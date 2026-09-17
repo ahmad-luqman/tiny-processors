@@ -1,6 +1,6 @@
 # Tiny Processors: proposed learning plan
 
-Research date: 2026-09-17. Status: draft for discussion; no RTL or tooling installed.
+Research date: 2026-09-17. Status: first counter lab implemented and verified; later milestones remain proposed.
 
 ## Direction
 
@@ -31,7 +31,7 @@ Use both for comparison. Build our own small modules, then explain differences. 
 
 ## macOS toolchain
 
-Local inspection: Apple Silicon (`arm64`), macOS 26.6.2; Homebrew, uv, Python shim, and clang found on PATH. Verilator, Icarus, Yosys, and Surfer were not found on PATH. After the user accepted the Xcode license, Git checks succeeded and Apple clang 21.0.0 compiled and ran a minimal C program successfully. The Xcode license blocker is resolved. HDL simulators still need installation and their own smoke tests.
+Local verification: Apple Silicon (`arm64`), macOS 26.6.2; Icarus 13.0, Verilator 5.052, Yosys 0.69+post, and Apple clang 21.0.0. The user installed the HDL tools and accepted the Xcode license. The counter lab passes Icarus and compiled Verilator simulation (264 checked edges each), Verilator RTL lint, and Yosys synthesis/checks. Both simulators generate VCD waveforms. Surfer and cocotb setup remain future work.
 
 | Layer | Proposed tool | Purpose |
 | --- | --- | --- |
