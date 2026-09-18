@@ -6,6 +6,8 @@ The circuit contains eight bits of state and logic to increment that state. `alw
 
 Reset is synchronous and active high. Asserting it between rising edges leaves the output unchanged until the next rising edge. The missing final `else` intentionally retains the flip-flop state when enable is low. A missing assignment in a combinational process has different implications: it can infer a latch.
 
+For the circuit behind this code, see [How Verilog becomes gates](../../docs/verilog-to-gates.md), including a circuit diagram and our actual Yosys cell counts.
+
 ## Read the trace
 
 The testbench clock has a 10 ns period. It changes inputs on falling edges and checks outputs 1 ns after rising edges, allowing the nonblocking updates to settle. These delays belong to the testbench; the RTL has no delays.

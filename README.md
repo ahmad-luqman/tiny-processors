@@ -24,6 +24,7 @@ The RTL is Verilog-2005. The testbench uses SystemVerilog's `$fatal` so failed c
 1. [counter.v](labs/01-counter/counter.v): the actual circuit.
 2. [counter_tb.sv](labs/01-counter/counter_tb.sv): the clock, input stimulus, and expected results.
 3. [Lab notes](labs/01-counter/README.md): timing walkthrough and exercises.
+4. [How Verilog becomes gates](docs/verilog-to-gates.md): flip-flops, muxes, incrementer logic, and the synthesized counter.
 
 ## Verified local tools
 
