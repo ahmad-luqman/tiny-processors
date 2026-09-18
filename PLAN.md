@@ -1,6 +1,6 @@
 # Tiny Processors: proposed learning plan
 
-Research date: 2026-09-17. Implementation status updated 2026-09-19: counter and eight-bit combinational ALU labs implemented and verified. Paused before CPU implementation; later milestones remain proposed.
+Research date: 2026-09-17. Implementation status updated 2026-09-19: counter, eight-bit combinational ALU, and SAP8 CPU implemented and verified. The SAP8 milestone is complete; the next item is the proposed `simd4` compute prototype.
 
 ## Direction
 
@@ -32,6 +32,8 @@ Use both for comparison. Build our own small modules, then explain differences. 
 ## macOS toolchain
 
 Local verification: Apple Silicon (`arm64`), macOS 26.6.2; Icarus 13.0, Verilator 5.052, Yosys 0.69+post, and Apple clang 21.0.0. The user installed the HDL tools and accepted the Xcode license. The counter lab passes Icarus and compiled Verilator simulation (264 checked edges each), Verilator RTL lint, and Yosys synthesis/checks. The ALU passes both simulators (524,307 checked vectors each: 19 directed plus all 524,288 binary input combinations), RTL lint, and synthesis/checks with an assertion against inferred flip-flops/latches. Both simulators generate VCD waveforms. The user has inspected the counter waveform in Surfer; cocotb setup remains future work.
+
+SAP8 passes both simulators: 493 core instruction checks across 275 reset scenarios, plus assembled addition and sum-loop programs checked against an independent instruction interpreter. Verilator lint and Yosys synthesis/checks pass. The Python standard-library assembler passes 12 tests on Python 3.14.2. No Python packages are required yet.
 
 | Layer | Proposed tool | Purpose |
 | --- | --- | --- |
@@ -71,8 +73,8 @@ Start natively on macOS. Choose FPGA hardware and its supported build/programmin
 
 | Stage | Proposed scope | Complete when | Rough sessions |
 | --- | --- | --- | --- |
-| 0. RTL refresher | Counter and ALU; introduce registers/FSMs while building the CPU | Self-checking tests pass; explain reset, overflow, and clocked updates from a waveform | 1–2 |
-| 1. `sap8` | 8-bit accumulator CPU, 8-bit address space, fixed 16-bit instructions, separate program/data memories, multicycle control | Arithmetic and a loop run correctly; trace shows fetch/decode/execute and memory effects | 2–3 |
+| 0. RTL refresher (complete) | Counter and ALU; introduce registers/FSMs while building the CPU | Self-checking tests pass; reset, overflow, and clocked updates documented with waveforms | 1–2 |
+| 1. `sap8` (complete) | 8-bit accumulator CPU, 8-bit address space, fixed 16-bit instructions, separate program/data memories, multicycle control | Addition and sum loop pass; traces show fetch/decode/execute and memory effects | 2–3 |
 | 2. `simd4` prototype | Four 16-bit integer lanes, one shared PC/decode unit, per-lane registers, lane ID, load/store, launch/done interface | Vector addition matches Python; stalls and cycle counts are reported; matrix multiply follows | 3–5 for vector-add MVP |
 | 3. `rv32-multi` | 32-bit registers, RISC-V instruction decoding, multicycle control, explicit memory handshake; grow from a documented subset toward RV32I | Supported instructions match a reference model at retirement; programs survive memory wait states | 8–12 for broader ISA coverage |
 | 4. CPU + accelerator | Memory-mapped command/status registers and a simple ownership protocol for shared memory | CPU launches work, observes completion, and checks results | 3–5 |
@@ -83,11 +85,15 @@ Cover blocking versus nonblocking assignment, concurrent processes, combinationa
 
 Completed: an 8-bit counter with reset/enable/wraparound tests, followed by an [8-bit combinational ALU](labs/02-alu/README.md) with ADD, SUB, AND, OR, XOR, NOT, SHL, and SHR. Zero/sign flags apply to every result; carry means no borrow for subtraction and the discarded bit for shifts; signed overflow applies only to ADD/SUB. Tests exhaust every binary operand/opcode combination. Short directed traces, gate-mapping notes, and exercises are in [docs/alu-to-gates.md](docs/alu-to-gates.md).
 
-The counter commands remain unchanged; the ALU uses `make test-alu`, `make sim-alu`, `make waves-alu`, `make lint-alu`, `make synth-alu`, and `make test-alu-verilator`. Stop here for this milestone. Registers, flag capture, and FSM control return when CPU work is explicitly resumed.
+The counter commands remain unchanged; the ALU uses `make test-alu`, `make sim-alu`, `make waves-alu`, `make lint-alu`, `make synth-alu`, and `make test-alu-verilator`. Registers, flag capture, and FSM control are now demonstrated in the SAP8 milestone below.
 
 ### Stage 1: connect to the breadboard experience
 
-Proposed instructions: `LDI`, `LDA`, `STA`, `ADD`, `SUB`, `JMP`, `JZ`, `OUT`, `HLT`. Define instruction encoding, flag updates, wraparound, and invalid-opcode behavior before implementation. Use an output register observable in simulation. Start with a hand-encoded addition, then a tiny assembler with labels for loops. Freeze this CPU after the refresher milestone.
+Completed and frozen: `LDI`, `LDA`, `STA`, `ADD`, `SUB`, `JMP`, `JZ`, `OUT`, `HLT`, with an eight-bit opcode and eight-bit operand. Each instruction takes FETCH/DECODE/EXECUTE clocks. Loads update Z/N and clear C/V; arithmetic captures ALU flags; other instructions preserve flags. PC/arithmetic wrap at eight bits. Illegal opcodes halt with a fault and no retirement. Memories have combinational reads and edge-triggered data writes; the core has no wait-state interface.
+
+The hand-encoded addition outputs 12. A label-aware assembler emits separate program/data images; the sum loop outputs 6 after 29 instructions and leaves its counter at zero. Tests compare architectural state and all data-memory bytes at each phase, check all illegal opcodes, PC wrap, reset/store interaction, flag behavior, halt/fault recovery, and reproducible mixed programs. Text and VCD traces are generated for both examples.
+
+Use `make test-sap8`, `make sim-sap8`, `make waves-sap8`, `make lint-sap8`, `make synth-sap8`, and `make test-sap8-verilator`. Read [the specification](docs/sap8.md) and [the gate/control walkthrough](docs/sap8-to-gates.md). The original labs and commands remain intact. Stop at this completed scalar CPU milestone; do not extend its ISA while starting the next project.
 
 ### Stage 2: understand parallel compute
 

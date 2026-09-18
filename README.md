@@ -32,7 +32,24 @@ make test-alu-verilator  # Same checks, plus build/alu-verilator.vcd
 make waves-alu           # Generate the trace and print the Surfer link
 ```
 
-The counter commands above are unchanged. Both labs pass simulation in Icarus and Verilator, RTL lint, and synthesis. The ALU milestone is complete; CPU implementation is the next session's work.
+The counter commands above are unchanged. Both labs pass simulation in Icarus and Verilator, RTL lint, and synthesis.
+
+## A working SAP8 CPU
+
+[SAP8](docs/sap8.md) combines the ALU with an accumulator, stored flags, program counter, output register, and three-phase controller. Its nine instructions run an addition and a loop that sums 3 + 2 + 1. A small Python assembler supports labels and separate program/data images.
+
+```sh
+make test-sap8            # Assembler tests, core regression, and assembled programs
+make sim-sap8             # All tests, then addition/loop text traces and VCDs
+make lint-sap8            # Verilator RTL lint
+make synth-sap8           # Yosys core synthesis/checks; memories are in the testbench
+make test-sap8-verilator  # Core/program checks and waveforms in Verilator
+make waves-sap8           # Generate traces and print the Surfer link
+```
+
+Both simulators pass 493 core instruction checks plus the assembled addition (6 instructions, output 12) and loop (29 instructions, output 6). All 12 assembler tests pass. The assembler uses Python's standard library; no packages or virtual environment are required. Python 3.14.2 was used locally.
+
+Start with the [ISA and memory contract](docs/sap8.md), then follow the [register, control, and waveform walkthrough](docs/sap8-to-gates.md). SAP8 uses combinational memory reads and clocked writes; memory wait states and FPGA memory integration are outside this milestone. CPU work is complete; the next planned project is `simd4`.
 
 ## What to read
 
@@ -42,6 +59,8 @@ The counter commands above are unchanged. Both labs pass simulation in Icarus an
 4. [How Verilog becomes gates](docs/verilog-to-gates.md): flip-flops, muxes, incrementer logic, and the synthesized counter.
 5. [ALU operation and flag contract](labs/02-alu/README.md), then [alu.v](labs/02-alu/alu.v) and [alu_tb.sv](labs/02-alu/alu_tb.sv).
 6. [How ALU RTL becomes gates](docs/alu-to-gates.md): combinational logic, carry versus overflow, annotated waveform observations, and exercises.
+7. [SAP8 specification and commands](docs/sap8.md), [CPU RTL](rtl/sap8/sap8.v), and [self-checking testbench](tests/sap8_tb.sv).
+8. [CPU gate/control notes](docs/sap8-to-gates.md), then [addition](programs/sap8/add.asm) and [sum loop](programs/sap8/sum_loop.asm) assembly.
 
 ## Verified local tools
 
