@@ -1,6 +1,6 @@
 # Tiny Processors: proposed learning plan
 
-Research date: 2026-09-17. Status: first counter lab implemented and verified; later milestones remain proposed.
+Research date: 2026-09-17. Implementation status updated 2026-09-19: counter and eight-bit combinational ALU labs implemented and verified. Paused before CPU implementation; later milestones remain proposed.
 
 ## Direction
 
@@ -31,7 +31,7 @@ Use both for comparison. Build our own small modules, then explain differences. 
 
 ## macOS toolchain
 
-Local verification: Apple Silicon (`arm64`), macOS 26.6.2; Icarus 13.0, Verilator 5.052, Yosys 0.69+post, and Apple clang 21.0.0. The user installed the HDL tools and accepted the Xcode license. The counter lab passes Icarus and compiled Verilator simulation (264 checked edges each), Verilator RTL lint, and Yosys synthesis/checks. Both simulators generate VCD waveforms. Surfer and cocotb setup remain future work.
+Local verification: Apple Silicon (`arm64`), macOS 26.6.2; Icarus 13.0, Verilator 5.052, Yosys 0.69+post, and Apple clang 21.0.0. The user installed the HDL tools and accepted the Xcode license. The counter lab passes Icarus and compiled Verilator simulation (264 checked edges each), Verilator RTL lint, and Yosys synthesis/checks. The ALU passes both simulators (524,307 checked vectors each: 19 directed plus all 524,288 binary input combinations), RTL lint, and synthesis/checks with an assertion against inferred flip-flops/latches. Both simulators generate VCD waveforms. The user has inspected the counter waveform in Surfer; cocotb setup remains future work.
 
 | Layer | Proposed tool | Purpose |
 | --- | --- | --- |
@@ -81,7 +81,9 @@ Start natively on macOS. Choose FPGA hardware and its supported build/programmin
 
 Cover blocking versus nonblocking assignment, concurrent processes, combinational defaults, latch inference, widths, signedness, reset, and simulation scheduling. Begin with a small HDL testbench to understand clocks and stimulus; add cocotb once that is clear. Inspect unknown/uninitialized behavior with Icarus as well as running Verilator lint.
 
-First session outcome: an 8-bit counter with reset/enable/wraparound tests and a waveform we can explain, followed by an ALU exercise.
+Completed: an 8-bit counter with reset/enable/wraparound tests, followed by an [8-bit combinational ALU](labs/02-alu/README.md) with ADD, SUB, AND, OR, XOR, NOT, SHL, and SHR. Zero/sign flags apply to every result; carry means no borrow for subtraction and the discarded bit for shifts; signed overflow applies only to ADD/SUB. Tests exhaust every binary operand/opcode combination. Short directed traces, gate-mapping notes, and exercises are in [docs/alu-to-gates.md](docs/alu-to-gates.md).
+
+The counter commands remain unchanged; the ALU uses `make test-alu`, `make sim-alu`, `make waves-alu`, `make lint-alu`, `make synth-alu`, and `make test-alu-verilator`. Stop here for this milestone. Registers, flag capture, and FSM control return when CPU work is explicitly resumed.
 
 ### Stage 1: connect to the breadboard experience
 

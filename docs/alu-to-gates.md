@@ -98,7 +98,32 @@ Before 10 ns, input values are unspecified. Icarus's four-state simulation can e
 
 The first testbench version initialized all inputs to zero at declaration and immediately applied a zero vector. Icarus left the output unknown: no input transition woke the `always @*` block after it began waiting. The testbench now leaves inputs unspecified and drives its first vector after a startup delay. This is a simulation scheduling lesson, not a reason to add reset circuitry to a combinational ALU.
 
-## 5. Exercises
+## 5. Inspect the synthesized circuit
+
+`make synth-alu` writes `build/alu-synth.log` and `build/alu.json`. On the verified Yosys 0.69+post toolchain, generic synthesis produced:
+
+| Cell | Count |
+| --- | ---: |
+| ANDNOT | 12 |
+| AND | 61 |
+| NAND | 84 |
+| NOR | 2 |
+| ORNOT | 15 |
+| OR | 32 |
+| XNOR | 5 |
+| XOR | 12 |
+| **Total combinational cells** | **223** |
+| Flip-flops / latches | **0** |
+
+ANDNOT means `A & ~B`; ORNOT means `A | ~B`. Arithmetic, selection, inversion, and flag logic have all been mapped and optimized into this gate network. There need not be a standalone mux or NOT cell for each corresponding source construct.
+
+The synthesis command runs `check -assert` and `select -assert-none t:*DFF* t:*LATCH*` after generic synthesis, so connectivity problems or these inferred storage cells fail the target. The inspected netlist contains only the combinational types above. The counter, by comparison, contains eight flip-flops.
+
+These are generic cell counts, not transistor counts, FPGA LUT usage, or a timing result. Different tool versions and mapping choices may change them. No board frequency has been established.
+
+Verification on 2026-09-19: Icarus and Verilator each pass 524,307 result-and-flag checks; Verilator RTL lint and Yosys synthesis/checks pass. Both short VCDs end at 200 ns, and their documented waveform samples agree. The counter still passes all 264 checks on both simulators, lint, and synthesis.
+
+## 6. Exercises
 
 Keep the committed baseline before experimenting. Predict first, then change RTL, specification, and test expectations together.
 

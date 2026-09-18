@@ -141,3 +141,7 @@ An **FPGA** already contains configurable lookup tables (LUTs), flip-flops, rout
 An **ASIC** flow maps logic onto a target cell library containing physical gate and flip-flop designs. Placement and routing determine their locations and connections; manufacturing realizes the design in silicon.
 
 Simulation is a separate path: Icarus or Verilator models behavior so we can test it. The testbench's `#5` delay and `$display` messages are simulation instructions, not gates in our synthesized counter.
+
+## Next: logic without storage
+
+The [ALU walkthrough](alu-to-gates.md) applies the same reasoning to arithmetic, bitwise operations, shifts, and flags. Its `always @*` block assigns every output on every path, so it synthesizes entirely into combinational gates, with no flip-flops or latches. Compare that with the counter's deliberate edge-triggered storage.
