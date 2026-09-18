@@ -20,6 +20,8 @@ module sap8_tb;
     reg [31:0] random_state = 32'h51a8cafe;
     reg [7:0] random_opcode, random_operand;
     reg [1023:0] wave_path;
+    reg [1023:0] program_path, data_path;
+    integer expected_output, expected_steps, expected_address, expected_value, file_handle;
 
     sap8 dut (.*);
     always #5 clk = ~clk;
@@ -162,6 +164,8 @@ module sap8_tb;
 
     task run_to_stop;
         integer steps;
+        reg [15:0] stopped_instruction;
+        reg [23:0] stopped_metadata;
         begin
             steps = 0;
             while (!ref_halted && steps < 256) begin
@@ -170,11 +174,14 @@ module sap8_tb;
             end
             if (!ref_halted)
                 $fatal(1, "Program exceeded 256 instructions");
+            stopped_instruction = instruction;
+            stopped_metadata = {retire_pc, retire_instruction};
             // Halt/fault must hold state and suppress stores on subsequent edges.
             repeat (3) begin
                 @(posedge clk); #1;
                 check_architecture;
-                if (retired !== 0 || state !== 3 || data_write_enable !== 0)
+                if (retired !== 0 || state !== 3 || data_write_enable !== 0 ||
+                    instruction !== stopped_instruction || {retire_pc, retire_instruction} !== stopped_metadata)
                     $fatal(1, "STOP failed to hold or retirement pulse did not clear");
             end
         end
@@ -185,6 +192,37 @@ module sap8_tb;
         if ($value$plusargs("wave=%s", wave_path)) begin
             $dumpfile(wave_path);
             $dumpvars(0, sap8_tb.dut);
+        end
+
+        // Optional assembled program mode uses the same architectural checker.
+        if ($value$plusargs("program=%s", program_path)) begin
+            if (!$value$plusargs("data=%s", data_path) ||
+                !$value$plusargs("expected=%d", expected_output) ||
+                !$value$plusargs("instructions=%d", expected_steps))
+                $fatal(1, "Program mode requires +data, +expected, and +instructions");
+            prepare;
+            file_handle = $fopen(program_path, "r");
+            if (file_handle == 0) $fatal(1, "Cannot open program image");
+            $fclose(file_handle);
+            file_handle = $fopen(data_path, "r");
+            if (file_handle == 0) $fatal(1, "Cannot open data image");
+            $fclose(file_handle);
+            $readmemh(program_path, program_memory);
+            $readmemh(data_path, data_memory);
+            reset_cpu;
+            run_to_stop;
+            if (fault !== 0 || int'(out) !== expected_output || checked_instructions != expected_steps)
+                $fatal(1, "Assembled program: expected out=%0d steps=%0d, got out=%0d steps=%0d fault=%b",
+                       expected_output, expected_steps, out, checked_instructions, fault);
+            if ($value$plusargs("memory-address=%d", expected_address)) begin
+                if (expected_address < 0 || expected_address > 255 ||
+                    !$value$plusargs("memory-value=%d", expected_value))
+                    $fatal(1, "Memory check requires address in 0..255 and +memory-value");
+                if (int'(data_memory[expected_address]) !== expected_value)
+                    $fatal(1, "Assembled program final memory mismatch");
+            end
+            $display("PASS: SAP8 assembled program (%0d checked instructions, output=%0d)", checked_instructions, out);
+            $finish;
         end
 
         // Hand-encoded addition: save 7, load 5, add saved value, output 12.
@@ -268,6 +306,30 @@ module sap8_tb;
             if (data_memory[255] !== 99)
                 $fatal(1, "Execution failed after reset");
         end
+
+        // A fault must preserve a nonzero accumulator/output and overflow flag.
+        prepare;
+        data_memory[1] = 1;
+        program_memory[0] = 16'h007f;
+        program_memory[1] = 16'h0700;
+        program_memory[2] = 16'h0301;
+        program_memory[3] = 16'hff02;
+        reset_cpu;
+        run_to_stop;
+        if ({acc, out, zero, negative, carry, overflow, fault} !== {8'h80, 8'h7f, 4'b0101, 1'b1})
+            $fatal(1, "Fault clobbered prior architectural state");
+
+        // Data address zero is writable without changing program word zero.
+        prepare;
+        program_memory[0] = 16'h002a;
+        program_memory[1] = 16'h0200;
+        program_memory[2] = 16'h0000;
+        program_memory[3] = 16'h0100;
+        program_memory[4] = 16'h0700;
+        reset_cpu;
+        run_to_stop;
+        if (out !== 42 || data_memory[0] !== 42 || program_memory[0] !== 16'h002a)
+            $fatal(1, "Separate program/data memory addressing failed");
 
         // Every unsupported opcode faults without a store or retirement.
         for (i = 9; i < 256; i = i + 1) begin

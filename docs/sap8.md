@@ -66,3 +66,37 @@ make waves-sap8           # Generate trace and print the Surfer link
 The original counter and ALU targets are unchanged. `tests/sap8_tb.sv` supplies memory arrays and a separate instruction interpreter. It compares PC, accumulator, output, all flags, halt/fault, and **every data-memory byte** during each phase and after each executed instruction. It also checks store strobes, retirement metadata, three-clock timing, synchronous reset, reset cancellation of stores, and stable stopped state. Arithmetic expectations use wide integers and signed range checks, independently of the ALU expressions.
 
 The first verified core checkpoint passes 483 instruction checks (including 247 faulting opcodes), across 273 reset scenarios in both simulators. It includes hand-calculated arithmetic boundaries, address wraparound, taken/untaken JZ, reset in each active phase, recovery from halt/fault, and twelve reproducible mixed programs. The small addition waveform shows six instructions and outputs decimal 12. These tests establish functional simulation behavior, not a physical clock-frequency limit.
+
+## Assemble and run programs
+
+The assembler uses only Python's standard library. `make test-sap8` runs its unit tests, assembles both examples, runs the core regression, then checks both assembled programs against the instruction interpreter. `make test-sap8-verilator` executes the same core and program tests in Verilator.
+
+```sh
+make test-sap8-assembler  # Encoding, label, bounds, error, and CLI tests
+make programs-sap8       # Generate both program/data image pairs under build/sap8/
+make sim-sap8            # All Icarus checks, plus addition and loop traces
+```
+
+Read [add.asm](../programs/sap8/add.asm) first: its emitted words match the hand-encoded smoke test. Then read [sum_loop.asm](../programs/sap8/sum_loop.asm). It sums 3 + 2 + 1 in 29 instructions (87 clocks after reset), outputs 6, and leaves `data[f1]=0`, `data[f2]=6`.
+
+Source syntax is intentionally small:
+
+- One instruction per line, with whitespace-separated operands; `;` starts a comment.
+- Mnemonics and `.data` are case-insensitive. Labels are case-sensitive identifiers such as `loop:` and resolve to program **word** addresses, with forward references allowed.
+- Operands are bytes written in decimal, hexadecimal (`0xff`), or binary (`0b1010`), or program labels. Data addresses in these examples are numeric literals.
+- `.data address value` initializes a numeric data-memory address without consuming a program word. Duplicate initializations are errors. Labels cannot be attached directly to `.data` directives.
+- OUT/HLT take no assembly operand. Missing operands, extra operands, unknown instructions/labels, duplicate labels, out-of-range bytes, and programs longer than 256 words fail with a line number.
+- Unused program words contain `0800` (HLT); unspecified data bytes are zero. Each image has 256 hex lines for `$readmemh`.
+
+To assemble your own source:
+
+```sh
+python3 tools/sap8_asm.py programs/sap8/sum_loop.asm \
+  --program build/my-program.hex --data build/my-data.hex
+vvp build/sap8.vvp +program=build/my-program.hex +data=build/my-data.hex \
+  +expected=6 +instructions=29 +memory-address=241 +memory-value=0 +trace
+```
+
+Run `make test-sap8` first to build the simulator. Program mode requires expected output and instruction count, stops after at most 256 instructions, and optionally checks a final memory byte. Every instruction still undergoes full architectural and memory comparisons. `+wave=build/my-program.vcd` adds a waveform.
+
+`make sim-sap8` saves `build/sap8.trace` and `build/sap8-loop.trace` alongside `build/sap8.vcd` and `build/sap8-loop.vcd`. Verilator produces corresponding `*-verilator.vcd` files. `make waves-sap8` prints the Surfer link; it does not launch a viewer.
