@@ -1,6 +1,6 @@
 # Tiny Processors: proposed learning plan
 
-Research date: 2026-09-17. Implementation status updated 2026-09-19: counter, eight-bit combinational ALU, and SAP8 CPU implemented and verified. The SAP8 milestone is complete; the next item is the proposed `simd4` compute prototype.
+Research date: 2026-09-17. Implementation status updated 2026-09-19: counter, eight-bit combinational ALU, SAP8 CPU, and SIMD4 vector-add prototype implemented and verified. The next compute item is multiplication and a small matrix kernel; RISC-V and graphics remain later work.
 
 ## Direction
 
@@ -34,6 +34,8 @@ Use both for comparison. Build our own small modules, then explain differences. 
 Local verification: Apple Silicon (`arm64`), macOS 26.6.2; Icarus 13.0, Verilator 5.052, Yosys 0.69+post, and Apple clang 21.0.0. The user installed the HDL tools and accepted the Xcode license. The counter lab passes Icarus and compiled Verilator simulation (264 checked edges each), Verilator RTL lint, and Yosys synthesis/checks. The ALU passes both simulators (524,307 checked vectors each: 19 directed plus all 524,288 binary input combinations), RTL lint, and synthesis/checks with an assertion against inferred flip-flops/latches. Both simulators generate VCD waveforms. The user has inspected the counter waveform in Surfer; cocotb setup remains future work.
 
 SAP8 passes both simulators: 493 core instruction checks across 275 reset scenarios, plus assembled addition and sum-loop programs checked against an independent instruction interpreter. Verilator lint and Yosys synthesis/checks pass. The Python standard-library assembler passes 12 tests on Python 3.14.2. No Python packages are required yet.
+
+SIMD4 passes both simulators: 312 cases and 329 completed launches each, with Python reference snapshots, transfer checks, and complete final-memory comparisons. Six Python model/kernel tests pass; lint passes for 1/2/4 lanes; four-lane synthesis/checks pass without latches. Benchmarks and no-wait/stalled waveforms agree between simulators. Counter, ALU, and SAP8 regressions remain passing.
 
 | Layer | Proposed tool | Purpose |
 | --- | --- | --- |
@@ -75,7 +77,8 @@ Start natively on macOS. Choose FPGA hardware and its supported build/programmin
 | --- | --- | --- | --- |
 | 0. RTL refresher (complete) | Counter and ALU; introduce registers/FSMs while building the CPU | Self-checking tests pass; reset, overflow, and clocked updates documented with waveforms | 1–2 |
 | 1. `sap8` (complete) | 8-bit accumulator CPU, 8-bit address space, fixed 16-bit instructions, separate program/data memories, multicycle control | Addition and sum loop pass; traces show fetch/decode/execute and memory effects | 2–3 |
-| 2. `simd4` prototype | Four 16-bit integer lanes, one shared PC/decode unit, per-lane registers, lane ID, load/store, launch/done interface | Vector addition matches Python; stalls and cycle counts are reported; matrix multiply follows | 3–5 for vector-add MVP |
+| 2a. `simd4` vector MVP (complete) | Four 16-bit integer lanes, shared PC/decode and uniform loops, per-lane registers, lane ID, ready/valid load/store, launch/done | Vector addition matches Python; stalls and cycle counts measured for 1/2/4 lanes | 3–5 for vector-add MVP |
+| 2b. SIMD matrix kernel (next) | Define multiplication width/overflow, add multiply, and build a small matrix kernel on the shared-memory interface | Matrix results match Python; memory traffic, stalls, and cycle counts are explained | Plan next session |
 | 3. `rv32-multi` | 32-bit registers, RISC-V instruction decoding, multicycle control, explicit memory handshake; grow from a documented subset toward RV32I | Supported instructions match a reference model at retirement; programs survive memory wait states | 8–12 for broader ISA coverage |
 | 4. CPU + accelerator | Memory-mapped command/status registers and a simple ownership protocol for shared memory | CPU launches work, observes completion, and checks results | 3–5 |
 
@@ -97,7 +100,13 @@ Use `make test-sap8`, `make sim-sap8`, `make waves-sap8`, `make lint-sap8`, `mak
 
 ### Stage 2: understand parallel compute
 
-Start with straight-line kernels and uniform loops; explicitly disallow divergent per-lane branches. Document integer overflow and multiplication result width. Begin with serialized memory access, then vary lane count and memory bandwidth to see why four lanes do not automatically produce a fourfold speedup.
+Completed vector MVP: four 16-bit lanes with four registers each, one PC/decoder, lane IDs, a shared loop counter, and an external ready/valid data port. Loads and stores serialize lanes 0 through 3, holding requests stable under backpressure. Launch clears lane state/counters; done/fault are sticky; reset cancels pending requests and preserves completed stores. Addition wraps modulo 65536, and program/data addresses wrap modulo 256. Every lane remains active; no divergent branches or tail masks.
+
+The vector kernel covers up to 64 elements in uniform groups and matches both an instruction interpreter and direct Python array addition. Tests cover arithmetic/address/PC wrap, register aliases, store collisions, all illegal opcodes, invalid loops, relaunch, starts while busy, partial-load/store reset, backpressure, and deterministic mixed programs. The benchmark holds length at 32: 486/294/198 cycles for 1/2/4 lanes without stalls, each making 96 memory transfers. Three extra waits per transfer change those totals to 774/582/486, showing the bandwidth limit.
+
+Use `make test-simd4`, `make test-simd4-verilator`, `make lint-simd4`, `make synth-simd4`, `make bench-simd4`, and `make waves-simd4`. See [the contract](docs/simd4.md), [kernel](programs/simd4/vector_add.py), and [gate/performance notes](docs/simd4-to-gates.md). All prior commands are preserved. Pause at the completed vector-add MVP.
+
+Next: define multiplication result width and overflow/truncation before adding it, then implement a small matrix kernel and compare with Python. Keep the shared-memory bottleneck visible in the measurements. Wider memory ports and active masks can be separate experiments after that.
 
 This stage builds a SIMD engine. A later GPU extension adds batches of logical threads, scheduling, active masks, and divergence/reconvergence. Avoid treating those mechanisms as already present. Graphics follows as a distinct next milestone: generate a framebuffer image in simulation, then build line/triangle rasterization. Physical display output can come later.
 

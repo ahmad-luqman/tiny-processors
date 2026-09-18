@@ -61,9 +61,11 @@ module simd4 #(
     generate
         for (lane = 0; lane < LANES; lane = lane + 1) begin: lanes
             reg [15:0] r [0:3];
+            // Named aliases make individual registers visible in both VCDs.
+            wire [15:0] r0 = r[0], r1 = r[1], r2 = r[2], r3 = r[3];
             assign address_base[lane] = r[ra][7:0];
             assign store_data[lane] = r[rd];
-            assign register_state[lane*64 +: 64] = {r[3], r[2], r[1], r[0]};
+            assign register_state[lane*64 +: 64] = {r3, r2, r1, r0};
             always @(posedge clk) begin
                 if (reset || launch) begin
                     r[0] <= 16'd0;

@@ -49,7 +49,24 @@ make waves-sap8           # Generate traces and print the Surfer link
 
 Both simulators pass 493 core instruction checks plus the assembled addition (6 instructions, output 12) and loop (29 instructions, output 6). All 12 assembler tests pass. The assembler uses Python's standard library; no packages or virtual environment are required. Python 3.14.2 was used locally.
 
-Start with the [ISA and memory contract](docs/sap8.md), then follow the [register, control, and waveform walkthrough](docs/sap8-to-gates.md). SAP8 uses combinational memory reads and clocked writes; memory wait states and FPGA memory integration are outside this milestone. CPU work is complete; the next planned project is `simd4`.
+Start with the [ISA and memory contract](docs/sap8.md), then follow the [register, control, and waveform walkthrough](docs/sap8-to-gates.md). SAP8 uses combinational memory reads and clocked writes; memory wait states and FPGA memory integration are outside this milestone. The scalar CPU is frozen while compute work proceeds below.
+
+## Four-lane parallel compute
+
+[SIMD4](docs/simd4.md) has four 16-bit lanes, four registers per lane, a shared PC/decoder, and uniform loops. Its vector-add kernel matches a Python reference at every instruction and memory transfer. One ready/valid memory port serves lanes in order and supports stalls. Launch/done, faults, and reset cancellation are tested.
+
+```sh
+make test-simd4            # Python checks and 312 Icarus cases across 1/2/4 lanes
+make test-simd4-verilator  # Same cases in Verilator, plus short waveforms
+make lint-simd4            # Strict RTL lint for all lane configurations
+make synth-simd4           # Four-lane generic synthesis and latch check
+make bench-simd4           # Compare cycle counts at fixed vector length
+make waves-simd4           # Tests, no-wait/stalled traces, and the Surfer link
+```
+
+Both simulators pass 312 cases with 329 completed launches and agree on the benchmarks. For 32 elements, one lane takes 486 cycles and four lanes take 198 cycles with no memory waits: **2.45× speedup**. All still need 96 transfers through the single port. Read the [gate and performance walkthrough](docs/simd4-to-gates.md) to connect lane duplication, stalls, and measured speedup.
+
+The [kernel builder](programs/simd4/vector_add.py), interpreter, and runner use Python's standard library. Generated reports and traces are under `build/simd4/icarus/` and `build/simd4/verilator/`. Every lane is active, so vector length must be divisible by lane count; divergent branches and multiply instructions are not implemented. The vector-add MVP is complete; a multiply operation and matrix kernel follow next.
 
 ## What to read
 
@@ -61,6 +78,7 @@ Start with the [ISA and memory contract](docs/sap8.md), then follow the [registe
 6. [How ALU RTL becomes gates](docs/alu-to-gates.md): combinational logic, carry versus overflow, annotated waveform observations, and exercises.
 7. [SAP8 specification and commands](docs/sap8.md), [CPU RTL](rtl/sap8/sap8.v), and [self-checking testbench](tests/sap8_tb.sv).
 8. [CPU gate/control notes](docs/sap8-to-gates.md), then [addition](programs/sap8/add.asm) and [sum loop](programs/sap8/sum_loop.asm) assembly.
+9. [SIMD4 specification](docs/simd4.md), [RTL](rtl/simd4/simd4.v), [kernel](programs/simd4/vector_add.py), and [gate/performance walkthrough](docs/simd4-to-gates.md).
 
 ## Verified local tools
 

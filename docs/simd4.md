@@ -1,6 +1,6 @@
 # SIMD4: vector-add compute milestone
 
-## Plan
+## Implementation plan (completed)
 
 1. Define shared control, lane registers, integer/address rules, and the memory handshake.
 2. Implement parameterized SIMD RTL and compare every retired instruction and memory transfer with a Python interpreter. Verify launch, completion, faults, backpressure, and reset; commit a working core.
@@ -70,3 +70,9 @@ Python uses only the standard library. The [kernel builder](../programs/simd4/ve
 `test-simd4` and `test-simd4-verilator` each pass 312 cases and 329 completed launches, with 12 additional reset-aborted prefixes. Coverage includes every illegal opcode, invalid loop counts, arithmetic/address/PC wraparound, register aliases, colliding stores, shared loops, ignored starts while busy, sticky done/fault, relaunch without reset, variable backpressure, partial-load reset, partial-store reset, and deterministic mixed instruction sequences. The testbench compares every retirement and accepted transfer, all final memory words, stalled request stability, and performance counters. Six Python tests pin encodings and independently check reference semantics and input validation.
 
 Kernel lengths must be 1–64 and divisible by the chosen lane count: every lane is active. Each lane processes `lane_id`, `lane_id + LANES`, and so on. A and B start at data word addresses `00` and `40`; C starts at `80`. No tail masks are implemented. Generated images, traces, logs, and JSON reports live under `build/simd4/icarus/` and `build/simd4/verilator/`.
+
+## Milestone result
+
+Completed on 2026-09-19: both simulators agree on all 312 regression cases and all nine benchmark records. RTL lint passes for one, two, and four lanes; four-lane synthesis/checks pass with no latches. The counter, ALU, and SAP8 simulations, lint, synthesis, and assembler tests still pass.
+
+The 32-element benchmark takes 486 cycles with one lane and 198 with four lanes at zero memory waits; all configurations transfer 96 words. See the [gate, handshake, waveform, and performance walkthrough](simd4-to-gates.md) for the explanation, complete measurements, and exercises. The vector-add MVP is complete. Multiplication and a small matrix kernel are the next compute extension; divergent branches, tail masks, and physical FPGA memory integration remain future work.
