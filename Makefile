@@ -4,9 +4,12 @@ RTL := labs/01-counter/counter.v
 TB := labs/01-counter/counter_tb.sv
 ALU_RTL := labs/02-alu/alu.v
 ALU_TB := labs/02-alu/alu_tb.sv
+SAP8_RTL := rtl/sap8/sap8.v $(ALU_RTL)
+SAP8_TB := tests/sap8_tb.sv
 
 .PHONY: test sim lint synth test-verilator waves clean
 .PHONY: test-alu sim-alu lint-alu synth-alu test-alu-verilator waves-alu
+.PHONY: test-sap8 sim-sap8 lint-sap8 synth-sap8 test-sap8-verilator waves-sap8
 
 build:
 	mkdir -p build
@@ -55,6 +58,29 @@ test-alu-verilator: | build
 
 waves-alu: sim-alu
 	@echo "Open build/alu.vcd in Surfer: https://app.surfer-project.org/"
+
+build/sap8.vvp: $(SAP8_RTL) $(SAP8_TB) | build
+	iverilog -g2012 -Wall -s sap8_tb -o $@ $(SAP8_TB) $(SAP8_RTL)
+
+test-sap8: build/sap8.vvp
+	vvp $<
+
+sim-sap8: test-sap8
+	vvp build/sap8.vvp +examples-only +trace +wave=build/sap8.vcd
+
+lint-sap8:
+	verilator --lint-only --Wall --language 1364-2005 --top-module sap8 $(SAP8_RTL)
+
+synth-sap8: | build
+	yosys -Q -T -l build/sap8-synth.log -p 'read_verilog $(SAP8_RTL); synth -top sap8; check -assert; select -assert-none t:*LATCH*; stat; write_json build/sap8.json'
+
+test-sap8-verilator: | build
+	verilator --binary --timing --trace --top-module sap8_tb --Mdir build/verilator-sap8 -o sap8_sim $(SAP8_TB) $(SAP8_RTL)
+	./build/verilator-sap8/sap8_sim
+	./build/verilator-sap8/sap8_sim +examples-only +trace +wave=build/sap8-verilator.vcd
+
+waves-sap8: sim-sap8
+	@echo "Open build/sap8.vcd in Surfer: https://app.surfer-project.org/"
 
 clean:
 	rm -rf build
