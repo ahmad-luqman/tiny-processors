@@ -9,11 +9,16 @@ SAP8_RTL := rtl/sap8/sap8.v $(ALU_RTL)
 SAP8_TB := tests/sap8_tb.sv
 SAP8_ADD_ARGS := +program=build/sap8/add.program.hex +data=build/sap8/add.data.hex +expected=12 +instructions=6 +memory-address=240 +memory-value=7
 SAP8_LOOP_ARGS := +program=build/sap8/sum_loop.program.hex +data=build/sap8/sum_loop.data.hex +expected=6 +instructions=29 +memory-address=241 +memory-value=0
+SIMD4_RTL := rtl/simd4/simd4.v
+SIMD4_TB := tests/simd4_tb.sv
+SIMD4_ICARUS := build/simd4-1.vvp build/simd4-2.vvp build/simd4-4.vvp
+SIMD4_VERILATOR := build/verilator-simd4-1/simd4_sim build/verilator-simd4-2/simd4_sim build/verilator-simd4-4/simd4_sim
 
 .PHONY: test sim lint synth test-verilator waves clean
 .PHONY: test-alu sim-alu lint-alu synth-alu test-alu-verilator waves-alu
 .PHONY: test-sap8 sim-sap8 lint-sap8 synth-sap8 test-sap8-verilator waves-sap8
 .PHONY: test-sap8-assembler programs-sap8
+.PHONY: test-simd4-model test-simd4 test-simd4-verilator sim-simd4 waves-simd4 bench-simd4 lint-simd4 synth-simd4
 
 build:
 	mkdir -p build
@@ -102,6 +107,39 @@ test-sap8-verilator: programs-sap8 | build
 
 waves-sap8: sim-sap8
 	@echo "Open build/sap8.vcd or build/sap8-loop.vcd in Surfer: https://app.surfer-project.org/"
+
+build/simd4-%.vvp: $(SIMD4_RTL) $(SIMD4_TB) | build
+	iverilog -g2012 -Wall -s simd4_tb -Psimd4_tb.LANES=$* -o $@ $(SIMD4_TB) $(SIMD4_RTL)
+
+build/verilator-simd4-%/simd4_sim: $(SIMD4_RTL) $(SIMD4_TB) | build
+	verilator --binary --timing --trace --top-module simd4_tb -GLANES=$* --Mdir build/verilator-simd4-$* -o simd4_sim $(SIMD4_TB) $(SIMD4_RTL)
+
+test-simd4-model:
+	$(PYTHON) -m unittest discover -s tests -p 'test_simd4_model.py' -v
+
+test-simd4: $(SIMD4_ICARUS) test-simd4-model
+	$(PYTHON) -m tools.simd4_run --simulator icarus
+
+test-simd4-verilator: $(SIMD4_VERILATOR) test-simd4-model
+	$(PYTHON) -m tools.simd4_run --simulator verilator
+	$(PYTHON) -m tools.simd4_run --simulator verilator --mode waves
+
+sim-simd4: test-simd4
+	$(PYTHON) -m tools.simd4_run --mode waves
+
+waves-simd4: sim-simd4
+	@echo "Open build/simd4/icarus/vector-wave.vcd or stalled-wave.vcd in Surfer: https://app.surfer-project.org/"
+
+bench-simd4: $(SIMD4_ICARUS)
+	$(PYTHON) -m tools.simd4_run --mode bench
+
+lint-simd4:
+	verilator --lint-only --Wall --language 1364-2005 --top-module simd4 -GLANES=1 $(SIMD4_RTL)
+	verilator --lint-only --Wall --language 1364-2005 --top-module simd4 -GLANES=2 $(SIMD4_RTL)
+	verilator --lint-only --Wall --language 1364-2005 --top-module simd4 -GLANES=4 $(SIMD4_RTL)
+
+synth-simd4: | build
+	yosys -Q -T -l build/simd4-synth.log -p 'read_verilog $(SIMD4_RTL); synth -top simd4; check -assert; select -assert-none t:*LATCH*; stat; write_json build/simd4.json'
 
 clean:
 	rm -rf build
