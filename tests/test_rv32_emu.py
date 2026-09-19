@@ -10,6 +10,9 @@ state dump, the trace, the console output, and the exit status.
 from collections import namedtuple
 import os
 from pathlib import Path
+import resource
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -463,6 +466,112 @@ class EmulatorTest(unittest.TestCase):
         self.assertEqual((completed.returncode, completed.stdout), (0, "PASS 807d9fad\n"))
         self.assertEqual((state.halt, state.done, state.traps), ("done", 0x5555, 0))
         self.assertEqual(state.x[2], 0x80040000, "sp is back at _stack_top when main returns")
+
+    # Host-side robustness: outputs, limits, and the drivers around the emulator.
+
+    def test_outputs_may_not_overwrite_inputs_or_each_other(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            image = path / "image.bin"
+            image.write_bytes(b"".join(word.to_bytes(4, "little") for word in FINISH()))
+            original = image.read_bytes()
+            for extra, message in [(["--trace", str(image)], "trace file"),
+                                   (["--dump-state", str(image)], "state file"),
+                                   (["--trace", str(path / "t"), "--dump-state", str(path / "t")], "state file"),
+                                   (["--trace", str(path / "t"), "--dump-state", str(path / "./t")], "state file")]:
+                with self.subTest(extra=extra):
+                    completed = subprocess.run([str(self.emulator), "--image", str(image), *extra],
+                                               capture_output=True, text=True)
+                    self.assertEqual(completed.returncode, 2)
+                    self.assertIn(f"{message} ", completed.stderr)
+                    self.assertIn("would overwrite", completed.stderr)
+                    self.assertEqual(image.read_bytes(), original, "the image is never touched")
+
+    def test_trace_write_failure_rejects_the_run(self):
+        words = [ADDI(1, 1, 1)] * 400 + FINISH()
+
+        def limit_file_size():
+            resource.setrlimit(resource.RLIMIT_FSIZE, (4096, 4096))
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "image.bin").write_bytes(b"".join(word.to_bytes(4, "little") for word in words))
+            completed = subprocess.run([str(self.emulator), "--image", str(path / "image.bin"),
+                                        "--trace", str(path / "trace")], capture_output=True, text=True,
+                                       preexec_fn=limit_file_size)
+            lines = (path / "trace").read_text().splitlines()
+        self.assertLess(len(lines), len(words), "the trace really was truncated")
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("error writing", completed.stderr)
+        self.assertIn("outputs incomplete", completed.stderr)
+        self.assertIn("halt=done", completed.stderr, "the guest run itself is still reported")
+
+    def test_instruction_limit_is_validated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "image.bin"
+            image.write_bytes(JAL(0, 0).to_bytes(4, "little"))
+            for text in ("-1", "+5", "10junk", "", "18446744073709551616", "0x"):
+                with self.subTest(limit=text):
+                    completed = subprocess.run([str(self.emulator), "--image", str(image), "--max-instructions", text],
+                                               capture_output=True, text=True, timeout=10)
+                    self.assertEqual(completed.returncode, 2)
+                    self.assertIn("bad instruction limit", completed.stderr)
+            completed = subprocess.run([str(self.emulator), "--image", str(image), "--max-instructions", "0x10"],
+                                       capture_output=True, text=True, timeout=10)
+            self.assertIn("halt=limit steps=16 ", completed.stderr)
+
+    def test_run_driver_rejects_negative_limit_and_times_out(self):
+        driver = ROOT / "tools" / "rv32_run_emu.py"
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "image.bin"
+            image.write_bytes(JAL(0, 0).to_bytes(4, "little"))
+            common = [sys.executable, str(driver), str(image), "--emulator", str(self.emulator)]
+            completed = subprocess.run(common + ["--max-instructions", "-1"], capture_output=True, text=True)
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("is negative", completed.stderr)
+            completed = subprocess.run(common + ["--timeout", "0.5", "--max-instructions", "4000000000"],
+                                       capture_output=True, text=True, timeout=30)
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn("did not finish within 0.5 s", completed.stderr)
+
+
+class DiffDriverTest(unittest.TestCase):
+    """The QEMU differential must never pass on a stale log or a failed QEMU run."""
+
+    def run_diff(self, qemu, log):
+        script = ROOT / "tools" / "rv32_diff_qemu.py"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "trace").write_text("1 80000000 00100093 x1=00000001\n")
+            (path / "image.elf").write_bytes(b"")
+            return subprocess.run([sys.executable, str(script), str(path / "image.elf"), str(path / "trace"),
+                                   "--qemu", str(qemu), "--log", str(log)], capture_output=True, text=True, timeout=30)
+
+    def test_failed_qemu_and_stale_log_are_rejected(self):
+        good_log = "Trace 0: 0x1 [00000100/0000000080000000/01c1401b/ff020201]\n"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            stale = path / "qemu.log"
+            stale.write_text(good_log)
+            completed = self.run_diff(shutil.which("false"), stale)
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn("QEMU exited with status 1", completed.stderr)
+            self.assertFalse(stale.exists(), "the old log is removed before QEMU starts")
+            fake = path / "fake-qemu.sh"
+            fake.write_text("#!/bin/sh\nexit 0\n")
+            fake.chmod(0o755)
+            completed = self.run_diff(fake, stale)
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn("wrote no execution log", completed.stderr)
+            fake.write_text("#!/bin/sh\nwhile [ $# -gt 1 ]; do [ \"$1\" = -D ] && printf %s \"$2\" > \"$2\"; shift; done; exit 0\n")
+            completed = self.run_diff(fake, stale)
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn("no instructions inside RAM", completed.stderr)
+            fake.write_text("#!/bin/sh\nwhile [ $# -gt 1 ]; do [ \"$1\" = -D ] && printf '%s' '" + good_log + "' > \"$2\"; shift; done; exit 0\n")
+            completed = self.run_diff(fake, stale)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("1 instructions: emulator and QEMU executed the same PC sequence", completed.stdout)
 
 
 class DriverParsingTest(unittest.TestCase):

@@ -8,12 +8,15 @@
  *
  * Build: cc -std=c11 -O2 -Wall -Wextra -Werror -o rv32emu rv32emu.c
  */
+#define _POSIX_C_SOURCE 200809L
+#include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 /* Machine contract constants; keep in step with programs/rv32/board.h. */
 #define RAM_BASE 0x80000000u
@@ -460,15 +463,56 @@ static void dump_state(const machine *m, FILE *out)
     }
 }
 
-static uint32_t parse_u32(const char *text, const char *what)
+/* Strict unsigned parse: digits only (with 0x/0 prefixes), no sign, no trailing text, no overflow. */
+static uint64_t parse_u64(const char *text, uint64_t max, const char *what)
 {
     char *end;
+    errno = 0;
     unsigned long long value = strtoull(text, &end, 0);
-    if (*text == '\0' || *end != '\0' || value > 0xffffffffull) {
+    if (*text == '\0' || *text == '-' || *text == '+' || *end != '\0' || errno == ERANGE || value > max) {
         fprintf(stderr, "rv32emu: bad %s: %s\n", what, text);
         exit(EXIT_EMULATOR_ERROR);
     }
-    return (uint32_t)value;
+    return (uint64_t)value;
+}
+
+static uint32_t parse_u32(const char *text, const char *what)
+{
+    return (uint32_t)parse_u64(text, 0xffffffffull, what);
+}
+
+/* True when both names refer to one file: same spelling, or same device and inode when both exist. */
+static bool same_file(const char *a, const char *b)
+{
+    struct stat sa, sb;
+    if (!a || !b) {
+        return false;
+    }
+    if (strcmp(a, b) == 0) {
+        return true;
+    }
+    return stat(a, &sa) == 0 && stat(b, &sb) == 0 && sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+}
+
+static void require_distinct(const char *path, const char *what, const char *other_path, const char *other)
+{
+    if (same_file(path, other_path)) {
+        fprintf(stderr, "rv32emu: %s %s would overwrite the %s\n", what, path, other);
+        exit(EXIT_EMULATOR_ERROR);
+    }
+}
+
+/* Close an output stream, reporting any write error that reached it. */
+static bool close_output(FILE *stream, const char *path)
+{
+    bool ok = !ferror(stream);
+    if (fclose(stream) != 0) {
+        ok = false;
+    }
+    if (!ok) {
+        fprintf(stderr, "rv32emu: error writing %s: %s\n", path, strerror(errno));
+    }
+    return ok;
 }
 
 static void usage(void)
@@ -507,7 +551,7 @@ int main(int argc, char **argv)
         } else if (!strcmp(arg, "--dump-state")) {
             state_path = value;
         } else if (!strcmp(arg, "--max-instructions")) {
-            m.limit = strtoull(value, NULL, 0);
+            m.limit = parse_u64(value, UINT64_MAX, "instruction limit");
         } else {
             usage();
         }
@@ -537,6 +581,7 @@ int main(int argc, char **argv)
     fclose(image);
     m.pc = start_given ? start : RAM_BASE; /* reset PC from the contract */
     if (trace_path) {
+        require_distinct(trace_path, "trace file", image_path, "image");
         m.trace = fopen(trace_path, "w");
         if (!m.trace) {
             fprintf(stderr, "rv32emu: cannot write %s\n", trace_path);
@@ -551,18 +596,26 @@ int main(int argc, char **argv)
         }
         step(&m);
     }
-    fflush(stdout);
-    if (m.trace) {
-        fclose(m.trace);
+    bool outputs_ok = true;
+    if (fflush(stdout) != 0 || ferror(stdout)) {
+        fprintf(stderr, "rv32emu: error writing console output: %s\n", strerror(errno));
+        outputs_ok = false;
+    }
+    if (m.trace && !close_output(m.trace, trace_path)) {
+        outputs_ok = false;
     }
     if (state_path) {
+        require_distinct(state_path, "state file", image_path, "image");
+        require_distinct(state_path, "state file", trace_path, "trace file");
         FILE *out = fopen(state_path, "w");
         if (!out) {
             fprintf(stderr, "rv32emu: cannot write %s\n", state_path);
             return EXIT_EMULATOR_ERROR;
         }
         dump_state(&m, out);
-        fclose(out);
+        if (!close_output(out, state_path)) {
+            outputs_ok = false;
+        }
     }
 
     int status = EXIT_EMULATOR_ERROR;
@@ -595,5 +648,9 @@ int main(int argc, char **argv)
         fputc('\n', stderr);
     }
     free(m.ram);
+    if (!outputs_ok) {
+        fputs("rv32emu: outputs incomplete, run rejected\n", stderr);
+        return EXIT_EMULATOR_ERROR;
+    }
     return status;
 }

@@ -50,6 +50,13 @@ def emulator_command(emulator, image, trace=None, state=None, limit=None):
     return command
 
 
+def count(text):
+    value = int(text, 0)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"{text} is negative")
+    return value
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("image", type=Path, help="flat image loaded at 0x80000000 (build/rv32/*.bin)")
@@ -57,14 +64,18 @@ def main():
     parser.add_argument("--trace", type=Path, help="write the retirement trace here")
     parser.add_argument("--state", type=Path, help="write the final architectural state here")
     parser.add_argument("--transcript", type=Path, help="write the guest console output here")
-    parser.add_argument("--max-instructions", type=int)
+    parser.add_argument("--max-instructions", type=count)
+    parser.add_argument("--timeout", type=float, default=60.0, help="seconds before the run is abandoned")
     parser.add_argument("--expect-hex", help="checksum the PASS line must carry")
     args = parser.parse_args()
     command = emulator_command(args.emulator, args.image, args.trace, args.state, args.max_instructions)
     try:
-        completed = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        completed = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                   timeout=args.timeout)
     except OSError as error:
         parser.exit(1, f"{args.emulator}: {error}\n")
+    except subprocess.TimeoutExpired:
+        parser.exit(1, f"{args.image}: the emulator did not finish within {args.timeout} s\n")
     if args.transcript:
         args.transcript.parent.mkdir(parents=True, exist_ok=True)
         args.transcript.write_text(completed.stdout)

@@ -73,13 +73,22 @@ def main():
     command = qemu_command(args.qemu, args.elf, args.cpu) + ["-accel", "tcg,one-insn-per-tb=on",
                                                               "-d", "exec,nochain", "-D", str(args.log)]
     args.log.parent.mkdir(parents=True, exist_ok=True)
+    args.log.unlink(missing_ok=True)  # never compare against a log from an earlier run
     try:
-        subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=args.timeout)
+        completed = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                   timeout=args.timeout)
     except (OSError, subprocess.TimeoutExpired) as error:
         parser.exit(1, f"{args.qemu}: {error}\n")
+    print(" ".join(command))
+    if completed.returncode != 0:
+        parser.exit(1, f"{args.elf}: QEMU exited with status {completed.returncode}, expected 0 (the pass word)\n"
+                       f"{completed.stderr}")
+    if not args.log.exists():
+        parser.exit(1, f"{args.elf}: QEMU wrote no execution log at {args.log}\n{completed.stderr}")
     ours = trace_pcs(args.trace.read_text())
     theirs = qemu_pcs(args.log.read_text())
-    print(" ".join(command))
+    if not theirs:
+        parser.exit(1, f"{args.elf}: QEMU's log has no instructions inside RAM\n{completed.stderr}")
     problem = compare(ours, theirs)
     if problem:
         parser.exit(1, f"{args.elf}: PC sequences differ: {problem}\n")

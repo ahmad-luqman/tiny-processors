@@ -79,6 +79,7 @@ build/rv32/rv32emu --image FILE [--base ADDR] [--pc ADDR] [--trace FILE] [--dump
 - `--dump-state` writes the final PC, all registers, the four CSRs, the counters, and the halt reason, one `name value` pair per line.
 - `--max-instructions` (default 100,000,000) turns a runaway loop into a `limit` halt.
 - Exit status: 0 for the pass word, the guest's code for a fail word, 2 for any emulator error. Because a guest `FAIL 2` also exits 2, the driver treats the stderr halt line as authoritative and requires `halt=done`.
+- Output files are checked before use: the trace and state paths may not name the image or each other (same spelling or same inode), and a write error on the console, trace, or state, such as a full disk, makes the run an emulator error even when the guest passed, so a truncated trace is never reported as a completed one. `--max-instructions` accepts only an unsigned decimal, octal, or hex count that fits 64 bits; the Python driver rejects negative values and abandons a run after `--timeout` seconds (default 60).
 
 ## Retirement trace contract
 
@@ -168,9 +169,9 @@ No line says how long anything took. The `.bss` clearing loop at steps 7–10 is
 
 ## Verification
 
-- `make test-rv32-emu`: 19 tests in [tests/test_rv32_emu.py](../tests/test_rv32_emu.py). The test file has its own instruction encoder written from the specification's format diagrams, and every expected value is a hand-computed constant or Python integer arithmetic. Families: arithmetic and compare edges (`0x7fffffff + 1`, `sltiu` against −1, signed versus unsigned `slt`), shifts by 31 and by 33 (five-bit masking), `x0` writes, loads and stores of every width with byte order and sign extension, all six branches at the signed boundary in both directions, `jal`/`jalr` including bit-0 clearing and `rd == rs1`, misaligned jump targets, `ecall` → handler → `mret`, `ebreak`, nine illegal encodings (`mul`, `fence.i`, `mstatus`, `sret`, malformed shifts, unused `funct3` values), CSR masking, 23 memory-fault cases at every device and RAM edge, double faults and nested traps, console output and every done-word outcome, the instruction limit, and load base and start PC options.
+- `make test-rv32-emu`: 24 tests in [tests/test_rv32_emu.py](../tests/test_rv32_emu.py). The test file has its own instruction encoder written from the specification's format diagrams, and every expected value is a hand-computed constant or Python integer arithmetic. Families: arithmetic and compare edges (`0x7fffffff + 1`, `sltiu` against −1, signed versus unsigned `slt`), shifts by 31 and by 33 (five-bit masking), `x0` writes, loads and stores of every width with byte order and sign extension, all six branches at the signed boundary in both directions, `jal`/`jalr` including bit-0 clearing and `rd == rs1`, misaligned jump targets, `ecall` → handler → `mret`, `ebreak`, nine illegal encodings (`mul`, `fence.i`, `mstatus`, `sret`, malformed shifts, unused `funct3` values), CSR masking, 23 memory-fault cases at every device and RAM edge, double faults and nested traps, console output and every done-word outcome, the instruction limit, and load base and start PC options.
 - `make run-rv32-emu`: `selfcheck.bin` prints `PASS 807d9fad`, writes `0x5555`, and exits 0, checked with the same `classify` as the QEMU run. A copy with one byte of `g_init` flipped printed `FAIL 1` and exited 1.
-- `make diff-rv32-qemu`: QEMU with `-accel tcg,one-insn-per-tb=on -d exec,nochain` logs one line per instruction; after dropping the mask ROM at `0x1000`, its 32,610 PCs equal ours in order. QEMU logs the guard spin after the done store about 30 more times before its exit request lands; only repeats of that one address are tolerated. Register values are not in QEMU's log; the self-check's 28 checks and checksum compare those.
+- `make diff-rv32-qemu`: QEMU with `-accel tcg,one-insn-per-tb=on -d exec,nochain` logs one line per instruction. The old log is deleted first and QEMU must exit 0 and produce a log with instructions in RAM, so a failed QEMU run can never pass against stale output; after dropping the mask ROM at `0x1000`, its 32,610 PCs equal ours in order. QEMU logs the guard spin after the done store about 30 more times before its exit request lands; only repeats of that one address are tolerated. Register values are not in QEMU's log; the self-check's 28 checks and checksum compare those.
 - `make test-rv32` runs all of the above after the M1 checks; `make test` is still the counter.
 
 ## Exercises
@@ -186,7 +187,7 @@ Optional experiments on the committed baseline; each is a small edit with a real
 
 Completed on 2026-09-19 on branch `m2-rv32-emulator`. `make test-rv32` passes from a clean `build/`:
 
-- `make test-rv32-emu`: 19 tests, 0.6 s including compiling the emulator into a temporary directory.
+- `make test-rv32-emu`: 24 tests, about 2 s including compiling the emulator into a temporary directory.
 - `make run-rv32-emu`: `PASS 807d9fad`, done word `0x5555`, exit status 0, 32,610 instructions retired, 0 traps.
 - `make diff-rv32-qemu`: identical PC sequence for all 32,610 instructions.
 - Counter, ALU, SAP8, SIMD4, and all M1 targets unchanged and passing.
