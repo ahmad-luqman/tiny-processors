@@ -1,6 +1,6 @@
 # Tiny Processors: our computer and advanced SoC
 
-Updated 2026-09-19 after the [planning interview](docs/planning/full-stack-plan.md). This is a planning milestone; no new CPU, emulator, OS, or accelerator has been implemented in this session.
+Updated 2026-09-19 after the [planning interview](docs/planning/full-stack-plan.md) and the first M1 implementation session. No CPU RTL, emulator, OS, or accelerator for the new computer exists yet; the M1 firmware toolchain and contract do.
 
 Build our own Nand2Tetris-inspired computer, preserving the completed labs. Design an RV32I CPU and matching emulator, reuse an existing C compiler, and run our own boot/menu/game runtime in a native Mac window. Pong comes first; Tetris defines the first complete computer. After Tetris, build an FP32 unit and integrate the RISC-V F extension into our CPU and emulator. GPU/NPU work also follows the playable machine: 2D acceleration, programmable 3D, and handwritten-digit recognition, integrated into an advanced SoC.
 
@@ -40,13 +40,11 @@ These are recorded prior verification results, not newly rerun during planning. 
 
 The recommended post-Tetris order is F1 → F2 → A1 → A2 → G1 → N1 → G2 → S1. Floating-point integration must pass before programmable 3D; N1 and G2 can be reordered once their prerequisites pass. CPU FP32 support does not select the GPU or NPU numeric format. A small programmable 3D demonstration is the selected graphics goal, not commercial graphics API compatibility. Neural inference uses a small pretrained model; training hardware is outside the initial goal.
 
-## Next milestone: M1
+## Next milestone: M1 (acceptance pending)
 
-Define the machine contract and make a complete, reproducible RV32I C firmware build: startup, linker script, image, disassembly, runtime helpers as needed, and an executable smoke test on an independent reference runner. Record assumptions and limitations before the CPU RTL depends on them. See the [next-session checklist](docs/planning/roadmap.md#next-implementation-session-m1-only).
+The [RV32 machine contract](docs/rv32.md) is written and the complete C firmware build exists: startup assembly, linker script, our own multiply/divide runtime, a 28-check C self-check, a standard-library ELF image checker, a QEMU driver, and `make test-rv32`. Homebrew Clang 22 compiles RV32I/ILP32, Homebrew lld 23 links it (the planning probe's gap is closed), and QEMU 11 executes the image on its `virt` board with the bare `rv32i` CPU model; the guest console line and the done-register exit status agree.
 
-The planning probe found that existing Homebrew Clang 22.1.8 can emit RV32I/ILP32 objects. Default Apple Clang 21 could not. A suitable executable linker was not found in the checked locations, and firmware linking remains unverified. This is the first toolchain gap to resolve, not evidence that C firmware already runs.
-
-Keep the first implementation bounded to M1, commit verified work, then explain C → instructions → memory layout. Do not begin implementation automatically as part of this planning conversation.
+One step remains before M1 moves to the completed table: the signed division routines `rv32_div`/`rv32_rem` in `programs/rv32/rt/muldiv.c` are the milestone's exercise and are placeholders. Until they are implemented the run reports `FAIL 10` with exit status 10; afterwards `make test-rv32` must print `PASS 807d9fad`, the milestone status in `docs/rv32.md` gets the final numbers, and M2 (headless RV32I emulator loading the same ELF) becomes next. See the [next-session checklist](docs/planning/roadmap.md#next-implementation-session-m1-only) and the [C-to-instructions walkthrough](docs/c-to-instructions.md).
 
 ## Later optional tracks
 

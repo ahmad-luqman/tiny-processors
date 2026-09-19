@@ -68,6 +68,19 @@ Both simulators pass 312 cases with 329 completed launches and agree on the benc
 
 The [kernel builder](programs/simd4/vector_add.py), interpreter, and runner use Python's standard library. Generated reports and traces are under `build/simd4/icarus/` and `build/simd4/verilator/`. Every lane is active, so vector length must be divisible by lane count; divergent branches and multiply instructions are not implemented. The vector-add MVP is complete; multiplication and a matrix kernel are deferred until after the first playable computer.
 
+## RV32I firmware on a reference runner
+
+The [RV32 machine contract](docs/rv32.md) fixes reset, the address map, the console and done-register protocol, and the ILP32 firmware ABI for our RISC-V computer. A freestanding C self-check with our own startup code, linker script, and multiply/divide runtime compiles with Homebrew Clang 22, links with lld, passes a standard-library ELF checker, and runs on QEMU's `virt` board, whose UART and test device sit at the contract's three addresses.
+
+```sh
+make test-rv32          # Tool tests, host runtime tests, image checks, and the QEMU run
+make check-rv32-image   # Build ELF/listing/bin/hex and verify them against the contract
+make run-rv32-qemu      # Run on qemu-system-riscv32; console line and exit status must agree
+make disasm-rv32        # Print the annotated listing
+```
+
+QEMU boots the image with the bare `rv32i` CPU model. The guest currently reports `FAIL 10` with exit status 10, because the signed division routines in [muldiv.c](programs/rv32/rt/muldiv.c) are the milestone's exercise; once implemented, the line is `PASS 807d9fad`. Read the [C to instructions to memory walkthrough](docs/c-to-instructions.md). QEMU is a reference runner, not our machine; the headless emulator is the next milestone.
+
 ## What to read
 
 1. [counter.v](labs/01-counter/counter.v): the actual circuit.
@@ -79,13 +92,14 @@ The [kernel builder](programs/simd4/vector_add.py), interpreter, and runner use 
 7. [SAP8 specification and commands](docs/sap8.md), [CPU RTL](rtl/sap8/sap8.v), and [self-checking testbench](tests/sap8_tb.sv).
 8. [CPU gate/control notes](docs/sap8-to-gates.md), then [addition](programs/sap8/add.asm) and [sum loop](programs/sap8/sum_loop.asm) assembly.
 9. [SIMD4 specification](docs/simd4.md), [RTL](rtl/simd4/simd4.v), [kernel](programs/simd4/vector_add.py), and [gate/performance walkthrough](docs/simd4-to-gates.md).
+10. [RV32 machine contract](docs/rv32.md), then [start.S](programs/rv32/start.S), [link.ld](programs/rv32/link.ld), [selfcheck.c](programs/rv32/selfcheck.c), and the [C to instructions walkthrough](docs/c-to-instructions.md).
 
 ## Verified local tools
 
-Apple Silicon macOS, Icarus 13.0, Verilator 5.052, Yosys 0.69+post, Apple Clang 21.0.0. These are the tested versions, not enforced minimums.
+Apple Silicon macOS, Icarus 13.0, Verilator 5.052, Yosys 0.69+post, Apple Clang 21.0.0, Homebrew LLVM 22.1.8 (`llvm@22`, keg-only), lld 23.1.1, QEMU 11.1.1, Python 3.14.2. These are the tested versions, not enforced minimums. The RV32 targets find the keg-only LLVM and lld by absolute path; nothing has to be on `PATH`.
 
 ```sh
-brew install icarus-verilog verilator yosys
+brew install icarus-verilog verilator yosys llvm@22 lld qemu
 ```
 
 An accepted Xcode license and working command-line compiler are required for the Verilator C++ build. Generated files stay in the ignored `build/` directory.

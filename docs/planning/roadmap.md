@@ -71,7 +71,7 @@ Each row is a bounded milestone, potentially split into several verified commits
 
 | ID and dependency | Artifact and completion check | Walkthrough or exercise | Rough sessions |
 | --- | --- | --- | --- |
-| M1 — next | Machine contract and complete C firmware build. Startup, linker script, ELF/image/disassembly, and a tiny C self-check run on a suitable independent reference runner. Resolve linker and runtime helpers. Check image sections, ISA flags, entry point, and memory bounds. | Follow one C function through ABI registers, assembly, linked addresses, and bytes. Explain why compiling an object is not booting a computer. | 1–3 |
+| M1 — acceptance pending ([contract](../rv32.md)) | Machine contract and complete C firmware build. Startup, linker script, ELF/image/disassembly, and a tiny C self-check run on a suitable independent reference runner. Resolve linker and runtime helpers. Check image sections, ISA flags, entry point, and memory bounds. | Follow one C function through ABI registers, assembly, linked addresses, and bytes. Explain why compiling an object is not booting a computer. | 1–3 |
 | M2 — M1 | Headless RV32I emulator and image loader, with architectural state/retirement trace. Arithmetic, branches, jumps, loads/stores, faults, and x0 tested against hand-computed edges and an independent reference. Run the M1 C image and inspect its result. | Trace stack growth, a function call/return, and a signed branch. Distinguish a software VM, CPU emulator, and RTL simulator. | 2–4 |
 | M3 — M1/M2 | Small multicycle RTL CPU slice: registers, PC, immediate decode, ALU, fetch/execute/writeback, and a documented instruction subset. A short assembly loop agrees with the emulator at retirement, including memory stalls. Lint and synthesis pass without unintended latches. | Map register writes to flip-flops, reads/selects to muxes, and controller states to storage plus combinational next-state logic. Inspect a held request and a single retirement. | 2–4 |
 | M4 — M3 | Broader RV32I execution: complete planned instruction coverage, byte/halfword/word behavior, jumps, signedness, alignment, and fault semantics. Run freestanding C with stack, globals, calls, and required helpers. Differential tests, both RTL simulators where practical, lint, synthesis, and directed waves pass. Publish a coverage/limitations table. | Predict sign extension, discarded x0 writes, and stalled stores. Relate instruction count to clock count. | 3–6 |
@@ -105,6 +105,8 @@ GPU FP32/other formats and NPU integer/other formats remain independent choices.
 
 ## Next implementation session: M1 only
 
+Status 2026-09-19: steps 1–4 and 6 are done and committed; see [docs/rv32.md](../rv32.md) for the contract, tool versions, and the verified QEMU run. Step 5 executes on QEMU and reports `FAIL 10` with a matching exit status until the signed division exercise in `programs/rv32/rt/muldiv.c` is completed; the passing line is `PASS 807d9fad`. The next session finishes that exercise, records the passing run and final image sizes in the milestone status, moves M1 to the completed table, and then begins M2 using `tools/rv32_image.py` as the emulator's loader.
+
 1. Inspect Git status and instructions, preserve completed commands, and record actual tool paths/versions. Read the relevant ISA and ABI primary documentation before fixing the contract.
 2. Write the first machine contract: reset, byte order, address map and bounds, memory transactions, alignment/fault behavior, supported initial ISA, and diagnostic completion/output protocol. Distinguish planned full-machine behavior from the first executable slice.
 3. Finish the cross-toolchain. Existing Homebrew Clang can emit RV32I objects, but a working executable link has not been established. Select and verify a suitable ELF linker and binary utilities; record reproducible setup rather than relying on an accidental PATH.
@@ -128,7 +130,7 @@ Complete milestones autonomously, then explain what changed, why it works, how i
 
 | Choice | Decide when | Starting direction |
 | --- | --- | --- |
-| Final addresses, RAM size, boot layout, fault contract, and exact toolchain | M1, before firmware depends on them | Small fixed map; explicit failures; RV32I/ILP32 firmware |
+| Final addresses, RAM size, boot layout, fault contract, and exact toolchain | Decided in M1: see [docs/rv32.md](../rv32.md) | RAM 4 MiB at 0x8000_0000 (256 KiB slice), console 0x1000_0000, done register 0x0010_0000; traps documented, handler deferred to M2; Clang 22 + lld 23 + QEMU 11 |
 | Emulator implementation language and reference runner | M1/M2, after a minimal performance/tooling check | Simple portable interpreter; keep an independent correctness reference |
 | Display format/resolution and native library | M5/M6, before graphics API stabilizes | Low-resolution framebuffer with host scaling; minimal library dependencies |
 | Exact Tetris rules and controls | M7 specification | Small consistent ruleset, tested rotations, restart; no online services |

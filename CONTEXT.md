@@ -29,6 +29,14 @@ _Avoid_: guest renderer, guest operating system.
 **Instruction retirement**:
 The point where an executed instruction commits its architectural effects, used to compare CPU behavior across implementations.
 
+**RV32 machine**:
+Our RISC-V computer as defined by the machine contract in docs/rv32.md: an RV32I CPU, RAM at 0x8000_0000, and memory-mapped devices, implemented by our emulator and RTL.
+_Avoid_: SAP8, the QEMU virt board, a Linux-capable platform.
+
+**Reference runner**:
+An existing, independent implementation of enough of the machine contract to execute our firmware image and confirm its observable results; QEMU's virt board serves this role in M1.
+_Avoid_: our emulator, the RTL simulator, a timing oracle.
+
 **SAP8**:
 The project's SAP-inspired teaching CPU and its instruction set.
 _Avoid_: Hack computer, RISC-V CPU.
