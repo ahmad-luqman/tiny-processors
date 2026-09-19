@@ -37,7 +37,7 @@ RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
 .PHONY: test-sap8-assembler programs-sap8
 .PHONY: test-simd4-model test-simd4 test-simd4-verilator sim-simd4 waves-simd4 bench-simd4 lint-simd4 synth-simd4
 .PHONY: toolchain-rv32 firmware-rv32 check-rv32-image run-rv32-qemu test-rv32-tools test-rv32-rt test-rv32 disasm-rv32
-.PHONY: toolchain-rv32-emu build-rv32-emu test-rv32-emu run-rv32-emu trace-rv32-emu
+.PHONY: toolchain-rv32-emu build-rv32-emu test-rv32-emu run-rv32-emu trace-rv32-emu diff-rv32-qemu
 
 build:
 	mkdir -p build
@@ -226,7 +226,10 @@ trace-rv32-emu: run-rv32-emu
 	@echo "trace: build/rv32/selfcheck.trace ($$(wc -l < build/rv32/selfcheck.trace | tr -d ' ') lines); state: build/rv32/selfcheck.state"
 	@head -20 build/rv32/selfcheck.trace
 
-test-rv32: test-rv32-tools test-rv32-rt run-rv32-qemu test-rv32-emu run-rv32-emu
+diff-rv32-qemu: run-rv32-emu
+	$(PYTHON) tools/rv32_diff_qemu.py build/rv32/selfcheck.elf build/rv32/selfcheck.trace --qemu $(QEMU_RV32) --log build/rv32/qemu-exec.log
+
+test-rv32: test-rv32-tools test-rv32-rt run-rv32-qemu test-rv32-emu run-rv32-emu diff-rv32-qemu
 
 disasm-rv32: firmware-rv32
 	cat build/rv32/selfcheck.lst

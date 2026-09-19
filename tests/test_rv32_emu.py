@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 
+from tools.rv32_diff_qemu import compare, qemu_pcs, trace_pcs
 from tools.rv32_run_emu import halt_line
 
 
@@ -458,6 +459,29 @@ class EmulatorTest(unittest.TestCase):
         self.assertEqual((completed.returncode, completed.stdout), (0, "PASS 807d9fad\n"))
         self.assertEqual((state.halt, state.done, state.traps), ("done", 0x5555, 0))
         self.assertEqual(state.x[2], 0x80040000, "sp is back at _stack_top when main returns")
+
+
+class DriverParsingTest(unittest.TestCase):
+    def test_halt_line(self):
+        self.assertIsNone(halt_line("rv32emu: cannot open x\n"))
+        self.assertEqual(halt_line("noise\nrv32emu: halt=done steps=7 retired=7 traps=0 loaded=28 done=00073333 fail=7\n"),
+                         {"halt": "done", "steps": 7, "retired": 7, "traps": 0, "loaded": 28, "done": 0x73333,
+                          "outcome": "fail=7"})
+        self.assertEqual(halt_line("rv32emu: halt=limit steps=5 retired=5 traps=0 loaded=4 error=instruction-limit pc=80000000")
+                         ["outcome"], "error=instruction-limit pc=80000000")
+
+    def test_qemu_log_and_trace_parsing(self):
+        log = ("Trace 0: 0x107bbc180 [00000100/0000000000001000/01c1401b/ff020201] \n"
+               "Trace 0: 0x107c01c00 [00000100/0000000080000000/01c1401b/ff020201] _start\n"
+               "Stopped execution of TB chain before 0x107c01c00 [0000000080000058] rv32_exit\n"
+               "Trace 0: 0x107c01c00 [00000100/0000000080000004/01c1401b/ff020201]\n")
+        self.assertEqual(qemu_pcs(log), [RAM, RAM + 4])
+        self.assertEqual(trace_pcs("1 80000000 00100093 x1=00000001\n2 80000004 00000073 trap 11 00000000\n"), [RAM, RAM + 4])
+        self.assertIsNone(compare([RAM, RAM + 4], [RAM, RAM + 4]))
+        self.assertIsNone(compare([RAM, RAM + 4], [RAM, RAM + 4, RAM + 8, RAM + 8]), "guard spin repeats are tolerated")
+        self.assertIn("instruction 2", compare([RAM, RAM + 4], [RAM, RAM + 8]))
+        self.assertIn("stopped after 1", compare([RAM, RAM + 4], [RAM]))
+        self.assertIn("extra", compare([RAM, RAM + 4], [RAM, RAM + 4, RAM + 12]))
 
 
 if __name__ == "__main__":
