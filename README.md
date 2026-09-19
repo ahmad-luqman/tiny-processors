@@ -1,6 +1,6 @@
 # Tiny Processors
 
-Learning Verilog by building small CPUs, parallel compute hardware, and eventually graphics. See [the roadmap](PLAN.md).
+Learning Verilog by building small CPUs, parallel compute hardware, and an end-to-end computer. The next direction is our own RV32I CPU and native Mac emulator running C, a small OS/runtime, Pong, and Tetris; GPU/NPU integration follows the playable machine. See [the roadmap](PLAN.md) and the [detailed full-stack plan](docs/planning/roadmap.md).
 
 ## Start here
 
@@ -49,7 +49,7 @@ make waves-sap8           # Generate traces and print the Surfer link
 
 Both simulators pass 493 core instruction checks plus the assembled addition (6 instructions, output 12) and loop (29 instructions, output 6). All 12 assembler tests pass. The assembler uses Python's standard library; no packages or virtual environment are required. Python 3.14.2 was used locally.
 
-Start with the [ISA and memory contract](docs/sap8.md), then follow the [register, control, and waveform walkthrough](docs/sap8-to-gates.md). SAP8 uses combinational memory reads and clocked writes; memory wait states and FPGA memory integration are outside this milestone. The scalar CPU is frozen while compute work proceeds below.
+Start with the [ISA and memory contract](docs/sap8.md), then follow the [register, control, and waveform walkthrough](docs/sap8-to-gates.md). SAP8 uses combinational memory reads and clocked writes; memory wait states and FPGA memory integration are outside this milestone. SAP8 remains frozen as the smaller teaching CPU; the completed compute prototype is described below.
 
 ## Four-lane parallel compute
 
@@ -66,7 +66,7 @@ make waves-simd4           # Tests, no-wait/stalled traces, and the Surfer link
 
 Both simulators pass 312 cases with 329 completed launches and agree on the benchmarks. For 32 elements, one lane takes 486 cycles and four lanes take 198 cycles with no memory waits: **2.45× speedup**. All still need 96 transfers through the single port. Read the [gate and performance walkthrough](docs/simd4-to-gates.md) to connect lane duplication, stalls, and measured speedup.
 
-The [kernel builder](programs/simd4/vector_add.py), interpreter, and runner use Python's standard library. Generated reports and traces are under `build/simd4/icarus/` and `build/simd4/verilator/`. Every lane is active, so vector length must be divisible by lane count; divergent branches and multiply instructions are not implemented. The vector-add MVP is complete; a multiply operation and matrix kernel follow next.
+The [kernel builder](programs/simd4/vector_add.py), interpreter, and runner use Python's standard library. Generated reports and traces are under `build/simd4/icarus/` and `build/simd4/verilator/`. Every lane is active, so vector length must be divisible by lane count; divergent branches and multiply instructions are not implemented. The vector-add MVP is complete; multiplication and a matrix kernel are deferred until after the first playable computer.
 
 ## What to read
 
