@@ -77,9 +77,16 @@ make test-rv32          # Tool tests, host runtime tests, image checks, and the 
 make check-rv32-image   # Build ELF/listing/bin/hex and verify them against the contract
 make run-rv32-qemu      # Run on qemu-system-riscv32; console line and exit status must agree
 make disasm-rv32        # Print the annotated listing
+make test-rv32-emu      # 19 hand-computed edge tests against our C emulator
+make run-rv32-emu       # Run the same image on our emulator with a retirement trace
+make diff-rv32-qemu     # Emulator and QEMU must execute the same PC sequence
 ```
 
-QEMU boots the image with the bare `rv32i` CPU model; all 28 checks pass, the guest prints `PASS 807d9fad`, and QEMU exits with status 0. The 12 tool tests and 6 host runtime tests use only the standard library. Read the [C to instructions to memory walkthrough](docs/c-to-instructions.md). QEMU is a reference runner, not our machine; the headless emulator is the next milestone.
+QEMU boots the image with the bare `rv32i` CPU model; all 28 checks pass, the guest prints `PASS 807d9fad`, and QEMU exits with status 0. The 12 tool tests and 6 host runtime tests use only the standard library. Read the [C to instructions to memory walkthrough](docs/c-to-instructions.md). QEMU is a reference runner, not our machine.
+
+## RV32 headless emulator
+
+[tools/rv32emu.c](tools/rv32emu.c) is our own machine: one C file that loads the flattened image, executes RV32I with the contract's trap, alignment, console, and done-register rules, and writes a retirement trace whose format the RTL testbench will reproduce. It runs the self-check to `PASS 807d9fad` in 32,610 instructions and executes exactly the PC sequence QEMU logs; 19 tests with an independent instruction encoder pin the hand-computed edges (signed boundaries, shifts by 31, `x0`, sub-word stores, misaligned and out-of-map traps, `ecall`/`mret`, double faults, every device edge). Untraced it runs about 400 M instructions/s. Read the [design, trace contract, and trace walkthrough](docs/rv32-emulator.md); the multicycle RTL CPU is the next milestone.
 
 ## What to read
 
@@ -93,6 +100,7 @@ QEMU boots the image with the bare `rv32i` CPU model; all 28 checks pass, the gu
 8. [CPU gate/control notes](docs/sap8-to-gates.md), then [addition](programs/sap8/add.asm) and [sum loop](programs/sap8/sum_loop.asm) assembly.
 9. [SIMD4 specification](docs/simd4.md), [RTL](rtl/simd4/simd4.v), [kernel](programs/simd4/vector_add.py), and [gate/performance walkthrough](docs/simd4-to-gates.md).
 10. [RV32 machine contract](docs/rv32.md), then [start.S](programs/rv32/start.S), [link.ld](programs/rv32/link.ld), [selfcheck.c](programs/rv32/selfcheck.c), and the [C to instructions walkthrough](docs/c-to-instructions.md).
+11. [RV32 emulator](docs/rv32-emulator.md), then [rv32emu.c](tools/rv32emu.c) and [test_rv32_emu.py](tests/test_rv32_emu.py); run `make trace-rv32-emu` and follow the walkthrough in the trace.
 
 ## Verified local tools
 

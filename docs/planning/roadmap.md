@@ -72,7 +72,7 @@ Each row is a bounded milestone, potentially split into several verified commits
 | ID and dependency | Artifact and completion check | Walkthrough or exercise | Rough sessions |
 | --- | --- | --- | --- |
 | M1 — completed 2026-09-19 ([contract](../rv32.md)) | Machine contract and complete C firmware build. Startup, linker script, ELF/image/disassembly, and a tiny C self-check run on a suitable independent reference runner. Resolve linker and runtime helpers. Check image sections, ISA flags, entry point, and memory bounds. | Follow one C function through ABI registers, assembly, linked addresses, and bytes. Explain why compiling an object is not booting a computer. | 1–3 |
-| M2 — next | Headless RV32I emulator and image loader, with architectural state/retirement trace. Arithmetic, branches, jumps, loads/stores, faults, and x0 tested against hand-computed edges and an independent reference. Run the M1 C image and inspect its result. | Trace stack growth, a function call/return, and a signed branch. Distinguish a software VM, CPU emulator, and RTL simulator. | 2–4 |
+| M2 — completed 2026-09-19 ([record](../rv32-emulator.md)) | Headless RV32I emulator and image loader, with architectural state/retirement trace. Arithmetic, branches, jumps, loads/stores, faults, and x0 tested against hand-computed edges and an independent reference. Run the M1 C image and inspect its result. | Trace stack growth, a function call/return, and a signed branch. Distinguish a software VM, CPU emulator, and RTL simulator. | 2–4 |
 | M3 — M1/M2 | Small multicycle RTL CPU slice: registers, PC, immediate decode, ALU, fetch/execute/writeback, and a documented instruction subset. A short assembly loop agrees with the emulator at retirement, including memory stalls. Lint and synthesis pass without unintended latches. | Map register writes to flip-flops, reads/selects to muxes, and controller states to storage plus combinational next-state logic. Inspect a held request and a single retirement. | 2–4 |
 | M4 — M3 | Broader RV32I execution: complete planned instruction coverage, byte/halfword/word behavior, jumps, signedness, alignment, and fault semantics. Run freestanding C with stack, globals, calls, and required helpers. Differential tests, both RTL simulators where practical, lint, synthesis, and directed waves pass. Publish a coverage/limitations table. | Predict sign extension, discarded x0 writes, and stalled stores. Relate instruction count to clock count. | 3–6 |
 | M5 — M2/M4 | Matched RAM/device models and RTL peripherals for timer, input, debug output, framebuffer, and faults. One diagnostic firmware image exercises them on both backends; scripted results and framebuffer checks agree under the documented time contract. | Decode an MMIO address into a peripheral select. Show why a framebuffer store is ordinary data movement until something displays it. | 2–4 |
@@ -103,16 +103,16 @@ Select and verify the compiler ISA/ABI flags at F2. Either preserve the integer 
 
 GPU FP32/other formats and NPU integer/other formats remain independent choices. The CPU FPU may help with reference computations or scene setup, but does not automatically create floating-point GPU lanes or change the digit model's quantization contract.
 
-## Next implementation session: M2
+## Next implementation session: M3
 
-M1 completed on 2026-09-19; its record is [docs/rv32.md](../rv32.md) (contract, tool versions, verified QEMU run) and [docs/c-to-instructions.md](../c-to-instructions.md). Its six-step checklist is preserved in Git history.
+M2 completed on 2026-09-19; its record is [docs/rv32-emulator.md](../rv32-emulator.md) (language measurement, machine model, trace contract, walkthrough, verification) and the contract additions in [docs/rv32.md](../rv32.md#behavior-fixed-in-m2). Its six-step checklist is preserved in Git history and in that document.
 
-1. Inspect Git status and preserve every existing command. Run a short performance and tooling check to choose the emulator language; a simple portable interpreter is the starting direction, and the choice must not weaken the independent reference (QEMU stays available).
-2. Reuse `parse_elf`/`flatten` from `tools/rv32_image.py` as the loader. Implement fetch, decode, and execute for all of RV32I with `x0` hardwired, correct sign extension, and the contract's alignment, access-fault, `ECALL`/`EBREAK`, and `mtvec`/`mcause`/`mepc`/`mtval` trap behavior in machine mode.
-3. Model RAM with the 4 MiB bound, the console, and the done register exactly as documented; anything else faults.
-4. Emit a retirement trace (PC, instruction word, register written, memory effect) and deterministic instruction counts; do not call them cycles.
-5. Test against hand-computed edges (signed compares, shifts by 31, `x0` writes, sub-word stores, misaligned traps), then run `selfcheck.elf` and require `PASS 807d9fad` with the pass done word; keep QEMU as the differential reference.
-6. Add distinct make targets, write the trace walkthrough (stack growth, call/return, a signed branch; software VM versus CPU emulator versus RTL simulator), commit in small verified increments, and stop before RTL.
+1. Inspect Git status and preserve every existing command, including the M2 emulator targets. Start a branch and end with one pull request, as M2 did.
+2. Write the RTL CPU contract before any Verilog: the multicycle controller states, the ready/valid memory port from [docs/rv32.md](../rv32.md#memory-transaction-contract), and the instruction subset of the first slice (at least `lui`, `auipc`, `addi`/`add`/`sub`, `sw`/`lw`, `beq`/`bne`, `jal`). Say which RV32I instructions are excluded and how an excluded encoding behaves (illegal-instruction trap or explicit "unsupported" halt).
+3. Implement `rtl/rv32/`: register file, PC, immediate decode, ALU (reuse ideas from `labs/02-alu`), and a fetch/execute/writeback controller driving one memory port; a testbench RAM loaded with `$readmemh` from `build/rv32/selfcheck.hex`-style files, with a configurable number of stall cycles.
+4. Make the testbench print the retirement trace in exactly the emulator's format (`docs/rv32-emulator.md`, "Retirement trace contract") and add a Python test that assembles a short loop with the encoder pattern from `tests/test_rv32_emu.py`, runs both backends, and `diff`s the traces with and without stalls.
+5. Lint with Verilator `--Wall`, synthesize with Yosys asserting no latches, record cell and flip-flop counts, and capture one waveform showing a held request under a stall and a single retirement.
+6. Write the walkthrough (register writes as flip-flops, reads and selects as muxes, controller states as storage plus next-state logic; instruction count versus clock count), commit in verified increments, update this roadmap, and stop before broadening to full RV32I (M4).
 
 ## Verification and learning discipline
 
@@ -129,7 +129,7 @@ Complete milestones autonomously, then explain what changed, why it works, how i
 | Choice | Decide when | Starting direction |
 | --- | --- | --- |
 | Final addresses, RAM size, boot layout, fault contract, and exact toolchain | Decided in M1: see [docs/rv32.md](../rv32.md) | RAM 4 MiB at 0x8000_0000 (256 KiB slice), console 0x1000_0000, done register 0x0010_0000; traps documented, handler deferred to M2; Clang 22 + lld 23 + QEMU 11 |
-| Emulator implementation language and reference runner | M1/M2, after a minimal performance/tooling check | Simple portable interpreter; keep an independent correctness reference |
+| Emulator implementation language and reference runner | Decided in M2: C, one file, host `cc`; QEMU stays the reference and the PC-sequence differential is a make target | Measured about 400 M instructions/s untraced, 1.5 M/s for the Python alternative |
 | Display format/resolution and native library | M5/M6, before graphics API stabilizes | Low-resolution framebuffer with host scaling; minimal library dependencies |
 | Exact Tetris rules and controls | M7 specification | Small consistent ruleset, tested rotations, restart; no online services |
 | FPU microarchitecture and independent reference | F1, before arithmetic RTL | Multicycle FP32 with exact result/flag comparisons; split implementation into verified operations |
