@@ -142,11 +142,11 @@ You can watch all of this. The driver saves the console bytes to `build/rv32/sel
 
 RV32I has forty instructions and none of them multiply or divide; those belong to the M extension. When the target lacks M, clang lowers each 32-bit `*`, `/`, `%` to a call named after the routine GCC's `libgcc` has provided for decades: `__mulsi3`, `__divsi3`, `__udivsi3`, `__modsi3`, `__umodsi3` (`si` for a 32-bit "single integer", `3` for three operands). Normally the compiler's runtime library supplies them, but Homebrew's LLVM ships no RISC-V compiler-rt, so the link would fail with undefined symbols. [muldiv.c](../programs/rv32/rt/muldiv.c) supplies them: shift-and-add multiplication, restoring division with an explicit 33rd bit, and aliases from the `rv32_*` names to the libcall names. `llvm-objdump -d -r build/rv32/muldiv.o` shows no call relocations at all, which is the proof that the routines do not accidentally call themselves through a `*` or `%` of their own.
 
-The signed routines are the exercise below. Their contract is the RISC-V M extension's, so that hardware we build later and these routines never disagree.
+The signed routines compute on unsigned magnitudes and fix the sign afterwards; their contract is the RISC-V M extension's, so that hardware we build later and these routines never disagree.
 
 ## 9. Exercises
 
-1. Implement `rv32_div` and `rv32_rem` in `muldiv.c` using `udivmod()` on magnitudes. Predict, before running, what `-7 / 2`, `-7 % 2`, `7 / -2`, `INT32_MIN / -1`, and `x / 0` must return, then run `make test-rv32-rt` and finally `make test-rv32`. The passing line is `PASS 807d9fad`.
+1. Before reading `rv32_div` and `rv32_rem` in `muldiv.c`, predict what `-7 / 2`, `-7 % 2`, `7 / -2`, `INT32_MIN / -1`, and `x / 0` must return, and why `INT32_MIN / -1` needs no special case once the work is done on magnitudes. Then break one rule on purpose and watch which host test and which guest check catch it.
 2. Change one expected constant in `selfcheck.c`, say check 12's `97406784u`. Predict the console line and the exit status (`make run-rv32-qemu; echo $?`), then restore it.
 3. Rebuild with `-O0` (`make RV32_CFLAGS="..." ...` or edit the Makefile locally) and compare `fib`'s frame in the listing with the `-O2` version. How many bytes does each recursion level use?
 4. Change `ORIGIN` in `link.ld` to `0x80001000`. Predict what the image checker says, and what QEMU would do if you bypassed it (the PC still starts at `0x8000_0000`, where there is now nothing).

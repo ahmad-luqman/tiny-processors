@@ -79,7 +79,7 @@ make run-rv32-qemu      # Run on qemu-system-riscv32; console line and exit stat
 make disasm-rv32        # Print the annotated listing
 ```
 
-QEMU boots the image with the bare `rv32i` CPU model. The guest currently reports `FAIL 10` with exit status 10, because the signed division routines in [muldiv.c](programs/rv32/rt/muldiv.c) are the milestone's exercise; once implemented, the line is `PASS 807d9fad`. Read the [C to instructions to memory walkthrough](docs/c-to-instructions.md). QEMU is a reference runner, not our machine; the headless emulator is the next milestone.
+QEMU boots the image with the bare `rv32i` CPU model; all 28 checks pass, the guest prints `PASS 807d9fad`, and QEMU exits with status 0. The 12 tool tests and 6 host runtime tests use only the standard library. Read the [C to instructions to memory walkthrough](docs/c-to-instructions.md). QEMU is a reference runner, not our machine; the headless emulator is the next milestone.
 
 ## What to read
 

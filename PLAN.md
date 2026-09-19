@@ -1,6 +1,6 @@
 # Tiny Processors: our computer and advanced SoC
 
-Updated 2026-09-19 after the [planning interview](docs/planning/full-stack-plan.md) and the first M1 implementation session. No CPU RTL, emulator, OS, or accelerator for the new computer exists yet; the M1 firmware toolchain and contract do.
+Updated 2026-09-19 after the [planning interview](docs/planning/full-stack-plan.md) and the completed M1 session. No CPU RTL, emulator, OS, or accelerator for the new computer exists yet; the machine contract and the firmware toolchain do.
 
 Build our own Nand2Tetris-inspired computer, preserving the completed labs. Design an RV32I CPU and matching emulator, reuse an existing C compiler, and run our own boot/menu/game runtime in a native Mac window. Pong comes first; Tetris defines the first complete computer. After Tetris, build an FP32 unit and integrate the RISC-V F extension into our CPU and emulator. GPU/NPU work also follows the playable machine: 2D acceleration, programmable 3D, and handwritten-digit recognition, integrated into an advanced SoC.
 
@@ -22,6 +22,7 @@ Read the [detailed roadmap](docs/planning/roadmap.md) for architecture proposals
 | Eight-bit combinational ALU | Eight operations and flags; 524,307 checks per simulator; lint and synthesis with no storage pass | [Lab](labs/02-alu/README.md), [gates](docs/alu-to-gates.md); `make test-alu`, `make test-alu-verilator`, `make lint-alu`, `make synth-alu`, `make waves-alu` |
 | SAP8 CPU and assembler | 493 core checks across 275 reset scenarios, assembled addition/loop programs, 12 assembler tests; lint and synthesis pass | [Contract](docs/sap8.md), [datapath](docs/sap8-to-gates.md); `make test-sap8`, `make test-sap8-verilator`, `make lint-sap8`, `make synth-sap8`, `make waves-sap8` |
 | SIMD4 vector-add engine | 312 cases and 329 completed launches per simulator, six Python tests, 1/2/4-lane lint, four-lane synthesis; stalls and bandwidth measured | [Contract](docs/simd4.md), [gates/performance](docs/simd4-to-gates.md); `make test-simd4`, `make test-simd4-verilator`, `make lint-simd4`, `make synth-simd4`, `make bench-simd4`, `make waves-simd4` |
+| RV32 machine contract and M1 firmware | 28-check freestanding C self-check runs on QEMU virt with the bare `rv32i` model: `PASS 807d9fad`, exit status 0; 12 tool tests and 6 host runtime tests; ELF image checks pass | [Contract](docs/rv32.md), [C to instructions](docs/c-to-instructions.md); `make test-rv32`, `make check-rv32-image`, `make run-rv32-qemu`, `make disasm-rv32` |
 
 These are recorded prior verification results, not newly rerun during planning. SAP8 stays frozen as the small teaching CPU. SIMD4 is a parallel compute prototype, not an integrated GPU or NPU. Its multiply/matrix extension moves after the playable computer.
 
@@ -40,11 +41,9 @@ These are recorded prior verification results, not newly rerun during planning. 
 
 The recommended post-Tetris order is F1 → F2 → A1 → A2 → G1 → N1 → G2 → S1. Floating-point integration must pass before programmable 3D; N1 and G2 can be reordered once their prerequisites pass. CPU FP32 support does not select the GPU or NPU numeric format. A small programmable 3D demonstration is the selected graphics goal, not commercial graphics API compatibility. Neural inference uses a small pretrained model; training hardware is outside the initial goal.
 
-## Next milestone: M1 (acceptance pending)
+## Next milestone: M2
 
-The [RV32 machine contract](docs/rv32.md) is written and the complete C firmware build exists: startup assembly, linker script, our own multiply/divide runtime, a 28-check C self-check, a standard-library ELF image checker, a QEMU driver, and `make test-rv32`. Homebrew Clang 22 compiles RV32I/ILP32, Homebrew lld 23 links it (the planning probe's gap is closed), and QEMU 11 executes the image on its `virt` board with the bare `rv32i` CPU model; the guest console line and the done-register exit status agree.
-
-One step remains before M1 moves to the completed table: the signed division routines `rv32_div`/`rv32_rem` in `programs/rv32/rt/muldiv.c` are the milestone's exercise and are placeholders. Until they are implemented the run reports `FAIL 10` with exit status 10; afterwards `make test-rv32` must print `PASS 807d9fad`, the milestone status in `docs/rv32.md` gets the final numbers, and M2 (headless RV32I emulator loading the same ELF) becomes next. See the [next-session checklist](docs/planning/roadmap.md#next-implementation-session-m1-only) and the [C-to-instructions walkthrough](docs/c-to-instructions.md).
+Build the headless RV32I emulator against the [machine contract](docs/rv32.md): load `selfcheck.elf` with the parser from `tools/rv32_image.py`, execute RV32I with the documented trap, alignment, console, and done-register behavior, and record a retirement trace (PC, instruction, register write, memory effect). Test arithmetic, branches, jumps, loads/stores, `x0`, and faults against hand-computed edges, then require the same console line and done word QEMU produced: `PASS 807d9fad`. The emulator's implementation language is decided at the start of M2 after a short performance and tooling check. See the [next-session checklist](docs/planning/roadmap.md#next-implementation-session-m2).
 
 ## Later optional tracks
 
