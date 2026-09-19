@@ -21,6 +21,7 @@ RV32_OBJCOPY ?= $(RV32_LLVM)/llvm-objcopy
 RV32_READELF ?= $(RV32_LLVM)/llvm-readelf
 RV32_NM ?= $(RV32_LLVM)/llvm-nm
 QEMU_RV32 ?= qemu-system-riscv32
+HOST_CC ?= cc
 RV32_ARCH := --target=riscv32-unknown-elf -march=rv32i -mabi=ilp32 -mcmodel=medlow -mno-relax
 RV32_CFLAGS := $(RV32_ARCH) -std=c11 -ffreestanding -fno-builtin -nostdlib -O2 -g -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Wextra -Werror -Iprograms/rv32
 RV32_LDFLAGS := $(RV32_ARCH) -nostdlib -static --ld-path=$(RV32_LD) -Wl,-T,programs/rv32/link.ld -Wl,-Map,build/rv32/selfcheck.map
@@ -34,6 +35,7 @@ RV32_SELFCHECK_HEX := 807d9fad
 .PHONY: test-sap8-assembler programs-sap8
 .PHONY: test-simd4-model test-simd4 test-simd4-verilator sim-simd4 waves-simd4 bench-simd4 lint-simd4 synth-simd4
 .PHONY: toolchain-rv32 firmware-rv32 check-rv32-image run-rv32-qemu test-rv32-tools test-rv32-rt test-rv32 disasm-rv32
+.PHONY: toolchain-rv32-emu
 
 build:
 	mkdir -p build
@@ -188,6 +190,10 @@ toolchain-rv32:
 	@$(RV32_CC) --version | head -1
 	@$(RV32_LD) --version
 	@$(QEMU_RV32) --version | head -1
+
+toolchain-rv32-emu:
+	@command -v $(HOST_CC) >/dev/null || { echo "missing $(HOST_CC) (xcode-select --install)"; exit 1; }
+	@$(HOST_CC) --version | head -1
 
 firmware-rv32: toolchain-rv32 build/rv32/selfcheck.elf build/rv32/selfcheck.lst build/rv32/selfcheck.bin build/rv32/selfcheck.readelf
 
