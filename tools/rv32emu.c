@@ -235,7 +235,7 @@ static void step(machine *m)
     uint32_t rs1 = (word >> 15) & 31u, rs2 = (word >> 20) & 31u, funct7 = word >> 25;
     uint32_t a = m->x[rs1], b = m->x[rs2];
     int32_t imm_i = (int32_t)word >> 20;
-    int32_t imm_s = (int32_t)(((int32_t)word >> 25) << 5) | (int32_t)((word >> 7) & 0x1fu);
+    int32_t imm_s = ((int32_t)(word & 0xfe000000u) >> 20) | (int32_t)((word >> 7) & 0x1fu);
     int32_t imm_b = (int32_t)(((int32_t)(word & 0x80000000u) >> 19) | (int32_t)((word & 0x80u) << 4)
                               | (int32_t)((word >> 20) & 0x7e0u) | (int32_t)((word >> 7) & 0x1eu));
     int32_t imm_j = (int32_t)(((int32_t)(word & 0x80000000u) >> 11) | (int32_t)(word & 0xff000u)

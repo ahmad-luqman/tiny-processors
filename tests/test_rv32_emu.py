@@ -236,6 +236,8 @@ class EmulatorTest(unittest.TestCase):
         words += LI(11, 0x8001) + [SH(11, 5, 4), LH(12, 5, 4), LHU(13, 5, 4)]
         words += LI(14, 0x1234FFAB) + [SB(14, 5, 6), LW(15, 5, 4), LB(16, 5, 6), LH(17, 5, 6)]
         words += LI(18, 0x80) + [SB(18, 5, 8), LB(19, 5, 8), LBU(20, 5, 8), LW(21, 5, 0)]
+        words += LI(22, data + 0x800) + [SW(6, 22, -0x800), SH(11, 22, -2046), SB(18, 22, -1),
+                                        LW(23, 22, -0x800), LHU(24, 22, -2046), LBU(25, 22, -1)]
         result = self.run_pass(words)
         x = result.state.x
         self.assertEqual(x[7], 0x44, "little-endian: the low byte is at the low address")
@@ -250,6 +252,8 @@ class EmulatorTest(unittest.TestCase):
         self.assertEqual(x[19], 0xFFFFFF80)
         self.assertEqual(x[20], 0x80)
         self.assertEqual(x[21], 0x11223344)
+        self.assertEqual((x[23], x[24], x[25]), (0x80013344, 0x8001, 0x80),
+                         "negative offsets: the halfword at +2 overlaps the word's upper half")
         effects = [line.split(" ", 3)[3] for line in result.trace if "mem[" in line]
         self.assertEqual(effects[0], "mem[80001000]<-11223344/4")
         self.assertEqual(effects[1], "x7=00000044 mem[80001000]->00000044/1")

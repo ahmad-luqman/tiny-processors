@@ -73,7 +73,7 @@ The [kernel builder](programs/simd4/vector_add.py), interpreter, and runner use 
 The [RV32 machine contract](docs/rv32.md) fixes reset, the address map, the console and done-register protocol, and the ILP32 firmware ABI for our RISC-V computer. A freestanding C self-check with our own startup code, linker script, and multiply/divide runtime compiles with Homebrew Clang 22, links with lld, passes a standard-library ELF checker, and runs on QEMU's `virt` board, whose UART and test device sit at the contract's three addresses.
 
 ```sh
-make test-rv32          # Tool tests, host runtime tests, image checks, and the QEMU run
+make test-rv32          # Tool tests, host runtime tests, image checks, the QEMU run, and the emulator checks
 make check-rv32-image   # Build ELF/listing/bin/hex and verify them against the contract
 make run-rv32-qemu      # Run on qemu-system-riscv32; console line and exit status must agree
 make disasm-rv32        # Print the annotated listing
