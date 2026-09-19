@@ -28,6 +28,8 @@ RV32_LDFLAGS := $(RV32_ARCH) -nostdlib -static --ld-path=$(RV32_LD) -Wl,-T,progr
 RV32_HEADERS := programs/rv32/board.h programs/rv32/mmio.h programs/rv32/console.h programs/rv32/rt/muldiv.h
 RV32_OBJS := build/rv32/start.o build/rv32/selfcheck.o build/rv32/console.o build/rv32/muldiv.o
 RV32_SELFCHECK_HEX := 807d9fad
+RV32EMU := build/rv32/rv32emu
+RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
 
 .PHONY: test sim lint synth test-verilator waves clean
 .PHONY: test-alu sim-alu lint-alu synth-alu test-alu-verilator waves-alu
@@ -35,7 +37,7 @@ RV32_SELFCHECK_HEX := 807d9fad
 .PHONY: test-sap8-assembler programs-sap8
 .PHONY: test-simd4-model test-simd4 test-simd4-verilator sim-simd4 waves-simd4 bench-simd4 lint-simd4 synth-simd4
 .PHONY: toolchain-rv32 firmware-rv32 check-rv32-image run-rv32-qemu test-rv32-tools test-rv32-rt test-rv32 disasm-rv32
-.PHONY: toolchain-rv32-emu
+.PHONY: toolchain-rv32-emu build-rv32-emu test-rv32-emu run-rv32-emu trace-rv32-emu
 
 build:
 	mkdir -p build
@@ -209,7 +211,22 @@ test-rv32-tools:
 test-rv32-rt:
 	$(PYTHON) -m unittest discover -s tests -p 'test_rv32_rt.py' -v
 
-test-rv32: test-rv32-tools test-rv32-rt run-rv32-qemu
+$(RV32EMU): tools/rv32emu.c | build/rv32
+	$(HOST_CC) $(RV32EMU_CFLAGS) -o $@ $<
+
+build-rv32-emu: toolchain-rv32-emu $(RV32EMU)
+
+test-rv32-emu:
+	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_emu.py' -v
+
+run-rv32-emu: check-rv32-image $(RV32EMU)
+	$(PYTHON) tools/rv32_run_emu.py build/rv32/selfcheck.bin --emulator $(RV32EMU) --transcript build/rv32/selfcheck.emu.transcript --trace build/rv32/selfcheck.trace --state build/rv32/selfcheck.state --expect-hex $(RV32_SELFCHECK_HEX)
+
+trace-rv32-emu: run-rv32-emu
+	@echo "trace: build/rv32/selfcheck.trace ($$(wc -l < build/rv32/selfcheck.trace | tr -d ' ') lines); state: build/rv32/selfcheck.state"
+	@head -20 build/rv32/selfcheck.trace
+
+test-rv32: test-rv32-tools test-rv32-rt run-rv32-qemu test-rv32-emu run-rv32-emu
 
 disasm-rv32: firmware-rv32
 	cat build/rv32/selfcheck.lst
