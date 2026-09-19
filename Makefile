@@ -13,12 +13,27 @@ SIMD4_RTL := rtl/simd4/simd4.v
 SIMD4_TB := tests/simd4_tb.sv
 SIMD4_ICARUS := build/simd4-1.vvp build/simd4-2.vvp build/simd4-4.vvp
 SIMD4_VERILATOR := build/verilator-simd4-1/simd4_sim build/verilator-simd4-2/simd4_sim build/verilator-simd4-4/simd4_sim
+RV32_LLVM ?= /opt/homebrew/opt/llvm@22/bin
+RV32_CC ?= $(RV32_LLVM)/clang
+RV32_LD ?= /opt/homebrew/opt/lld/bin/ld.lld
+RV32_OBJDUMP ?= $(RV32_LLVM)/llvm-objdump
+RV32_OBJCOPY ?= $(RV32_LLVM)/llvm-objcopy
+RV32_READELF ?= $(RV32_LLVM)/llvm-readelf
+RV32_NM ?= $(RV32_LLVM)/llvm-nm
+QEMU_RV32 ?= qemu-system-riscv32
+RV32_ARCH := --target=riscv32-unknown-elf -march=rv32i -mabi=ilp32 -mcmodel=medlow -mno-relax
+RV32_CFLAGS := $(RV32_ARCH) -std=c11 -ffreestanding -fno-builtin -nostdlib -O2 -g -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Wextra -Werror -Iprograms/rv32
+RV32_LDFLAGS := $(RV32_ARCH) -nostdlib -static --ld-path=$(RV32_LD) -Wl,-T,programs/rv32/link.ld -Wl,-Map,build/rv32/selfcheck.map
+RV32_HEADERS := programs/rv32/board.h programs/rv32/mmio.h programs/rv32/console.h programs/rv32/rt/muldiv.h
+RV32_OBJS := build/rv32/start.o build/rv32/selfcheck.o build/rv32/console.o build/rv32/muldiv.o
+RV32_SELFCHECK_HEX := 807d9fad
 
 .PHONY: test sim lint synth test-verilator waves clean
 .PHONY: test-alu sim-alu lint-alu synth-alu test-alu-verilator waves-alu
 .PHONY: test-sap8 sim-sap8 lint-sap8 synth-sap8 test-sap8-verilator waves-sap8
 .PHONY: test-sap8-assembler programs-sap8
 .PHONY: test-simd4-model test-simd4 test-simd4-verilator sim-simd4 waves-simd4 bench-simd4 lint-simd4 synth-simd4
+.PHONY: toolchain-rv32 firmware-rv32 check-rv32-image run-rv32-qemu test-rv32-tools test-rv32-rt test-rv32 disasm-rv32
 
 build:
 	mkdir -p build
@@ -140,6 +155,58 @@ lint-simd4:
 
 synth-simd4: | build
 	yosys -Q -T -l build/simd4-synth.log -p 'read_verilog $(SIMD4_RTL); synth -top simd4; check -assert; select -assert-none t:*LATCH*; stat; write_json build/simd4.json'
+
+build/rv32: | build
+	mkdir -p $@
+
+build/rv32/%.o: programs/rv32/%.c $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -c -o $@ $<
+
+build/rv32/%.o: programs/rv32/%.S programs/rv32/board.h | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -c -o $@ $<
+
+build/rv32/muldiv.o: programs/rv32/rt/muldiv.c programs/rv32/rt/muldiv.h | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -c -o $@ $<
+
+build/rv32/selfcheck.elf: $(RV32_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -o $@ $(RV32_OBJS)
+
+build/rv32/selfcheck.lst: build/rv32/selfcheck.elf
+	$(RV32_OBJDUMP) -d -S $< > $@
+
+build/rv32/selfcheck.bin: build/rv32/selfcheck.elf
+	$(RV32_OBJCOPY) -O binary $< $@
+
+build/rv32/selfcheck.readelf: build/rv32/selfcheck.elf
+	$(RV32_READELF) -h -l -S -s -A $< > $@
+
+toolchain-rv32:
+	@for tool in $(RV32_CC) $(RV32_OBJDUMP) $(RV32_OBJCOPY) $(RV32_READELF) $(RV32_NM); do \
+		test -x $$tool || { echo "missing $$tool (brew install llvm@22)"; exit 1; }; done
+	@test -x $(RV32_LD) || { echo "missing $(RV32_LD) (brew install lld)"; exit 1; }
+	@command -v $(QEMU_RV32) >/dev/null || { echo "missing $(QEMU_RV32) (brew install qemu)"; exit 1; }
+	@$(RV32_CC) --version | head -1
+	@$(RV32_LD) --version
+	@$(QEMU_RV32) --version | head -1
+
+firmware-rv32: toolchain-rv32 build/rv32/selfcheck.elf build/rv32/selfcheck.lst build/rv32/selfcheck.bin build/rv32/selfcheck.readelf
+
+check-rv32-image: firmware-rv32
+	$(PYTHON) tools/rv32_image.py build/rv32/selfcheck.elf --listing build/rv32/selfcheck.lst --bin build/rv32/selfcheck.bin --hex build/rv32/selfcheck.hex
+
+run-rv32-qemu: check-rv32-image
+	$(PYTHON) tools/rv32_run_qemu.py build/rv32/selfcheck.elf --qemu $(QEMU_RV32) --timeout 20 --transcript build/rv32/selfcheck.transcript --qemu-log build/rv32/qemu.log --expect-hex $(RV32_SELFCHECK_HEX)
+
+test-rv32-tools:
+	$(PYTHON) -m unittest discover -s tests -p 'test_rv32_tools.py' -v
+
+test-rv32-rt:
+	$(PYTHON) -m unittest discover -s tests -p 'test_rv32_rt.py' -v
+
+test-rv32: test-rv32-tools test-rv32-rt run-rv32-qemu
+
+disasm-rv32: firmware-rv32
+	cat build/rv32/selfcheck.lst
 
 clean:
 	rm -rf build
