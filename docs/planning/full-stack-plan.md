@@ -1,6 +1,6 @@
 # Full-stack computer and advanced SoC: planning interview
 
-Status: Q1–Q12 answered on 2026-09-19. This document records the interview and factual checks; the resulting [detailed roadmap](roadmap.md) is ready for review. Implementation details labeled proposed in that roadmap remain adjustable. This session changes planning documents only.
+Status: Q1–Q12 and the floating-point follow-up answered on 2026-09-19. This document records the interview and factual checks; the resulting [detailed roadmap](roadmap.md) is ready for review. Implementation details labeled proposed in that roadmap remain adjustable. This session changes planning documents only.
 
 ## Confirmed intent and existing work
 
@@ -76,6 +76,14 @@ Both demonstration goals are settled. Neither accelerator is required for the fi
 | Q12 | What real inference workload should demonstrate the NPU? | User selected handwritten-digit recognition with a small pretrained network | Settled |
 
 The initial accelerator designs should be bounded enough to verify independently, then integrated with CPU-visible commands, explicit memory ownership, and reference comparisons. Detailed GPU stages and NPU arithmetic/model choice follow from the demonstration goals; they are not selected yet. The sequenced milestones, completion criteria, and deferred decisions are in the [detailed roadmap](roadmap.md).
+
+## Follow-up: floating-point instructions
+
+| ID | Decision | Answer | Status |
+| --- | --- | --- | --- |
+| Q13 | Make hardware floating point an explicit milestone or leave it optional? | User selected an FP32 unit and CPU F-extension integration after Tetris, before programmable 3D | Settled |
+
+Implement this as two verified increments: standalone FP32 arithmetic, then full F-extension integration into the CPU and emulator. The first playable system remains RV32I. GPU and NPU numeric formats are independent decisions; double precision and lower-precision floating-point extensions remain later possibilities. The complete F-extension claim requires its specified instruction, rounding, status, and exceptional-value behavior, not just floating-point addition/multiplication.
 
 ## Result
 

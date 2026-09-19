@@ -1,6 +1,6 @@
 # Tiny Processors
 
-Learning Verilog by building small CPUs, parallel compute hardware, and an end-to-end computer. The next direction is our own RV32I CPU and native Mac emulator running C, a small OS/runtime, Pong, and Tetris; GPU/NPU integration follows the playable machine. See [the roadmap](PLAN.md) and the [detailed full-stack plan](docs/planning/roadmap.md).
+Learning Verilog by building small CPUs, parallel compute hardware, and an end-to-end computer. The next direction is our own RV32I CPU and native Mac emulator running C, a small OS/runtime, Pong, and Tetris; FP32 hardware and CPU F-extension integration follow Tetris, before programmable 3D; GPU/NPU integration also follows the playable machine. See [the roadmap](PLAN.md) and the [detailed full-stack plan](docs/planning/roadmap.md).
 
 ## Start here
 

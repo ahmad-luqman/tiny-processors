@@ -40,6 +40,10 @@ _Avoid_: complete GPU, graphics renderer, NPU.
 **Learning milestone**:
 A bounded working artifact with verified behavior, an explanation connecting its source to the hardware or software it represents, and exercises for understanding it.
 
+**CPU FPU**:
+The floating-point execution unit serving our CPU instructions, introduced after the first playable computer.
+_Avoid_: GPU floating-point lanes, NPU numeric format, software floating-point runtime.
+
 **Advanced SoC**:
 The longer-term project direction of integrating general-purpose processing, graphics processing, and neural-network acceleration with the memory and peripherals that make them a computer system.
 _Avoid_: completed hardware, current SIMD4 implementation.
