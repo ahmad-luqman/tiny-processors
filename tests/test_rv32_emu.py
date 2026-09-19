@@ -511,7 +511,7 @@ class EmulatorTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             image = Path(directory) / "image.bin"
             image.write_bytes(JAL(0, 0).to_bytes(4, "little"))
-            for text in ("-1", "+5", "10junk", "", "18446744073709551616", "0x"):
+            for text in ("-1", "+5", " -1", "\t-1", " 5", "10junk", "", "18446744073709551616", "0x", "1 "):
                 with self.subTest(limit=text):
                     completed = subprocess.run([str(self.emulator), "--image", str(image), "--max-instructions", text],
                                                capture_output=True, text=True, timeout=10)
@@ -520,6 +520,12 @@ class EmulatorTest(unittest.TestCase):
             completed = subprocess.run([str(self.emulator), "--image", str(image), "--max-instructions", "0x10"],
                                        capture_output=True, text=True, timeout=10)
             self.assertIn("halt=limit steps=16 ", completed.stderr)
+            for extra in (["--base", " 0x80000000"], ["--pc", "-0x80000000"]):
+                with self.subTest(extra=extra):
+                    completed = subprocess.run([str(self.emulator), "--image", str(image), *extra],
+                                               capture_output=True, text=True, timeout=10)
+                    self.assertEqual(completed.returncode, 2)
+                    self.assertIn("rv32emu: bad", completed.stderr)
 
     def test_run_driver_rejects_negative_limit_and_times_out(self):
         driver = ROOT / "tools" / "rv32_run_emu.py"

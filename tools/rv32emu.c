@@ -9,6 +9,7 @@
  * Build: cc -std=c11 -O2 -Wall -Wextra -Werror -o rv32emu rv32emu.c
  */
 #define _POSIX_C_SOURCE 200809L
+#include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -463,13 +464,14 @@ static void dump_state(const machine *m, FILE *out)
     }
 }
 
-/* Strict unsigned parse: digits only (with 0x/0 prefixes), no sign, no trailing text, no overflow. */
+/* Strict unsigned parse: must start with a digit (strtoull would skip whitespace and accept a
+ * sign), may use 0x/0 prefixes, and must have no trailing text and no overflow. */
 static uint64_t parse_u64(const char *text, uint64_t max, const char *what)
 {
     char *end;
     errno = 0;
     unsigned long long value = strtoull(text, &end, 0);
-    if (*text == '\0' || *text == '-' || *text == '+' || *end != '\0' || errno == ERANGE || value > max) {
+    if (!isdigit((unsigned char)*text) || *end != '\0' || errno == ERANGE || value > max) {
         fprintf(stderr, "rv32emu: bad %s: %s\n", what, text);
         exit(EXIT_EMULATOR_ERROR);
     }
