@@ -65,38 +65,41 @@ uint32_t rv32_remu(uint32_t n, uint32_t d)
     return rem;
 }
 
-/* Signed division and remainder.
+/* Signed division and remainder follow the RISC-V M extension:
  *
- * TODO(you): implement these two functions. This is the one place in M1 where
- * a numeric contract has to be chosen and it has to match hardware we will
- * build later, so the choice is yours. The tests in tests/test_rv32_rt.py and
- * the firmware self-check pin the RISC-V M-extension answers:
- *
- *   rv32_div(n, 0)             == -1          rv32_rem(n, 0)             == n
- *   rv32_div(INT32_MIN, -1)    == INT32_MIN   rv32_rem(INT32_MIN, -1)    == 0
- *   otherwise: quotient truncates toward zero and n == q * d + r, so the
+ *   rv32_div(n, 0)          == -1          rv32_rem(n, 0)          == n
+ *   rv32_div(INT32_MIN, -1) == INT32_MIN   rv32_rem(INT32_MIN, -1) == 0
+ *   otherwise the quotient truncates toward zero and n == q * d + r, so the
  *   remainder takes the sign of the dividend:  -7 / 2 == -3,  -7 % 2 == -1.
  *
- * Constraints worth respecting:
- *   - C signed overflow is undefined behavior, so do not negate INT32_MIN as an
- *     int32_t, and do not write `n / d` (that would call this function again).
- *   - Work on unsigned magnitudes with udivmod(), then fix up the signs.
- *     Negating an unsigned value (0u - x) is well defined and wraps.
- *   - The host tests build this file at -O0 and -O2; a UB-dependent answer
- *     will show up as a difference between the two.
+ * Both work on unsigned magnitudes: negating a signed INT32_MIN would be
+ * undefined behavior in C, while 0u - x wraps and is exactly the magnitude.
+ * The overflow case needs no special code: |INT32_MIN| / 1 = 0x80000000,
+ * negated back because the signs differ, is INT32_MIN again with remainder 0.
  */
+static uint32_t magnitude(int32_t value)
+{
+    return value < 0 ? 0u - (uint32_t)value : (uint32_t)value;
+}
+
 int32_t rv32_div(int32_t n, int32_t d)
 {
-    (void)n;
-    (void)d;
-    return 0; /* placeholder: replace */
+    uint32_t rem;
+    if (d == 0) {
+        return -1;
+    }
+    uint32_t quotient = udivmod(magnitude(n), magnitude(d), &rem);
+    return (int32_t)((n < 0) != (d < 0) ? 0u - quotient : quotient);
 }
 
 int32_t rv32_rem(int32_t n, int32_t d)
 {
-    (void)n;
-    (void)d;
-    return 0; /* placeholder: replace */
+    uint32_t rem;
+    if (d == 0) {
+        return n;
+    }
+    udivmod(magnitude(n), magnitude(d), &rem);
+    return (int32_t)(n < 0 ? 0u - rem : rem);
 }
 
 #if defined(__riscv)
