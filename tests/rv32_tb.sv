@@ -16,7 +16,7 @@ module rv32_tb;
     reg reset = 1;
     wire mem_valid, mem_we, mem_fetch, retire, retire_rd_we, halted, fault, unsupported;
     wire [31:0] mem_addr, mem_wdata, retire_pc, retire_insn, retire_rd_value, fault_value, pc;
-    wire [3:0] mem_wstrb, fault_cause;
+    wire [3:0] mem_strb, fault_cause;
     wire [4:0] retire_rd;
     wire [2:0] state;
     reg mem_ready = 0;
@@ -37,7 +37,7 @@ module rv32_tb;
     reg delay_chosen = 0;
     integer request_age = 0;
     reg stalled_request = 0;
-    wire [69:0] request = {mem_fetch, mem_we, mem_wstrb, mem_addr, mem_wdata};
+    wire [69:0] request = {mem_fetch, mem_we, mem_strb, mem_addr, mem_wdata};
     reg [69:0] held_request;    // the request as it was on the first stalled edge
     integer cycles = 0, steps = 0, stalls = 0, transfers = 0;
     integer max_cycles = 1000000;
@@ -74,13 +74,13 @@ module rv32_tb;
             mem_error = 1'b1;
         end else if (in_console) begin
             if (mem_we)
-                mem_error = !(mem_addr[2:0] == 3'd0 && mem_wstrb == 4'b0001); // TX byte only
-            else if (mem_addr[2:0] == 3'd5) begin
+                mem_error = !(mem_addr[2:0] == 3'd0 && mem_strb == 4'b0001); // TX byte only
+            else if (mem_addr[2:0] == 3'd5 && mem_strb == 4'b0010) begin
                 mem_rdata = 32'h0000_2000; // status byte 0x20 in lane 1 of the word at +4
-                mem_error = 1'b0;
+                mem_error = 1'b0;          // a wider read of +4 is refused: the strobe says the width
             end
         end else if (mem_addr == DONE_ADDR) begin
-            mem_error = !(mem_we && mem_wstrb == 4'b1111);
+            mem_error = !(mem_we && mem_strb == 4'b1111);
         end
     end
 
@@ -175,10 +175,10 @@ module rv32_tb;
                     // An accepted write takes effect on exactly one device.
                     if (!mem_error && mem_we) begin
                         if (in_ram) begin
-                            if (mem_wstrb[0]) ram[ram_index][7:0] <= mem_wdata[7:0];
-                            if (mem_wstrb[1]) ram[ram_index][15:8] <= mem_wdata[15:8];
-                            if (mem_wstrb[2]) ram[ram_index][23:16] <= mem_wdata[23:16];
-                            if (mem_wstrb[3]) ram[ram_index][31:24] <= mem_wdata[31:24];
+                            if (mem_strb[0]) ram[ram_index][7:0] <= mem_wdata[7:0];
+                            if (mem_strb[1]) ram[ram_index][15:8] <= mem_wdata[15:8];
+                            if (mem_strb[2]) ram[ram_index][23:16] <= mem_wdata[23:16];
+                            if (mem_strb[3]) ram[ram_index][31:24] <= mem_wdata[31:24];
                         end else if (in_console) begin
                             // The guest console: a file when +console is given, else stdout.
                             if (console_fd != 0) $fwrite(console_fd, "%c", mem_wdata[7:0]);
@@ -194,8 +194,10 @@ module rv32_tb;
                         pending = 1;
                         pending_write = mem_we;
                         pending_addr = mem_addr;
-                        pending_value = mem_we ? narrowed(mem_wstrb, mem_wdata) : mem_rdata;
-                        pending_width = mem_we ? width_of(mem_wstrb) : 4;
+                        // Both directions show the strobed lanes: a store's written
+                        // bytes, a load's raw bytes before the core extends them.
+                        pending_value = narrowed(mem_strb, mem_we ? mem_wdata : mem_rdata);
+                        pending_width = width_of(mem_strb);
                     end
                 end else begin
                     stalls = stalls + 1;

@@ -1,9 +1,9 @@
 `timescale 1ns/1ps
 
-// Multicycle RV32I slice: FETCH, DECODE, EXECUTE, MEM, WRITEBACK, one
-// ready/valid memory port, retirement in the last state. The contract is
-// docs/rv32-rtl.md; the datapath and controller are explained in
-// docs/rv32-to-gates.md.
+// Multicycle RV32I core: FETCH, DECODE, EXECUTE, MEM, WRITEBACK, one
+// ready/valid memory port with byte strobes in both directions, retirement
+// in the last state. The contract is docs/rv32-rtl.md; the datapath and
+// controller are explained in docs/rv32-to-gates.md.
 module rv32 (
     input  wire        clk,
     input  wire        reset,
@@ -11,7 +11,7 @@ module rv32 (
     output wire        mem_valid,
     output wire [31:0] mem_addr,
     output wire        mem_we,
-    output wire [3:0]  mem_wstrb,
+    output wire [3:0]  mem_strb,
     output wire [31:0] mem_wdata,
     input  wire        mem_ready,
     input  wire [31:0] mem_rdata,
@@ -47,43 +47,74 @@ module rv32 (
 
     // Decoded fields, combinational from ir.
     wire [4:0] rd, rs1, rs2;
+    wire [2:0] funct3;
     wire [31:0] imm;
-    wire is_lui, is_auipc, is_alu_reg, alu_sub, is_load, is_store, store_byte;
-    wire is_branch, branch_ne, is_jal, is_ecall, is_ebreak, writes_rd, illegal, unsupported_insn;
+    wire is_lui, is_auipc, is_alu_imm, is_alu_reg, alu_alt, is_load, is_store;
+    wire is_branch, is_jal, is_jalr, is_ecall, is_ebreak, writes_rd, illegal, unsupported_insn;
 
     rv32_decode decode (
-        .insn(ir), .rd(rd), .rs1(rs1), .rs2(rs2), .imm(imm),
-        .is_lui(is_lui), .is_auipc(is_auipc), .is_alu_reg(is_alu_reg),
-        .alu_sub(alu_sub), .is_load(is_load), .is_store(is_store), .store_byte(store_byte),
-        .is_branch(is_branch), .branch_ne(branch_ne), .is_jal(is_jal),
+        .insn(ir), .rd(rd), .rs1(rs1), .rs2(rs2), .funct3(funct3), .imm(imm),
+        .is_lui(is_lui), .is_auipc(is_auipc), .is_alu_imm(is_alu_imm), .is_alu_reg(is_alu_reg),
+        .alu_alt(alu_alt), .is_load(is_load), .is_store(is_store), .is_branch(is_branch),
+        .is_jal(is_jal), .is_jalr(is_jalr),
         .is_ecall(is_ecall), .is_ebreak(is_ebreak), .writes_rd(writes_rd),
         .illegal(illegal), .unsupported(unsupported_insn));
+
+    // Access width from funct3[1:0] (0 byte, 1 halfword, 2 word) and the lane
+    // the effective address selects; shared by loads and stores.
+    wire [1:0] width = funct3[1:0];
+    wire [1:0] lane = alu_out[1:0];
+    wire [3:0] strb = (width == 2'd0) ? (4'b0001 << lane) :
+                      (width == 2'd1) ? (lane[1] ? 4'b1100 : 4'b0011) : 4'b1111;
+
+    // The strobed lanes of the word read: a halfword mux on lane[1], a byte
+    // mux on lane[0], then extension by funct3[2] (clear: sign, lb and lh;
+    // set: zero, lbu and lhu).
+    wire [15:0] load_half = lane[1] ? mdr[31:16] : mdr[15:0];
+    wire [7:0] load_byte = lane[0] ? load_half[15:8] : load_half[7:0];
+    wire [31:0] load_value =
+        (width == 2'd0) ? {{24{load_byte[7] & ~funct3[2]}}, load_byte} :
+        (width == 2'd1) ? {{16{load_half[15] & ~funct3[2]}}, load_half} : mdr;
 
     // Register file: written in WRITEBACK, read in DECODE.
     wire [31:0] rs1_value, rs2_value;
     wire rd_written = writes_rd && (rd != 5'd0); // one x0 test for the write and the trace
     wire rf_we = (state == WRITEBACK) && rd_written;
-    wire [31:0] rd_value = is_load ? mdr : is_jal ? ir_pc + 32'd4 : alu_out;
+    wire [31:0] rd_value = is_load ? load_value : (is_jal || is_jalr) ? ir_pc + 32'd4 : alu_out;
 
     rv32_regfile regfile (
         .clk(clk), .reset(reset), .we(rf_we), .waddr(rd), .wdata(rd_value),
         .raddr1(rs1), .raddr2(rs2), .rdata1(rs1_value), .rdata2(rs2_value));
 
-    // ALU operand selection: the PC for auipc/branches/jal, zero for lui,
-    // otherwise the register read in DECODE; the second operand is a register
-    // only for add/sub.
-    wire uses_pc = is_auipc || is_branch || is_jal;
-    wire [31:0] alu_a = uses_pc ? ir_pc : is_lui ? 32'd0 : a;
-    wire [31:0] alu_b = is_alu_reg ? b : imm;
+    // The ALU sees the registers read in DECODE (zero for lui, whose result
+    // is the immediate itself) and either the second register or the
+    // immediate. It computes results, effective addresses, the jalr target,
+    // and, for a branch, the comparison of rs1 with rs2. PC-relative targets
+    // (auipc, jal, branches) come from a separate adder so the ALU's flags
+    // are free for the branch decision in the same cycle.
+    wire uses_alu_op = is_alu_imm || is_alu_reg;
+    wire [31:0] alu_a = is_lui ? 32'd0 : a;
+    wire [31:0] alu_b = (is_alu_reg || is_branch) ? b : imm;
     wire [31:0] alu_result;
+    wire alu_eq, alu_lt, alu_ltu;
 
-    rv32_alu alu (.a(alu_a), .b(alu_b), .sub(is_alu_reg && alu_sub), .result(alu_result));
+    rv32_alu alu (.a(alu_a), .b(alu_b), .op(uses_alu_op ? funct3 : 3'd0),
+                  .alt(uses_alu_op && alu_alt), .result(alu_result),
+                  .eq(alu_eq), .lt(alu_lt), .ltu(alu_ltu));
 
-    wire rs_equal = (a == b);
-    wire branch_taken = is_branch && (rs_equal ^ branch_ne);
-    wire word_access = is_load || (is_store && !store_byte);
-    wire access_misaligned = word_access && (alu_result[1:0] != 2'b00);
-    wire target_misaligned = (is_jal || branch_taken) && alu_result[1];
+    wire [31:0] pc_target = ir_pc + imm;
+    // funct3: 000 beq, 001 bne, 100 blt, 101 bge, 110 bltu, 111 bgeu;
+    // bit 0 inverts, bit 2 selects order over equality, bit 1 unsigned.
+    wire branch_cond = funct3[2] ? (funct3[1] ? alu_ltu : alu_lt) : alu_eq;
+    wire branch_taken = is_branch && (branch_cond ^ funct3[0]);
+    wire [31:0] jalr_target = {alu_result[31:1], 1'b0};
+    wire [31:0] execute_out = is_jalr ? jalr_target :
+                              (is_auipc || is_jal || is_branch) ? pc_target : alu_result;
+
+    wire access_misaligned = (is_load || is_store) &&
+                             ((width == 2'd2 && alu_result[1:0] != 2'b00) ||
+                              (width == 2'd1 && alu_result[0]));
+    wire target_misaligned = (is_jal || is_jalr || branch_taken) && execute_out[1];
 
     // Memory port: a fetch in FETCH, a data access in MEM, nothing otherwise
     // and nothing while reset is asserted (the state register already says
@@ -92,10 +123,9 @@ module rv32 (
     assign mem_fetch = mem_valid && (state == FETCH);
     assign mem_addr = mem_fetch ? pc : alu_out;
     assign mem_we = mem_valid && (state == MEM) && is_store;
-    assign mem_wstrb = !mem_we ? 4'b0000 :
-                       !store_byte ? 4'b1111 :
-                       (4'b0001 << alu_out[1:0]);
-    assign mem_wdata = store_byte ? {4{b[7:0]}} : b;
+    assign mem_strb = !mem_valid ? 4'b0000 : mem_fetch ? 4'b1111 : strb;
+    // Sub-word store data is replicated across the lanes so the strobe alone selects it.
+    assign mem_wdata = (width == 2'd0) ? {4{b[7:0]}} : (width == 2'd1) ? {2{b[15:0]}} : b;
 
     task stop;
         input is_fault;
@@ -161,12 +191,12 @@ module rv32 (
                         state <= EXECUTE;
                 end
                 EXECUTE: begin
-                    alu_out <= alu_result;
+                    alu_out <= execute_out;
                     taken <= branch_taken;
                     if (access_misaligned)
                         stop(1'b1, is_load ? CAUSE_LOAD_MISALIGNED : CAUSE_STORE_MISALIGNED, alu_result);
                     else if (target_misaligned)
-                        stop(1'b1, CAUSE_TARGET_MISALIGNED, alu_result);
+                        stop(1'b1, CAUSE_TARGET_MISALIGNED, execute_out);
                     else if (is_load || is_store)
                         state <= MEM;
                     else
@@ -181,7 +211,7 @@ module rv32 (
                 end
                 WRITEBACK: begin
                     // The register file samples rf_we/rd_value on this same edge.
-                    pc <= (is_jal || taken) ? alu_out : ir_pc + 32'd4;
+                    pc <= (is_jal || is_jalr || taken) ? alu_out : ir_pc + 32'd4;
                     retire <= 1'b1;
                     retire_rd_we <= rd_written;
                     retire_rd <= rd;

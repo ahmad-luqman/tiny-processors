@@ -228,9 +228,7 @@ class RtlTest(unittest.TestCase):
 
     def test_unsupported_encodings_halt_without_a_trace_line(self):
         prefix = LI(1, RAM + 0x100)
-        cases = [JALR(0, 1, 0), LB(2, 1, 0), LHU(2, 1, 0), SH(1, 1, 0), BLT(1, 0, 8), BGEU(1, 0, 8),
-                 SLTI(2, 1, 1), ANDI(2, 1, 1), SLLI(2, 1, 1), SRAI(2, 1, 1), SLL(2, 1, 1), SRA(2, 1, 1),
-                 XOR(2, 1, 1), FENCE(), CSRRW(0, MTVEC, 1), CSRRS(2, MEPC, 0), MRET()]
+        cases = [CSRRW(0, MTVEC, 1), CSRRS(2, MEPC, 0), CSRRWI(2, MTVAL, 3), MRET()]
         for word in cases:
             with self.subTest(word=f"{word:08x}"):
                 words = prefix + [word, ADDI(2, 0, 2)] + FINISH()
@@ -242,6 +240,121 @@ class RtlTest(unittest.TestCase):
                 self.assertGreater(len(emulator.trace), 2, "the emulator executes the instruction the slice refuses")
                 self.assertNotIn("trap 2", emulator.trace[2], "it is not illegal on the machine")
                 self.assertEqual(rtl.halt["steps"], 2)
+
+    def test_sub_word_loads_and_stores(self):
+        data = RAM + 0x200
+        words = LI(1, data) + LI(2, 0x80FF7F01) + [
+            SW(2, 1, 0),             # 4  mem[data] = 80ff7f01
+            LB(3, 1, 0),             # 5  x3 = 01
+            LB(4, 1, 1),             # 6  x4 = 7f
+            LB(5, 1, 2),             # 7  x5 = ffffffff
+            LB(6, 1, 3),             # 8  x6 = ffffff80: sign-extended
+            LBU(7, 1, 3),            # 9  x7 = 00000080: zero-extended
+            LH(8, 1, 0),             # 10 x8 = 00007f01
+            LH(9, 1, 2),             # 11 x9 = ffff80ff
+            LHU(10, 1, 2),           # 12 x10 = 000080ff
+            SH(2, 1, 4),             # 13 low halfword into lane 0..1 of data+4
+            SH(9, 1, 6),             # 14 low halfword of x9 into lane 2..3
+            LW(11, 1, 4),            # 15 x11 = 80ff7f01 again, assembled from two halves
+            SB(6, 1, 9),             # 16 byte 80 into lane 1 of data+8
+            LH(12, 1, 8),            # 17 x12 = ffff8000: the other byte was never written
+        ] + LI(13, CONSOLE) + [
+            LBU(14, 13, 5),          # 20 the console status byte: 0x20 in lane 1
+        ] + FINISH()
+        for stall in (0, 2):
+            with self.subTest(stall=stall):
+                emulator, rtl = self.assert_same_pass(words, stall=stall)
+        by_step = {line.split()[0]: effects(line) for line in rtl.trace}
+        self.assertEqual(by_step["5"], "mem[80000200]<-80ff7f01/4")
+        self.assertEqual(by_step["6"], "x3=00000001 mem[80000200]->00000001/1")
+        self.assertEqual(by_step["7"], "x4=0000007f mem[80000201]->0000007f/1")
+        self.assertEqual(by_step["8"], "x5=ffffffff mem[80000202]->000000ff/1", "the raw byte, then the extended register")
+        self.assertEqual(by_step["9"], "x6=ffffff80 mem[80000203]->00000080/1")
+        self.assertEqual(by_step["10"], "x7=00000080 mem[80000203]->00000080/1")
+        self.assertEqual(by_step["11"], "x8=00007f01 mem[80000200]->00007f01/2")
+        self.assertEqual(by_step["12"], "x9=ffff80ff mem[80000202]->000080ff/2")
+        self.assertEqual(by_step["13"], "x10=000080ff mem[80000202]->000080ff/2")
+        self.assertEqual(by_step["14"], "mem[80000204]<-00007f01/2")
+        self.assertEqual(by_step["15"], "mem[80000206]<-000080ff/2")
+        self.assertEqual(by_step["16"], "x11=80ff7f01 mem[80000204]->80ff7f01/4")
+        self.assertEqual(by_step["17"], "mem[80000209]<-00000080/1")
+        self.assertEqual(by_step["18"], "x12=ffff8000 mem[80000208]->00008000/2")
+        self.assertEqual(by_step["21"], "x14=00000020 mem[10000005]->00000020/1", "a byte read the strobe identifies")
+
+    def test_alu_operations_directed(self):
+        words = LI(1, 0x7FFFFFFF) + [
+            ADDI(2, 1, 1),           # 2  x2 = 80000000: the signed overflow wraps
+            SLTI(3, 2, 0),           # 3  1: signed 80000000 < 0
+            SLTIU(4, 2, -1),         # 4  1: unsigned 80000000 < ffffffff
+            SLTIU(5, 2, 1),          # 5  0
+            SLT(6, 2, 1),            # 6  1: signed
+            SLTU(7, 2, 1),           # 7  0: unsigned
+            XORI(8, 1, -1),          # 8  80000000
+            ORI(9, 2, 0x7F),         # 9  8000007f
+            ANDI(10, 9, -0x80),      # 10 80000000
+            SLLI(11, 9, 31),         # 11 80000000
+            SRLI(12, 2, 31),         # 12 00000001
+            SRAI(13, 2, 31),         # 13 ffffffff
+            SRAI(14, 2, 0),          # 14 80000000
+            ADDI(15, 0, 33),         # 15 a shift amount past 31 uses its low five bits
+            SLL(16, 1, 15),          # 16 fffffffe
+            SRL(17, 2, 15),          # 17 40000000
+            SRA(18, 2, 15),          # 18 c0000000
+            XOR(19, 1, 2),           # 19 ffffffff
+            OR(20, 1, 2),            # 20 ffffffff
+            AND(21, 9, 2),           # 21 80000000
+            SUB(22, 0, 2),           # 22 80000000: negating the minimum is itself
+            ADD(23, 2, 2),           # 23 00000000
+            FENCE(),                 # 24 retires with no effect
+            SLT(0, 1, 2),            # 25 discarded
+        ] + FINISH()
+        for stall in (0, 1):
+            with self.subTest(stall=stall):
+                emulator, rtl = self.assert_same_pass(words, stall=stall)
+        expected = ["x2=80000000", "x3=00000001", "x4=00000001", "x5=00000000", "x6=00000001", "x7=00000000",
+                    "x8=80000000", "x9=8000007f", "x10=80000000", "x11=80000000", "x12=00000001", "x13=ffffffff",
+                    "x14=80000000", "x15=00000021", "x16=fffffffe", "x17=40000000", "x18=c0000000", "x19=ffffffff",
+                    "x20=ffffffff", "x21=80000000", "x22=80000000", "x23=00000000", "", ""]
+        self.assertEqual([effects(line) for line in rtl.trace[2:26]], expected)
+        self.assertEqual(rtl.trace[24], "25 80000060 0ff0000f", "fence is a line with nothing after the word")
+
+    def test_branches_at_the_signed_boundary_and_jalr(self):
+        words = LI(1, 0x7FFFFFFF) + LI(2, 0x80000000) + [
+            BLT(2, 1, 8), ADDI(3, 0, 1),     # 4  taken: -2^31 < 2^31-1 signed
+            BLT(1, 2, 8), ADDI(3, 0, 2),     # 6  not taken
+            BGE(1, 2, 8), ADDI(3, 0, 3),     # 8  taken
+            BGE(2, 1, 8), ADDI(3, 0, 4),     # 10 not taken
+            BLTU(1, 2, 8), ADDI(3, 0, 5),    # 12 taken: 7fffffff < 80000000 unsigned
+            BLTU(2, 1, 8), ADDI(3, 0, 6),    # 14 not taken
+            BGEU(2, 1, 8), ADDI(3, 0, 7),    # 16 taken
+            BGEU(1, 2, 8), ADDI(3, 0, 8),    # 18 not taken
+            BGE(1, 1, 8), ADDI(3, 0, 9),     # 20 equal: taken
+            BGEU(2, 2, 8), ADDI(3, 0, 10),   # 22 equal: taken
+            BLT(1, 1, 8), ADDI(3, 0, 11),    # 24 equal: not taken
+            AUIPC(4, 0),                     # 26 x4 = pc
+            JALR(5, 4, 17),                  # 27 bit 0 cleared: target x4 + 16, x5 = return address
+            ADDI(3, 0, 12), ADDI(3, 0, 13),  # 28 skipped
+            ADDI(3, 0, 14),                  # 30 landed
+            AUIPC(6, 0),                     # 31 x6 = pc
+            JALR(6, 6, 12),                  # 32 rd == rs1: the target uses the old value
+            ADDI(3, 0, 15),                  # 33 skipped
+            JAL(1, 12),                      # 34 call f
+            ADDI(3, 0, 17),                  # 35 after the return
+            JAL(0, 12),                      # 36 over f, to FINISH
+            ADDI(3, 0, 16),                  # 37 f:
+            JALR(0, 1, 0),                   # 38 ret
+        ] + FINISH()
+        for stall in (0, 3):
+            with self.subTest(stall=stall):
+                emulator, rtl = self.assert_same_pass(words, stall=stall)
+        indices = [(int(line.split()[1], 16) - RAM) // 4 for line in rtl.trace]
+        self.assertEqual(indices[:30], [0, 1, 2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15, 16, 18, 19, 20, 22, 24, 25,
+                                        26, 27, 30, 31, 32, 34, 37, 38, 35, 36])
+        by_step = {line.split()[0]: effects(line) for line in rtl.trace}
+        self.assertEqual(by_step["22"], f"x5={RAM + 28 * 4:08x}")
+        self.assertEqual(by_step["25"], f"x6={RAM + 33 * 4:08x}")
+        self.assertEqual(by_step["26"], f"x1={RAM + 35 * 4:08x}")
+        self.assertEqual(effects(rtl.trace[-7]), "x3=00000011", "17 after the return, then the jump over f")
 
     def test_decode_classification_agrees_with_the_emulator(self):
         """Every opcode x funct3 x representative funct7: illegal on the RTL iff the emulator traps
@@ -280,6 +393,15 @@ class RtlTest(unittest.TestCase):
             ("byte store to the done register", LI(1, DONE) + [SB(1, 1, 0)], 7, DONE),
             ("word store past the done register", LI(1, DONE) + [SW(1, 1, 4)], 7, DONE + 4),
             ("store past the end of RAM", LI(1, RAM + 0x400000) + [SW(1, 1, 0)], 7, RAM + 0x400000),
+            ("misaligned halfword load", LI(1, RAM + 0x201) + [LH(2, 1, 0)], 4, RAM + 0x201),
+            ("misaligned halfword store", LI(1, RAM + 0x203) + [SH(1, 1, 0)], 6, RAM + 0x203),
+            ("halfword load of the console status", LI(1, CONSOLE) + [LHU(2, 1, 4)], 5, CONSOLE + 4),
+            ("byte load of the console TX register", LI(1, CONSOLE) + [LBU(2, 1, 0)], 5, CONSOLE),
+            ("byte load of the done register", LI(1, DONE) + [LB(2, 1, 0)], 5, DONE),
+            ("halfword store to the done register", LI(1, DONE) + [SH(1, 1, 0)], 7, DONE),
+            ("jalr to a non-word target", LI(1, RAM + 0x100) + [JALR(0, 1, 2)], 0, RAM + 0x102),
+            ("jalr with bit 0 set still checks bit 1", LI(1, RAM + 0x100) + [JALR(0, 1, 3)], 0, RAM + 0x102),
+            ("fetch from a device address", LI(1, CONSOLE) + [JALR(0, 1, 0)], 1, CONSOLE),
             ("jal to a non-word target", [ADDI(1, 0, 1), JAL(0, 6)], 0, RAM + 4 + 6),
             ("taken branch to a non-word target", [ADDI(1, 0, 1), BEQ(1, 1, -2)], 0, RAM + 4 - 2),
             ("fetch outside RAM", [ADDI(1, 0, 1), JAL(0, -8)], 1, RAM - 4),
@@ -290,10 +412,11 @@ class RtlTest(unittest.TestCase):
                 # A fetch fault is one line past the jump that caused it; every other fault is the last word.
                 self.assertEqual(len(rtl.trace), len(words) + 1 if cause == 1 else len(words))
                 self.assertNotIn("]<-", rtl.trace[-1], "a faulting store writes nothing")
-        # The last RAM word is inside the map.
-        words = LI(1, RAM + 0x3FFFFC) + [SW(1, 1, 0), LW(2, 1, 0)] + FINISH()
+        # The last RAM word, and the last halfword and byte, are inside the map.
+        words = LI(1, RAM + 0x3FFFFC) + [SW(1, 1, 0), LW(2, 1, 0), LHU(3, 1, 2), LBU(4, 1, 3)] + FINISH()
         emulator, rtl = self.assert_same_pass(words, stall=0)
         self.assertEqual(effects(rtl.trace[3]), "x2=803ffffc mem[803ffffc]->803ffffc/4")
+        self.assertEqual(effects(rtl.trace[5]), "x4=00000080 mem[803fffff]->00000080/1")
 
     def test_console_bytes_and_done_words(self):
         say = LI(1, CONSOLE)
