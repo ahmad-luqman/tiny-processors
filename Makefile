@@ -281,7 +281,8 @@ synth-rv32-soc: | build
 waves-rv32: $(RV32_TB_VVP) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl --mode waves --program loop --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
 	$(PYTHON) -m tools.rv32_rtl --mode waves --program full --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
-	@echo "Open build/rv32/rtl/loop.vcd or full.vcd in Surfer: https://app.surfer-project.org/"
+	$(PYTHON) -m tools.rv32_rtl --mode waves --program devices --stall 0 --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
+	@echo "Open build/rv32/rtl/loop.vcd, full.vcd, or devices.vcd in Surfer: https://app.surfer-project.org/"
 
 run-rv32-rtl: check-rv32-image $(RV32_TB_VVP) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl --image build/rv32/selfcheck.bin --expect-console "PASS $(RV32_SELFCHECK_HEX)" --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl

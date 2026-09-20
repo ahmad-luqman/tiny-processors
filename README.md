@@ -77,23 +77,23 @@ make test-rv32          # Tool tests, host runtime tests, image checks, the QEMU
 make check-rv32-image   # Build ELF/listing/bin/hex and verify them against the contract
 make run-rv32-qemu      # Run on qemu-system-riscv32; console line and exit status must agree
 make disasm-rv32        # Print the annotated listing
-make test-rv32-emu      # 19 hand-computed edge tests against our C emulator
+make test-rv32-emu      # 30 hand-computed edge tests against our C emulator
 make run-rv32-emu       # Run the same image on our emulator with a retirement trace
 make diff-rv32-qemu     # Emulator and QEMU must execute the same PC sequence
 ```
 
-QEMU boots the image with the bare `rv32i` CPU model; all 28 checks pass, the guest prints `PASS 807d9fad`, and QEMU exits with status 0. The 12 tool tests and 6 host runtime tests use only the standard library. Read the [C to instructions to memory walkthrough](docs/c-to-instructions.md). QEMU is a reference runner, not our machine.
+QEMU boots the image with the bare `rv32i` CPU model; all 28 checks pass, the guest prints `PASS 807d9fad`, and QEMU exits with status 0. The 17 tool tests and 6 host runtime tests use only the standard library. Read the [C to instructions to memory walkthrough](docs/c-to-instructions.md). QEMU is a reference runner, not our machine.
 
 ## RV32 headless emulator
 
-[tools/rv32emu.c](tools/rv32emu.c) is our own machine: one C file that loads the flattened image, executes RV32I with the contract's trap, alignment, console, and done-register rules, and writes a retirement trace whose format the RTL testbench will reproduce. It runs the self-check to `PASS 807d9fad` in 32,610 instructions and executes exactly the PC sequence QEMU logs; 19 tests with an independent instruction encoder pin the hand-computed edges (signed boundaries, shifts by 31, `x0`, sub-word stores, misaligned and out-of-map traps, `ecall`/`mret`, double faults, every device edge). Untraced it runs about 400 M instructions/s. Read the [design, trace contract, and trace walkthrough](docs/rv32-emulator.md).
+[tools/rv32emu.c](tools/rv32emu.c) is our own machine: one C file that loads the flattened image, executes RV32I with the contract's trap, alignment, console, and done-register rules, and writes a retirement trace whose format the RTL testbench will reproduce. It runs the self-check to `PASS 807d9fad` in 32,610 instructions and executes exactly the PC sequence QEMU logs; 30 tests with an independent instruction encoder pin the hand-computed edges (signed boundaries, shifts by 31, `x0`, sub-word stores, misaligned and out-of-map traps, `ecall`/`mret`, double faults, every device edge). Untraced it runs about 400 M instructions/s. Read the [design, trace contract, and trace walkthrough](docs/rv32-emulator.md).
 
 ## RV32 multicycle RTL CPU
 
-[rtl/rv32/](rtl/rv32/) is the hardware for the machine: a register file, an ALU with a barrel shifter and one subtractor's comparison flags, an immediate decoder, the four trap CSRs, and a five-state controller driving the contract's ready/valid memory port with byte strobes in both directions. It runs all of RV32I plus `csrr*` and `mret`; illegal encodings and faults trap through `mtvec` exactly as the emulator's do, and a double fault halts both backends the same way. The testbench is the RAM, console, and done register, stalls the port on request, and prints the emulator's retirement trace, so a Python test diffs the two backends line for line, and the M1 C self-check runs on the core to `PASS 807d9fad` with the emulator's 32,610-line trace.
+[rtl/rv32/](rtl/rv32/) is the hardware for the machine: a register file, an ALU with a barrel shifter and one subtractor's comparison flags, an immediate decoder, the four trap CSRs, and a five-state controller driving the contract's ready/valid memory port with byte strobes in both directions. It runs all of RV32I plus `csrr*` and `mret`; illegal encodings and faults trap through `mtvec` exactly as the emulator's do, and a double fault halts both backends the same way. The testbench holds the bus to model stalls and prints the emulator's retirement trace, so a Python test diffs the two backends line for line, and the M1 C self-check runs on the core to `PASS 807d9fad` with the emulator's 32,610-line trace.
 
 ```sh
-make test-rv32-rtl            # 29 tests: emulator vs Icarus, differential, traps, harness, fixed and random stalls
+make test-rv32-rtl            # 35 tests: emulator vs Icarus, differential, traps, devices, harness, fixed and random stalls
 make test-rv32-rtl-verilator  # the same tests on a Verilator build of the testbench
 make run-rv32-rtl             # the C self-check on the RTL: PASS 807d9fad, identical trace, cycle count
 make run-rv32-rtl-verilator   # the same on Verilator with one stall cycle per request
@@ -104,6 +104,20 @@ make bench-rv32-rtl           # cycles, stalls, and transfers for the loop at ea
 ```
 
 The 78-instruction loop produces identical traces on both backends at every stall setting; 336 cycles unstalled, 102 more per stall cycle. The self-check takes 138,495 cycles for 32,610 instructions, 4.25 per instruction, and 40,665 more per stall cycle. Read the [RTL contract and coverage table](docs/rv32-rtl.md) and the [gates, waveform, and cycle walkthrough](docs/rv32-to-gates.md). Every earlier target is unchanged, and `make test-rv32` includes the RTL tests, the self-check on both simulators, lint, and synthesis.
+
+## RV32 machine: bus, devices, and the diagnostic
+
+[rtl/rv32/rv32_soc.v](rtl/rv32/rv32_soc.v) wires the core to a bus decoder (one comparator per window, a one-hot read mux, fetches refused outside RAM) and to the machine's memories and devices: RAM, the console, the done register, a timer, a 16-event input queue with a held-key mask, a display controller, and a 320×240 framebuffer of 8-bit pixels. [tools/rv32emu.c](tools/rv32emu.c) models the same windows with the same fault edges, schedules key events from a script by frame, hashes the framebuffer into a checkpoint at each present, and writes frames as PPM files. A tick is a clock cycle on the RTL and an executed instruction on the emulator, so the [device diagnostic](programs/rv32/diag.c), which exercises every device and reads the timer, is compared at the results level: five identical console lines ending `PASS 8bd87e9a` and identical checkpoints on the emulator, Icarus, and Verilator, with the frame hash and the checksum derived independently in Python. Everything that never reads the timer stays trace-identical.
+
+```sh
+make run-rv32-diag-emu        # the diagnostic on the emulator: PASS, checkpoints, build/rv32/frames/*.ppm
+make run-rv32-diag-rtl        # the same on Icarus, results compared with the emulator (1,666,415 cycles, about 16 s)
+make run-rv32-diag-rtl-verilator  # the same on Verilator with one stall per request
+make lint-rv32-soc            # verilator --Wall on the whole machine
+make synth-rv32-soc           # yosys on the machine with 64-word memories: 24,141 cells, no latches
+```
+
+Read the [SoC record](docs/rv32-soc.md): the decoder as comparators and muxes, each device, the testbench as host, device time in practice, three waveform observations, the synthesis table, and exercises.
 
 ## What to read
 
@@ -119,6 +133,7 @@ The 78-instruction loop produces identical traces on both backends at every stal
 10. [RV32 machine contract](docs/rv32.md), then [start.S](programs/rv32/start.S), [link.ld](programs/rv32/link.ld), [selfcheck.c](programs/rv32/selfcheck.c), and the [C to instructions walkthrough](docs/c-to-instructions.md).
 11. [RV32 emulator](docs/rv32-emulator.md), then [rv32emu.c](tools/rv32emu.c) and [test_rv32_emu.py](tests/test_rv32_emu.py); run `make trace-rv32-emu` and follow the walkthrough in the trace.
 12. [RV32 RTL contract](docs/rv32-rtl.md), then [rv32.v](rtl/rv32/rv32.v) with its three submodules, [rv32_tb.sv](tests/rv32_tb.sv), and [test_rv32_rtl.py](tests/test_rv32_rtl.py); run `make waves-rv32` and follow the [gates walkthrough](docs/rv32-to-gates.md) in the waveform.
+13. [RV32 SoC record](docs/rv32-soc.md), then [rv32_bus.v](rtl/rv32/rv32_bus.v), the device modules, [diag.c](programs/rv32/diag.c), and [rv32_devices.py](tools/rv32_devices.py); run `make run-rv32-diag-emu` and look at `build/rv32/frames/frame-0002.ppm`, then `make waves-rv32` for `devices.vcd`.
 
 ## Verified local tools
 

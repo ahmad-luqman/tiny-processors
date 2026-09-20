@@ -29,6 +29,18 @@ _Avoid_: guest renderer, guest operating system.
 **Instruction retirement**:
 The point where an executed instruction commits its architectural effects, used to compare CPU behavior across implementations.
 
+**Device time**:
+The rule that a timer tick is a clock cycle on the RTL and an executed instruction on the emulator, so only the timer's values differ between backends; programs that read it are compared at the results level (console, outcome, checkpoints), everything else trace for trace.
+_Avoid_: wall-clock time, a claim that the backends run at the same speed.
+
+**Frame checkpoint**:
+The `frame N <hash>` line a backend writes when the guest presents the framebuffer, and the point at which scripted input events for that frame arrive; the unit of agreement for display and input across backends.
+_Avoid_: a screenshot, a cycle count.
+
+**Bus decoder**:
+The combinational logic in rv32_bus.v that turns an address into one peripheral select and returns that peripheral's answer; the emulator's region table is its software twin.
+_Avoid_: a cache, an interconnect with arbitration.
+
 **RV32 machine**:
 Our RISC-V computer as defined by the machine contract in docs/rv32.md: an RV32I CPU, RAM at 0x8000_0000, and memory-mapped devices, implemented by our emulator and RTL.
 _Avoid_: SAP8, the QEMU virt board, a Linux-capable platform.

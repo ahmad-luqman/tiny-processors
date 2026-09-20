@@ -444,8 +444,7 @@ module rv32_tb;
             if (fd == 0) $fatal(1, "Cannot open wave file %0s", wave_path);
             $fclose(fd);
             $dumpfile(wave_path);
-            $dumpvars(0, rv32_tb.dut.core); // the whole core, as before the SoC existed
-            $dumpvars(1, rv32_tb.dut);      // plus the bus boundary and the device strobes
+            $dumpvars(0, rv32_tb.dut); // the whole machine; the simulators skip the large memories
         end
         if ($value$plusargs("trace=%s", trace_path)) begin
             trace_fd = $fopen(trace_path, "w");

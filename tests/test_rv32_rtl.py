@@ -976,7 +976,7 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(SW(1, 1, 0x800), SW(1, 1, -2048), "a 12-bit field accepts its unsigned spelling")
         self.assertEqual(len(program_loop(LOOP_MAX_N)), 18 + 8)
         self.assertEqual(len(program_full()), 17)
-        self.assertEqual(sorted(PROGRAMS), ["full", "loop"])
+        self.assertEqual(sorted(PROGRAMS), ["devices", "full", "loop"])
         with self.assertRaises(AssertionError):
             program_loop(LOOP_MAX_N + 1)
         words = program_loop()

@@ -18,7 +18,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tools.rv32_asm import PROGRAMS, words_to_bytes, words_to_hex  # noqa: E402
+from tools.rv32_asm import PROGRAM_INPUTS, PROGRAMS, words_to_bytes, words_to_hex  # noqa: E402
 from tools.rv32_image import to_hex_words  # noqa: E402
 from tools.rv32_run_emu import DEFAULT_EMULATOR, emulator_command, halt_line, last_halt_line, parse_halt_line  # noqa: E402
 
@@ -269,6 +269,9 @@ def main():
     else:
         name = args.program
         hex_path, bin_path = write_image(PROGRAMS[name](), out, name)
+        if args.input is None and name in PROGRAM_INPUTS:
+            args.input = out / f"{name}.input"
+            args.input.write_text(PROGRAM_INPUTS[name])
     if args.frames is not None:
         args.frames.mkdir(parents=True, exist_ok=True)
     emulator = run_emulator(args.emulator, bin_path, out / f"{name}.emu.trace",

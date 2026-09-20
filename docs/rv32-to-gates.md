@@ -109,7 +109,7 @@ The CSRs are four more 32-bit registers with two write paths each: the trap path
 
 ## 6. Inspect the waveforms
 
-`make waves-rv32` runs the loop and the M4 program with `+stall=2` into `build/rv32/rtl/loop.vcd` and `full.vcd`. Open them in [Surfer](https://app.surfer-project.org/) and add, from `rv32_tb.dut`: `clk`, `reset`, `state`, `mem_valid`, `mem_ready`, `mem_fetch`, `mem_addr`, `mem_we`, `mem_strb`, `mem_wdata`, `mem_rdata`, `ir`, `a`, `b`, `alu_out`, `mdr`, `load_value`, `rf_we`, `rd_value`, `pc`, `retire`, `retire_rd_we`, `retire_rd`, `retire_rd_value`, `trap`. Use unsigned decimal for `state` (`0 FETCH, 1 DECODE, 2 EXECUTE, 3 MEM, 4 WRITEBACK, 5 HALT`) and hex for the rest. Reset is high for the edges at 5 and 15 ns and drops at 16 ns; the first counted edge is 25 ns. With `+stall=2` every request costs three edges: two stalled, one accepting.
+`make waves-rv32` runs the loop and the M4 program with `+stall=2` into `build/rv32/rtl/loop.vcd` and `full.vcd` (and, since M5, the devices program into `devices.vcd`, read in the [SoC record](rv32-soc.md#inspect-the-waveforms)). Open them in [Surfer](https://app.surfer-project.org/) and add, from `rv32_tb.dut.core` (the core is one instance inside the machine since M5; `clk` and `reset` are also at `rv32_tb.dut`): `clk`, `reset`, `state`, `mem_valid`, `mem_ready`, `mem_fetch`, `mem_addr`, `mem_we`, `mem_strb`, `mem_wdata`, `mem_rdata`, `ir`, `a`, `b`, `alu_out`, `mdr`, `load_value`, `rf_we`, `rd_value`, `pc`, `retire`, `retire_rd_we`, `retire_rd`, `retire_rd_value`, `trap`. Use unsigned decimal for `state` (`0 FETCH, 1 DECODE, 2 EXECUTE, 3 MEM, 4 WRITEBACK, 5 HALT`) and hex for the rest. Reset is high for the edges at 5 and 15 ns and drops at 16 ns; the first counted edge is 25 ns. With `+stall=2` every request costs three edges: two stalled, one accepting.
 
 **A held request and a single retirement** (`loop.vcd`), the first instruction `auipc x5, 0` (word `00000297`):
 
@@ -189,7 +189,7 @@ The emulator cannot produce any of these numbers. The trace it defines deliberat
 
 ## 8. What synthesis actually built
 
-`make synth-rv32` on Yosys 0.69+post: **8,175 generic cells**, no latches (`select -assert-none t:*LATCH*` passes), hierarchy preserved:
+`make synth-rv32` on Yosys 0.69+post: **8,175 generic cells**, no latches (`select -assert-none t:*LATCH*` passes), hierarchy preserved (M5 did not touch the core; the bus and the devices are counted in the [SoC record](rv32-soc.md#what-synthesis-built)):
 
 | Module | Cells | Flip-flops | Muxes | M3 cells |
 | --- | ---: | ---: | ---: | ---: |
