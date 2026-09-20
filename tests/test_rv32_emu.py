@@ -1,7 +1,7 @@
 """Hand-computed edge tests for the RV32 emulator (tools/rv32emu.c).
 
-The instruction encoder below is written from the RV32I instruction formats
-independently of the emulator's decoder, and every expected value is computed
+The instruction encoder (tools/rv32_asm.py) is written from the RV32I instruction
+formats independently of the emulator's decoder, and every expected value is computed
 by hand or with Python integers, never by running the emulator. Each test
 assembles a raw image, runs the compiled emulator on it, and inspects the
 state dump, the trace, the console output, and the exit status.
@@ -18,108 +18,13 @@ import sys
 import tempfile
 import unittest
 
+# The encoder lives in tools/rv32_asm.py so the RTL tests assemble the same words.
+from tools.rv32_asm import *  # noqa: F401,F403
 from tools.rv32_diff_qemu import compare, qemu_pcs, trace_pcs
 from tools.rv32_run_emu import halt_line
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RAM = 0x80000000
-CONSOLE = 0x10000000
-DONE = 0x00100000
-M = 0xFFFFFFFF
-
-# Instruction formats (RV32I unprivileged specification, chapter 2).
-def r_type(opcode, rd, funct3, rs1, rs2, funct7):
-    return (funct7 << 25) | (rs2 << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | opcode
-
-
-def i_type(opcode, rd, funct3, rs1, imm):
-    return ((imm & 0xFFF) << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | opcode
-
-
-def s_type(opcode, funct3, rs1, rs2, imm):
-    imm &= 0xFFF
-    return ((imm >> 5) << 25) | (rs2 << 20) | (rs1 << 15) | (funct3 << 12) | ((imm & 0x1F) << 7) | opcode
-
-
-def b_type(funct3, rs1, rs2, offset):
-    offset &= 0x1FFF
-    return ((offset >> 12) << 31) | (((offset >> 5) & 0x3F) << 25) | (rs2 << 20) | (rs1 << 15) \
-        | (funct3 << 12) | (((offset >> 1) & 0xF) << 8) | (((offset >> 11) & 1) << 7) | 0x63
-
-
-def u_type(opcode, rd, imm20):
-    return ((imm20 & 0xFFFFF) << 12) | (rd << 7) | opcode
-
-
-def j_type(rd, offset):
-    offset &= 0x1FFFFF
-    return ((offset >> 20) << 31) | (((offset >> 1) & 0x3FF) << 21) | (((offset >> 11) & 1) << 20) \
-        | (((offset >> 12) & 0xFF) << 12) | (rd << 7) | 0x6F
-
-
-# Mnemonics; registers are numbers so nothing is hidden behind ABI names.
-def LUI(rd, imm20): return u_type(0x37, rd, imm20)
-def AUIPC(rd, imm20): return u_type(0x17, rd, imm20)
-def JAL(rd, offset): return j_type(rd, offset)
-def JALR(rd, rs1, imm): return i_type(0x67, rd, 0, rs1, imm)
-def BEQ(rs1, rs2, off): return b_type(0, rs1, rs2, off)
-def BNE(rs1, rs2, off): return b_type(1, rs1, rs2, off)
-def BLT(rs1, rs2, off): return b_type(4, rs1, rs2, off)
-def BGE(rs1, rs2, off): return b_type(5, rs1, rs2, off)
-def BLTU(rs1, rs2, off): return b_type(6, rs1, rs2, off)
-def BGEU(rs1, rs2, off): return b_type(7, rs1, rs2, off)
-def LB(rd, rs1, imm): return i_type(0x03, rd, 0, rs1, imm)
-def LH(rd, rs1, imm): return i_type(0x03, rd, 1, rs1, imm)
-def LW(rd, rs1, imm): return i_type(0x03, rd, 2, rs1, imm)
-def LBU(rd, rs1, imm): return i_type(0x03, rd, 4, rs1, imm)
-def LHU(rd, rs1, imm): return i_type(0x03, rd, 5, rs1, imm)
-def SB(rs2, rs1, imm): return s_type(0x23, 0, rs1, rs2, imm)
-def SH(rs2, rs1, imm): return s_type(0x23, 1, rs1, rs2, imm)
-def SW(rs2, rs1, imm): return s_type(0x23, 2, rs1, rs2, imm)
-def ADDI(rd, rs1, imm): return i_type(0x13, rd, 0, rs1, imm)
-def SLTI(rd, rs1, imm): return i_type(0x13, rd, 2, rs1, imm)
-def SLTIU(rd, rs1, imm): return i_type(0x13, rd, 3, rs1, imm)
-def XORI(rd, rs1, imm): return i_type(0x13, rd, 4, rs1, imm)
-def ORI(rd, rs1, imm): return i_type(0x13, rd, 6, rs1, imm)
-def ANDI(rd, rs1, imm): return i_type(0x13, rd, 7, rs1, imm)
-def SLLI(rd, rs1, sh): return i_type(0x13, rd, 1, rs1, sh)
-def SRLI(rd, rs1, sh): return i_type(0x13, rd, 5, rs1, sh)
-def SRAI(rd, rs1, sh): return i_type(0x13, rd, 5, rs1, 0x400 | sh)
-def ADD(rd, a, b): return r_type(0x33, rd, 0, a, b, 0)
-def SUB(rd, a, b): return r_type(0x33, rd, 0, a, b, 0x20)
-def SLL(rd, a, b): return r_type(0x33, rd, 1, a, b, 0)
-def SLT(rd, a, b): return r_type(0x33, rd, 2, a, b, 0)
-def SLTU(rd, a, b): return r_type(0x33, rd, 3, a, b, 0)
-def XOR(rd, a, b): return r_type(0x33, rd, 4, a, b, 0)
-def SRL(rd, a, b): return r_type(0x33, rd, 5, a, b, 0)
-def SRA(rd, a, b): return r_type(0x33, rd, 5, a, b, 0x20)
-def OR(rd, a, b): return r_type(0x33, rd, 6, a, b, 0)
-def AND(rd, a, b): return r_type(0x33, rd, 7, a, b, 0)
-def FENCE(): return i_type(0x0F, 0, 0, 0, 0x0FF)
-def ECALL(): return 0x00000073
-def EBREAK(): return 0x00100073
-def MRET(): return 0x30200073
-def CSRRW(rd, csr, rs1): return i_type(0x73, rd, 1, rs1, csr)
-def CSRRS(rd, csr, rs1): return i_type(0x73, rd, 2, rs1, csr)
-def CSRRC(rd, csr, rs1): return i_type(0x73, rd, 3, rs1, csr)
-def CSRRWI(rd, csr, uimm): return i_type(0x73, rd, 5, uimm, csr)
-MTVEC, MEPC, MCAUSE, MTVAL, MSTATUS = 0x305, 0x341, 0x342, 0x343, 0x300
-
-
-def LI(rd, value):
-    """Always two instructions (lui + addi) so program offsets stay predictable."""
-    value &= M
-    low = value & 0xFFF
-    if low >= 0x800:
-        low -= 0x1000
-    high = ((value - low) & M) >> 12
-    return [LUI(rd, high), ADDI(rd, rd, low)]
-
-
-def FINISH(word=0x5555):
-    """Write `word` to the done register through x30/x31; five instructions."""
-    return LI(30, DONE) + LI(31, word) + [SW(31, 30, 0)]
 
 
 State = namedtuple("State", "pc x mtvec mepc mcause mtval steps retired traps halt done")
