@@ -124,7 +124,7 @@ The testbench keeps three counters and prints them in its halt line; the walkthr
 - `transfers`: accepted port transactions, fetches included. A retired instruction costs one fetch, plus one data transaction for a load or store. A trapped instruction costs its fetch, plus the refused data transaction for a load or store fault.
 - `stalls`: rising edges on which `mem_valid` was high and `mem_ready` low.
 
-With a fixed stall of `N` cycles per request and no traps, `cycles = 4 × (retired non-memory instructions) + 5 × (retired memory instructions) + N × transfers`; `tools/rv32_rtl.py` prints this relation for every run and the tests assert it for the loop and the self-check. A trap costs the cycles up to the state that raised it (two for an illegal word or `ecall`, three for a misaligned address, five for a refused access, one for a fetch fault), so a run with traps is reported without the equality.
+With a fixed stall of `N` cycles per request and no traps, `cycles = 4 × (retired non-memory instructions) + 5 × (retired memory instructions) + N × transfers`; `tools/rv32_rtl.py` prints this relation for every run and the tests assert it for the loop and the self-check. A trap costs the cycles up to the state that raised it, stalls included: one edge for a fetch fault (the refused fetch), two for an illegal word, `ecall`, or `ebreak` (fetch, `DECODE`), three for a misaligned address or target (through `EXECUTE`), four for a refused load or store (through the `MEM` edge that returned `error`). A run with trap lines is reported without the equality.
 
 ## Testbench: memory, devices, and outputs
 
