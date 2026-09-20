@@ -3,8 +3,8 @@
 // Combinational instruction decoder: register fields, the sign-extended
 // immediate for each format, one flag per instruction class, and the
 // `illegal` check that follows the machine contract (the emulator traps the
-// same words). Every valid word sets exactly one class flag or `illegal`;
-// the core executes all of them.
+// same words). Every valid word sets exactly one class flag, or none for
+// `fence`, which retires with no effect; the core executes all of them.
 module rv32_decode (
     input  wire [31:0] insn,
     output wire [4:0]  rd,
@@ -82,7 +82,7 @@ module rv32_decode (
             OP_BRANCH: illegal = (funct3 == 3'd2) || (funct3 == 3'd3);
             OP_LOAD: illegal = (funct3 == 3'd3) || (funct3 > 3'd5);
             OP_STORE: illegal = (funct3 > 3'd2);
-            OP_IMM: illegal = (funct3 == 3'd1 && funct7 != 7'd0) ||                    // slli with shamt bits set
+            OP_IMM: illegal = (funct3 == 3'd1 && funct7 != 7'd0) ||                    // slli with bits above the shift amount set
                               (funct3 == 3'd5 && funct7 != 7'd0 && funct7 != 7'h20);   // neither srli nor srai
             OP_REG: illegal = !(funct7 == 7'd0 || (funct7 == 7'h20 && (funct3 == 3'd0 || funct3 == 3'd5))); // every M word
             OP_FENCE: illegal = (funct3 != 3'd0);                                      // fence.i and the rest

@@ -185,6 +185,13 @@ def write_image(words, out, name):
     return hex_path, bin_path
 
 
+def has_value_changes(vcd):
+    """True when a VCD has its header closed and at least one timestamp after it: a dump that
+    resolved to an empty scope has definitions and nothing else."""
+    _, separator, changes = vcd.partition("$enddefinitions")
+    return bool(separator) and any(line.startswith("#") for line in changes.splitlines())
+
+
 def cycle_relation(rtl):
     """Relate the testbench's cycle count to the trace: 4 cycles per instruction without a data
     access, 5 with one, plus the stalls. Returns (text, holds); `holds` is None when a trap line
@@ -207,6 +214,8 @@ def main():
     parser.add_argument("--program", choices=sorted(PROGRAMS), default="loop", help="assembled program to run")
     parser.add_argument("--image", type=Path, help="a flat .bin image to run instead of an assembled program")
     parser.add_argument("--expect-console", help="the guest console output both backends must produce")
+    parser.add_argument("--allow-traps", action="store_true",
+                        help="accept a trace with trap lines, where the cycle formula is not exact")
     parser.add_argument("--emulator", default=DEFAULT_EMULATOR)
     parser.add_argument("--simulator", default=DEFAULT_SIMULATOR, help=".vvp file or Verilator binary")
     parser.add_argument("--out", default=DEFAULT_OUT, help="directory for the image, traces, and VCD")
@@ -246,6 +255,10 @@ def main():
             difference = diff_traces(rtl.trace, emulator.trace)
             if difference:
                 sys.exit(f"stall={stall} seed={seed}: {difference}")
+            if rtl.console != emulator.console:
+                sys.exit(f"stall={stall} seed={seed}: console mismatch: RTL {rtl.console!r}, emulator {emulator.console!r}")
+            if stall is not None and rtl.halt["stalls"] != stall * rtl.halt["transfers"]:
+                sys.exit(f"stall={stall}: {rtl.halt['stalls']} stalls for {rtl.halt['transfers']} transfers")
             label = f"seed {seed}" if seed is not None else str(stall)
             print(f"{label:>6}  {rtl.halt['cycles']:>6}  {rtl.halt['stalls']:>6}  "
                   f"{rtl.halt['transfers']:>9}  {rtl.halt['steps']:>5}")
@@ -273,10 +286,12 @@ def main():
     print(f"traces identical: {len(rtl.trace)} lines; {out / f'{name}.rtl.trace'}")
     relation, holds = cycle_relation(rtl)
     print(relation)
+    if holds is None and not args.allow_traps:
+        sys.exit("the trace has trap lines, so the cycle formula cannot be checked; pass --allow-traps if that is expected")
     if holds is False:
         sys.exit("the cycle count does not follow the state machine")
     if wave is not None:
-        if not wave.exists() or wave.stat().st_size == 0:
+        if not wave.exists() or not has_value_changes(wave.read_text()):
             sys.exit(f"the simulator wrote no waveform to {wave}")
         print(f"waveform: {wave}")
 

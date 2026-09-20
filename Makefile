@@ -242,10 +242,10 @@ $(RV32_TB_VERILATOR): $(RV32_RTL) $(RV32_TB) | build
 
 build-rv32-rtl: $(RV32_TB_VVP)
 
-test-rv32-rtl:
+test-rv32-rtl: check-rv32-image
 	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_rtl.py' -v
 
-test-rv32-rtl-verilator: $(RV32_TB_VERILATOR)
+test-rv32-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR)
 	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_rtl.py' -v
 
 lint-rv32:

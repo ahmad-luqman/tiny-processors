@@ -130,13 +130,13 @@ The three observations the roadmap asks for are in `full.vcd`, whose program is 
 
 | Rising edge | Observation |
 | --- | --- |
-| 195, 205 ns | `FETCH` stalled twice on `mem_addr=8000_000c`. |
-| 215 ns | Fetch accepted; `DECODE`. |
-| 225 ns | `a` = `x1` = `8000_0100`, `b` = `x2` = `ffff_ff80`; `EXECUTE`. |
-| 235 ns | `alu_out` = `8000_0100`; `MEM`: `mem_valid=1`, `mem_we=1`, `mem_strb=0001` (lane 0 of the word), `mem_wdata=8080_8080` (the byte on every lane), `mem_fetch=0`. |
-| 245, 255 ns | The store is held: address, strobe, and data unchanged while `mem_ready=0`. Memory has not been written. |
-| 265 ns | Accepted: the testbench RAM captures lane 0 on this edge, exactly once. `WRITEBACK`. |
-| 275 ns | `retire=1`, no register write (`retire_rd_we=0`); the testbench prints `mem[80000100]<-00000080/1` from the transaction it recorded at 265 ns, narrowed by the strobe. |
+| 205, 215 ns | `FETCH` stalled twice on `mem_addr=8000_000c`. |
+| 225 ns | Fetch accepted; `DECODE`. |
+| 235 ns | `a` = `x1` = `8000_0100`, `b` = `x2` = `ffff_ff80`; `EXECUTE`. |
+| 245 ns | `alu_out` = `8000_0100`; `MEM`: `mem_valid=1`, `mem_we=1`, `mem_strb=0001` (lane 0 of the word), `mem_wdata=8080_8080` (the byte on every lane), `mem_fetch=0`. |
+| 255, 265 ns | The store is held: address, strobe, and data unchanged while `mem_ready=0`. Memory has not been written. |
+| 275 ns | Accepted: the testbench RAM captures lane 0 on this edge, exactly once. `WRITEBACK`. |
+| 285 ns | `retire=1`, no register write (`retire_rd_we=0`); the testbench prints `mem[80000100]<-00000080/1` from the transaction it recorded at 275 ns, narrowed by the strobe. |
 
 Nine edges: five states plus four stalls. The write happened on the edge before the retiring one; the trace line still describes it as the instruction's effect because the testbench attributes every accepted data transaction to the next retirement.
 
@@ -144,23 +144,24 @@ Nine edges: five states plus four stalls. The write happened on the edge before 
 
 | Rising edge | Observation |
 | --- | --- |
-| 335 ns | `MEM` for the `lb`: `mem_addr=8000_0100`, `mem_strb=0001`, `mem_we=0`; the RAM answers `mem_rdata=0000_0080` combinationally, the word the store built. |
-| 355 ns | Accepted: `mdr` captures `0000_0080`. From this edge `load_half` is `0080`, `load_byte` `80`, and `load_value` is `ffff_ff80`: bit 7 of the byte ANDed with "not unsigned" fans out to the top 24 bits. `rf_we=1`, `rd_value=ffff_ff80`. |
-| 365 ns | `WRITEBACK`: `x3` captures `ffff_ff80`; `retire_rd_value` shows it at 375 ns and the trace prints `x3=ffffff80 mem[80000100]->00000080/1`. |
-| 445 ns | The `lbu` accepts the same word; `load_value` is `0000_0080` because `funct3[2]` is now 1 and the AND gates output zero. |
-| 455 ns | `x4` captures `0000_0080`; the trace line's memory field is identical to the `lb`'s, only the register field differs. |
+| 335 ns | `EXECUTE` → `MEM` for the `lb`: from here `mem_addr=8000_0100`, `mem_strb=0001`, `mem_we=0`, and the RAM answers `mem_rdata=0000_0080` combinationally, the word the store built. |
+| 345, 355 ns | Held while `mem_ready=0`. |
+| 365 ns | Accepted: `mdr` captures `0000_0080`. From this edge `load_half` is `0080`, `load_byte` `80`, and `load_value` is `ffff_ff80`: bit 7 of the byte ANDed with "not unsigned" fans out to the top 24 bits. `rf_we=1`, `rd_value=ffff_ff80`. |
+| 375 ns | `WRITEBACK`: `x3` and `retire_rd_value` both capture `ffff_ff80` on this edge, and the trace prints `x3=ffffff80 mem[80000100]->00000080/1` at 376 ns. |
+| 455 ns | The `lbu` accepts the same word; `load_value` is `0000_0080` because `funct3[2]` is now 1 and the AND gates output zero. |
+| 465 ns | `x4` captures `0000_0080`; the trace line's memory field is identical to the `lb`'s, only the register field differs. |
 
 **A discarded `x0` write**, `add x0, x3, x4` (word `0041_8033` at `8000_0018`):
 
 | Rising edge | Observation |
 | --- | --- |
-| 505 ns | `EXECUTE`: `alu_out` captures `ffff_ff80 + 0000_0080 = 0000_0000`. The adder ran; nothing about `x0` stopped it. |
-| 515 ns | `WRITEBACK`: `rd=0`, so `rd_written=0` and `rf_we=0` while `rd_value=0000_0000` sits on the write data bus unused. `pc` advances. |
-| 525 ns | `retire=1` with `retire_rd_we=0`: the trace line is `7 80000018 00418033` and nothing else. |
+| 505 ns | `DECODE`: `a` captures `ffff_ff80`, `b` `0000_0080`. |
+| 515 ns | `EXECUTE`: `alu_out` captures `ffff_ff80 + 0000_0080 = 0000_0000`. The adder ran; nothing about `x0` stopped it. From here `rd=0`, so `rd_written=0` and `rf_we=0` while `rd_value=0000_0000` sits on the write data bus unused. |
+| 525 ns | `WRITEBACK`: `pc` becomes `8000_001c`, `retire=1` with `retire_rd_we=0`, and no register captured anything. The trace line is `7 80000018 00418033` and nothing else. |
 
-Compare the M3 loop's `x0` case in `test_every_subset_instruction_directed`: the emulator skips the store with `if (writes_rd && rd != 0)`, the core computes the value and drops the enable. Both leave `x0` at zero; only the core did the arithmetic.
+Compare the directed test's `x0` case (`ADDI(0, 1, 5)` in `test_every_subset_instruction_directed`): the emulator skips the store with `if (writes_rd && rd != 0)`, the core computes the value and drops the enable. Both leave `x0` at zero; only the core did the arithmetic.
 
-**A trap**, not in the two VCDs but easy to add: run `python3 -m tools.rv32_rtl --mode waves` on any program from `test_traps_vector_through_the_handler_and_mret_returns` and watch `trap` pulse one cycle after the `DECODE` edge of the `ecall`, `pc` jump to `mtvec` on the same edge, `mepc` capture the `ecall`'s PC, and `in_trap` stay high until the handler's first `WRITEBACK`.
+**A trap**, not in the two VCDs but easy to add: write any program from `test_traps_vector_through_the_handler_and_mret_returns` out with `write_image` and run `python3 -m tools.rv32_rtl --mode waves --image that.bin --allow-traps`, then watch `trap` pulse one cycle after the `DECODE` edge of the `ecall`, `pc` jump to `mtvec` on the same edge, `mepc` capture the `ecall`'s PC, and `in_trap` stay high until the handler's first `WRITEBACK`.
 
 ## 7. Instruction count versus clock count
 
@@ -202,7 +203,7 @@ The register file is unchanged in function and its flip-flops are exactly 31 × 
 
 The ALU grew from 187 cells (one adder) to 1,246: the 33-bit subtractor and its flags, the shifters (the source writes `<<`, `>>`, and `>>>` as three operators, each a five-stage barrel shifter to Yosys before optimization; how much ABC merged is not visible in the generic-gate count), and the three logic operations, all under one 8-way result mux. That is the price of RV32I's arithmetic; a core that cared would build one shifter and reverse the operand for the other direction, and the exercises below ask you to try it and measure.
 
-The top level grew by 126 flip-flops. Its registers now add up to 498 bits: fifteen 32-bit registers (`pc`, `ir`, `ir_pc`, `a`, `b`, `alu_out`, `mdr`, `retire_pc`, `retire_insn`, `retire_rd_value`, `trap_value`, `mtvec`, `mepc`, `mcause`, `mtval`), `retire_rd` (5), `trap_cause` (4), `state` (3), and six single bits (`taken`, `in_trap`, `retire`, `trap`, `retire_rd_we`, `halted`). Yosys kept 465: as in M3, bits 30:0 of `retire_pc` are the same flip-flops as `ir_pc` (both capture `pc` on the same edge and differ only in reset value), and two more bits were proved redundant. Two cells are `$_SDFFE_PP1P_` (reset to one): bit 31 of `pc` and of `ir_pc`. Two are `$_SDFF_PP0_` with no enable: `retire` and `trap`, which are assigned on every non-reset edge.
+The top level grew by 126 flip-flops. Its registers now add up to 498 bits: fifteen 32-bit registers (`pc`, `ir`, `ir_pc`, `a`, `b`, `alu_out`, `mdr`, `retire_pc`, `retire_insn`, `retire_rd_value`, `trap_value`, `mtvec`, `mepc`, `mcause`, `mtval`), `retire_rd` (5), `trap_cause` (4), `state` (3), and six single bits (`taken`, `in_trap`, `retire`, `trap`, `retire_rd_we`, `halted`). Yosys kept 465: as in M3, bits 30:0 of `retire_pc` are the same flip-flops as `ir_pc` (both capture `pc` on the same edge and differ only in reset value), and `mtvec[1:0]` are constant zero because both write paths mask them, so Yosys dropped them too. Two cells are `$_SDFFE_PP1P_` (reset to one): bit 31 of `pc` and of `ir_pc`. Two are `$_SDFF_PP0_` with no enable: `retire` and `trap`, which are assigned on every non-reset edge.
 
 The 323 top-level muxes are the operand selects, the `EXECUTE` result select, the load lane and extension muxes, the `rd` value select, the PC select (`pc + 4`, target, `mepc`, `mtvec`), the strobe and data selects on the port, the CSR read and write muxes, and the cause and value selects in `take_trap`. The decoder is 179 gates with no storage. The counts exclude the RAM and devices, which live in the testbench; there is no placement, routing, or frequency claim.
 

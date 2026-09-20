@@ -44,7 +44,7 @@ module rv32_tb;
     integer max_cycles = 1000000;
 
     // The last accepted data transaction, printed at the next retirement.
-    reg pending = 0, pending_write = 0;
+    reg pending = 0, pending_write = 0, pending_error = 0;
     reg [31:0] pending_addr, pending_value;
     integer pending_width;
     reg done_pending = 0;
@@ -193,6 +193,7 @@ module rv32_tb;
                             $fatal(1, "Two data transactions without a retirement between them");
                         pending = 1;
                         pending_write = mem_we;
+                        pending_error = mem_error;
                         pending_addr = mem_addr;
                         // Both directions show the strobed lanes: a store's written
                         // bytes, a load's raw bytes before the core extends them.
@@ -230,7 +231,11 @@ module rv32_tb;
                 if (trace_fd != 0)
                     $fwrite(trace_fd, "%0d %h %h trap %0d %h\n", steps, retire_pc, retire_insn, trap_cause, trap_value);
                 // A refused load or store was an accepted transaction with error:
-                // the trap line replaces its effect, so nothing carries over.
+                // the trap line replaces its effect, so nothing carries over. A
+                // write that was accepted without error has taken effect, and the
+                // contract says a trapping instruction has none: that is a core bug.
+                if (pending && pending_write && !pending_error)
+                    $fatal(1, "Trap after an accepted write at cycle %0d", cycles);
                 pending = 0;
             end
             // One outcome per run: a terminal outcome on the edge that also
