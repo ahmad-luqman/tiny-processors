@@ -17,8 +17,8 @@ import unittest
 
 from tools.rv32_asm import *  # noqa: F401,F403
 from tools.rv32_image import to_hex_words
-from tools.rv32_rtl import (Run, check_passed, compile_testbench, diagnostics, diff_traces, rtl_halt_line,
-                            run_backend, run_emulator, run_rtl, simulator_command, write_image)
+from tools.rv32_rtl import (Run, check_passed, compile_testbench, diff_traces, rtl_halt_line,
+                            run_backend, run_emulator, run_rtl, simulator_command, simulator_noise, write_image)
 from tools.rv32_run_emu import build_emulator
 
 STALLS = (0, 1, 3)
@@ -66,9 +66,9 @@ class RtlTest(unittest.TestCase):
             emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace", limit=limit)
             rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace",
                           stall=stall, seed=seed, max_cycles=max_cycles)
-        report = f"\n--- rtl stdout ---\n{rtl.stdout}--- rtl stderr ---\n{rtl.stderr}"
+        report = f"\n--- simulator output ---\n{rtl.noise}--- guest console ---\n{rtl.console}--- stderr ---\n{rtl.stderr}"
         self.assertEqual(rtl.status, 0, report)
-        self.assertEqual(diagnostics(rtl.stdout), [], report)
+        self.assertEqual(rtl.noise, "", "the simulator printed something of its own" + report)
         self.assertIsNotNone(rtl.halt, report)
         self.assertIsNotNone(emulator.halt, emulator.stderr)
         return emulator, rtl
@@ -80,7 +80,7 @@ class RtlTest(unittest.TestCase):
         self.assertEqual((emulator.halt["halt"], emulator.halt["outcome"]), ("done", "pass"), emulator.stderr)
         self.assertEqual((rtl.halt["halt"], rtl.halt["done"], rtl.halt["outcome"]), ("done", 0x5555, "pass"), rtl.stderr)
         self.assertEqual(rtl.halt["steps"], len(rtl.trace))
-        self.assertEqual(rtl.stdout, emulator.stdout)
+        self.assertEqual(rtl.console, emulator.console)
         return emulator, rtl
 
     def assert_prefix_then_fault(self, words, cause, value, **kwargs):
@@ -300,11 +300,17 @@ class RtlTest(unittest.TestCase):
         for byte in b"Hi\n":
             say += LI(2, byte) + [SB(2, 1, 0)]
         emulator, rtl = self.assert_same_pass(say + FINISH(), stall=1)
-        self.assertEqual(rtl.stdout, "Hi\n")
+        self.assertEqual(rtl.console, "Hi\n")
         self.assertIn("mem[10000000]<-00000048/1", rtl.trace[4])
         # A byte the host cannot decode as text must still be compared, not crash the runner.
         emulator, rtl = self.assert_same_pass(LI(1, CONSOLE) + LI(2, 0xFF) + [SB(2, 1, 0)] + FINISH(), stall=0)
-        self.assertEqual(rtl.stdout, "\\xff")
+        self.assertEqual(rtl.console, "\\xff")
+        # Guest text that looks like a simulator message is still guest text.
+        shout = LI(1, CONSOLE)
+        for byte in b"ERROR: mine\n":
+            shout += LI(2, byte) + [SB(2, 1, 0)]
+        emulator, rtl = self.assert_same_pass(shout + FINISH(), stall=0)
+        self.assertEqual((rtl.console, rtl.noise), ("ERROR: mine\n", ""))
         for word, outcome in (((3 << 16) | 0x3333, "fail=3"), ((255 << 16) | 0x3333, "fail=255"),
                               ((256 << 16) | 0x3333, "error=undefined-done-word"), (0x3333, "error=undefined-done-word"),
                               (0x7777, "error=reserved-reset-word"), (0xDEAD, "error=undefined-done-word")):
@@ -341,28 +347,30 @@ class RtlTest(unittest.TestCase):
             hex_path, _ = write_image(program_loop(), directory, "image")
             trace = Path(directory) / "rtl.trace"
 
+            console = Path(directory) / "console"
+
             def run(extra_args=(), image=hex_path):
-                command = simulator_command(self.simulator, image, trace=trace) + list(extra_args)
-                return run_backend(command, trace, rtl_halt_line, 60)
+                command = simulator_command(self.simulator, image, trace=trace, console=console) + list(extra_args)
+                return run_backend(command, trace, rtl_halt_line, 60, console=console)
 
             for args in (["+stall=abc"], ["+stall=3junk"], ["+stall="], ["+stall=-1"], ["+stall-seed=x"],
                          ["+max-cycles=0"], ["+max-cycles=abc"], ["+max-cycles=99999999999"],
                          ["+stall=2", "+stall-seed=7"], ["+wave=/nonexistent/dir/w.vcd"]):
                 with self.subTest(args=args):
                     result = run(args)
-                    self.assertNotEqual(result.status, 0, result.stdout)
+                    self.assertNotEqual(result.status, 0, result.noise)
                     self.assertIsNone(result.halt)
-                    self.assertTrue(diagnostics(result.stdout), result.stdout)
+                    self.assertNotEqual(result.noise, "", "the simulator must say why")
             for content in ("hello\n", "0002a403\n@1\n", "xxxxxxxx\n", ""):
                 with self.subTest(image=content):
                     bad = Path(directory) / "bad.hex"
                     bad.write_text(content)
                     result = run(image=bad)
-                    self.assertNotEqual(result.status, 0, result.stdout)
+                    self.assertNotEqual(result.status, 0, result.noise)
                     self.assertIsNone(result.halt)
             result = run(image=Path(directory) / "missing.hex")
             self.assertNotEqual(result.status, 0)
-            self.assertTrue(any("Cannot open" in line for line in diagnostics(result.stdout)), result.stdout)
+            self.assertIn("Cannot open", result.noise)
 
 
 class HelperTest(unittest.TestCase):
@@ -401,20 +409,22 @@ class HelperTest(unittest.TestCase):
                     rtl_halt_line(bad)
                 self.assertIn("halt", str(raised.exception))
 
-    def test_simulator_command_and_diagnostics(self):
-        self.assertEqual(simulator_command("x.vvp", "img.hex", trace="t", stall=2),
-                         ["vvp", "x.vvp", "+image=img.hex", "+trace=t", "+stall=2"])
+    def test_simulator_noise_keeps_everything_but_the_vcd_notice(self):
+        self.assertEqual(simulator_noise("VCD info: dumpfile x.vcd opened for output.\n"), "")
+        self.assertEqual(simulator_noise("VCD info: opened\nFATAL: tests/rv32_tb.sv:1: x\n"), "FATAL: tests/rv32_tb.sv:1: x\n")
+        self.assertEqual(simulator_noise("ERROR: anything else\n"), "ERROR: anything else\n")
+
+    def test_simulator_command(self):
+        self.assertEqual(simulator_command("x.vvp", "img.hex", trace="t", console="c", stall=2),
+                         ["vvp", "x.vvp", "+image=img.hex", "+trace=t", "+console=c", "+stall=2"])
         self.assertEqual(simulator_command("build/verilator-rv32/rv32_sim", "img.hex", wave="w", seed=7, max_cycles=9),
                          ["build/verilator-rv32/rv32_sim", "+verilator+quiet", "+image=img.hex", "+wave=w",
                           "+stall-seed=7", "+max-cycles=9"])
-        self.assertEqual(diagnostics("Hi\nFATAL: tests/rv32_tb.sv:1: x\n[0 ns] %Fatal: y\n[0] %Fatal: v\nWARNING: z\n"),
-                         ["FATAL: tests/rv32_tb.sv:1: x", "[0 ns] %Fatal: y", "[0] %Fatal: v", "WARNING: z"])
-        self.assertEqual(diagnostics("PASS 807d9fad\n"), [])
 
     def test_check_passed_rejects_anything_but_a_clean_pass(self):
-        good = Run(0, "", "rv32_tb: halt=done ...", [], {"halt": "done", "outcome": "pass"})
+        good = Run(0, "ERROR: guest text is fine\n", "", "rv32_tb: halt=done ...", [], {"halt": "done", "outcome": "pass"})
         check_passed(good)
-        for run in (good._replace(status=3), good._replace(stdout="FATAL: x\n"), good._replace(halt=None),
+        for run in (good._replace(status=3), good._replace(noise="FATAL: x\n"), good._replace(halt=None),
                     good._replace(halt={"halt": "done", "outcome": "fail=3"}),
                     good._replace(halt={"halt": "limit", "outcome": "error=limit"})):
             with self.subTest(run=run):

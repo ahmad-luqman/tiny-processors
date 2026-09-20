@@ -12,7 +12,6 @@ with context.
 import argparse
 from collections import namedtuple
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import sys
@@ -33,11 +32,12 @@ DECIMAL = COUNTERS + ("cause",)
 HEX = ("done", "tval", "pc", "word")
 # The keys each halt reason carries besides the counters and the outcome (docs/rv32-rtl.md).
 REQUIRED = {"done": ("done",), "fault": ("cause", "tval"), "unsupported": ("pc", "word"), "limit": ()}
-# Simulator diagnostics land on stdout (Icarus $fatal, $readmemh, and plusarg
-# messages; Verilator %Error/%Fatal); any such line fails a run whatever the status.
-DIAGNOSTIC = re.compile(r"^(FATAL:|ERROR:|WARNING:|VCD Error|%(Error|Fatal|Warning)|\[\d+( \w+)?\] %)")
-
-Run = namedtuple("Run", "status stdout stderr trace halt")
+# A run's guest transcript and the simulator's own output are kept apart:
+# `console` is what the guest printed (the emulator's stdout, or the file the
+# testbench writes with +console), `noise` is anything the simulator itself
+# printed on stdout (Icarus $fatal, $readmemh, and plusarg messages, Verilator
+# %Error/%Fatal), which is empty for a clean run and always empty for the emulator.
+Run = namedtuple("Run", "status console noise stderr trace halt")
 
 
 def compile_testbench(output, iverilog="iverilog"):
@@ -46,7 +46,7 @@ def compile_testbench(output, iverilog="iverilog"):
                     str(TESTBENCH), *map(str, RTL_SOURCES)], check=True)
 
 
-def simulator_command(simulator, image, trace=None, wave=None, stall=None, seed=None, max_cycles=None):
+def simulator_command(simulator, image, trace=None, console=None, wave=None, stall=None, seed=None, max_cycles=None):
     """The command line for a compiled testbench: `vvp` for a .vvp file, else a Verilator binary."""
     simulator = Path(simulator)
     if simulator.suffix == ".vvp":
@@ -56,6 +56,8 @@ def simulator_command(simulator, image, trace=None, wave=None, stall=None, seed=
     command.append(f"+image={image}")
     if trace is not None:
         command.append(f"+trace={trace}")
+    if console is not None:
+        command.append(f"+console={console}")
     if wave is not None:
         command.append(f"+wave={wave}")
     if stall is not None:
@@ -87,34 +89,52 @@ def rtl_halt_line(stderr):
     return fields
 
 
-def diagnostics(stdout):
-    """Simulator diagnostic lines that a run printed on stdout."""
-    return [line for line in stdout.splitlines() if DIAGNOSTIC.match(line)]
+def decode(data):
+    """Guest and simulator output as text: any byte is allowed, so decoding never raises."""
+    return data.decode("utf-8", errors="backslashreplace")
 
 
-def run_backend(command, trace, parse_halt, timeout):
-    """Run one backend; the trace file is truncated first so a crash cannot pass.
+# The only thing a simulator may say on stdout in a clean run: Icarus announces
+# the VCD it opened. The guest cannot reach stdout once +console is given, so
+# this allowlist cannot hide guest text.
+INFORMATIONAL = ("VCD info: ",)
 
-    Output is captured as bytes and decoded leniently: a guest may print any
-    byte, and a run must be reported rather than raise from inside subprocess.
-    A malformed halt line becomes `halt=None` with the reason appended to stderr.
+
+def simulator_noise(stdout):
+    """Simulator stdout with the known informational lines removed; empty for a clean run."""
+    return "".join(line for line in stdout.splitlines(keepends=True) if not line.startswith(INFORMATIONAL))
+
+
+def run_backend(command, trace, parse_halt, timeout, console=None):
+    """Run one backend; the trace (and console) files are truncated first so a crash cannot pass.
+
+    With `console`, the guest transcript is read from that file and the process's
+    stdout is the simulator's own noise; without it the transcript is stdout and
+    there is no noise channel (the emulator). A malformed halt line becomes
+    `halt=None` with the reason appended to stderr.
     """
     Path(trace).write_text("")
+    if console is not None:
+        Path(console).write_text("")
     completed = subprocess.run(command, capture_output=True, timeout=timeout)
-    stdout = completed.stdout.decode("utf-8", errors="backslashreplace")
-    stderr = completed.stderr.decode("utf-8", errors="backslashreplace")
+    stdout, stderr = decode(completed.stdout), decode(completed.stderr)
     try:
         halt = parse_halt(stderr)
     except ValueError as error:
         halt, stderr = None, f"{stderr}\n{error}\n"
-    return Run(completed.returncode, stdout, stderr, Path(trace).read_text().splitlines(), halt)
+    if console is None:
+        transcript, noise = stdout, ""
+    else:
+        transcript, noise = decode(Path(console).read_bytes()), simulator_noise(stdout)
+    return Run(completed.returncode, transcript, noise, stderr, Path(trace).read_text().splitlines(), halt)
 
 
 def run_rtl(simulator, image_hex, trace, stall=None, seed=None, wave=None, max_cycles=None, timeout=120):
-    """Run the testbench on a hex image with the documented plusargs."""
-    command = simulator_command(simulator, image_hex, trace=trace, wave=wave,
+    """Run the testbench on a hex image with the documented plusargs; the console goes next to the trace."""
+    console = Path(trace).with_name(Path(trace).name + ".console")
+    command = simulator_command(simulator, image_hex, trace=trace, console=console, wave=wave,
                                 stall=stall, seed=seed, max_cycles=max_cycles)
-    return run_backend(command, trace, rtl_halt_line, timeout)
+    return run_backend(command, trace, rtl_halt_line, timeout, console=console)
 
 
 def run_emulator(emulator, image_bin, trace, limit=None, timeout=120):
@@ -139,15 +159,15 @@ def diff_traces(rtl, emulator, context=3):
 
 def describe(run):
     """Everything a failed run printed, for an error message."""
-    return f"status {run.status}\n--- stdout ---\n{run.stdout}--- stderr ---\n{run.stderr}"
+    return (f"status {run.status}\n--- simulator output ---\n{run.noise}--- guest console ---\n{run.console}"
+            f"--- stderr ---\n{run.stderr}")
 
 
 def check_passed(run, name="simulator"):
-    """A matching trace is not enough: the backend must exit cleanly, print no
-    diagnostic, and report `halt=done ... pass`; otherwise exit with everything it printed."""
-    noise = diagnostics(run.stdout)
-    if run.status != 0 or noise:
-        sys.exit(f"{name} failed ({'; '.join(noise) or 'no diagnostic'}):\n{describe(run)}")
+    """A matching trace is not enough: the backend must exit cleanly, print nothing
+    of its own, and report `halt=done ... pass`; otherwise exit with everything it printed."""
+    if run.status != 0 or run.noise:
+        sys.exit(f"{name} failed:\n{describe(run)}")
     if run.halt is None:
         sys.exit(f"{name} printed no valid halt line:\n{describe(run)}")
     if (run.halt["halt"], run.halt["outcome"]) != ("done", "pass"):

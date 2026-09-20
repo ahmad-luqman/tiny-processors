@@ -49,8 +49,8 @@ module rv32_tb;
     reg done_pending = 0;
     reg [31:0] done_word;
 
-    string image_path, trace_path, wave_path, text;
-    integer trace_fd = 0;
+    string image_path, trace_path, wave_path, console_path, text;
+    integer trace_fd = 0, console_fd = 0;
     integer image_words = 0;
     integer fd, i;
     reg finished = 0;
@@ -150,6 +150,7 @@ module rv32_tb;
             end
             $fwrite(STDERR, "\n");
             if (trace_fd != 0) $fclose(trace_fd);
+            if (console_fd != 0) $fclose(console_fd);
             finished = 1;
         end
     endtask
@@ -179,7 +180,9 @@ module rv32_tb;
                             if (mem_wstrb[2]) ram[ram_index][23:16] <= mem_wdata[23:16];
                             if (mem_wstrb[3]) ram[ram_index][31:24] <= mem_wdata[31:24];
                         end else if (in_console) begin
-                            $write("%c", mem_wdata[7:0]);
+                            // The guest console: a file when +console is given, else stdout.
+                            if (console_fd != 0) $fwrite(console_fd, "%c", mem_wdata[7:0]);
+                            else $write("%c", mem_wdata[7:0]);
                         end else if (mem_addr == DONE_ADDR) begin
                             done_pending = 1;
                             done_word = mem_wdata;
@@ -300,6 +303,13 @@ module rv32_tb;
         if ($value$plusargs("trace=%s", trace_path)) begin
             trace_fd = $fopen(trace_path, "w");
             if (trace_fd == 0) $fatal(1, "Cannot open trace file %0s", trace_path);
+        end
+        // With +console the guest's bytes go to a file and stdout carries only
+        // simulator diagnostics, so the runner can fail a run on any stdout output
+        // without guessing which lines are the simulator's.
+        if ($value$plusargs("console=%s", console_path)) begin
+            console_fd = $fopen(console_path, "w");
+            if (console_fd == 0) $fatal(1, "Cannot open console file %0s", console_path);
         end
         image_words = count_words(image_path);
         if (image_words == 0 || image_words > RAM_WORDS) $fatal(1, "Image %0s has %0d words", image_path, image_words);
