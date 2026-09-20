@@ -159,6 +159,10 @@ module rv32_tb;
     always @(posedge clk) begin
         if (!reset) begin
             cycles = cycles + 1;
+            // The contract: nothing about a request changes while it waits,
+            // including on the edge that finally accepts it.
+            if (stalled_request && {mem_valid, mem_fetch, mem_we, mem_wstrb, mem_addr, mem_wdata} !== {1'b1, held_request})
+                $fatal(1, "Request changed while stalled at cycle %0d", cycles);
             if (mem_valid) begin
                 if (mem_ready) begin
                     transfers = transfers + 1;
@@ -189,8 +193,6 @@ module rv32_tb;
                 end else begin
                     stalls = stalls + 1;
                     request_age = request_age + 1;
-                    if (stalled_request && {mem_fetch, mem_we, mem_wstrb, mem_addr, mem_wdata} !== held_request)
-                        $fatal(1, "Request changed while stalled at cycle %0d", cycles);
                     stalled_request = 1;
                     held_request = {mem_fetch, mem_we, mem_wstrb, mem_addr, mem_wdata};
                 end
@@ -213,34 +215,37 @@ module rv32_tb;
                     $fwrite(trace_fd, "\n");
                 end
                 pending = 0;
-                if (done_pending) finish_run("done");
             end
-            if (halted) begin
-                if (fault) begin
-                    steps = steps + 1; // a trap counts as a step, as in the emulator
-                    if (trace_fd != 0)
-                        $fwrite(trace_fd, "%0d %h %h trap %0d %h\n", steps, retire_pc, retire_insn, fault_cause, fault_value);
-                    finish_run("fault");
-                end else begin
-                    finish_run("unsupported");
-                end
+            // One outcome per run: a terminal outcome on the edge that also
+            // reaches the cycle limit is reported as that outcome, not as a limit.
+            if (retire && done_pending) begin
+                finish_run("done");
+            end else if (halted && fault) begin
+                steps = steps + 1; // a trap counts as a step, as in the emulator
+                if (trace_fd != 0)
+                    $fwrite(trace_fd, "%0d %h %h trap %0d %h\n", steps, retire_pc, retire_insn, fault_cause, fault_value);
+                finish_run("fault");
+            end else if (halted) begin
+                finish_run("unsupported");
+            end else if (cycles >= max_cycles) begin
+                finish_run("limit");
             end
-            if (cycles >= max_cycles) finish_run("limit");
         end
     end
 
-    // Count the image's lines so $readmemh gets an exact range: Icarus warns
+    // Count the image's words so $readmemh gets an exact range: Icarus warns
     // when a file is shorter than the whole array, and the RAM is 1M words.
-    function integer count_lines;
+    // %s skips whitespace, so blank lines and trailing newlines do not count.
+    function integer count_words;
         input string path;
         integer fd;
-        string line;
+        string token;
         begin
-            count_lines = 0;
+            count_words = 0;
             fd = $fopen(path, "r");
             if (fd == 0) $fatal(1, "Cannot open %0s", path);
-            while ($fgets(line, fd) != 0)
-                count_lines = count_lines + 1;
+            while ($fscanf(fd, "%s", token) == 1)
+                count_words = count_words + 1;
             $fclose(fd);
         end
     endfunction
@@ -260,7 +265,7 @@ module rv32_tb;
             trace_fd = $fopen(trace_path, "w");
             if (trace_fd == 0) $fatal(1, "Cannot open trace file %0s", trace_path);
         end
-        image_words = count_lines(image_path);
+        image_words = count_words(image_path);
         if (image_words == 0 || image_words > RAM_WORDS) $fatal(1, "Image %0s has %0d words", image_path, image_words);
         // The emulator allocates zero-filled RAM; unwritten words must read zero here too.
         for (i = 0; i < RAM_WORDS; i = i + 1)

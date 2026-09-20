@@ -124,7 +124,7 @@ The emulator's `steps` and the testbench's `steps` are the same number, 78 for t
 | 3 | 642 | 306 | 102 | 78 |
 | seed 7 | 482 | 146 | 102 | 78 |
 
-`make bench-rv32-rtl` prints this table. The loop retires 54 four-cycle instructions and 24 five-cycle ones: 4 × 54 + 5 × 24 = 336. Every transfer, fetch or data, costs one extra cycle per stall cycle, and there are 78 fetches plus 24 data accesses, so each unit of `+stall` adds 102. `test_cycle_count_follows_the_state_machine` asserts this formula; the seeded row draws 0 to 3 cycles per request and lands wherever `$random` puts it, with the trace unchanged.
+`make bench-rv32-rtl` prints this table. The loop retires 54 four-cycle instructions and 24 five-cycle ones: 4 × 54 + 5 × 24 = 336. Every transfer, fetch or data, costs one extra cycle per stall cycle, and there are 78 fetches plus 24 data accesses, so each unit of `+stall` adds 102. `test_cycle_count_follows_the_state_machine` asserts this formula; the seeded row draws 0 to 3 cycles per request and lands wherever `$random` puts it, with the trace unchanged. The seeded numbers are Icarus's: Verilator's `$random` sequence differs (479 cycles, 143 stalls for the same seed), and the test asserts the trace, not the seeded counts.
 
 The emulator cannot produce any of these numbers. The trace it defines deliberately says nothing about time so that the two backends can be compared; the cycle count is the first thing M3 knows that M2 does not. The 336-cycle floor is the price of a multicycle design with one memory port: the fetch of the next instruction cannot start until the current one has left `WRITEBACK`. A pipelined core would overlap them, and the roadmap keeps that as a later measured experiment against this baseline.
 

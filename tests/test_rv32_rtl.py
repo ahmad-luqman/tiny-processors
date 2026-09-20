@@ -247,6 +247,15 @@ class RtlTest(unittest.TestCase):
         self.assertEqual(rtl.trace, emulator.trace[:len(rtl.trace)])
         self.assertEqual(len(rtl.trace), 50, "200 cycles at 4 per instruction")
 
+    def test_terminal_outcome_wins_over_the_limit_on_the_same_edge(self):
+        # The loop retires its done store on cycle 336; a limit of exactly 336 must still report done.
+        emulator, rtl = self.assert_same_pass(program_loop(), stall=0, max_cycles=336)
+        self.assertEqual(rtl.halt["cycles"], 336)
+        self.assertEqual(rtl.stderr.count("rv32_tb: halt="), 1, rtl.stderr)
+        emulator, rtl = self.run_both([ADDI(1, 0, 1), ECALL()], stall=0, max_cycles=6)
+        self.assertEqual((rtl.halt["halt"], rtl.halt["cycles"], rtl.halt["cause"]), ("fault", 6, 11), rtl.stderr)
+        self.assertEqual(rtl.stderr.count("rv32_tb: halt="), 1, rtl.stderr)
+
 
 class HelperTest(unittest.TestCase):
     def test_diff_traces_reports_first_difference_with_context(self):
