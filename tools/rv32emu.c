@@ -32,6 +32,13 @@
 #define DONE_RESET 0x7777u
 #define TIMER_BASE 0x20000000u
 #define TIMER_TICKS 0x0u
+#define INPUT_BASE 0x20001000u
+#define INPUT_EVENT 0x0u
+#define INPUT_COUNT 0x4u
+#define INPUT_KEYS 0x8u
+#define INPUT_QUEUE 16u
+#define EVENT_VALID 0x80000000u
+#define EVENT_PRESS 0x100u
 #define DISPLAY_BASE 0x20002000u
 #define DISPLAY_PRESENT 0x0u
 #define DISPLAY_FRAMES 0x4u
@@ -60,6 +67,12 @@ enum csr { CSR_MTVEC = 0x305, CSR_MEPC = 0x341, CSR_MCAUSE = 0x342, CSR_MTVAL = 
 
 enum halt { RUNNING, HALT_DONE, HALT_DOUBLE_FAULT, HALT_LIMIT };
 
+/* One line of the input script: the event and the frame it arrives at. */
+typedef struct {
+    uint32_t frame;
+    uint32_t event;
+} scripted_event;
+
 /* Process exit status when the run did not end with a pass/fail done word. */
 #define EXIT_EMULATOR_ERROR 2
 
@@ -83,6 +96,11 @@ typedef struct {
     FILE *checkpoints;     /* one `frame N <hash>` line per present, or NULL */
     const char *frames_dir; /* directory for frame-NNNN.ppm, or NULL */
     bool output_error;     /* a frame file could not be written; the run is rejected */
+    uint32_t queue[INPUT_QUEUE]; /* the input device: a ring of events */
+    unsigned head, count;
+    uint32_t keys;         /* one bit per key code, as events arrive */
+    scripted_event *script; /* --input, sorted by frame; delivered as frames are reached */
+    size_t scripted, next_scripted;
     /* Effects of the current step, for the trace line. */
     int wr_reg;
     uint32_t wr_value;
@@ -188,6 +206,49 @@ static access timer_store(machine *m, uint32_t offset, int width, uint32_t value
     return ACC_FAULT;
 }
 
+/* Input (docs/rv32.md): the host queues an event when its frame is reached,
+ * or drops it and says so when the queue is full; KEYS follows arrivals. */
+static void queue_event(machine *m, uint32_t frame, uint32_t event)
+{
+    if (m->count == INPUT_QUEUE) {
+        fprintf(stderr, "rv32emu: input queue full: dropped frame %" PRIu32 " event %08" PRIx32 "\n", frame, event);
+        return;
+    }
+    m->queue[(m->head + m->count) % INPUT_QUEUE] = event;
+    m->count++;
+    uint32_t bit = 1u << (event & 31u);
+    m->keys = (event & EVENT_PRESS) ? (m->keys | bit) : (m->keys & ~bit);
+}
+
+static void deliver_events(machine *m)
+{
+    while (m->next_scripted < m->scripted && m->script[m->next_scripted].frame <= m->frames) {
+        queue_event(m, m->script[m->next_scripted].frame, m->script[m->next_scripted].event);
+        m->next_scripted++;
+    }
+}
+
+static access input_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    if (width != 4) {
+        return ACC_FAULT;
+    }
+    switch (offset) {
+    case INPUT_EVENT:
+        if (m->count == 0) {
+            *value = 0;
+        } else {
+            *value = m->queue[m->head];
+            m->head = (m->head + 1) % INPUT_QUEUE;
+            m->count--;
+        }
+        return ACC_OK;
+    case INPUT_COUNT: *value = m->count; return ACC_OK;
+    case INPUT_KEYS: *value = m->keys; return ACC_OK;
+    default: return ACC_FAULT;
+    }
+}
+
 static access fb_load(machine *m, uint32_t offset, int width, uint32_t *value)
 {
     *value = bytes_read(m->fb + offset, width);
@@ -238,6 +299,7 @@ static bool write_ppm(const machine *m, const char *path)
 static void present(machine *m)
 {
     m->frames++;
+    deliver_events(m); /* this frame's scripted events arrive with the snapshot */
     if (m->checkpoints) {
         fprintf(m->checkpoints, "frame %" PRIu32 " %08" PRIx32 "\n", m->frames, frame_hash(m->fb));
     }
@@ -280,6 +342,7 @@ static const region REGIONS[] = {
     {"done", DONE_ADDR, 4, NULL, done_store},
     {"console", CONSOLE_BASE, 8, console_load, console_store},
     {"timer", TIMER_BASE, 16, timer_load, timer_store},
+    {"input", INPUT_BASE, 16, input_load, NULL},
     {"display", DISPLAY_BASE, 16, display_load, display_store},
     {"framebuffer", FB_BASE, FB_SIZE, fb_load, fb_store},
     {"ram", RAM_BASE, RAM_SIZE, ram_load, ram_store},
@@ -648,8 +711,8 @@ static void dump_state(const machine *m, FILE *out)
     }
     fprintf(out, "mtvec %08" PRIx32 "\nmepc %08" PRIx32 "\nmcause %08" PRIx32 "\nmtval %08" PRIx32 "\n",
             m->mtvec, m->mepc, m->mcause, m->mtval);
-    fprintf(out, "steps %" PRIu64 "\nretired %" PRIu64 "\ntraps %" PRIu64 "\nframes %" PRIu32 "\nhalt %s\n",
-            m->steps, m->retired, m->traps, m->frames, halt_name(m->halt));
+    fprintf(out, "steps %" PRIu64 "\nretired %" PRIu64 "\ntraps %" PRIu64 "\nframes %" PRIu32 "\nevents %u\nhalt %s\n",
+            m->steps, m->retired, m->traps, m->frames, m->count, halt_name(m->halt));
     if (m->halt == HALT_DONE) {
         fprintf(out, "done %08" PRIx32 "\n", m->done_word);
     }
@@ -708,14 +771,90 @@ static bool close_output(FILE *stream, const char *path)
     return ok;
 }
 
+/* A key name from programs/rv32/board.h, any case, or a number 0..31; -1 otherwise. */
+static int key_code(const char *text)
+{
+    static const struct { const char *name; int code; } names[] = {
+        {"LEFT", 1}, {"RIGHT", 2}, {"UP", 3}, {"DOWN", 4}, {"SPACE", 5}, {"ENTER", 6}, {"ESCAPE", 7},
+        {"A", 8}, {"D", 9}, {"W", 10}, {"S", 11}, {"P", 12}, {"Q", 13}, {"R", 14},
+    };
+    char upper[16];
+    size_t len = strlen(text);
+    if (len == 0 || len >= sizeof upper) {
+        return -1;
+    }
+    for (size_t i = 0; i <= len; i++) {
+        upper[i] = (char)toupper((unsigned char)text[i]);
+    }
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+        if (strcmp(upper, names[i].name) == 0) {
+            return names[i].code;
+        }
+    }
+    char *end;
+    unsigned long value = strtoul(text, &end, 10);
+    if (isdigit((unsigned char)text[0]) && *end == '\0' && value < 32) {
+        return (int)value;
+    }
+    return -1;
+}
+
+/* Read the input script (docs/rv32.md, "Input"): `frame N down|up KEY` lines with frames
+ * never decreasing; blank lines and `#` comments are skipped. Any other line is an error. */
+static void read_input_script(machine *m, const char *path)
+{
+    FILE *in = fopen(path, "r");
+    if (!in) {
+        fprintf(stderr, "rv32emu: cannot open input script %s\n", path);
+        exit(EXIT_EMULATOR_ERROR);
+    }
+    char line[256];
+    size_t capacity = 0;
+    uint32_t last_frame = 0;
+    for (unsigned number = 1; fgets(line, sizeof line, in); number++) {
+        char keyword[16], frame_text[16], direction[16], key[16], rest[16];
+        if (strchr(line, '\n') == NULL && !feof(in)) {
+            fprintf(stderr, "rv32emu: input script %s line %u is too long\n", path, number);
+            exit(EXIT_EMULATOR_ERROR);
+        }
+        if (sscanf(line, " %15s", keyword) != 1 || keyword[0] == '#') {
+            continue;
+        }
+        int fields = sscanf(line, " %15s %15s %15s %15s %15s", keyword, frame_text, direction, key, rest);
+        char *end;
+        unsigned long frame = strtoul(frame_text, &end, 10);
+        int code = key_code(key);
+        if (fields != 4 || strcmp(keyword, "frame") != 0 || (strcmp(direction, "down") != 0 && strcmp(direction, "up") != 0) ||
+            !isdigit((unsigned char)frame_text[0]) || *end != '\0' || frame > 0xffffffffull || code < 0 || frame < last_frame) {
+            fprintf(stderr, "rv32emu: input script %s line %u: expected `frame N down|up KEY` with frames in order: %s",
+                    path, number, line);
+            exit(EXIT_EMULATOR_ERROR);
+        }
+        if (m->scripted == capacity) {
+            capacity = capacity ? 2 * capacity : 64;
+            m->script = realloc(m->script, capacity * sizeof *m->script);
+            if (!m->script) {
+                fputs("rv32emu: cannot allocate the input script\n", stderr);
+                exit(EXIT_EMULATOR_ERROR);
+            }
+        }
+        m->script[m->scripted].frame = (uint32_t)frame;
+        m->script[m->scripted].event = EVENT_VALID | (direction[0] == 'd' ? EVENT_PRESS : 0u) | (uint32_t)code;
+        m->scripted++;
+        last_frame = (uint32_t)frame;
+    }
+    fclose(in);
+}
+
 static void usage(void)
 {
     fputs("usage: rv32emu --image FILE [--base ADDR] [--pc ADDR] [--trace FILE] [--dump-state FILE]\n"
-          "               [--max-instructions N] [--checkpoints FILE] [--frames DIR]\n"
+          "               [--max-instructions N] [--checkpoints FILE] [--frames DIR] [--input FILE]\n"
           "Loads FILE at ADDR (default 0x80000000), starts at --pc (default the base), and runs\n"
           "until the done register is written. Console bytes go to stdout, the trace and state\n"
           "to their files, and a final 'rv32emu: halt=...' line to stderr. Each present appends\n"
-          "'frame N <hash>' to the checkpoints file and writes DIR/frame-NNNN.ppm.\n",
+          "'frame N <hash>' to the checkpoints file and writes DIR/frame-NNNN.ppm. The input\n"
+          "script's `frame N down|up KEY` events arrive when frame N is presented.\n",
           stderr);
     exit(EXIT_EMULATOR_ERROR);
 }
@@ -723,6 +862,7 @@ static void usage(void)
 int main(int argc, char **argv)
 {
     const char *image_path = NULL, *trace_path = NULL, *state_path = NULL, *checkpoints_path = NULL;
+    const char *input_path = NULL;
     uint32_t base = RAM_BASE, start = 0;
     bool start_given = false;
     machine m;
@@ -750,6 +890,8 @@ int main(int argc, char **argv)
             checkpoints_path = value;
         } else if (!strcmp(arg, "--frames")) {
             m.frames_dir = value;
+        } else if (!strcmp(arg, "--input")) {
+            input_path = value;
         } else {
             usage();
         }
@@ -779,6 +921,10 @@ int main(int argc, char **argv)
     }
     fclose(image);
     m.pc = start_given ? start : RAM_BASE; /* reset PC from the contract */
+    if (input_path) {
+        read_input_script(&m, input_path);
+        deliver_events(&m); /* frame 0's events are queued before the first instruction */
+    }
     if (trace_path) {
         require_distinct(trace_path, "trace file", image_path, "image");
         m.trace = fopen(trace_path, "w");
@@ -864,6 +1010,7 @@ int main(int argc, char **argv)
     }
     free(m.ram);
     free(m.fb);
+    free(m.script);
     if (!outputs_ok) {
         fputs("rv32emu: outputs incomplete, run rejected\n", stderr);
         return EXIT_EMULATOR_ERROR;

@@ -19,7 +19,7 @@ import unittest
 
 # The encoder lives in tools/rv32_asm.py so the RTL tests assemble the same words.
 from tools.rv32_asm import *  # noqa: F401,F403
-from tools.rv32_devices import FB_SIZE, frame_hash
+from tools.rv32_devices import FB_SIZE, event_word, frame_hash
 from tools.rv32_diff_qemu import compare, qemu_pcs, trace_pcs
 from tools.rv32_run_emu import build_emulator, halt_line
 
@@ -27,9 +27,9 @@ from tools.rv32_run_emu import build_emulator, halt_line
 ROOT = Path(__file__).resolve().parents[1]
 
 
-State = namedtuple("State", "pc x mtvec mepc mcause mtval steps retired traps frames halt done")
+State = namedtuple("State", "pc x mtvec mepc mcause mtval steps retired traps frames events halt done")
 Result = namedtuple("Result", "status stdout stderr state trace halt checkpoints", defaults=([],))
-DECIMAL_STATE = ("steps", "retired", "traps", "frames")
+DECIMAL_STATE = ("steps", "retired", "traps", "frames", "events")
 
 
 def parse_state(text):
@@ -39,8 +39,8 @@ def parse_state(text):
         fields[key] = value if key == "halt" else int(value, 10 if key in DECIMAL_STATE else 16)
     x = [fields[f"x{i}"] for i in range(32)]
     return State(fields["pc"], x, fields["mtvec"], fields["mepc"], fields["mcause"], fields["mtval"],
-                 fields["steps"], fields["retired"], fields["traps"], fields["frames"], fields["halt"],
-                 fields.get("done"))
+                 fields["steps"], fields["retired"], fields["traps"], fields["frames"], fields["events"],
+                 fields["halt"], fields.get("done"))
 
 
 def effects(line):
@@ -75,8 +75,9 @@ class EmulatorTest(unittest.TestCase):
                 (path / "input.txt").write_text(input_script)
                 command += ["--input", str(path / "input.txt")]
             completed = subprocess.run(command, capture_output=True, text=True)
-            state = parse_state((path / "state").read_text())
-            trace = (path / "trace").read_text().splitlines()
+            # A run refused before it starts (a bad argument or script) writes no state or trace.
+            state = parse_state((path / "state").read_text()) if (path / "state").exists() else None
+            trace = (path / "trace").read_text().splitlines() if (path / "trace").exists() else []
             lines = (path / "checkpoints").read_text().splitlines() if checkpoints else []
         return Result(completed.returncode, completed.stdout, completed.stderr, state, trace,
                       halt_line(completed.stderr), lines)
@@ -314,7 +315,12 @@ class EmulatorTest(unittest.TestCase):
             ([SB(1, 2, 0)], DISPLAY, 7, DISPLAY),
             ([SB(1, 2, 0)], FB + FB_SIZE, 7, FB + FB_SIZE), # the byte past the last pixel
             ([LW(1, 2, 0)], FB + FB_SIZE, 5, FB + FB_SIZE),
-            ([LBU(1, 2, 0)], FB - 1, 5, FB - 1)]
+            ([LBU(1, 2, 0)], FB - 1, 5, FB - 1),
+            ([SW(1, 2, 0)], INPUT, 7, INPUT),               # the input registers are read-only
+            ([SW(1, 2, 8)], INPUT, 7, INPUT + 8),
+            ([LBU(1, 2, 0)], INPUT, 5, INPUT),              # and words
+            ([LHU(1, 2, 4)], INPUT, 5, INPUT + 4),
+            ([LW(1, 2, 12)], INPUT, 5, INPUT + 12)]         # no fourth register
         for body, base, cause, tval in cases:
             with self.subTest(body=body, base=hex(base)):
                 result = self.run_trapping(LI(2, base) + LI(1, 0x5555) + body)
@@ -411,6 +417,46 @@ class EmulatorTest(unittest.TestCase):
         self.assertEqual((result.state.frames, result.checkpoints), (1, []))
         result = self.run_pass(LI(1, DISPLAY) + [SW(0, 1, 0)], checkpoints=True)
         self.assertEqual(result.checkpoints, [f"frame 1 {frame_hash(bytes(FB_SIZE)):08x}"])
+
+    def test_input_events_arrive_at_frames(self):
+        """Frame 0's events are queued before the first instruction, later frames' when their
+        present retires; EVENT pops, COUNT counts, KEYS follows arrivals (a press and release that
+        arrive together leave the bit clear); a full queue drops and reports."""
+        script = "frame 0 down LEFT\nframe 0 up left\nframe 1 down A\nframe 2 up 8\n"
+        words = LI(1, INPUT) + LI(2, DISPLAY) + [LW(3, 1, 4), LW(4, 1, 8), LW(5, 1, 0), LW(6, 1, 0), LW(7, 1, 0), LW(8, 1, 4)]
+        words += [SW(0, 2, 0), LW(9, 1, 4), LW(10, 1, 8), LW(11, 1, 0), SW(0, 2, 0), LW(12, 1, 0), LW(13, 1, 8), LW(14, 1, 0)]
+        result = self.run_pass(words, input_script=script)
+        x = result.state.x
+        self.assertEqual(x[3:9], [2, 0, event_word(True, 1), event_word(False, 1), 0, 0])
+        self.assertEqual(x[9:12], [1, 0x100, event_word(True, 8)])
+        self.assertEqual(x[12:15], [event_word(False, 8), 0, 0])
+        self.assertEqual((result.state.frames, result.state.events), (2, 0))
+        self.assertEqual(effects(result.trace[6]), f"x5={event_word(True, 1):08x} mem[{INPUT:08x}]->{event_word(True, 1):08x}/4")
+        # Sixteen events fill the queue; the seventeenth is dropped and reported; KEYS shows arrivals only.
+        burst = "".join(f"frame 0 down {code}\n" for code in range(17))
+        result = self.run_pass(LI(1, INPUT) + [LW(3, 1, 4), LW(4, 1, 8)], input_script=burst)
+        self.assertEqual((x := result.state.x)[3], 16)
+        self.assertEqual(x[4], 0xFFFF)
+        self.assertEqual(result.state.events, 16)
+        self.assertIn(f"rv32emu: input queue full: dropped frame 0 event {event_word(True, 16):08x}", result.stderr)
+        # Popping makes room; an event for a frame never presented stays with the host.
+        result = self.run_pass(LI(1, INPUT) + [LW(3, 1, 0), LW(4, 1, 4)], input_script=burst + "frame 5 up 3\n")
+        self.assertEqual((result.state.x[3], result.state.x[4], result.state.events), (event_word(True, 0), 15, 15))
+
+    def test_input_script_errors(self):
+        for content in ("frame 1 down\n", "frame x down A\n", "frame 1 press A\n", "frame 2 down A\nframe 1 up A\n",
+                        "frame 1 down NOPE\n", "frame 1 down 32\n", "key 1 down A\n", "frame 1 down A extra\n",
+                        "frame 1 down A " + "x" * 300 + "\n"):
+            with self.subTest(script=content):
+                result = self.run_words(FINISH(), input_script=content)
+                self.assertEqual(result.status, 2)
+                self.assertIsNone(result.halt, "the run never starts")
+                self.assertIn("input script", result.stderr)
+        result = self.run_pass([], input_script="# only a comment\n\n  frame 0 down Left  \n")
+        self.assertEqual(result.state.events, 1)
+        result = self.run_words(FINISH(), extra=("--input", "/nonexistent/input.txt"))
+        self.assertEqual((result.status, result.halt), (2, None))
+        self.assertIn("cannot open input script", result.stderr)
 
     def test_frames_are_written_as_ppm(self):
         """--frames DIR writes one binary PPM per present with the RGB332 mapping; an unwritable

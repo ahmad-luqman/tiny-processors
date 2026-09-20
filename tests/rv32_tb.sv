@@ -19,9 +19,19 @@ module rv32_tb;
     wire [3:0] mem_strb, trap_cause;
     wire [4:0] retire_rd;
     wire [2:0] state;
-    wire console_valid, done_valid, display_present;
+    wire console_valid, done_valid, display_present, in_full;
     wire [7:0] console_byte;
     wire [31:0] done_wdata, display_frames;
+    reg in_push = 0;
+    reg [31:0] in_event = 0;
+
+    // The input script (+input=FILE): `frame N down|up KEY` lines, delivered in
+    // order; an event's frame must have been reached before it is pushed.
+    localparam integer MAX_EVENTS = 4096;
+    integer event_frame [0:MAX_EVENTS-1];
+    reg [31:0] event_word [0:MAX_EVENTS-1];
+    integer events = 0, next_event = 0;
+    integer frame_reached = 0; // the frame count the guest has observably reached
     reg mem_hold = 1; // acceptance deferred until the stall generator releases it
 
     // Stall generator and counters.
@@ -44,7 +54,7 @@ module rv32_tb;
     reg done_pending = 0;
     reg [31:0] done_word;
 
-    string image_path, trace_path, wave_path, console_path, checkpoints_path, text;
+    string image_path, trace_path, wave_path, console_path, checkpoints_path, input_path, text;
     integer trace_fd = 0, console_fd = 0, checkpoints_fd = 0;
     integer image_words = 0;
     integer fd, i;
@@ -69,6 +79,23 @@ module rv32_tb;
                 delay_chosen = 1;
             end
             mem_hold = !(request_age >= delay);
+        end
+    end
+
+    // The host's keyboard: one event per cycle, as soon as its frame has been
+    // reached (frame 0 from reset release). The device refuses guest accesses
+    // while a push is presented, so a frame's events arrive as one burst.
+    always @(negedge clk) begin
+        in_push = 0;
+        if (!reset && next_event < events && event_frame[next_event] <= frame_reached) begin
+            if (in_full) begin
+                $fwrite(STDERR, "rv32_tb: input queue full: dropped frame %0d event %h\n",
+                        event_frame[next_event], event_word[next_event]);
+            end else begin
+                in_push = 1;
+                in_event = event_word[next_event];
+            end
+            next_event = next_event + 1;
         end
     end
 
@@ -173,8 +200,11 @@ module rv32_tb;
                     end
                     // A present snapshots the framebuffer as it is at acceptance: every earlier
                     // store has landed, this cycle's frame number is the count plus one.
-                    if (display_present && checkpoints_fd != 0)
-                        $fwrite(checkpoints_fd, "frame %0d %h\n", display_frames + 1, frame_hash(FB_WORDS));
+                    if (display_present) begin
+                        frame_reached = display_frames + 1;
+                        if (checkpoints_fd != 0)
+                            $fwrite(checkpoints_fd, "frame %0d %h\n", display_frames + 1, frame_hash(FB_WORDS));
+                    end
                     if (!mem_fetch) begin
                         if (pending)
                             $fatal(1, "Two data transactions without a retirement between them");
@@ -277,8 +307,124 @@ module rv32_tb;
         end
     endfunction
 
+    // Upper case by hand: Icarus has no string toupper method.
+    function string upper;
+        input string text;
+        integer k;
+        byte c;
+        begin
+            upper = "";
+            for (k = 0; k < text.len(); k = k + 1) begin
+                c = text[k];
+                if (c >= "a" && c <= "z") c = c - 32;
+                upper = {upper, string'(c)};
+            end
+        end
+    endfunction
+
+    // A decimal of at most nine digits, or -1. Written by hand because $sscanf's %d accepts
+    // x and z as digits and Verilator and Icarus count a failed %s differently.
+    function integer decimal_of;
+        input string text;
+        integer k;
+        byte c;
+        begin
+            decimal_of = (text.len() >= 1 && text.len() <= 9) ? 0 : -1;
+            for (k = 0; k < text.len() && decimal_of >= 0; k = k + 1) begin
+                c = text[k];
+                if (c >= "0" && c <= "9") decimal_of = 10 * decimal_of + ({24'd0, c} - 32'd48);
+                else decimal_of = -1;
+            end
+        end
+    endfunction
+
+    // A key name from board.h, any case, or a number 0..31; -1 for anything else.
+    // (An if-chain rather than a case: Icarus 13 cannot compile a case on a string.)
+    function integer key_code;
+        input string name;
+        string u;
+        integer value;
+        begin
+            u = upper(name);
+            value = decimal_of(name);
+            if (u == "LEFT") key_code = 1;
+            else if (u == "RIGHT") key_code = 2;
+            else if (u == "UP") key_code = 3;
+            else if (u == "DOWN") key_code = 4;
+            else if (u == "SPACE") key_code = 5;
+            else if (u == "ENTER") key_code = 6;
+            else if (u == "ESCAPE") key_code = 7;
+            else if (u == "A") key_code = 8;
+            else if (u == "D") key_code = 9;
+            else if (u == "W") key_code = 10;
+            else if (u == "S") key_code = 11;
+            else if (u == "P") key_code = 12;
+            else if (u == "Q") key_code = 13;
+            else if (u == "R") key_code = 14;
+            else if (value >= 0 && value < 32) key_code = value;
+            else key_code = -1;
+        end
+    endfunction
+
+    // Read the input script (docs/rv32.md, "Input"): blank lines and `#` comments are skipped;
+    // every other line is `frame N down|up KEY` with frames never decreasing. Lines are split
+    // on blanks by hand so both simulators agree on what a token is.
+    task read_input_script;
+        input string path;
+        integer fd, number, frame, code, last_frame, k, tokens;
+        string line, token0, token1, token2, token3, extra;
+        byte c;
+        reg in_token;
+        begin
+            fd = $fopen(path, "r");
+            if (fd == 0) $fatal(1, "Cannot open input script %0s", path);
+            number = 0;
+            last_frame = 0;
+            while ($fgets(line, fd) != 0) begin
+                number = number + 1;
+                tokens = 0;
+                in_token = 0;
+                token0 = ""; token1 = ""; token2 = ""; token3 = ""; extra = "";
+                for (k = 0; k < line.len(); k = k + 1) begin
+                    c = line[k];
+                    if (c == 8'h20 || c == 8'h09 || c == 8'h0A || c == 8'h0D) begin // blank, tab, LF, CR: Icarus has no \r escape
+                        in_token = 0;
+                    end else begin
+                        if (!in_token) begin
+                            tokens = tokens + 1;
+                            in_token = 1;
+                        end
+                        case (tokens)
+                            1: token0 = {token0, string'(c)};
+                            2: token1 = {token1, string'(c)};
+                            3: token2 = {token2, string'(c)};
+                            4: token3 = {token3, string'(c)};
+                            default: extra = {extra, string'(c)};
+                        endcase
+                    end
+                end
+                if (tokens == 0 || token0[0] == "#") continue;
+                if (tokens != 4 || token0 != "frame" || (token2 != "down" && token2 != "up"))
+                    $fatal(1, "Input script %0s line %0d: expected `frame N down|up KEY`", path, number);
+                frame = decimal_of(token1);
+                if (frame < 0) $fatal(1, "Input script %0s line %0d: frame %0s is not a number", path, number, token1);
+                code = key_code(token3);
+                if (code < 0) $fatal(1, "Input script %0s line %0d: unknown key %0s", path, number, token3);
+                if (frame < last_frame)
+                    $fatal(1, "Input script %0s line %0d: frame %0d comes after frame %0d", path, number, frame, last_frame);
+                if (events == MAX_EVENTS) $fatal(1, "Input script %0s has more than %0d events", path, MAX_EVENTS);
+                event_frame[events] = frame;
+                event_word[events] = 32'h8000_0000 | ((token2 == "down") ? 32'h100 : 32'h0) | {27'd0, code[4:0]};
+                events = events + 1;
+                last_frame = frame;
+            end
+            $fclose(fd);
+        end
+    endtask
+
     initial begin
         if (!$value$plusargs("image=%s", image_path)) $fatal(1, "Missing +image=FILE");
+        if ($value$plusargs("input=%s", input_path)) read_input_script(input_path);
         if ($value$plusargs("stall=%s", text)) begin
             stall = plusarg_count("stall", text, 0);
             stall_given = 1;

@@ -6,7 +6,8 @@
 // the handshake and print the trace exactly as it did when it was the
 // memory itself; `mem_hold` lets it defer every acceptance to model a slow
 // memory. Device side effects that need a host (console bytes, the done
-// word) leave as strobes; the host decides what they mean.
+// word, a present) leave as strobes and the host's key events come in
+// through the input push port; the host decides what they mean.
 module rv32_soc #(
     parameter integer RAM_WORDS = 1048576,
     parameter integer FB_WORDS = 19200, // 320 x 240 bytes
@@ -48,7 +49,10 @@ module rv32_soc #(
     output wire        done_valid,
     output wire [31:0] done_wdata,
     output wire        display_present,
-    output wire [31:0] display_frames
+    output wire [31:0] display_frames,
+    input  wire        in_push,
+    input  wire [31:0] in_event,
+    output wire        in_full
 );
     wire ram_valid, ram_ready, ram_error;
     wire [31:0] ram_rdata;
@@ -58,6 +62,8 @@ module rv32_soc #(
     wire [31:0] dn_rdata;
     wire tm_valid, tm_ready, tm_error;
     wire [31:0] tm_rdata;
+    wire in_valid, in_ready, in_error;
+    wire [31:0] in_rdata;
     wire dp_valid, dp_ready, dp_error;
     wire [31:0] dp_rdata;
     wire fb_valid, fb_ready, fb_error;
@@ -81,6 +87,7 @@ module rv32_soc #(
         .console_valid(con_valid), .console_ready(con_ready), .console_error(con_error), .console_rdata(con_rdata),
         .done_valid(dn_valid), .done_ready(dn_ready), .done_error(dn_error), .done_rdata(dn_rdata),
         .timer_valid(tm_valid), .timer_ready(tm_ready), .timer_error(tm_error), .timer_rdata(tm_rdata),
+        .input_valid(in_valid), .input_ready(in_ready), .input_error(in_error), .input_rdata(in_rdata),
         .display_valid(dp_valid), .display_ready(dp_ready), .display_error(dp_error), .display_rdata(dp_rdata),
         .fb_valid(fb_valid), .fb_ready(fb_ready), .fb_error(fb_error), .fb_rdata(fb_rdata)
     );
@@ -105,6 +112,12 @@ module rv32_soc #(
     rv32_timer timer (
         .clk(clk), .reset(reset), .valid(tm_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
         .wdata(mem_wdata), .rdata(tm_rdata), .ready(tm_ready), .error(tm_error)
+    );
+
+    rv32_input input_device (
+        .clk(clk), .reset(reset), .valid(in_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
+        .wdata(mem_wdata), .rdata(in_rdata), .ready(in_ready), .error(in_error),
+        .push(in_push), .push_event(in_event), .full(in_full)
     );
 
     rv32_display display (

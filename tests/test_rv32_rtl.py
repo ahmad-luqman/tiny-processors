@@ -16,7 +16,7 @@ import tempfile
 import unittest
 
 from tools.rv32_asm import *  # noqa: F401,F403
-from tools.rv32_devices import FB_SIZE, frame_hash
+from tools.rv32_devices import FB_SIZE, event_word, frame_hash
 from tools.rv32_image import to_hex_words
 from tools.rv32_rtl import (ROOT, Run, check_passed, compile_testbench, cycle_relation, diff_traces, has_value_changes,
                             rtl_halt_line, run_backend, run_emulator, run_rtl, simulator_command, simulator_noise, write_image)
@@ -582,6 +582,11 @@ class RtlTest(unittest.TestCase):
             ("word load past the framebuffer", LI(1, FB + FB_SIZE) + [LW(2, 1, 0)], 5, FB + FB_SIZE),
             ("byte load below the framebuffer", LI(1, FB - 1) + [LBU(2, 1, 0)], 5, FB - 1),
             ("fetch from the framebuffer", LI(1, FB) + [JALR(0, 1, 0)], 1, FB),
+            ("store to the input queue", LI(1, INPUT) + [SW(1, 1, 0)], 7, INPUT),
+            ("store to the held keys", LI(1, INPUT) + [SW(1, 1, 8)], 7, INPUT + 8),
+            ("byte read of an event", LI(1, INPUT) + [LBU(2, 1, 0)], 5, INPUT),
+            ("halfword read of the count", LI(1, INPUT) + [LHU(2, 1, 4)], 5, INPUT + 4),
+            ("read of an unimplemented input offset", LI(1, INPUT) + [LW(2, 1, 12)], 5, INPUT + 12),
         ]
         for name, words, cause, value in cases:
             with self.subTest(name=name):
@@ -691,6 +696,47 @@ class RtlTest(unittest.TestCase):
         emulator, rtl = self.assert_same_pass(FINISH(), stall=0, checkpoints=True)
         self.assertEqual((rtl.checkpoints, emulator.checkpoints), ([], []))
 
+    def test_input_events_arrive_at_frames(self):
+        """A script's events are readable after the present that reaches their frame (frame 0 from
+        reset); EVENT pops, COUNT counts, KEYS follows arrivals; the sequence the guest reads is
+        identical on both backends although the RTL pushes one event per cycle."""
+        down, up = event_word(True, 1), event_word(False, 1)
+        script = "frame 0 down LEFT\nframe 0 up left\nframe 1 down A\nframe 2 up 8\n"
+        words = LI(1, INPUT) + LI(2, DISPLAY) + [LW(3, 1, 4), LW(4, 1, 8), LW(5, 1, 0), LW(6, 1, 0), LW(7, 1, 0), LW(8, 1, 4)]
+        words += [SW(0, 2, 0), LW(9, 1, 4), LW(10, 1, 8), LW(11, 1, 0), SW(0, 2, 0), LW(12, 1, 0), LW(13, 1, 8), LW(14, 1, 0)]
+        for stall in (0, 2):
+            with self.subTest(stall=stall):
+                emulator, rtl = self.assert_same_pass(words + FINISH(), stall=stall, input_script=script)
+                self.assertEqual([effects(line) for line in rtl.trace[4:10]],
+                                 [f"x3=00000002 mem[{INPUT + 4:08x}]->00000002/4", f"x4=00000000 mem[{INPUT + 8:08x}]->00000000/4",
+                                  f"x5={down:08x} mem[{INPUT:08x}]->{down:08x}/4", f"x6={up:08x} mem[{INPUT:08x}]->{up:08x}/4",
+                                  f"x7=00000000 mem[{INPUT:08x}]->00000000/4", f"x8=00000000 mem[{INPUT + 4:08x}]->00000000/4"])
+                self.assertEqual([effects(line) for line in rtl.trace[11:14]],
+                                 [f"x9=00000001 mem[{INPUT + 4:08x}]->00000001/4", f"x10=00000100 mem[{INPUT + 8:08x}]->00000100/4",
+                                  f"x11={event_word(True, 8):08x} mem[{INPUT:08x}]->{event_word(True, 8):08x}/4"])
+                self.assertEqual([effects(line) for line in rtl.trace[15:18]],
+                                 [f"x12={event_word(False, 8):08x} mem[{INPUT:08x}]->{event_word(False, 8):08x}/4",
+                                  f"x13=00000000 mem[{INPUT + 8:08x}]->00000000/4", f"x14=00000000 mem[{INPUT:08x}]->00000000/4"])
+        # A burst of 16 events at frame 1 is queued whole before the guest's next load can see it:
+        # the RTL holds that load off until the pushes end (visible as stalls at +stall=0), the
+        # emulator queues them in one step, and both read COUNT 16.
+        burst = "".join(f"frame 1 down {code}\n" for code in range(16))
+        words = LI(1, INPUT) + LI(2, DISPLAY) + [SW(0, 2, 0), LW(3, 1, 4), LW(4, 1, 8)] + FINISH()
+        emulator, rtl = self.assert_same_pass(words, stall=0, input_script=burst)
+        self.assertEqual([effects(line) for line in rtl.trace[5:7]],
+                         [f"x3=00000010 mem[{INPUT + 4:08x}]->00000010/4", f"x4=0000ffff mem[{INPUT + 8:08x}]->0000ffff/4"])
+        self.assertGreater(rtl.halt["stalls"], 0, "the load waited for the burst")
+        # A seventeenth event at the same frame is dropped by the host and reported on stderr.
+        emulator, rtl = self.assert_same_pass(words, stall=0, input_script=burst + "frame 1 down 16\n")
+        self.assertEqual(effects(rtl.trace[5]), f"x3=00000010 mem[{INPUT + 4:08x}]->00000010/4")
+        self.assertEqual(effects(rtl.trace[6]), f"x4=0000ffff mem[{INPUT + 8:08x}]->0000ffff/4", "a dropped event never arrives")
+        for run, name in ((rtl, "rv32_tb"), (emulator, "rv32emu")):
+            self.assertIn(f"{name}: input queue full: dropped frame 1 event {event_word(True, 16):08x}", run.stderr)
+        # Events for a frame that is never presented stay with the host.
+        emulator, rtl = self.assert_same_pass(LI(1, INPUT) + [LW(3, 1, 4)] + FINISH(), stall=0,
+                                              input_script="frame 3 down A\n")
+        self.assertEqual(effects(rtl.trace[2]), f"x3=00000000 mem[{INPUT + 4:08x}]->00000000/4")
+
     def test_runaway_hits_the_cycle_limit(self):
         emulator, rtl = self.run_both([ADDI(1, 1, 1), JAL(0, -4)], limit=50, max_cycles=200)
         self.assertEqual(rtl.halt["halt"], "limit")
@@ -743,6 +789,21 @@ class RtlTest(unittest.TestCase):
                     result = run(image=bad)
                     self.assertNotEqual(result.status, 0, result.noise)
                     self.assertIsNone(result.halt)
+            script = Path(directory) / "input.txt"
+            for content in ("frame 1 down\n", "frame x down A\n", "frame 1 press A\n", "frame 2 down A\nframe 1 up A\n",
+                            "frame 1 down NOPE\n", "frame 1 down 32\n", "key 1 down A\n", "frame 1 down A extra\n"):
+                with self.subTest(script=content):
+                    script.write_text(content)
+                    result = run([f"+input={script}"])
+                    self.assertNotEqual(result.status, 0, result.noise)
+                    self.assertIsNone(result.halt)
+                    self.assertIn("Input script", result.noise)
+            script.write_text("# only a comment\n\n  frame 0 down Left  \n")
+            result = run([f"+input={script}"])
+            self.assertEqual((result.status, result.halt["outcome"]), (0, "pass"), result.noise)
+            result = run([f"+input={Path(directory) / 'missing.txt'}"])
+            self.assertNotEqual(result.status, 0)
+            self.assertIn("Cannot open input script", result.noise)
             result = run(image=Path(directory) / "missing.hex")
             self.assertNotEqual(result.status, 0)
             self.assertIn("Cannot open", result.noise)
