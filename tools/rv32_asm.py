@@ -14,6 +14,12 @@ a stalled store, and a call with `jalr`.
 RAM = 0x80000000
 CONSOLE = 0x10000000
 DONE = 0x00100000
+TIMER = 0x20000000
+INPUT = 0x20001000
+DISPLAY = 0x20002000
+FB = 0x30000000
+FB_SIZE = 320 * 240
+UNMAPPED = 0x50000000  # no window: the probe address for "outside the map" tests
 M = 0xFFFFFFFF
 
 

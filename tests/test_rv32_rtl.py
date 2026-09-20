@@ -355,7 +355,7 @@ class RtlTest(unittest.TestCase):
         handler = [CSRRS(10, MCAUSE, 0), CSRRS(11, MTVAL, 0), CSRRS(12, MEPC, 0), ADDI(20, 20, 1),
                    ADDI(12, 12, 4), CSRRW(0, MEPC, 12), MRET()]
         mul = r_type(0x33, 1, 0, 2, 3, 1)
-        body = LI(1, 0x20000000) + LI(2, RAM + 0x102) + [
+        body = LI(1, UNMAPPED) + LI(2, RAM + 0x102) + [
             ECALL(),                 # cause 11, mtval 0
             EBREAK(),                # cause 3, mtval its PC
             mul,                     # cause 2, mtval the word
@@ -374,7 +374,7 @@ class RtlTest(unittest.TestCase):
                 emulator, rtl = self.assert_same_pass(words, stall=stall)
         traps = [line for line in rtl.trace if " trap " in line]
         self.assertEqual([effects(line) for line in traps],
-                         ["trap 11 00000000", f"trap 3 {RAM + 8 * 4:08x}", f"trap 2 {mul:08x}", "trap 5 20000000",
+                         ["trap 11 00000000", f"trap 3 {RAM + 8 * 4:08x}", f"trap 2 {mul:08x}", f"trap 5 {UNMAPPED:08x}",
                           f"trap 6 {RAM + 0x102:08x}", f"trap 4 {RAM + 0x103:08x}", f"trap 0 {RAM + 14 * 4 + 2:08x}",
                           f"trap 0 {RAM + 15 * 4 + 6:08x}"])
         self.assertEqual(len(traps), 8)
@@ -534,10 +534,10 @@ class RtlTest(unittest.TestCase):
 
     def test_memory_and_target_faults(self):
         cases = [
-            ("load outside the map", LI(1, 0x20000000) + [LW(2, 1, 0)], 5, 0x20000000),
+            ("load outside the map", LI(1, UNMAPPED) + [LW(2, 1, 0)], 5, UNMAPPED),
             ("misaligned load", LI(1, RAM + 0x102) + [LW(2, 1, 0)], 4, RAM + 0x102),
             ("misaligned store", LI(1, RAM + 0x101) + [SW(1, 1, 0)], 6, RAM + 0x101),
-            ("misaligned address outside the map", LI(1, 0x20000002) + [LW(2, 1, 0)], 4, 0x20000002),
+            ("misaligned address outside the map", LI(1, UNMAPPED + 2) + [LW(2, 1, 0)], 4, UNMAPPED + 2),
             ("word store to the console", LI(1, CONSOLE) + [SW(1, 1, 0)], 7, CONSOLE),
             ("byte store to the console status", LI(1, CONSOLE) + [SB(1, 1, 5)], 7, CONSOLE + 5),
             ("word load from the console", LI(1, CONSOLE) + [LW(2, 1, 4)], 5, CONSOLE + 4),

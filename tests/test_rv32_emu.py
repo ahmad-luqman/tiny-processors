@@ -271,7 +271,7 @@ class EmulatorTest(unittest.TestCase):
             ([LBU(1, 2, 0)], RAM + 0x400000, 5, RAM + 0x400000),  # first byte past RAM
             ([LW(1, 2, 0)], RAM + 0x3FFFFE, 4, RAM + 0x3FFFFE),   # misaligned before bounds
             ([LH(1, 2, 0)], RAM + 0x3FFFFF, 4, RAM + 0x3FFFFF),
-            ([SW(1, 2, 0)], 0x20000000, 7, 0x20000000),     # unmapped store
+            ([SW(1, 2, 0)], UNMAPPED, 7, UNMAPPED),     # unmapped store
             ([SB(1, 2, 0)], 0x7FFFFFFF, 7, 0x7FFFFFFF),     # one byte below RAM
             ([SW(1, 2, 0)], 0xFFFFFFFC, 7, 0xFFFFFFFC),     # top of the address space
             ([LW(1, 2, 0)], 0xFFFFFFFC, 5, 0xFFFFFFFC),
