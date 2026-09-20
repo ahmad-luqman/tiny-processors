@@ -8,35 +8,63 @@ because a guest `FAIL 2` and an emulator error both exit with status 2.
 """
 
 import argparse
+import os
 from pathlib import Path
 import subprocess
 import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 from tools.rv32_run_qemu import classify  # noqa: E402
 
 DEFAULT_EMULATOR = "build/rv32/rv32emu"
+EMULATOR_SOURCE = ROOT / "tools" / "rv32emu.c"
+EMULATOR_CFLAGS = ("-std=c11", "-O2", "-Wall", "-Wextra", "-Werror")  # the Makefile's RV32EMU_CFLAGS
 COUNTERS = ("steps", "retired", "traps", "loaded")
+
+
+def build_emulator(output):
+    """Compile tools/rv32emu.c into `output` with the Makefile's flags; HOST_CC picks the compiler."""
+    compiler = os.environ.get("HOST_CC", "cc")
+    subprocess.run([compiler, *EMULATOR_CFLAGS, "-o", str(output), str(EMULATOR_SOURCE)], check=True)
+
+
+def last_halt_line(stderr, prefix):
+    """The last `<prefix> halt=...` line of `stderr`, or None."""
+    lines = [line for line in stderr.splitlines() if line.startswith(f"{prefix} halt=")]
+    return lines[-1] if lines else None
+
+
+def parse_halt_line(line, decimal, hexadecimal):
+    """Split one halt line into a dict: `halt`, the typed keys, and the untyped rest as `outcome`.
+
+    A typed key whose value does not parse raises ValueError naming the line, so
+    a truncated line or an `x` from the RTL is reported rather than swallowed.
+    """
+    fields, outcome = {}, []
+    for token in line.split()[1:]:
+        key, _, value = token.partition("=")
+        try:
+            if key == "halt":
+                fields[key] = value
+            elif key in decimal and not outcome:
+                fields[key] = int(value)
+            elif key in hexadecimal and not outcome:
+                fields[key] = int(value, 16)
+            else:
+                outcome.append(token)
+        except ValueError:
+            raise ValueError(f"malformed halt line field {token!r} in {line!r}") from None
+    if "halt" not in fields or not fields["halt"]:
+        raise ValueError(f"halt line without a reason: {line!r}")
+    fields["outcome"] = " ".join(outcome)
+    return fields
 
 
 def halt_line(stderr):
     """Parse the emulator's final `rv32emu: halt=... ` line into a dict, or None if absent."""
-    lines = [line for line in stderr.splitlines() if line.startswith("rv32emu: halt=")]
-    if not lines:
-        return None
-    fields, outcome = {}, []
-    for token in lines[-1].split()[1:]:
-        key, _, value = token.partition("=")
-        if key == "halt":
-            fields[key] = value
-        elif key in COUNTERS:
-            fields[key] = int(value)
-        elif key == "done" and not outcome:
-            fields[key] = int(value, 16)
-        else:
-            outcome.append(token)
-    fields["outcome"] = " ".join(outcome)
-    return fields
+    line = last_halt_line(stderr, "rv32emu:")
+    return None if line is None else parse_halt_line(line, COUNTERS, ("done",))
 
 
 def emulator_command(emulator, image, trace=None, state=None, limit=None):

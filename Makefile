@@ -30,6 +30,10 @@ RV32_OBJS := build/rv32/start.o build/rv32/selfcheck.o build/rv32/console.o buil
 RV32_SELFCHECK_HEX := 807d9fad
 RV32EMU := build/rv32/rv32emu
 RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
+RV32_RTL := rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32.v
+RV32_TB := tests/rv32_tb.sv
+RV32_TB_VVP := build/rv32/rv32_tb.vvp
+RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
 
 .PHONY: test sim lint synth test-verilator waves clean
 .PHONY: test-alu sim-alu lint-alu synth-alu test-alu-verilator waves-alu
@@ -38,6 +42,7 @@ RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
 .PHONY: test-simd4-model test-simd4 test-simd4-verilator sim-simd4 waves-simd4 bench-simd4 lint-simd4 synth-simd4
 .PHONY: toolchain-rv32 firmware-rv32 check-rv32-image run-rv32-qemu test-rv32-tools test-rv32-rt test-rv32 disasm-rv32
 .PHONY: toolchain-rv32-emu build-rv32-emu test-rv32-emu run-rv32-emu trace-rv32-emu diff-rv32-qemu
+.PHONY: build-rv32-rtl test-rv32-rtl test-rv32-rtl-verilator lint-rv32 synth-rv32 waves-rv32 bench-rv32-rtl
 
 build:
 	mkdir -p build
@@ -229,7 +234,34 @@ trace-rv32-emu: run-rv32-emu
 diff-rv32-qemu: run-rv32-emu
 	$(PYTHON) tools/rv32_diff_qemu.py build/rv32/selfcheck.elf build/rv32/selfcheck.trace --qemu $(QEMU_RV32) --log build/rv32/qemu-exec.log
 
-test-rv32: test-rv32-tools test-rv32-rt run-rv32-qemu test-rv32-emu run-rv32-emu diff-rv32-qemu
+$(RV32_TB_VVP): $(RV32_RTL) $(RV32_TB) | build/rv32
+	iverilog -g2012 -Wall -s rv32_tb -o $@ $(RV32_TB) $(RV32_RTL)
+
+$(RV32_TB_VERILATOR): $(RV32_RTL) $(RV32_TB) | build
+	verilator --binary --timing --trace --top-module rv32_tb --Mdir build/verilator-rv32 -o rv32_sim $(RV32_TB) $(RV32_RTL)
+
+build-rv32-rtl: $(RV32_TB_VVP)
+
+test-rv32-rtl:
+	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_rtl.py' -v
+
+test-rv32-rtl-verilator: $(RV32_TB_VERILATOR)
+	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_rtl.py' -v
+
+lint-rv32:
+	verilator --lint-only --Wall --language 1364-2005 --top-module rv32 $(RV32_RTL)
+
+synth-rv32: | build
+	yosys -Q -T -l build/rv32-synth.log -p 'read_verilog $(RV32_RTL); synth -top rv32; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32.json'
+
+waves-rv32: $(RV32_TB_VVP) $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl --mode waves --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
+	@echo "Open build/rv32/rtl/loop.vcd in Surfer: https://app.surfer-project.org/"
+
+bench-rv32-rtl: $(RV32_TB_VVP) $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl --mode bench --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
+
+test-rv32: test-rv32-tools test-rv32-rt run-rv32-qemu test-rv32-emu run-rv32-emu diff-rv32-qemu test-rv32-rtl test-rv32-rtl-verilator lint-rv32 synth-rv32
 
 disasm-rv32: firmware-rv32
 	cat build/rv32/selfcheck.lst
