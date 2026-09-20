@@ -61,7 +61,7 @@ class RtlTest(unittest.TestCase):
         cls.workdir.cleanup()
 
     def run_both(self, words, stall=None, seed=None, limit=100000, max_cycles=None, checkpoints=False,
-                 input_script=None):
+                 input_script=None, reset_at=None, simulator=None):
         """Run one image on both backends; the caller decides what must agree. With `checkpoints`
         both write their `frame N <hash>` lines; `input_script` is text for both `+input`/`--input`."""
         with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
@@ -74,9 +74,9 @@ class RtlTest(unittest.TestCase):
             rtl_checkpoints = Path(directory) / "rtl.checkpoints" if checkpoints else None
             emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace", limit=limit,
                                     checkpoints=emu_checkpoints, input_script=script)
-            rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace",
+            rtl = run_rtl(simulator or self.simulator, hex_path, Path(directory) / "rtl.trace",
                           stall=stall, seed=seed, max_cycles=max_cycles, checkpoints=rtl_checkpoints,
-                          input_script=script)
+                          input_script=script, reset_at=reset_at)
         report = f"\n--- simulator output ---\n{rtl.noise}--- guest console ---\n{rtl.console}--- stderr ---\n{rtl.stderr}"
         self.assertEqual(rtl.status, 0, report)
         self.assertEqual(rtl.noise, "", "the simulator printed something of its own" + report)
@@ -737,6 +737,55 @@ class RtlTest(unittest.TestCase):
                                               input_script="frame 3 down A\n")
         self.assertEqual(effects(rtl.trace[2]), f"x3=00000000 mem[{INPUT + 4:08x}]->00000000/4")
 
+    def test_console_backpressure_holds_ready_per_byte(self):
+        """With CONSOLE_BUSY=2 the console holds `ready` low for two cycles before each byte it
+        accepts; status reads and the rest of the bus are not delayed, and the trace is unchanged."""
+        if shutil.which("iverilog") is None:
+            self.skipTest("the busy console needs an Icarus build with -P")
+        busy = Path(self.workdir.name) / "rv32_tb_busy.vvp"
+        compile_testbench(busy, params={"CONSOLE_BUSY": 2})
+        say = LI(1, CONSOLE) + [LBU(3, 1, 5)]
+        for byte in b"Hi\n":
+            say += LI(2, byte) + [SB(2, 1, 0)]
+        for stall in (0, 1):
+            with self.subTest(stall=stall):
+                emulator, rtl = self.assert_same_pass(say + FINISH(), stall=stall, simulator=busy)
+                self.assertEqual(rtl.console, "Hi\n")
+                self.assertEqual(rtl.halt["stalls"], stall * rtl.halt["transfers"] + 2 * 3, "two extra stalls per byte")
+        emulator, rtl = self.assert_same_pass(say + FINISH(), stall=0)
+        self.assertEqual(rtl.halt["stalls"], 0, "the default console never waits")
+
+    def test_reset_during_a_held_store(self):
+        """+reset-at=N resets the machine while a store is being held: it never lands, the timer,
+        frame count, and input queue restart from zero, and the program runs again to its end."""
+        marker = RAM + 0x1000
+        words = LI(1, marker) + [LW(2, 1, 0)] + LI(6, TIMER) + [LW(5, 6, 0)] + LI(7, INPUT) + [LW(8, 7, 4)]
+        words += LI(9, DISPLAY) + [SW(0, 9, 0), LW(10, 9, 4)] + LI(3, 0xC0DE) + [SW(3, 1, 0), LW(4, 1, 0)] + FINISH()
+        # With +stall=3 every request takes four cycles: the fifteen instructions before the store take
+        # 10 x 7 + 5 x 11 = 125 cycles, the store's fetch ends at 129, decode 130, execute 131, and its
+        # MEM state is held on 132, 133, and 134 before acceptance on 135. Reset after cycle 133.
+        script = "frame 0 down A\nframe 0 up A\n"
+        emulator, rtl = self.run_both(words, stall=3, reset_at=133, input_script=script)
+        self.assertEqual((rtl.halt["halt"], rtl.halt["outcome"]), ("done", "pass"), rtl.stderr)
+        restarts = [i for i, line in enumerate(rtl.trace) if line.split()[1] == f"{RAM:08x}"]
+        self.assertEqual(restarts, [0, 15], "the machine restarted once, after the fifteenth instruction")
+        first, second = rtl.trace[:15], rtl.trace[15:]
+        self.assertEqual(effects(first[2]), f"x2=00000000 mem[{marker:08x}]->00000000/4")
+        self.assertEqual(effects(second[2]), f"x2=00000000 mem[{marker:08x}]->00000000/4", "the held store never landed")
+        self.assertEqual(effects(first[5]), effects(second[5]), "the timer restarted from zero")
+        self.assertEqual(effects(first[8]), f"x8=00000002 mem[{INPUT + 4:08x}]->00000002/4")
+        self.assertEqual(effects(second[8]), f"x8=00000000 mem[{INPUT + 4:08x}]->00000000/4", "the queue was cleared")
+        self.assertEqual(effects(first[12]), f"x10=00000001 mem[{DISPLAY + 4:08x}]->00000001/4")
+        self.assertEqual(effects(second[12]), f"x10=00000001 mem[{DISPLAY + 4:08x}]->00000001/4", "frames restarted")
+        self.assertEqual([effects(line) for line in second[15:17]],
+                         [f"mem[{marker:08x}]<-0000c0de/4", f"x4=0000c0de mem[{marker:08x}]->0000c0de/4"])
+        # The second run is the emulator's run, apart from the step numbers, the timer value, and the
+        # queue count (the emulator's run had no reset, so its frame 0 events are still queued).
+        self.assertEqual([line.split()[1:3] for line in second], [line.split()[1:3] for line in emulator.trace])
+        self.assertEqual([effects(line) for i, line in enumerate(second) if i not in (5, 8)],
+                         [effects(line) for i, line in enumerate(emulator.trace) if i not in (5, 8)])
+        self.assertEqual(rtl.halt["steps"], len(rtl.trace))
+
     def test_runaway_hits_the_cycle_limit(self):
         emulator, rtl = self.run_both([ADDI(1, 1, 1), JAL(0, -4)], limit=50, max_cycles=200)
         self.assertEqual(rtl.halt["halt"], "limit")
@@ -775,7 +824,7 @@ class RtlTest(unittest.TestCase):
                 return run_backend(command, trace, rtl_halt_line, 60, console=console)
 
             for args in (["+stall=abc"], ["+stall=3junk"], ["+stall="], ["+stall=-1"], ["+stall-seed=x"],
-                         ["+max-cycles=0"], ["+max-cycles=abc"], ["+max-cycles=99999999999"],
+                         ["+max-cycles=0"], ["+max-cycles=abc"], ["+max-cycles=99999999999"], ["+reset-at=0"],
                          ["+stall=2", "+stall-seed=7"], ["+wave=/nonexistent/dir/w.vcd"]):
                 with self.subTest(args=args):
                     result = run(args)

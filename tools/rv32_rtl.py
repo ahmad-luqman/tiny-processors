@@ -43,14 +43,16 @@ REQUIRED = {"done": ("done",), "double-fault": ("cause", "tval"), "limit": ()}
 Run = namedtuple("Run", "status console noise stderr trace halt checkpoints", defaults=([],))
 
 
-def compile_testbench(output, iverilog="iverilog"):
-    """Compile the testbench and the core for Icarus into `output`."""
-    subprocess.run([iverilog, "-g2012", "-Wall", "-s", "rv32_tb", "-o", str(output),
+def compile_testbench(output, iverilog="iverilog", params=None):
+    """Compile the testbench and the machine for Icarus into `output`; `params` overrides
+    testbench parameters (`{"CONSOLE_BUSY": 2}`), the way `-G` does for a Verilator build."""
+    overrides = [f"-Prv32_tb.{name}={value}" for name, value in (params or {}).items()]
+    subprocess.run([iverilog, "-g2012", "-Wall", *overrides, "-s", "rv32_tb", "-o", str(output),
                     str(TESTBENCH), *map(str, RTL_SOURCES)], check=True)
 
 
 def simulator_command(simulator, image, trace=None, console=None, wave=None, stall=None, seed=None, max_cycles=None,
-                      checkpoints=None, input_script=None):
+                      checkpoints=None, input_script=None, reset_at=None):
     """The command line for a compiled testbench: `vvp` for a .vvp file, else a Verilator binary."""
     simulator = Path(simulator)
     if simulator.suffix == ".vvp":
@@ -74,6 +76,8 @@ def simulator_command(simulator, image, trace=None, console=None, wave=None, sta
         command.append(f"+checkpoints={checkpoints}")
     if input_script is not None:
         command.append(f"+input={input_script}")
+    if reset_at is not None:
+        command.append(f"+reset-at={reset_at}")
     return command
 
 
@@ -141,12 +145,12 @@ def run_backend(command, trace, parse_halt, timeout, console=None, checkpoints=N
 
 
 def run_rtl(simulator, image_hex, trace, stall=None, seed=None, wave=None, max_cycles=None, timeout=120,
-            checkpoints=None, input_script=None):
+            checkpoints=None, input_script=None, reset_at=None):
     """Run the testbench on a hex image with the documented plusargs; the console goes next to the trace."""
     console = Path(trace).with_name(Path(trace).name + ".console")
     command = simulator_command(simulator, image_hex, trace=trace, console=console, wave=wave,
                                 stall=stall, seed=seed, max_cycles=max_cycles, checkpoints=checkpoints,
-                                input_script=input_script)
+                                input_script=input_script, reset_at=reset_at)
     return run_backend(command, trace, rtl_halt_line, timeout, console=console, checkpoints=checkpoints)
 
 

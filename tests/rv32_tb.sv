@@ -46,6 +46,7 @@ module rv32_tb;
     reg [69:0] held_request;    // the request as it was on the first stalled edge
     integer cycles = 0, steps = 0, stalls = 0, transfers = 0;
     integer max_cycles = 1000000;
+    integer reset_at = 0;       // +reset-at=N: assert reset again after counted cycle N
 
     // The last accepted data transaction, printed at the next retirement.
     reg pending = 0, pending_write = 0, pending_error = 0;
@@ -436,6 +437,8 @@ module rv32_tb;
         if (stall_given && random_stall) $fatal(1, "+stall and +stall-seed are exclusive");
         if ($value$plusargs("max-cycles=%s", text))
             max_cycles = plusarg_count("max-cycles", text, 1);
+        if ($value$plusargs("reset-at=%s", text))
+            reset_at = plusarg_count("reset-at", text, 1);
         if ($value$plusargs("wave=%s", wave_path)) begin
             fd = $fopen(wave_path, "w"); // prove the path is writable: Verilator drops a bad VCD silently
             if (fd == 0) $fatal(1, "Cannot open wave file %0s", wave_path);
@@ -471,5 +474,20 @@ module rv32_tb;
         $readmemh(image_path, dut.ram.mem, 0, image_words - 1);
         repeat (2) @(posedge clk);
         #1 reset = 0;
+        // A second reset in the middle of the run, two edges long like the first: the
+        // machine restarts, whatever transaction was in flight is abandoned (a held write
+        // never lands), and the host forgets its own bookkeeping of that transaction. The
+        // counters and the trace continue; the reset edges are not counted.
+        if (reset_at > 0) begin
+            wait (cycles == reset_at);
+            #2; // after this edge's trace processing, before the falling edge
+            reset = 1;
+            pending = 0;
+            stalled_request = 0;
+            request_age = 0;
+            done_pending = 0;
+            repeat (2) @(posedge clk);
+            #1 reset = 0;
+        end
     end
 endmodule
