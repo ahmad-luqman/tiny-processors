@@ -31,6 +31,7 @@ RV32_SELFCHECK_HEX := 807d9fad
 RV32EMU := build/rv32/rv32emu
 RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
 RV32_RTL := rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32.v
+RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_soc.v
 RV32_TB := tests/rv32_tb.sv
 RV32_TB_VVP := build/rv32/rv32_tb.vvp
 RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
@@ -43,6 +44,7 @@ RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
 .PHONY: toolchain-rv32 firmware-rv32 check-rv32-image run-rv32-qemu test-rv32-tools test-rv32-rt test-rv32 disasm-rv32
 .PHONY: toolchain-rv32-emu build-rv32-emu test-rv32-emu run-rv32-emu trace-rv32-emu diff-rv32-qemu
 .PHONY: build-rv32-rtl test-rv32-rtl test-rv32-rtl-verilator run-rv32-rtl run-rv32-rtl-verilator lint-rv32 synth-rv32 waves-rv32 bench-rv32-rtl
+.PHONY: lint-rv32-soc synth-rv32-soc
 
 build:
 	mkdir -p build
@@ -234,11 +236,11 @@ trace-rv32-emu: run-rv32-emu
 diff-rv32-qemu: run-rv32-emu
 	$(PYTHON) tools/rv32_diff_qemu.py build/rv32/selfcheck.elf build/rv32/selfcheck.trace --qemu $(QEMU_RV32) --log build/rv32/qemu-exec.log
 
-$(RV32_TB_VVP): $(RV32_RTL) $(RV32_TB) | build/rv32
-	iverilog -g2012 -Wall -s rv32_tb -o $@ $(RV32_TB) $(RV32_RTL)
+$(RV32_TB_VVP): $(RV32_SOC_RTL) $(RV32_TB) | build/rv32
+	iverilog -g2012 -Wall -s rv32_tb -o $@ $(RV32_TB) $(RV32_SOC_RTL)
 
-$(RV32_TB_VERILATOR): $(RV32_RTL) $(RV32_TB) | build
-	verilator --binary --timing --trace --top-module rv32_tb --Mdir build/verilator-rv32 -o rv32_sim $(RV32_TB) $(RV32_RTL)
+$(RV32_TB_VERILATOR): $(RV32_SOC_RTL) $(RV32_TB) | build
+	verilator --binary --timing --trace --top-module rv32_tb --Mdir build/verilator-rv32 -o rv32_sim $(RV32_TB) $(RV32_SOC_RTL)
 
 build-rv32-rtl: $(RV32_TB_VVP)
 
@@ -254,6 +256,14 @@ lint-rv32:
 synth-rv32: | build
 	yosys -Q -T -l build/rv32-synth.log -p 'read_verilog $(RV32_RTL); synth -top rv32; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32.json'
 
+lint-rv32-soc:
+	verilator --lint-only --Wall --language 1364-2005 --top-module rv32_soc $(RV32_SOC_RTL)
+
+# The memories are shrunk to 64 words so the count measures the decoder and
+# the devices; the core's own count is synth-rv32's.
+synth-rv32-soc: | build
+	yosys -Q -T -l build/rv32-soc-synth.log -p 'read_verilog $(RV32_SOC_RTL); chparam -set RAM_WORDS 64 rv32_soc; synth -top rv32_soc; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32-soc.json'
+
 waves-rv32: $(RV32_TB_VVP) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl --mode waves --program loop --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
 	$(PYTHON) -m tools.rv32_rtl --mode waves --program full --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
@@ -268,7 +278,7 @@ run-rv32-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR) $(RV32EMU)
 bench-rv32-rtl: $(RV32_TB_VVP) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl --mode bench --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
 
-test-rv32: test-rv32-tools test-rv32-rt run-rv32-qemu test-rv32-emu run-rv32-emu diff-rv32-qemu test-rv32-rtl test-rv32-rtl-verilator run-rv32-rtl run-rv32-rtl-verilator lint-rv32 synth-rv32
+test-rv32: test-rv32-tools test-rv32-rt run-rv32-qemu test-rv32-emu run-rv32-emu diff-rv32-qemu test-rv32-rtl test-rv32-rtl-verilator run-rv32-rtl run-rv32-rtl-verilator lint-rv32 lint-rv32-soc synth-rv32 synth-rv32-soc
 
 disasm-rv32: firmware-rv32
 	cat build/rv32/selfcheck.lst

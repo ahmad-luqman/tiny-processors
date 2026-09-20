@@ -1,34 +1,27 @@
 `timescale 1ns/1ps
 
-// Testbench for the RV32 multicycle core: the RAM, the console, the done
-// register, a stall generator on the ready/valid port, and the retirement
-// trace printer that reproduces docs/rv32-emulator.md's trace contract.
-// Contract for its plusargs, counters, and halt line: docs/rv32-rtl.md.
+// Testbench for the RV32 machine (rtl/rv32/rv32_soc.v): the host side of
+// the devices (console bytes, the done word), a stall generator that holds
+// the bus, the image loader, and the retirement trace printer that
+// reproduces docs/rv32-emulator.md's trace contract. Contract for its
+// plusargs, counters, and halt line: docs/rv32-rtl.md.
 module rv32_tb;
     parameter integer RAM_WORDS = 1048576; // the contract's 4 MiB
-    localparam [31:0] RAM_BASE = 32'h8000_0000;
-    localparam [31:0] CONSOLE_BASE = 32'h1000_0000;
-    localparam [31:0] DONE_ADDR = 32'h0010_0000;
-    localparam [31:0] RAM_BYTES = RAM_WORDS * 4;
+    parameter integer CONSOLE_BUSY = 0;    // cycles the console waits before each byte
     localparam integer STDERR = 32'h8000_0002;
 
     reg clk = 0;
     reg reset = 1;
-    wire mem_valid, mem_we, mem_fetch, retire, retire_rd_we, trap, halted;
-    wire [31:0] mem_addr, mem_wdata, retire_pc, retire_insn, retire_rd_value, trap_value, pc;
+    wire mem_valid, mem_we, mem_fetch, mem_ready, mem_error, retire, retire_rd_we, trap, halted;
+    wire [31:0] mem_addr, mem_wdata, mem_rdata, retire_pc, retire_insn, retire_rd_value, trap_value, pc;
     wire [31:0] mtvec, mepc, mcause, mtval;
     wire [3:0] mem_strb, trap_cause;
     wire [4:0] retire_rd;
     wire [2:0] state;
-    reg mem_ready = 0;
-    reg [31:0] mem_rdata;
-    reg mem_error;
-
-    reg [31:0] ram [0:RAM_WORDS-1];
-    wire in_ram = (mem_addr >= RAM_BASE) && ((mem_addr - RAM_BASE) < RAM_BYTES);
-    wire [31:0] ram_index = (mem_addr - RAM_BASE) >> 2;
-    wire [31:0] ram_word = ram[ram_index]; // a continuous read keeps the array out of @* sensitivity
-    wire in_console = (mem_addr[31:3] == CONSOLE_BASE[31:3]);
+    wire console_valid, done_valid;
+    wire [7:0] console_byte;
+    wire [31:0] done_wdata;
+    reg mem_hold = 1; // acceptance deferred until the stall generator releases it
 
     // Stall generator and counters.
     integer stall = 0;          // +stall=N: fixed cycles per request
@@ -56,46 +49,25 @@ module rv32_tb;
     integer fd, i;
     reg finished = 0;
 
-    rv32 dut (.*);
+    rv32_soc #(.RAM_WORDS(RAM_WORDS), .CONSOLE_BUSY(CONSOLE_BUSY)) dut (.*);
     // The clock stops when the run ends, so the simulation drains without
     // $finish: Icarus and Verilator then exit silently and stdout stays the
     // guest console only.
     initial while (!finished) #5 clk = ~clk;
 
-    // Response: combinational from the request, sampled by the core at the
-    // accepting edge. Devices answer data accesses only; a fetch from one
-    // is refused like any other unmapped fetch.
-    always @* begin
-        mem_rdata = 32'd0;
-        mem_error = 1'b1;
-        if (in_ram) begin
-            mem_rdata = ram_word;
-            mem_error = 1'b0;
-        end else if (mem_fetch) begin
-            mem_error = 1'b1;
-        end else if (in_console) begin
-            if (mem_we)
-                mem_error = !(mem_addr[2:0] == 3'd0 && mem_strb == 4'b0001); // TX byte only
-            else if (mem_addr[2:0] == 3'd5 && mem_strb == 4'b0010) begin
-                mem_rdata = 32'h0000_2000; // status byte 0x20 in lane 1 of the word at +4
-                mem_error = 1'b0;          // a wider read of +4 is refused: the strobe says the width
-            end
-        end else if (mem_addr == DONE_ADDR) begin
-            mem_error = !(mem_we && mem_strb == 4'b1111);
-        end
-    end
-
-    // Drive ready away from the sampling edge; the delay is chosen once per request.
+    // Hold the bus away from the sampling edge; the delay is chosen once per
+    // request. The machine answers in the cycle the hold is released, so
+    // `mem_ready` is what this block used to drive directly.
     always @(negedge clk) begin
         if (reset || !mem_valid) begin
-            mem_ready = 0;
+            mem_hold = 1;
             delay_chosen = 0;
         end else begin
             if (!delay_chosen) begin
                 delay = random_stall ? ($unsigned($random(stall_seed)) % 4) : stall;
                 delay_chosen = 1;
             end
-            mem_ready = (request_age >= delay);
+            mem_hold = !(request_age >= delay);
         end
     end
 
@@ -172,21 +144,16 @@ module rv32_tb;
                     request_age = 0;
                     stalled_request = 0;
                     delay_chosen = 0;
-                    // An accepted write takes effect on exactly one device.
-                    if (!mem_error && mem_we) begin
-                        if (in_ram) begin
-                            if (mem_strb[0]) ram[ram_index][7:0] <= mem_wdata[7:0];
-                            if (mem_strb[1]) ram[ram_index][15:8] <= mem_wdata[15:8];
-                            if (mem_strb[2]) ram[ram_index][23:16] <= mem_wdata[23:16];
-                            if (mem_strb[3]) ram[ram_index][31:24] <= mem_wdata[31:24];
-                        end else if (in_console) begin
-                            // The guest console: a file when +console is given, else stdout.
-                            if (console_fd != 0) $fwrite(console_fd, "%c", mem_wdata[7:0]);
-                            else $write("%c", mem_wdata[7:0]);
-                        end else if (mem_addr == DONE_ADDR) begin
-                            done_pending = 1;
-                            done_word = mem_wdata;
-                        end
+                    // The host side of the devices: the machine's strobes say
+                    // what was accepted in this cycle, once.
+                    if (console_valid) begin
+                        // The guest console: a file when +console is given, else stdout.
+                        if (console_fd != 0) $fwrite(console_fd, "%c", console_byte);
+                        else $write("%c", console_byte);
+                    end
+                    if (done_valid) begin
+                        done_pending = 1;
+                        done_word = done_wdata;
                     end
                     if (!mem_fetch) begin
                         if (pending)
@@ -308,7 +275,8 @@ module rv32_tb;
             if (fd == 0) $fatal(1, "Cannot open wave file %0s", wave_path);
             $fclose(fd);
             $dumpfile(wave_path);
-            $dumpvars(0, rv32_tb.dut);
+            $dumpvars(0, rv32_tb.dut.core); // the whole core, as before the SoC existed
+            $dumpvars(1, rv32_tb.dut);      // plus the bus boundary and the device strobes
         end
         if ($value$plusargs("trace=%s", trace_path)) begin
             trace_fd = $fopen(trace_path, "w");
@@ -323,10 +291,12 @@ module rv32_tb;
         end
         image_words = count_words(image_path);
         if (image_words == 0 || image_words > RAM_WORDS) $fatal(1, "Image %0s has %0d words", image_path, image_words);
-        // The emulator allocates zero-filled RAM; unwritten words must read zero here too.
+        // The emulator allocates zero-filled RAM; unwritten words must read zero
+        // here too. The image is loaded through the hierarchy: the RAM module
+        // has no initial block, so synthesis never sees a file.
         for (i = 0; i < RAM_WORDS; i = i + 1)
-            ram[i] = 32'd0;
-        $readmemh(image_path, ram, 0, image_words - 1);
+            dut.ram.mem[i] = 32'd0;
+        $readmemh(image_path, dut.ram.mem, 0, image_words - 1);
         repeat (2) @(posedge clk);
         #1 reset = 0;
     end
