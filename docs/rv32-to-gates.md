@@ -67,7 +67,7 @@ The immediate decoder in [rv32_decode.v](../rtl/rv32/rv32_decode.v) is a five-wa
 | `MEM` | `mdr` | `mem_ready` |
 | `WRITEBACK` | the register file, `pc`, the retirement port | nothing |
 
-`FETCH` and `MEM` are the only states with `if (mem_ready)`: when the memory says no, the arm does nothing, so every register holds and the same request stays on the bus. That is the whole implementation of "held stable until accepted". The testbench checks it independently on every stalled edge by comparing the request fields with what they were on the previous edge.
+`FETCH` and `MEM` are the only states with `if (mem_ready)`: when the memory says no, the arm does nothing, so every register holds and the same request stays on the bus. That is the whole implementation of "held stable until accepted". The testbench checks it independently: on every edge that follows a stalled one, including the edge that finally accepts the request, it compares the request fields with what they were before and fails the run if anything moved.
 
 The port outputs are combinational functions of `state`:
 
