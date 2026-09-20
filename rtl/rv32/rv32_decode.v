@@ -3,8 +3,9 @@
 // Combinational instruction decoder: register fields, the sign-extended
 // immediate for each format, one flag per M3 instruction class, and two
 // stop conditions. `illegal` follows the machine contract (the emulator
-// traps the same words); `unsupported` marks valid RV32I this slice does
-// not execute yet and disappears in M4.
+// traps the same words); `unsupported` is everything else the slice does
+// not execute, derived from the class flags so a forgotten arm halts
+// instead of retiring as a no-op. M4 empties the unsupported set.
 module rv32_decode (
     input  wire [31:0] insn,
     output wire [4:0]  rd,
@@ -25,7 +26,7 @@ module rv32_decode (
     output wire        is_ebreak,
     output wire        writes_rd,
     output reg         illegal,
-    output reg         unsupported
+    output wire        unsupported
 );
     localparam [6:0] OP_LUI = 7'h37, OP_AUIPC = 7'h17, OP_JAL = 7'h6F, OP_JALR = 7'h67,
                      OP_BRANCH = 7'h63, OP_LOAD = 7'h03, OP_STORE = 7'h23,
@@ -42,6 +43,7 @@ module rv32_decode (
 
     // The four existing CSRs; any other number is illegal on the machine.
     wire csr_exists = (csr == 12'h305) || (csr == 12'h341) || (csr == 12'h342) || (csr == 12'h343);
+    wire is_mret = (insn == 32'h30200073);
 
     assign is_lui = (opcode == OP_LUI);
     assign is_auipc = (opcode == OP_AUIPC);
@@ -70,55 +72,29 @@ module rv32_decode (
         endcase
     end
 
-    // Classify everything the slice does not execute. Assign both outputs on
-    // every path so no latch is inferred.
+    // What the machine rejects, opcode by opcode, mirroring the emulator's
+    // `goto illegal` paths in tools/rv32emu.c. Every path assigns `illegal`.
     always @* begin
-        illegal = 1'b0;
-        unsupported = 1'b0;
         case (opcode)
-            OP_LUI, OP_AUIPC, OP_JAL: begin end
-            OP_JALR: if (funct3 == 3'd0) unsupported = 1'b1; else illegal = 1'b1;
-            OP_BRANCH: case (funct3)
-                3'd0, 3'd1: begin end
-                3'd4, 3'd5, 3'd6, 3'd7: unsupported = 1'b1;
-                default: illegal = 1'b1;
-            endcase
-            OP_LOAD: case (funct3)
-                3'd2: begin end
-                3'd0, 3'd1, 3'd4, 3'd5: unsupported = 1'b1;
-                default: illegal = 1'b1;
-            endcase
-            OP_STORE: case (funct3)
-                3'd0, 3'd2: begin end
-                3'd1: unsupported = 1'b1;
-                default: illegal = 1'b1;
-            endcase
-            OP_IMM: case (funct3)
-                3'd0: begin end
-                3'd1: if (funct7 == 7'd0) unsupported = 1'b1; else illegal = 1'b1;
-                3'd5: if (funct7 == 7'd0 || funct7 == 7'h20) unsupported = 1'b1; else illegal = 1'b1;
-                default: unsupported = 1'b1; // slti, sltiu, xori, ori, andi
-            endcase
-            OP_REG: begin
-                if (funct7 == 7'd0)
-                    unsupported = (funct3 != 3'd0); // add is ours; the rest wait for M4
-                else if (funct7 == 7'h20 && (funct3 == 3'd0 || funct3 == 3'd5))
-                    unsupported = (funct3 == 3'd5); // sub is ours, sra is not
-                else
-                    illegal = 1'b1; // includes every M-extension word (funct7 == 1)
-            end
-            OP_FENCE: if (funct3 == 3'd0) unsupported = 1'b1; else illegal = 1'b1; // fence.i is illegal
-            OP_SYSTEM: begin
-                if (funct3 == 3'd0) begin
-                    if (insn == 32'h30200073) unsupported = 1'b1;          // mret
-                    else if (!is_ecall && !is_ebreak) illegal = 1'b1;       // wfi, sret, ...
-                end else if (funct3 == 3'd4 || !csr_exists) begin
-                    illegal = 1'b1;
-                end else begin
-                    unsupported = 1'b1;                                     // csrrw/s/c and immediates
-                end
-            end
+            OP_LUI, OP_AUIPC, OP_JAL: illegal = 1'b0;
+            OP_JALR: illegal = (funct3 != 3'd0);
+            OP_BRANCH: illegal = (funct3 == 3'd2) || (funct3 == 3'd3);
+            OP_LOAD: illegal = (funct3 == 3'd3) || (funct3 > 3'd5);
+            OP_STORE: illegal = (funct3 > 3'd2);
+            OP_IMM: illegal = (funct3 == 3'd1 && funct7 != 7'd0) ||                    // slli with shamt bits set
+                              (funct3 == 3'd5 && funct7 != 7'd0 && funct7 != 7'h20);   // neither srli nor srai
+            OP_REG: illegal = !(funct7 == 7'd0 || (funct7 == 7'h20 && (funct3 == 3'd0 || funct3 == 3'd5))); // every M word
+            OP_FENCE: illegal = (funct3 != 3'd0);                                      // fence.i and the rest
+            OP_SYSTEM: illegal = (funct3 == 3'd0) ? !(is_ecall || is_ebreak || is_mret) // wfi, sret, odd fields
+                                                   : (funct3 == 3'd4 || !csr_exists);  // CSR ops on missing CSRs
             default: illegal = 1'b1;
         endcase
     end
+
+    // Executed by this slice; anything valid that is not listed here halts as
+    // unsupported (jalr, the other branches, ALU ops, shifts, sub-word loads,
+    // sh, fence, CSR ops, mret).
+    wire executes = is_lui || is_auipc || is_alu_imm || is_alu_reg || is_load || is_store ||
+                    is_branch || is_jal || is_ecall || is_ebreak;
+    assign unsupported = !executes && !illegal;
 endmodule

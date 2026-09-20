@@ -42,7 +42,7 @@ The core distinguishes two kinds of instruction it will not execute, and the tes
 - **Illegal on the machine, terminal fault.** An encoding the emulator also rejects (`mul` and every other M-extension word, `fence.i`, an unused `funct3`/`funct7`, an unknown opcode, `mstatus` and other CSRs the machine lacks) stops the core with `fault = 1`, `fault_cause = 2`, and `fault_value` holding the instruction word, exactly the `mcause`/`mtval` pair the emulator writes. `ecall` (cause 11, value 0) and `ebreak` (cause 3, value the PC) stop the core the same way, since they trap on the machine and the slice has nowhere to vector. The testbench prints the emulator's trap line and halts with `halt=fault`.
 - **Valid RV32I the slice does not implement, unsupported halt.** `jalr`, `lb`/`lh`/`lbu`/`lhu`, `sh`, `blt`/`bge`/`bltu`/`bgeu`, `slti`/`sltiu`/`xori`/`ori`/`andi`, the shifts, `sll`/`slt`/`sltu`/`xor`/`srl`/`sra`/`or`/`and`, `fence`, `csrrw`/`csrrs`/`csrrc` and their immediate forms on the four existing CSRs, and `mret` stop the core with `unsupported = 1`. The emulator executes these, so no trace line is printed for them: faking a trap would make the two backends disagree about the machine. The testbench halts with `halt=unsupported pc=<pc> word=<word>`, and the differential test checks that every earlier line matches the emulator and that the emulator's trace continues past that point. M4 removes this category.
 
-The decoder therefore has two outputs, `illegal` and `unsupported`; the machine-level illegal check is the one M4 keeps.
+The decoder therefore has two outputs. `illegal` is written arm by arm to mirror the emulator's `goto illegal` paths; `unsupported` is derived as "neither executed nor illegal", so an encoding that no arm names halts rather than retiring as a no-op. The illegal check is the one M4 keeps.
 
 ## Faults are terminal in M3
 
@@ -54,7 +54,7 @@ The core has no CSRs and no `mtvec`: a trap cannot vector anywhere, so every tra
 | 1 | fetch with `error` (outside RAM, or a device address) | the PC |
 | 2 | illegal encoding (above) | the instruction word |
 | 3 | `ebreak` | the PC |
-| 4, 6 | `lw`, `sw`/`sb` address not naturally aligned | the effective address |
+| 4, 6 | `lw`, `sw` address not word aligned (`sb` is always aligned) | the effective address |
 | 5, 7 | `lw`, `sw`/`sb` with `error` at acceptance | the effective address |
 | 11 | `ecall` | 0 |
 
@@ -78,7 +78,7 @@ The core drives the port from the [memory transaction contract](rv32.md#memory-t
 | `mem_ready` | in | Acceptance; sampled on the rising edge together with `mem_rdata` and `mem_error`. |
 | `mem_rdata[31:0]` | in | The full aligned word for a read. |
 | `mem_error` | in | The access was refused: the core raises cause 1, 5, or 7 and issues nothing further. |
-| `mem_fetch` | out | Sideband, not part of the contract: 1 while the request is an instruction fetch. The testbench uses it to keep device side effects off fetches and to attribute data transactions to the retiring instruction. |
+| `mem_fetch` | out | Sideband, not part of the contract: 1 while a request is presented and it is an instruction fetch. The testbench uses it to keep device side effects off fetches and to attribute data transactions to the retiring instruction. |
 
 A write takes effect exactly once, at acceptance. The core never changes `mem_addr`, `mem_we`, `mem_wstrb`, or `mem_wdata` while `mem_valid` is high and `mem_ready` is low; the testbench checks this on every cycle of a stall and fails the run if it is violated.
 
@@ -90,7 +90,7 @@ Five states in a 3-bit register plus a terminal `HALT`. One instruction visits f
 | --- | --- | --- | --- |
 | `FETCH` | Wait for `mem_ready`; capture `mem_rdata` into `ir` and the PC into `ir_pc`. `mem_error` → fault 1. | `mem_valid=1, mem_addr=pc, mem_fetch=1` | `DECODE` |
 | `DECODE` | Read `rs1`/`rs2` from the register file into `a`/`b`; the immediate and control fields are combinational from `ir`. `illegal` → fault 2; `unsupported` → halt; `ecall`/`ebreak` → fault 11/3. | idle | `EXECUTE` |
-| `EXECUTE` | The ALU computes `a op b`, `a + imm`, `pc + imm`, or the branch compare; capture `alu_out`. A misaligned load/store address → fault 4/6; a misaligned taken target → fault 0. | idle | `MEM` for `lw`/`sw`/`sb`, else `WRITEBACK` |
+| `EXECUTE` | The ALU computes `a op b`, `a + imm`, or `pc + imm` (the branch or jump target); a separate equality comparator decides a branch; capture `alu_out` and `taken`. A misaligned load/store address → fault 4/6; a misaligned taken target → fault 0. | idle | `MEM` for `lw`/`sw`/`sb`, else `WRITEBACK` |
 | `MEM` | Wait for `mem_ready`; capture `mem_rdata` into `mdr`. `mem_error` → fault 5/7. | `mem_valid=1, mem_addr=alu_out, mem_we/mem_wstrb/mem_wdata` for stores | `WRITEBACK` |
 | `WRITEBACK` | Write `rd` (unless `x0`), update the PC (`pc+4`, the branch/jump target), pulse `retire` for one cycle. | idle | `FETCH` |
 | `HALT` | Hold everything. Only `reset` leaves. | idle | `HALT` |
@@ -138,7 +138,7 @@ With a fixed stall of `N` cycles per request, `cycles = 4 × (retired non-memory
 rv32_tb: halt=<done|fault|unsupported|limit> cycles=N steps=N stalls=N transfers=N [done=WORD] [cause=C tval=V] [pc=P word=W] <pass|fail=<code>|error=<reason>>
 ```
 
-`steps` is the number of trace lines written, so it counts a terminal fault as the emulator's `steps` does. Guest outcomes end the simulation with `$finish` after this line; `$fatal` is reserved for harness violations: a request changing while stalled, a missing file, or a data transaction with no retirement after it.
+`steps` is the number of trace lines written, so it counts a terminal fault as the emulator's `steps` does. Guest outcomes stop the clock after this line. `$fatal` is reserved for harness violations: a request on the bus during reset, a request changing while stalled, a plusarg that is not a decimal (`+stall=abc`, `+max-cycles=0`, `+stall` together with `+stall-seed`), an unwritable `+wave` or `+trace` path, a missing image or one with a token that is not an eight-digit hex word, or a data transaction with no retirement after it. Both simulators print those diagnostics on stdout, so the Python side treats any diagnostic line there as a failed run whatever the exit status.
 
 ## Run and verify
 
@@ -156,13 +156,13 @@ The loop program is `program_loop` in [tools/rv32_asm.py](../tools/rv32_asm.py):
 
 ## Verification
 
-- `make test-rv32-rtl`: 11 tests in [tests/test_rv32_rtl.py](../tests/test_rv32_rtl.py), about 12 s including compiling the emulator and the testbench into a temporary directory. The loop trace equals the emulator's line for line with 0, 1, and 3 stall cycles per request and with seeded random stalls, and the cycle formula holds. A directed program covers every subset instruction with hand-computed anchors (a negative immediate, `sub` wraparound, `auipc` at a non-zero PC, a discarded `x0` write, both branch outcomes, a backward `jal`, four `sb` lanes read back as one word, a load of a word the image never wrote reading zero). Five illegal encodings plus `ecall` and `ebreak` fault with the emulator's cause and value; seventeen valid but unimplemented encodings halt as `unsupported` with no trace line while the emulator carries on; twelve memory and target faults (outside the map, misaligned, every console and done-register misuse, a `jal` and a taken branch to a non-word target, a fetch outside RAM) match the emulator's trap line; console bytes reach stdout and each done-word outcome is reported as the emulator reports it; a runaway loop hits `+max-cycles`, and a run whose terminal edge equals the limit is still reported as `done` or `fault`, once. Two helper tests pin the trace diff and the halt-line parser with literal strings.
-- `make test-rv32-rtl-verilator`: the same 11 tests on the Verilator build of the testbench (about 1 s once built).
+- `make test-rv32-rtl`: 19 tests in [tests/test_rv32_rtl.py](../tests/test_rv32_rtl.py), about 50 s including compiling the emulator and the testbench into a temporary directory. The loop trace equals the emulator's line for line with 0, 1, and 3 stall cycles per request and with seeded random stalls, and the cycle formula holds. A directed program covers every subset instruction with hand-computed anchors (a negative immediate, `sub` wraparound, `auipc` at a non-zero PC, a discarded `x0` write, both branch outcomes, a backward `jal`, four `sb` lanes read back as one word, a load of a word the image never wrote reading zero). Five illegal encodings plus `ecall` and `ebreak` fault with the emulator's cause and value; seventeen valid but unimplemented encodings halt as `unsupported` with no trace line while the emulator carries on; fifteen memory and target faults (outside the map, misaligned, seven console and done-register misuses, a `jal` and a taken branch to a non-word target, a fetch outside RAM) match the emulator's trap line, and the last RAM word is reachable; the split J, B, S, and I immediate fields are each exercised with an offset that sets one high bit, plus the extreme U and I immediates; a not-taken branch to a misaligned target does not fault; an opcode × funct3 sweep (with every funct7 class where it matters) agrees with the emulator on illegal, executed, or unsupported for 143 words; console bytes reach stdout, a byte above 0x7f is compared without crashing the host, and each done-word outcome including the 255/256 boundary is reported as the emulator reports it; a runaway loop hits `+max-cycles`, a run whose terminal edge equals the limit is still reported as `done` or `fault`, once, and a limit one cycle before the done store retires is a limit; bad plusargs, bad images, and an unwritable wave path fail on both simulators. The seeded run must actually stall. Six helper tests pin the trace diff, the halt-line parser and its per-reason key validation, the simulator command lines and the diagnostic filter, `check_passed`, the stale-trace truncation, and the encoder's bounds and helpers with literal values and no simulator.
+- `make test-rv32-rtl-verilator`: the same 19 tests on the Verilator build of the testbench (about 3 s once built).
 - `make lint-rv32`: Verilator `--Wall` on the four core files, no warnings.
-- `make synth-rv32`: Yosys `check -assert` and no latches; 5,644 cells, 1,331 flip-flops, counted in the [walkthrough](rv32-to-gates.md#7-what-synthesis-actually-built).
+- `make synth-rv32`: Yosys `check -assert` and no latches; 5,777 cells, 1,331 flip-flops, counted in the [walkthrough](rv32-to-gates.md#7-what-synthesis-actually-built).
 - `make waves-rv32` and `make bench-rv32-rtl`: the loop under `+stall=2` as a VCD, and the cycle table for stalls 0 to 3 and a seeded run. Both require the simulator to exit cleanly and report `halt=done ... pass`; a matching trace alone is not success.
 - The testbench fails the run if the core presents a request while `reset` is high, and reports `halt=limit ... error=limit` even when a done store was accepted but not yet retired when the limit hit.
-- `make test-rv32` runs M1, M2, and these after one another; `make test` is still the counter.
+- `make test-rv32` runs M1, M2, and these, on both simulators, after one another; `make test` is still the counter.
 
 What is not verified: the console status read (unreachable without byte loads), a fetch from a device address (unreachable without `jalr`), and any timing of the port beyond the testbench's stall generator. All three are M4 work.
 
@@ -170,9 +170,9 @@ What is not verified: the console status read (unreachable without byte loads), 
 
 Completed on 2026-09-20 on branch `m3-rv32-rtl`. From a clean `build/`:
 
-- `make test-rv32-rtl`: 11 tests pass on Icarus; `make test-rv32-rtl-verilator`: the same 11 on Verilator.
+- `make test-rv32-rtl`: 19 tests pass on Icarus; `make test-rv32-rtl-verilator`: the same 19 on Verilator.
 - The loop: 78 instructions on both backends, identical traces; 336 cycles unstalled, 102 transfers, and 102 more cycles per stall cycle.
-- `make lint-rv32` clean, `make synth-rv32` 5,644 cells with no latches.
+- `make lint-rv32` clean, `make synth-rv32` 5,777 cells with no latches.
 - `make test-rv32` (QEMU, emulator, QEMU differential, RTL, lint, synthesis) passes; counter, ALU, SAP8, and SIMD4 targets unchanged and passing.
 
 Limitations that remain: eleven instructions; faults halt instead of vectoring; no CSRs; word loads only; the testbench is the only memory model; one memory port with no overlap between fetch and execution. M4 broadens the core to full RV32I and runs the C self-check on it.

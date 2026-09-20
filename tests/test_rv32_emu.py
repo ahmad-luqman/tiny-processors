@@ -8,7 +8,6 @@ state dump, the trace, the console output, and the exit status.
 """
 
 from collections import namedtuple
-import os
 from pathlib import Path
 import resource
 import shutil
@@ -21,7 +20,7 @@ import unittest
 # The encoder lives in tools/rv32_asm.py so the RTL tests assemble the same words.
 from tools.rv32_asm import *  # noqa: F401,F403
 from tools.rv32_diff_qemu import compare, qemu_pcs, trace_pcs
-from tools.rv32_run_emu import halt_line
+from tools.rv32_run_emu import build_emulator, halt_line
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,9 +45,7 @@ class EmulatorTest(unittest.TestCase):
     def setUpClass(cls):
         cls.workdir = tempfile.TemporaryDirectory()
         cls.emulator = Path(cls.workdir.name) / "rv32emu"
-        compiler = os.environ.get("HOST_CC", "cc")
-        subprocess.run([compiler, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-o", str(cls.emulator),
-                        str(ROOT / "tools" / "rv32emu.c")], check=True)
+        build_emulator(cls.emulator)
 
     @classmethod
     def tearDownClass(cls):

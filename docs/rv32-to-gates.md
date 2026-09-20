@@ -1,6 +1,6 @@
 # From the emulator to a multicycle RV32I core
 
-Start with the [RTL contract](rv32-rtl.md), keep [rv32.v](../rtl/rv32/rv32.v) open, and have `build/rv32/rtl/loop.rtl.trace` and `loop.vcd` from `make waves-rv32` at hand. SAP8 taught controlled storage with an 8-bit accumulator and a three-state controller. The new ideas here are a register file that is nothing but flip-flops and muxes, a controller that waits on a memory that may not answer, and a retirement port that lets a hardware simulation be compared with a software emulator line for line.
+Start with the [RTL contract](rv32-rtl.md), keep [rv32.v](../rtl/rv32/rv32.v) open, and have `build/rv32/rtl/loop.rtl.trace` and `loop.vcd` from `make waves-rv32` at hand. SAP8 taught controlled storage with an 8-bit accumulator and a three-state controller plus STOP. The new ideas here are a register file that is nothing but flip-flops and muxes, a controller that waits on a memory that may not answer, and a retirement port that lets a hardware simulation be compared with a software emulator line for line.
 
 ## 1. Connect the blocks
 
@@ -38,9 +38,9 @@ Every box that says flip-flops captures on a rising edge when the controller ena
 
 [rv32_regfile.v](../rtl/rv32/rv32_regfile.v) declares `reg [31:0] regs [1:31]` and writes it in one clocked block. Yosys turns that into **992 flip-flops** (31 × 32) with synchronous reset and a per-register enable: the write address decodes to one enable, the write data fans out to every register, and only the enabled one captures. The register the emulator writes with `m->x[rd] = result` is a decoder plus 992 enables here.
 
-The two read ports are `assign rdata1 = (raddr1 == 0) ? 0 : regs[raddr1]`. There is no "read" operation in hardware: each port is a 32-to-1 multiplexer, 32 bits wide, whose select is the register number. Yosys reports **1,442 `$_MUX_` cells** in the register file alone, most of the design's 1,636. Nothing in the core costs more than being able to read any two registers at once, which is why real cores are careful about how many read ports they add.
+The two read ports are `assign rdata1 = (raddr1 == 0) ? 0 : regs[raddr1]`. There is no "read" operation in hardware: each port is a 32-to-1 multiplexer, 32 bits wide, whose select is the register number. Yosys reports **1,367 `$_MUX_` cells** in the register file alone, most of the design's 1,562. Nothing in the core costs more than being able to read any two registers at once, which is why real cores are careful about how many read ports they add.
 
-`x0` is not a register. `raddr == 0` bypasses the mux with a constant zero, and `we && waddr != 0` discards the write, so the core never checks for `x0` anywhere else; the trace simply never shows an `x0=` field because `retire_rd_we` is computed from the same condition.
+`x0` is not a register. `raddr == 0` bypasses the mux with a constant zero, and `we && waddr != 0` discards the write. The datapath never tests for `x0` anywhere else; the one other test, `rd_written` in `rv32.v`, feeds both the write enable and `retire_rd_we`, which is why the trace never shows an `x0=` field.
 
 ## 3. The operand muxes and the one adder
 
@@ -53,7 +53,7 @@ wire [31:0] alu_b = is_alu_reg ? b : imm;
 
 `uses_pc` is true for `auipc`, branches, and `jal`, so branch targets and `auipc` results come out of the same adder that computes `addi` and load/store addresses. Subtraction is `a + ~b + 1` with the subtract bit as the carry-in, the same trick as in the [ALU lab](alu-to-gates.md). The branch decision is a separate equality comparator on `a` and `b` (`rs_equal`), because the adder is busy with the target address in the same cycle.
 
-The immediate decoder in [rv32_decode.v](../rtl/rv32/rv32_decode.v) is a five-way mux over bit rearrangements of `ir`. Every RV32I format puts the sign bit at `ir[31]`, so sign extension is `{{20{insn[31]}}, ...}`: twenty copies of one wire. There is no arithmetic in it at all.
+The immediate decoder in [rv32_decode.v](../rtl/rv32/rv32_decode.v) is a five-way mux over bit rearrangements of `ir`. Every RV32I format puts the sign bit at `ir[31]`, so sign extension is `{{20{insn[31]}}, ...}`: twelve to twenty-one copies of one wire, depending on the format. There is no arithmetic in it at all.
 
 ## 4. The controller is three flip-flops plus next-state logic
 
@@ -69,13 +69,16 @@ The immediate decoder in [rv32_decode.v](../rtl/rv32/rv32_decode.v) is a five-wa
 
 `FETCH` and `MEM` are the only states with `if (mem_ready)`: when the memory says no, the arm does nothing, so every register holds and the same request stays on the bus. That is the whole implementation of "held stable until accepted". The testbench checks it independently: on every edge that follows a stalled one, including the edge that finally accepts the request, it compares the request fields with what they were before and fails the run if anything moved.
 
-The port outputs are combinational functions of `state`:
+The port outputs are combinational functions of `state` and `reset`:
 
 ```verilog
-assign mem_valid = (state == FETCH) || (state == MEM);
+assign mem_valid = !reset && ((state == FETCH) || (state == MEM));
+assign mem_fetch = mem_valid && (state == FETCH);
 assign mem_addr = mem_fetch ? pc : alu_out;
-assign mem_we = (state == MEM) && is_store;
+assign mem_we = mem_valid && (state == MEM) && is_store;
 ```
+
+The `!reset` gate exists because the state register already reads `FETCH` during reset; without it the core would present a fetch on every reset cycle, and the testbench now fails any request it sees while `reset` is high.
 
 So "issuing a request" is not an action; it is what the wires say while the controller is in one of two states. Leaving the state is what withdraws it.
 
@@ -110,7 +113,7 @@ Six edges for one instruction: four states plus two stalls. The testbench prints
 | 335 ns | Accepted: the testbench RAM captures the word on this edge, exactly once. `WRITEBACK`. |
 | 345 ns | `retire=1`, no register write (`retire_rd_we=0`); the testbench prints `mem[80000100]<-00000000/4` from the transaction it recorded at 335 ns. |
 
-Nine edges: five states plus four stalls. The write happened two edges before the instruction retired; the trace line still describes it as the instruction's effect because the testbench attributes every accepted data transaction to the next retirement.
+Nine edges: five states plus four stalls. The write happened on the edge before the retiring one; the trace line still describes it as the instruction's effect because the testbench attributes every accepted data transaction to the next retirement.
 
 ## 6. Instruction count versus clock count
 
@@ -130,19 +133,19 @@ The emulator cannot produce any of these numbers. The trace it defines deliberat
 
 ## 7. What synthesis actually built
 
-`make synth-rv32` on Yosys 0.69+post: **5,644 generic cells**, no latches (`select -assert-none t:*LATCH*` passes), hierarchy preserved:
+`make synth-rv32` on Yosys 0.69+post: **5,777 generic cells**, no latches (`select -assert-none t:*LATCH*` passes), hierarchy preserved:
 
 | Module | Cells | Flip-flops | Muxes |
 | --- | ---: | ---: | ---: |
-| `rv32_regfile` | 4,019 | 992 | 1,442 |
-| `rv32` (controller, datapath registers, port, retirement port) | 1,243 | 339 | 172 |
-| `rv32_decode` | 195 | 0 | 0 |
-| `rv32_alu` | 187 | 0 | 0 |
-| Total | 5,644 | 1,331 | 1,636 |
+| `rv32_regfile` | 4,177 | 992 | 1,367 |
+| `rv32` (controller, datapath registers, port, retirement port) | 1,244 | 339 | 172 |
+| `rv32_decode` | 169 | 0 | 22 |
+| `rv32_alu` | 187 | 0 | 1 |
+| Total | 5,777 | 1,331 | 1,562 |
 
-The register file is 71 percent of the core, and its flip-flops are exactly 31 × 32. The top level's 339 flip-flops need a closer look. The registers declared there add up to 370 bits: `pc`, `ir`, `ir_pc`, `a`, `b`, `alu_out`, `mdr`, `retire_pc`, `retire_insn`, `retire_rd_value`, `fault_value` (11 × 32), `retire_rd` (5), `fault_cause` (4), `state` (3), and six single bits. Yosys removed 31: `retire_pc` and `ir_pc` both capture `pc` on the same edge and differ only in their reset value, so bits 30:0 are the same flip-flop and Yosys kept one copy for both. The remaining `retire_pc` bit is bit 31, the one that resets to a different value. Two cells are `$_SDFFE_PP1P_` (reset to one): bit 31 of `pc` and of `ir_pc`, because the reset PC is `0x8000_0000`.
+The register file is 72 percent of the core, and its flip-flops are exactly 31 × 32. Its cell count is not a property of the file alone: the same `rv32_regfile.v` came out at 4,019 cells in an earlier run with a different decoder, and at 4,400 synthesized on its own, because ABC's optimizer is sensitive to the order and content of the whole netlist it receives. Flip-flop counts are exact; gate counts are reproducible for a given tree, not for a file. The top level's 339 flip-flops need a closer look. The registers declared there add up to 370 bits: `pc`, `ir`, `ir_pc`, `a`, `b`, `alu_out`, `mdr`, `retire_pc`, `retire_insn`, `retire_rd_value`, `fault_value` (11 × 32), `retire_rd` (5), `fault_cause` (4), `state` (3), and six single bits. Yosys removed 31: `retire_pc` and `ir_pc` both capture `pc` on the same edge and differ only in their reset value, so bits 30:0 are the same flip-flop and Yosys kept one copy for both. The remaining `retire_pc` bit is bit 31, the one that resets to a different value. Two cells are `$_SDFFE_PP1P_` (reset to one): bit 31 of `pc` and of `ir_pc`, because the reset PC is `0x8000_0000`.
 
-The 172 top-level muxes are the operand selects (`alu_a`, `alu_b`), the `rd` value select, the address select on the port, and the per-register enables' data paths. The decoder is 195 gates with no storage, as its `always @*` blocks intend. The counts exclude the RAM and devices, which live in the testbench; there is no placement, routing, or frequency claim.
+The 172 top-level muxes are the operand selects (`alu_a`, `alu_b`), the `rd` value select, the address, strobe, and data selects on the port, and the cause and value selects in `stop`. The decoder is 169 gates with no storage, as its `always @*` blocks intend; `unsupported` is derived from the class flags (`!executes && !illegal`), so an encoding no arm names halts instead of retiring as a no-op. The counts exclude the RAM and devices, which live in the testbench; there is no placement, routing, or frequency claim.
 
 ## 8. Exercises
 

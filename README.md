@@ -93,10 +93,10 @@ QEMU boots the image with the bare `rv32i` CPU model; all 28 checks pass, the gu
 [rtl/rv32/](rtl/rv32/) is the first hardware for the machine: a register file, an add/subtract ALU, an immediate decoder, and a five-state controller driving the contract's ready/valid memory port. It runs eleven instructions (`lui`, `auipc`, `addi`, `add`, `sub`, `lw`, `sw`, `sb`, `beq`, `bne`, `jal`); everything else halts as a terminal fault with the emulator's cause code or as `unsupported`. The testbench is the RAM, console, and done register, stalls the port on request, and prints the emulator's retirement trace, so a Python test diffs the two backends line for line.
 
 ```sh
-make test-rv32-rtl            # 11 differential tests: emulator vs Icarus, fixed and random stalls
+make test-rv32-rtl            # 19 tests: emulator vs Icarus, differential and harness, fixed and random stalls
 make test-rv32-rtl-verilator  # the same tests on a Verilator build of the testbench
 make lint-rv32                # verilator --Wall on the core
-make synth-rv32               # yosys: no latches; 5,644 cells, 1,331 flip-flops
+make synth-rv32               # yosys: no latches; 5,777 cells, 1,331 flip-flops
 make waves-rv32               # the loop with two stall cycles per request as a VCD
 make bench-rv32-rtl           # cycles, stalls, and transfers for the loop at each stall depth
 ```

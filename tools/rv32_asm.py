@@ -2,9 +2,11 @@
 
 The format encoders are written from the RV32I instruction format diagrams
 (unprivileged specification, chapter 2) independently of the emulator's and
-the RTL's decoders. Registers are numbers so nothing hides behind ABI names;
-`LI` and `FINISH` always emit a fixed number of words so program offsets stay
-predictable. `program_loop` is the canonical M3 loop that both backends run.
+the RTL's decoders, and refuse operands that do not fit their field: a wrong
+register or immediate would otherwise encode a different valid instruction.
+Registers are numbers so nothing hides behind ABI names; `LI` and `FINISH`
+always emit a fixed number of words so program offsets stay predictable.
+`program_loop` is the canonical M3 loop that both backends run.
 """
 
 RAM = 0x80000000
@@ -13,34 +15,55 @@ DONE = 0x00100000
 M = 0xFFFFFFFF
 
 
+def _reg(x):
+    assert 0 <= x < 32, f"register x{x} does not exist"
+    return x
+
+
+def _field(value, bits, name):
+    """A field of `bits` bits, given as a signed or an unsigned number; returns the bit pattern."""
+    assert -(1 << (bits - 1)) <= value < (1 << bits), f"{name} {value:#x} does not fit {bits} bits"
+    return value & ((1 << bits) - 1)
+
+
+def _offset(value, bits, name):
+    """A branch or jump offset: even, `bits` bits signed."""
+    assert value % 2 == 0, f"{name} {value:#x} is odd"
+    assert -(1 << (bits - 1)) <= value < (1 << (bits - 1)), f"{name} {value:#x} does not fit {bits} bits"
+    return value & ((1 << bits) - 1)
+
+
 # Instruction formats (RV32I unprivileged specification, chapter 2).
 def r_type(opcode, rd, funct3, rs1, rs2, funct7):
-    return (funct7 << 25) | (rs2 << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | opcode
+    return (_field(funct7, 7, "funct7") << 25) | (_reg(rs2) << 20) | (_reg(rs1) << 15) \
+        | (_field(funct3, 3, "funct3") << 12) | (_reg(rd) << 7) | _field(opcode, 7, "opcode")
 
 
 def i_type(opcode, rd, funct3, rs1, imm):
-    return ((imm & 0xFFF) << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | opcode
+    return (_field(imm, 12, "immediate") << 20) | (_reg(rs1) << 15) | (_field(funct3, 3, "funct3") << 12) \
+        | (_reg(rd) << 7) | _field(opcode, 7, "opcode")
 
 
 def s_type(opcode, funct3, rs1, rs2, imm):
-    imm &= 0xFFF
-    return ((imm >> 5) << 25) | (rs2 << 20) | (rs1 << 15) | (funct3 << 12) | ((imm & 0x1F) << 7) | opcode
+    imm = _field(imm, 12, "immediate")
+    return ((imm >> 5) << 25) | (_reg(rs2) << 20) | (_reg(rs1) << 15) | (_field(funct3, 3, "funct3") << 12) \
+        | ((imm & 0x1F) << 7) | _field(opcode, 7, "opcode")
 
 
 def b_type(funct3, rs1, rs2, offset):
-    offset &= 0x1FFF
-    return ((offset >> 12) << 31) | (((offset >> 5) & 0x3F) << 25) | (rs2 << 20) | (rs1 << 15) \
-        | (funct3 << 12) | (((offset >> 1) & 0xF) << 8) | (((offset >> 11) & 1) << 7) | 0x63
+    offset = _offset(offset, 13, "branch offset")
+    return ((offset >> 12) << 31) | (((offset >> 5) & 0x3F) << 25) | (_reg(rs2) << 20) | (_reg(rs1) << 15) \
+        | (_field(funct3, 3, "funct3") << 12) | (((offset >> 1) & 0xF) << 8) | (((offset >> 11) & 1) << 7) | 0x63
 
 
 def u_type(opcode, rd, imm20):
-    return ((imm20 & 0xFFFFF) << 12) | (rd << 7) | opcode
+    return (_field(imm20, 20, "upper immediate") << 12) | (_reg(rd) << 7) | _field(opcode, 7, "opcode")
 
 
 def j_type(rd, offset):
-    offset &= 0x1FFFFF
+    offset = _offset(offset, 21, "jump offset")
     return ((offset >> 20) << 31) | (((offset >> 1) & 0x3FF) << 21) | (((offset >> 11) & 1) << 20) \
-        | (((offset >> 12) & 0xFF) << 12) | (rd << 7) | 0x6F
+        | (((offset >> 12) & 0xFF) << 12) | (_reg(rd) << 7) | 0x6F
 
 
 # Mnemonics; registers are numbers so nothing is hidden behind ABI names.
@@ -108,6 +131,7 @@ def FINISH(word=0x5555):
 
 
 LOOP_DATA = RAM + 0x100  # the loop's data word lies past the image, so it starts as zero
+LOOP_MAX_N = 63          # the expected sum n(n+1)/2 must fit addi's 12-bit immediate
 
 
 def program_loop(n=10):
@@ -115,12 +139,14 @@ def program_loop(n=10):
 
     Every instruction of the M3 subset appears, with a negative branch offset, a
     skipped instruction after `jal`, a byte store into a word the image never
-    wrote, and one taken and one not-taken `beq`. Ends with the pass word.
+    wrote, and one taken and one not-taken `beq`. Ends with the pass word. The
+    pass word does not depend on the sum: the trace, not the done word, is what
+    the tests check.
     """
-    assert 1 <= n <= 0x7FF
+    assert 1 <= n <= LOOP_MAX_N, f"n must be 1..{LOOP_MAX_N}"
     return [
         AUIPC(5, 0),            # 0  x5 = this PC (RAM base)
-        ADDI(5, 5, 0x100),      # 1  x5 = data word address
+        ADDI(5, 5, LOOP_DATA - RAM),  # 1  x5 = data word address
         ADDI(6, 0, n),          # 2  x6 = n
         ADDI(7, 0, 0),          # 3  x7 = i = 0
         SW(7, 5, 0),            # 4  sum = 0

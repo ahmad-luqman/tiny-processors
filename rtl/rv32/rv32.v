@@ -61,7 +61,8 @@ module rv32 (
 
     // Register file: written in WRITEBACK, read in DECODE.
     wire [31:0] rs1_value, rs2_value;
-    wire rf_we = (state == WRITEBACK) && writes_rd;
+    wire rd_written = writes_rd && (rd != 5'd0); // one x0 test for the write and the trace
+    wire rf_we = (state == WRITEBACK) && rd_written;
     wire [31:0] rd_value = is_load ? mdr : is_jal ? ir_pc + 32'd4 : alu_out;
 
     rv32_regfile regfile (
@@ -87,8 +88,8 @@ module rv32 (
     // Memory port: a fetch in FETCH, a data access in MEM, nothing otherwise
     // and nothing while reset is asserted (the state register already says
     // FETCH then, so the gate is explicit).
-    assign mem_fetch = (state == FETCH);
     assign mem_valid = !reset && ((state == FETCH) || (state == MEM));
+    assign mem_fetch = mem_valid && (state == FETCH);
     assign mem_addr = mem_fetch ? pc : alu_out;
     assign mem_we = mem_valid && (state == MEM) && is_store;
     assign mem_wstrb = !mem_we ? 4'b0000 :
@@ -182,7 +183,7 @@ module rv32 (
                     // The register file samples rf_we/rd_value on this same edge.
                     pc <= (is_jal || taken) ? alu_out : ir_pc + 32'd4;
                     retire <= 1'b1;
-                    retire_rd_we <= writes_rd && (rd != 5'd0);
+                    retire_rd_we <= rd_written;
                     retire_rd <= rd;
                     retire_rd_value <= rd_value;
                     state <= FETCH;

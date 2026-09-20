@@ -261,7 +261,7 @@ waves-rv32: $(RV32_TB_VVP) $(RV32EMU)
 bench-rv32-rtl: $(RV32_TB_VVP) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl --mode bench --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
 
-test-rv32: test-rv32-tools test-rv32-rt run-rv32-qemu test-rv32-emu run-rv32-emu diff-rv32-qemu test-rv32-rtl lint-rv32 synth-rv32
+test-rv32: test-rv32-tools test-rv32-rt run-rv32-qemu test-rv32-emu run-rv32-emu diff-rv32-qemu test-rv32-rtl test-rv32-rtl-verilator lint-rv32 synth-rv32
 
 disasm-rv32: firmware-rv32
 	cat build/rv32/selfcheck.lst

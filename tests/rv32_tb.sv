@@ -32,12 +32,13 @@ module rv32_tb;
     // Stall generator and counters.
     integer stall = 0;          // +stall=N: fixed cycles per request
     integer stall_seed = 0;     // +stall-seed=S: 0..3 cycles per request from $random
-    reg random_stall = 0;
+    reg stall_given = 0, random_stall = 0;
     integer delay = 0;
     reg delay_chosen = 0;
     integer request_age = 0;
     reg stalled_request = 0;
-    reg [69:0] held_request;    // {mem_fetch, mem_we, mem_wstrb, mem_addr, mem_wdata}
+    wire [69:0] request = {mem_fetch, mem_we, mem_wstrb, mem_addr, mem_wdata};
+    reg [69:0] held_request;    // the request as it was on the first stalled edge
     integer cycles = 0, steps = 0, stalls = 0, transfers = 0;
     integer max_cycles = 1000000;
 
@@ -48,11 +49,10 @@ module rv32_tb;
     reg done_pending = 0;
     reg [31:0] done_word;
 
-    string image_path, trace_path, wave_path;
+    string image_path, trace_path, wave_path, text;
     integer trace_fd = 0;
     integer image_words = 0;
-    integer i;
-
+    integer fd, i;
     reg finished = 0;
 
     rv32 dut (.*);
@@ -163,7 +163,7 @@ module rv32_tb;
             cycles = cycles + 1;
             // The contract: nothing about a request changes while it waits,
             // including on the edge that finally accepts it.
-            if (stalled_request && {mem_valid, mem_fetch, mem_we, mem_wstrb, mem_addr, mem_wdata} !== {1'b1, held_request})
+            if (stalled_request && (mem_valid !== 1'b1 || request !== held_request))
                 $fatal(1, "Request changed while stalled at cycle %0d", cycles);
             if (mem_valid) begin
                 if (mem_ready) begin
@@ -171,17 +171,19 @@ module rv32_tb;
                     request_age = 0;
                     stalled_request = 0;
                     delay_chosen = 0;
-                    if (!mem_error && mem_we && in_ram) begin
-                        if (mem_wstrb[0]) ram[ram_index][7:0] <= mem_wdata[7:0];
-                        if (mem_wstrb[1]) ram[ram_index][15:8] <= mem_wdata[15:8];
-                        if (mem_wstrb[2]) ram[ram_index][23:16] <= mem_wdata[23:16];
-                        if (mem_wstrb[3]) ram[ram_index][31:24] <= mem_wdata[31:24];
-                    end
-                    if (!mem_error && mem_we && in_console)
-                        $write("%c", mem_wdata[7:0]);
-                    if (!mem_error && mem_we && mem_addr == DONE_ADDR) begin
-                        done_pending = 1;
-                        done_word = mem_wdata;
+                    // An accepted write takes effect on exactly one device.
+                    if (!mem_error && mem_we) begin
+                        if (in_ram) begin
+                            if (mem_wstrb[0]) ram[ram_index][7:0] <= mem_wdata[7:0];
+                            if (mem_wstrb[1]) ram[ram_index][15:8] <= mem_wdata[15:8];
+                            if (mem_wstrb[2]) ram[ram_index][23:16] <= mem_wdata[23:16];
+                            if (mem_wstrb[3]) ram[ram_index][31:24] <= mem_wdata[31:24];
+                        end else if (in_console) begin
+                            $write("%c", mem_wdata[7:0]);
+                        end else if (mem_addr == DONE_ADDR) begin
+                            done_pending = 1;
+                            done_word = mem_wdata;
+                        end
                     end
                     if (!mem_fetch) begin
                         if (pending)
@@ -196,7 +198,7 @@ module rv32_tb;
                     stalls = stalls + 1;
                     request_age = request_age + 1;
                     stalled_request = 1;
-                    held_request = {mem_fetch, mem_we, mem_wstrb, mem_addr, mem_wdata};
+                    held_request = request;
                 end
             end else begin
                 request_age = 0;
@@ -235,31 +237,63 @@ module rv32_tb;
         end
     end
 
-    // Count the image's words so $readmemh gets an exact range: Icarus warns
-    // when a file is shorter than the whole array, and the RAM is 1M words.
-    // %s skips whitespace, so blank lines and trailing newlines do not count.
+    // Numeric plusargs are read as text and must round-trip through %0d, so
+    // "abc", "3junk", an empty value, or a number past 2^31-1 is refused
+    // instead of silently becoming zero or wrapping.
+    function integer plusarg_count;
+        input string name;
+        input string value_text;
+        input integer minimum;
+        integer value;
+        begin
+            // %d accepts x and z as digits, so an unknown value is refused explicitly.
+            if ($sscanf(value_text, "%d", value) != 1 || (^value) === 1'bx ||
+                $sformatf("%0d", value) != value_text || value < minimum)
+                $fatal(1, "+%0s=%0s must be a decimal of at least %0d", name, value_text, minimum);
+            plusarg_count = value;
+        end
+    endfunction
+
+    // Count the image's words so $readmemh gets an exact range (Icarus warns
+    // when a file is shorter than the whole array, and the RAM is 1M words)
+    // and refuse anything that is not a hex word, because Icarus's $readmemh
+    // keeps going after a bad token and the run would look like a decode fault.
     function integer count_words;
         input string path;
         integer fd;
         string token;
+        reg [31:0] value;
         begin
             count_words = 0;
             fd = $fopen(path, "r");
             if (fd == 0) $fatal(1, "Cannot open %0s", path);
-            while ($fscanf(fd, "%s", token) == 1)
+            // A word must read back as itself: eight lowercase hex digits, no x/z.
+            while ($fscanf(fd, "%s", token) == 1) begin
+                if ($sscanf(token, "%h", value) != 1 || (^value) === 1'bx || $sformatf("%h", value) != token)
+                    $fatal(1, "Image %0s word %0d: '%0s' is not an eight-digit hex word", path, count_words, token);
                 count_words = count_words + 1;
+            end
             $fclose(fd);
         end
     endfunction
 
     initial begin
-        $timeformat(-9, 0, " ns", 8);
         if (!$value$plusargs("image=%s", image_path)) $fatal(1, "Missing +image=FILE");
-        if ($value$plusargs("stall=%d", stall)) begin end
-        if ($value$plusargs("stall-seed=%d", stall_seed)) random_stall = 1;
-        if ($value$plusargs("max-cycles=%d", max_cycles)) begin end
-        if (stall < 0 || max_cycles <= 0) $fatal(1, "+stall and +max-cycles must not be negative");
+        if ($value$plusargs("stall=%s", text)) begin
+            stall = plusarg_count("stall", text, 0);
+            stall_given = 1;
+        end
+        if ($value$plusargs("stall-seed=%s", text)) begin
+            stall_seed = plusarg_count("stall-seed", text, 0);
+            random_stall = 1;
+        end
+        if (stall_given && random_stall) $fatal(1, "+stall and +stall-seed are exclusive");
+        if ($value$plusargs("max-cycles=%s", text))
+            max_cycles = plusarg_count("max-cycles", text, 1);
         if ($value$plusargs("wave=%s", wave_path)) begin
+            fd = $fopen(wave_path, "w"); // prove the path is writable: Verilator drops a bad VCD silently
+            if (fd == 0) $fatal(1, "Cannot open wave file %0s", wave_path);
+            $fclose(fd);
             $dumpfile(wave_path);
             $dumpvars(0, rv32_tb.dut);
         end

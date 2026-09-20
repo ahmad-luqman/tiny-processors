@@ -17,7 +17,8 @@ module rv32_regfile (
     reg [31:0] regs [1:31];
     integer i;
 
-    // A write to x0 is discarded here, so the rest of the core never checks.
+    // A write to x0 is discarded here; the datapath never tests for x0 again
+    // (only the retirement port repeats the test, to suppress the trace field).
     always @(posedge clk) begin
         if (reset) begin
             for (i = 1; i < 32; i = i + 1)
