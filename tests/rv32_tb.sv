@@ -131,7 +131,7 @@ module rv32_tb;
         begin
             $fwrite(STDERR, "rv32_tb: halt=%0s cycles=%0d steps=%0d stalls=%0d transfers=%0d",
                     halt_name, cycles, steps, stalls, transfers);
-            if (done_pending) begin
+            if (halt_name == "done") begin
                 $fwrite(STDERR, " done=%h", done_word);
                 if (done_word == 32'h5555)
                     $fwrite(STDERR, " pass");
@@ -141,12 +141,12 @@ module rv32_tb;
                     $fwrite(STDERR, " error=reserved-reset-word");
                 else
                     $fwrite(STDERR, " error=undefined-done-word");
-            end else if (fault) begin
+            end else if (halt_name == "fault") begin
                 $fwrite(STDERR, " cause=%0d tval=%h error=fault", fault_cause, fault_value);
-            end else if (unsupported) begin
+            end else if (halt_name == "unsupported") begin
                 $fwrite(STDERR, " pc=%h word=%h error=unsupported", retire_pc, retire_insn);
             end else begin
-                $fwrite(STDERR, " error=limit");
+                $fwrite(STDERR, " error=limit"); // even if a done store was accepted but never retired
             end
             $fwrite(STDERR, "\n");
             if (trace_fd != 0) $fclose(trace_fd);
@@ -157,6 +157,8 @@ module rv32_tb;
     // Handshake bookkeeping samples the pre-edge request; the trace samples
     // the core's registered retirement just after the edge.
     always @(posedge clk) begin
+        if (reset && (mem_valid !== 0 || mem_we !== 0))
+            $fatal(1, "Request on the bus during reset");
         if (!reset) begin
             cycles = cycles + 1;
             // The contract: nothing about a request changes while it waits,

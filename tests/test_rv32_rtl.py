@@ -252,6 +252,10 @@ class RtlTest(unittest.TestCase):
         emulator, rtl = self.assert_same_pass(program_loop(), stall=0, max_cycles=336)
         self.assertEqual(rtl.halt["cycles"], 336)
         self.assertEqual(rtl.stderr.count("rv32_tb: halt="), 1, rtl.stderr)
+        # One cycle earlier the done store has been accepted but not retired: that is a limit, not a pass.
+        emulator, rtl = self.run_both(program_loop(), stall=0, max_cycles=335)
+        self.assertEqual((rtl.halt["halt"], rtl.halt["outcome"], rtl.halt.get("done")), ("limit", "error=limit", None), rtl.stderr)
+        self.assertEqual(len(rtl.trace), 77)
         emulator, rtl = self.run_both([ADDI(1, 0, 1), ECALL()], stall=0, max_cycles=6)
         self.assertEqual((rtl.halt["halt"], rtl.halt["cycles"], rtl.halt["cause"]), ("fault", 6, 11), rtl.stderr)
         self.assertEqual(rtl.stderr.count("rv32_tb: halt="), 1, rtl.stderr)

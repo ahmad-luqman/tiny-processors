@@ -96,7 +96,7 @@ QEMU boots the image with the bare `rv32i` CPU model; all 28 checks pass, the gu
 make test-rv32-rtl            # 11 differential tests: emulator vs Icarus, fixed and random stalls
 make test-rv32-rtl-verilator  # the same tests on a Verilator build of the testbench
 make lint-rv32                # verilator --Wall on the core
-make synth-rv32               # yosys: no latches; 5,643 cells, 1,331 flip-flops
+make synth-rv32               # yosys: no latches; 5,644 cells, 1,331 flip-flops
 make waves-rv32               # the loop with two stall cycles per request as a VCD
 make bench-rv32-rtl           # cycles, stalls, and transfers for the loop at each stall depth
 ```

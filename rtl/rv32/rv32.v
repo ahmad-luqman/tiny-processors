@@ -84,11 +84,13 @@ module rv32 (
     wire access_misaligned = word_access && (alu_result[1:0] != 2'b00);
     wire target_misaligned = (is_jal || branch_taken) && alu_result[1];
 
-    // Memory port: a fetch in FETCH, a data access in MEM, nothing otherwise.
+    // Memory port: a fetch in FETCH, a data access in MEM, nothing otherwise
+    // and nothing while reset is asserted (the state register already says
+    // FETCH then, so the gate is explicit).
     assign mem_fetch = (state == FETCH);
-    assign mem_valid = (state == FETCH) || (state == MEM);
+    assign mem_valid = !reset && ((state == FETCH) || (state == MEM));
     assign mem_addr = mem_fetch ? pc : alu_out;
-    assign mem_we = (state == MEM) && is_store;
+    assign mem_we = mem_valid && (state == MEM) && is_store;
     assign mem_wstrb = !mem_we ? 4'b0000 :
                        !store_byte ? 4'b1111 :
                        (4'b0001 << alu_out[1:0]);

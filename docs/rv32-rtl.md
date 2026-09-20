@@ -159,8 +159,9 @@ The loop program is `program_loop` in [tools/rv32_asm.py](../tools/rv32_asm.py):
 - `make test-rv32-rtl`: 11 tests in [tests/test_rv32_rtl.py](../tests/test_rv32_rtl.py), about 12 s including compiling the emulator and the testbench into a temporary directory. The loop trace equals the emulator's line for line with 0, 1, and 3 stall cycles per request and with seeded random stalls, and the cycle formula holds. A directed program covers every subset instruction with hand-computed anchors (a negative immediate, `sub` wraparound, `auipc` at a non-zero PC, a discarded `x0` write, both branch outcomes, a backward `jal`, four `sb` lanes read back as one word, a load of a word the image never wrote reading zero). Five illegal encodings plus `ecall` and `ebreak` fault with the emulator's cause and value; seventeen valid but unimplemented encodings halt as `unsupported` with no trace line while the emulator carries on; twelve memory and target faults (outside the map, misaligned, every console and done-register misuse, a `jal` and a taken branch to a non-word target, a fetch outside RAM) match the emulator's trap line; console bytes reach stdout and each done-word outcome is reported as the emulator reports it; a runaway loop hits `+max-cycles`, and a run whose terminal edge equals the limit is still reported as `done` or `fault`, once. Two helper tests pin the trace diff and the halt-line parser with literal strings.
 - `make test-rv32-rtl-verilator`: the same 11 tests on the Verilator build of the testbench (about 1 s once built).
 - `make lint-rv32`: Verilator `--Wall` on the four core files, no warnings.
-- `make synth-rv32`: Yosys `check -assert` and no latches; 5,643 cells, 1,331 flip-flops, counted in the [walkthrough](rv32-to-gates.md#7-what-synthesis-actually-built).
-- `make waves-rv32` and `make bench-rv32-rtl`: the loop under `+stall=2` as a VCD, and the cycle table for stalls 0 to 3 and a seeded run.
+- `make synth-rv32`: Yosys `check -assert` and no latches; 5,644 cells, 1,331 flip-flops, counted in the [walkthrough](rv32-to-gates.md#7-what-synthesis-actually-built).
+- `make waves-rv32` and `make bench-rv32-rtl`: the loop under `+stall=2` as a VCD, and the cycle table for stalls 0 to 3 and a seeded run. Both require the simulator to exit cleanly and report `halt=done ... pass`; a matching trace alone is not success.
+- The testbench fails the run if the core presents a request while `reset` is high, and reports `halt=limit ... error=limit` even when a done store was accepted but not yet retired when the limit hit.
 - `make test-rv32` runs M1, M2, and these after one another; `make test` is still the counter.
 
 What is not verified: the console status read (unreachable without byte loads), a fetch from a device address (unreachable without `jalr`), and any timing of the port beyond the testbench's stall generator. All three are M4 work.
@@ -171,7 +172,7 @@ Completed on 2026-09-20 on branch `m3-rv32-rtl`. From a clean `build/`:
 
 - `make test-rv32-rtl`: 11 tests pass on Icarus; `make test-rv32-rtl-verilator`: the same 11 on Verilator.
 - The loop: 78 instructions on both backends, identical traces; 336 cycles unstalled, 102 transfers, and 102 more cycles per stall cycle.
-- `make lint-rv32` clean, `make synth-rv32` 5,643 cells with no latches.
+- `make lint-rv32` clean, `make synth-rv32` 5,644 cells with no latches.
 - `make test-rv32` (QEMU, emulator, QEMU differential, RTL, lint, synthesis) passes; counter, ALU, SAP8, and SIMD4 targets unchanged and passing.
 
 Limitations that remain: eleven instructions; faults halt instead of vectoring; no CSRs; word loads only; the testbench is the only memory model; one memory port with no overlap between fetch and execution. M4 broadens the core to full RV32I and runs the C self-check on it.

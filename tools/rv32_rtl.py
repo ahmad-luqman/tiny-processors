@@ -111,6 +111,16 @@ def diff_traces(rtl, emulator, context=3):
     return None
 
 
+def check_passed(rtl):
+    """A matching trace is not enough: the simulator must exit cleanly and report done/pass."""
+    if rtl.status != 0:
+        sys.exit(f"simulator exited with status {rtl.status}:\n{rtl.stderr}")
+    if rtl.halt is None:
+        sys.exit(f"simulator printed no halt line:\n{rtl.stderr}")
+    if (rtl.halt["halt"], rtl.halt["outcome"]) != ("done", "pass"):
+        sys.exit(f"run did not pass: {rtl.halt}")
+
+
 def write_image(words, out, name):
     """Write both image forms and return (hex_path, bin_path)."""
     out = Path(out)
@@ -148,8 +158,9 @@ def main():
         for stall, seed in settings:
             rtl = run_rtl(args.simulator, hex_path, out / "loop.rtl.trace", stall=stall, seed=seed)
             difference = diff_traces(rtl.trace, emulator.trace)
-            if rtl.halt is None or difference:
-                sys.exit(f"stall={stall} seed={seed}: {difference or rtl.stderr}")
+            if difference:
+                sys.exit(f"stall={stall} seed={seed}: {difference}")
+            check_passed(rtl)
             label = f"seed {seed}" if seed is not None else str(stall)
             print(f"{label:>6}  {rtl.halt['cycles']:>6}  {rtl.halt['stalls']:>6}  "
                   f"{rtl.halt['transfers']:>9}  {rtl.halt['steps']:>5}")
@@ -164,6 +175,7 @@ def main():
     print(rtl.stderr.strip().splitlines()[-1] if rtl.stderr.strip() else "rv32_tb: no halt line")
     if difference:
         sys.exit(f"trace mismatch: {difference}")
+    check_passed(rtl)
     print(f"traces identical: {len(rtl.trace)} lines; {out / 'loop.rtl.trace'}")
     if wave is not None:
         print(f"waveform: {wave}")

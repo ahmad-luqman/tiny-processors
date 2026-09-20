@@ -130,15 +130,15 @@ The emulator cannot produce any of these numbers. The trace it defines deliberat
 
 ## 7. What synthesis actually built
 
-`make synth-rv32` on Yosys 0.69+post: **5,643 generic cells**, no latches (`select -assert-none t:*LATCH*` passes), hierarchy preserved:
+`make synth-rv32` on Yosys 0.69+post: **5,644 generic cells**, no latches (`select -assert-none t:*LATCH*` passes), hierarchy preserved:
 
 | Module | Cells | Flip-flops | Muxes |
 | --- | ---: | ---: | ---: |
 | `rv32_regfile` | 4,019 | 992 | 1,442 |
-| `rv32` (controller, datapath registers, port, retirement port) | 1,242 | 339 | 172 |
+| `rv32` (controller, datapath registers, port, retirement port) | 1,243 | 339 | 172 |
 | `rv32_decode` | 195 | 0 | 0 |
 | `rv32_alu` | 187 | 0 | 0 |
-| Total | 5,643 | 1,331 | 1,636 |
+| Total | 5,644 | 1,331 | 1,636 |
 
 The register file is 71 percent of the core, and its flip-flops are exactly 31 × 32. The top level's 339 flip-flops need a closer look. The registers declared there add up to 370 bits: `pc`, `ir`, `ir_pc`, `a`, `b`, `alu_out`, `mdr`, `retire_pc`, `retire_insn`, `retire_rd_value`, `fault_value` (11 × 32), `retire_rd` (5), `fault_cause` (4), `state` (3), and six single bits. Yosys removed 31: `retire_pc` and `ir_pc` both capture `pc` on the same edge and differ only in their reset value, so bits 30:0 are the same flip-flop and Yosys kept one copy for both. The remaining `retire_pc` bit is bit 31, the one that resets to a different value. Two cells are `$_SDFFE_PP1P_` (reset to one): bit 31 of `pc` and of `ir_pc`, because the reset PC is `0x8000_0000`.
 
