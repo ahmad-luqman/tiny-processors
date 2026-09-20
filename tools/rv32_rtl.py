@@ -31,7 +31,7 @@ COUNTERS = ("cycles", "steps", "stalls", "transfers")
 DECIMAL = COUNTERS + ("cause",)
 HEX = ("done", "tval", "pc", "word")
 # The keys each halt reason carries besides the counters and the outcome (docs/rv32-rtl.md).
-REQUIRED = {"done": ("done",), "fault": ("cause", "tval"), "unsupported": ("pc", "word"), "limit": ()}
+REQUIRED = {"done": ("done",), "double-fault": ("cause", "tval"), "limit": ()}
 # A run's guest transcript and the simulator's own output are kept apart:
 # `console` is what the guest printed (the emulator's stdout, or the file the
 # testbench writes with +console), `noise` is anything the simulator itself
@@ -73,7 +73,7 @@ def rtl_halt_line(stderr):
     """Parse the testbench's final `rv32_tb: halt=...` line into a dict, or None if absent.
 
     The halt reason decides which keys must be present (`done`; `cause` and
-    `tval`; `pc` and `word`; none for a limit); anything else raises ValueError
+    `tval` of the undeliverable trap; none for a limit); anything else raises ValueError
     naming the line, so testbench format drift is caught here.
     """
     line = last_halt_line(stderr, "rv32_tb:")

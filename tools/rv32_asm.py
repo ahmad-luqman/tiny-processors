@@ -112,6 +112,8 @@ def CSRRW(rd, csr, rs1): return i_type(0x73, rd, 1, rs1, csr)
 def CSRRS(rd, csr, rs1): return i_type(0x73, rd, 2, rs1, csr)
 def CSRRC(rd, csr, rs1): return i_type(0x73, rd, 3, rs1, csr)
 def CSRRWI(rd, csr, uimm): return i_type(0x73, rd, 5, uimm, csr)
+def CSRRSI(rd, csr, uimm): return i_type(0x73, rd, 6, uimm, csr)
+def CSRRCI(rd, csr, uimm): return i_type(0x73, rd, 7, uimm, csr)
 MTVEC, MEPC, MCAUSE, MTVAL, MSTATUS = 0x305, 0x341, 0x342, 0x343, 0x300
 
 

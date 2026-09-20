@@ -14,9 +14,10 @@ module rv32_tb;
 
     reg clk = 0;
     reg reset = 1;
-    wire mem_valid, mem_we, mem_fetch, retire, retire_rd_we, halted, fault, unsupported;
-    wire [31:0] mem_addr, mem_wdata, retire_pc, retire_insn, retire_rd_value, fault_value, pc;
-    wire [3:0] mem_strb, fault_cause;
+    wire mem_valid, mem_we, mem_fetch, retire, retire_rd_we, trap, halted;
+    wire [31:0] mem_addr, mem_wdata, retire_pc, retire_insn, retire_rd_value, trap_value, pc;
+    wire [31:0] mtvec, mepc, mcause, mtval;
+    wire [3:0] mem_strb, trap_cause;
     wire [4:0] retire_rd;
     wire [2:0] state;
     reg mem_ready = 0;
@@ -141,10 +142,9 @@ module rv32_tb;
                     $fwrite(STDERR, " error=reserved-reset-word");
                 else
                     $fwrite(STDERR, " error=undefined-done-word");
-            end else if (halt_name == "fault") begin
-                $fwrite(STDERR, " cause=%0d tval=%h error=fault", fault_cause, fault_value);
-            end else if (halt_name == "unsupported") begin
-                $fwrite(STDERR, " pc=%h word=%h error=unsupported", retire_pc, retire_insn);
+            end else if (halt_name == "double-fault") begin
+                // The trap that could not be delivered; the first one is in the CSRs.
+                $fwrite(STDERR, " cause=%0d tval=%h error=double-fault", trap_cause, trap_value);
             end else begin
                 $fwrite(STDERR, " error=limit"); // even if a done store was accepted but never retired
             end
@@ -225,17 +225,20 @@ module rv32_tb;
                 end
                 pending = 0;
             end
+            if (trap) begin
+                steps = steps + 1; // a trap counts as a step, as in the emulator
+                if (trace_fd != 0)
+                    $fwrite(trace_fd, "%0d %h %h trap %0d %h\n", steps, retire_pc, retire_insn, trap_cause, trap_value);
+                // A refused load or store was an accepted transaction with error:
+                // the trap line replaces its effect, so nothing carries over.
+                pending = 0;
+            end
             // One outcome per run: a terminal outcome on the edge that also
             // reaches the cycle limit is reported as that outcome, not as a limit.
             if (retire && done_pending) begin
                 finish_run("done");
-            end else if (halted && fault) begin
-                steps = steps + 1; // a trap counts as a step, as in the emulator
-                if (trace_fd != 0)
-                    $fwrite(trace_fd, "%0d %h %h trap %0d %h\n", steps, retire_pc, retire_insn, fault_cause, fault_value);
-                finish_run("fault");
             end else if (halted) begin
-                finish_run("unsupported");
+                finish_run("double-fault");
             end else if (cycles >= max_cycles) begin
                 finish_run("limit");
             end

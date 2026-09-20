@@ -3,9 +3,8 @@
 // Combinational instruction decoder: register fields, the sign-extended
 // immediate for each format, one flag per instruction class, and the
 // `illegal` check that follows the machine contract (the emulator traps the
-// same words). `unsupported` is what the core does not execute yet, derived
-// from the class flags so a forgotten arm halts instead of retiring as a
-// no-op; it covers the CSR instructions and mret until trap vectoring lands.
+// same words). Every valid word sets exactly one class flag or `illegal`;
+// the core executes all of them.
 module rv32_decode (
     input  wire [31:0] insn,
     output wire [4:0]  rd,
@@ -23,11 +22,12 @@ module rv32_decode (
     output wire        is_branch,    // beq bne blt bge bltu bgeu
     output wire        is_jal,
     output wire        is_jalr,
+    output wire        is_csr,       // csrrw csrrs csrrc and the immediate forms
+    output wire        is_mret,
     output wire        is_ecall,
     output wire        is_ebreak,
     output wire        writes_rd,
-    output reg         illegal,
-    output wire        unsupported
+    output reg         illegal
 );
     localparam [6:0] OP_LUI = 7'h37, OP_AUIPC = 7'h17, OP_JAL = 7'h6F, OP_JALR = 7'h67,
                      OP_BRANCH = 7'h63, OP_LOAD = 7'h03, OP_STORE = 7'h23,
@@ -44,7 +44,7 @@ module rv32_decode (
 
     // The four existing CSRs; any other number is illegal on the machine.
     wire csr_exists = (csr == 12'h305) || (csr == 12'h341) || (csr == 12'h342) || (csr == 12'h343);
-    wire is_mret = (insn == 32'h30200073);
+    assign is_mret = (insn == 32'h30200073);
 
     assign is_lui = (opcode == OP_LUI);
     assign is_auipc = (opcode == OP_AUIPC);
@@ -56,10 +56,10 @@ module rv32_decode (
     assign is_branch = (opcode == OP_BRANCH) && !illegal;
     assign is_jal = (opcode == OP_JAL);
     assign is_jalr = (opcode == OP_JALR) && !illegal;
-    wire is_fence = (opcode == OP_FENCE) && !illegal; // retires with no effect
+    assign is_csr = (opcode == OP_SYSTEM) && (funct3 != 3'd0) && !illegal;
     assign is_ecall = (insn == 32'h00000073);
     assign is_ebreak = (insn == 32'h00100073);
-    assign writes_rd = is_lui || is_auipc || is_alu_imm || is_alu_reg || is_load || is_jal || is_jalr;
+    assign writes_rd = is_lui || is_auipc || is_alu_imm || is_alu_reg || is_load || is_jal || is_jalr || is_csr;
 
     // Immediates: each format places the sign bit at insn[31], so every
     // extension replicates that one bit (RV32I chapter 2.3).
@@ -92,9 +92,4 @@ module rv32_decode (
         endcase
     end
 
-    // Executed by the core; anything valid that is not listed here halts as
-    // unsupported (the CSR instructions and mret).
-    wire executes = is_lui || is_auipc || is_alu_imm || is_alu_reg || is_load || is_store ||
-                    is_branch || is_jal || is_jalr || is_fence || is_ecall || is_ebreak;
-    assign unsupported = !executes && !illegal;
 endmodule

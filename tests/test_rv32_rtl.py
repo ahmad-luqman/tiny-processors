@@ -5,8 +5,8 @@ the RTL testbench, and the two retirement traces must be identical line for
 line (docs/rv32-emulator.md, "Retirement trace contract"), under fixed and
 random memory stalls. A few lines are also asserted literally from
 hand-computed values so the RTL is not checked only against the emulator.
-The stops the slice defines (docs/rv32-rtl.md) are checked against the
-emulator's trap lines and halt reasons.
+Traps vector on both backends and a double fault halts both, so every
+program's trace, including its trap lines, must be identical (docs/rv32-rtl.md).
 """
 
 import os
@@ -83,18 +83,25 @@ class RtlTest(unittest.TestCase):
         self.assertEqual(rtl.console, emulator.console)
         return emulator, rtl
 
-    def assert_prefix_then_fault(self, words, cause, value, **kwargs):
-        """The RTL's trace is the emulator's through the first trap line; the emulator then double-faults."""
+    def assert_same_double_fault(self, words, cause, value, **kwargs):
+        """With mtvec at 0 the first trap vectors to address 0, whose fetch faults: both backends
+        print both trap lines and halt as a double fault, with the first trap's CSRs intact."""
         emulator, rtl = self.run_both(words, **kwargs)
-        self.assertEqual(rtl.halt["halt"], "fault", rtl.stderr)
-        self.assertEqual((rtl.halt["cause"], rtl.halt["tval"]), (cause, value), rtl.stderr)
-        self.assertEqual(rtl.trace, emulator.trace[:len(rtl.trace)])
-        self.assertTrue(rtl.trace[-1].endswith(f" trap {cause} {value:08x}"), rtl.trace[-1])
-        self.assertEqual(emulator.trace[len(rtl.trace):], [f"{len(rtl.trace) + 1} 00000000 00000000 trap 1 00000000"],
-                         "the emulator fetches the missing handler at mtvec = 0, then stops")
+        self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
+        self.assertEqual((rtl.halt["halt"], rtl.halt["cause"], rtl.halt["tval"]), ("double-fault", 1, 0), rtl.stderr)
         self.assertEqual(emulator.halt["halt"], "double-fault")
+        self.assertTrue(rtl.trace[-2].endswith(f" trap {cause} {value:08x}"), rtl.trace[-2])
+        self.assertEqual(rtl.trace[-1], f"{len(rtl.trace)} 00000000 00000000 trap 1 00000000")
         self.assertEqual(rtl.halt["steps"], len(rtl.trace))
         return emulator, rtl
+
+    HANDLER_AT = RAM + 0x200
+
+    def with_handler(self, body, handler, finish=FINISH()):
+        """`body` with mtvec pointing at `handler`, laid out the way the emulator tests do it."""
+        words = LI(5, self.HANDLER_AT) + [CSRRW(0, MTVEC, 5)] + list(body) + list(finish)
+        assert len(words) <= (self.HANDLER_AT - RAM) // 4
+        return words + [0] * ((self.HANDLER_AT - RAM) // 4 - len(words)) + list(handler)
 
     # The canonical loop: docs/rv32-rtl.md, "Run and verify".
     def test_loop_matches_emulator_with_and_without_stalls(self):
@@ -189,11 +196,11 @@ class RtlTest(unittest.TestCase):
         for offset, cause in ((0x400, 2), (0x800, 2), (0x1000, 2), (0x80000, 2), (-0x100000, 1)):
             with self.subTest(jal=hex(offset)):
                 target = (RAM + offset) & M
-                self.assert_prefix_then_fault([JAL(0, offset)] + FINISH(), cause, 0 if cause == 2 else target)
+                self.assert_same_double_fault([JAL(0, offset)] + FINISH(), cause, 0 if cause == 2 else target)
         for offset, cause in ((64, 2), (2048, 2), (-2056, 1), (-4096, 1)):
             with self.subTest(beq=offset):
                 target = (RAM + offset) & M
-                self.assert_prefix_then_fault([BEQ(0, 0, offset)] + FINISH(), cause, 0 if cause == 2 else target)
+                self.assert_same_double_fault([BEQ(0, 0, offset)] + FINISH(), cause, 0 if cause == 2 else target)
         # S and I immediates: negative and maximum offsets reach the same word.
         for offset in (-4, 0x7FC, -2048, 2047 - 3):
             with self.subTest(store=offset):
@@ -222,24 +229,10 @@ class RtlTest(unittest.TestCase):
         for word, cause, value in cases:
             with self.subTest(word=f"{word:08x}"):
                 words = [ADDI(1, 0, 1), word, ADDI(2, 0, 2)] + FINISH()
-                emulator, rtl = self.assert_prefix_then_fault(words, cause, value, stall=1)
+                emulator, rtl = self.assert_same_double_fault(words, cause, value, stall=1)
                 self.assertEqual(rtl.trace, ["1 80000000 00100093 x1=00000001",
-                                             f"2 80000004 {word:08x} trap {cause} {value:08x}"])
-
-    def test_unsupported_encodings_halt_without_a_trace_line(self):
-        prefix = LI(1, RAM + 0x100)
-        cases = [CSRRW(0, MTVEC, 1), CSRRS(2, MEPC, 0), CSRRWI(2, MTVAL, 3), MRET()]
-        for word in cases:
-            with self.subTest(word=f"{word:08x}"):
-                words = prefix + [word, ADDI(2, 0, 2)] + FINISH()
-                emulator, rtl = self.run_both(words, stall=1)
-                self.assertEqual(rtl.halt["halt"], "unsupported", rtl.stderr)
-                self.assertEqual((rtl.halt["pc"], rtl.halt["word"]), (RAM + 8, word))
-                self.assertEqual(len(rtl.trace), 2, "the two li instructions retired, the unsupported one did not")
-                self.assertEqual(rtl.trace, emulator.trace[:2])
-                self.assertGreater(len(emulator.trace), 2, "the emulator executes the instruction the slice refuses")
-                self.assertNotIn("trap 2", emulator.trace[2], "it is not illegal on the machine")
-                self.assertEqual(rtl.halt["steps"], 2)
+                                             f"2 80000004 {word:08x} trap {cause} {value:08x}",
+                                             "3 00000000 00000000 trap 1 00000000"])
 
     def test_sub_word_loads_and_stores(self):
         data = RAM + 0x200
@@ -356,10 +349,92 @@ class RtlTest(unittest.TestCase):
         self.assertEqual(by_step["26"], f"x1={RAM + 35 * 4:08x}")
         self.assertEqual(effects(rtl.trace[-7]), "x3=00000011", "17 after the return, then the jump over f")
 
-    def test_decode_classification_agrees_with_the_emulator(self):
-        """Every opcode x funct3 x representative funct7: illegal on the RTL iff the emulator traps
-        with cause 2, executed (or faulted for another reason) identically, or unsupported only when
-        the emulator carries on."""
+    def test_traps_vector_through_the_handler_and_mret_returns(self):
+        # The handler records the CSRs, counts the trap, steps mepc past the instruction, and returns.
+        handler = [CSRRS(10, MCAUSE, 0), CSRRS(11, MTVAL, 0), CSRRS(12, MEPC, 0), ADDI(20, 20, 1),
+                   ADDI(12, 12, 4), CSRRW(0, MEPC, 12), MRET()]
+        mul = r_type(0x33, 1, 0, 2, 3, 1)
+        body = LI(1, 0x20000000) + LI(2, RAM + 0x102) + [
+            ECALL(),                 # cause 11, mtval 0
+            EBREAK(),                # cause 3, mtval its PC
+            mul,                     # cause 2, mtval the word
+            LW(3, 1, 0),             # cause 5: refused at acceptance, then the next data access is fine
+            SW(3, 2, 0),             # cause 6: misaligned, never reaches the bus
+            LH(3, 2, 1),             # cause 4: an odd halfword address
+            JAL(0, 2),               # cause 0: misaligned target, mepc is the jal itself
+            BEQ(0, 0, 6),            # cause 0 again, for a taken branch
+            SW(20, 2, -2),           # a real store right after the faults: 8 traps counted
+            LW(21, 2, -2),
+        ]
+        words = self.with_handler(body, handler)
+        for stall in (0, 2):
+            with self.subTest(stall=stall):
+                emulator, rtl = self.assert_same_pass(words, stall=stall)
+        traps = [line for line in rtl.trace if " trap " in line]
+        self.assertEqual([effects(line) for line in traps],
+                         ["trap 11 00000000", f"trap 3 {RAM + 8 * 4:08x}", f"trap 2 {mul:08x}", "trap 5 20000000",
+                          f"trap 6 {RAM + 0x102:08x}", f"trap 4 {RAM + 0x103:08x}", f"trap 0 {RAM + 13 * 4 + 2:08x}",
+                          f"trap 0 {RAM + 14 * 4 + 6:08x}"])
+        self.assertEqual(len(traps), 8)
+        self.assertEqual(effects(rtl.trace[-6]), "x21=00000008 mem[80000100]->00000008/4")
+        by_step = {line.split()[0]: effects(line) for line in rtl.trace}
+        first = int(traps[0].split()[0])
+        self.assertEqual([by_step[str(first + i)] for i in range(1, 8)],
+                         ["x10=0000000b", "x11=00000000", f"x12={RAM + 7 * 4:08x}", "x20=00000001",
+                          f"x12={RAM + 8 * 4:08x}", "", ""], "the handler's lines after the ecall")
+        self.assertEqual(rtl.trace[first + 7].split()[1], f"{RAM + 8 * 4:08x}", "mret lands on the ebreak")
+
+    def test_double_fault_and_nested_trap(self):
+        # A handler that resets mtvec and then traps: the second trap is delivered to 0 (a nested
+        # trap, after the handler retired instructions), and the fetch there is the double fault.
+        handler = [CSRRS(10, MCAUSE, 0), CSRRW(0, MTVEC, 0), EBREAK()]
+        words = self.with_handler([ECALL()], handler)
+        emulator, rtl = self.run_both(words, stall=1)
+        self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
+        self.assertEqual((rtl.halt["halt"], rtl.halt["cause"], rtl.halt["tval"]), ("double-fault", 1, 0))
+        self.assertEqual([effects(line) for line in rtl.trace[-4:]],
+                         ["x10=0000000b", "", f"trap 3 {self.HANDLER_AT + 8:08x}", "trap 1 00000000"])
+        # A handler whose first word is illegal never retires: that is the double fault itself.
+        words = self.with_handler([ECALL()], [0])
+        emulator, rtl = self.run_both(words, stall=0)
+        self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
+        self.assertEqual((rtl.halt["halt"], rtl.halt["cause"], rtl.halt["tval"]), ("double-fault", 2, 0))
+        self.assertEqual(rtl.trace[-2:], [f"4 {RAM + 12:08x} 00000073 trap 11 00000000",
+                                          f"5 {self.HANDLER_AT:08x} 00000000 trap 2 00000000"])
+        # A refused fetch as the very first trap, then its handler fetch: the M3 shape.
+        emulator, rtl = self.assert_same_double_fault([JAL(0, -8)], 1, RAM - 8, stall=0)
+        self.assertEqual(len(rtl.trace), 3)
+
+    def test_csr_reads_writes_and_masking(self):
+        words = LI(5, RAM + 0x203) + [
+            CSRRW(0, MTVEC, 5),      # 2  mtvec = ...200: bits [1:0] dropped
+            CSRRS(6, MTVEC, 0),      # 3  x6 = 80000200, no write (rs1 field is zero)
+            CSRRWI(7, MTVAL, 3),     # 4  x7 = 0, mtval = 3
+            CSRRSI(8, MTVAL, 4),     # 5  x8 = 3, mtval = 7
+            CSRRCI(9, MTVAL, 1),     # 6  x9 = 7, mtval = 6
+            CSRRS(10, MTVAL, 0),     # 7  x10 = 6
+            CSRRSI(0, MTVAL, 0),     # 8  nothing written, nothing read
+        ] + LI(11, 0xFFFFFFFF) + [
+            CSRRC(12, MEPC, 11),     # 11 x12 = 0
+            CSRRW(13, MEPC, 11),     # 12 x13 = 0, mepc = fffffffc
+            CSRRS(14, MEPC, 0),      # 13 x14 = fffffffc
+            CSRRW(15, MCAUSE, 11),   # 14 x15 = 0, mcause = ffffffff: no mask
+            CSRRC(16, MCAUSE, 11),   # 15 x16 = ffffffff, mcause = 0
+            CSRRS(17, MCAUSE, 0),    # 16 x17 = 0
+            CSRRW(0, MEPC, 0),       # 17 mepc = 0 so the mret below goes to a fetch fault at 0
+        ] + FINISH()
+        emulator, rtl = self.assert_same_pass(words, stall=1)
+        self.assertEqual([effects(line) for line in rtl.trace[2:17]],
+                         ["", "x6=80000200", "x7=00000000", "x8=00000003", "x9=00000007", "x10=00000006", "",
+                          "x11=00000000", "x11=ffffffff", "x12=00000000", "x13=00000000", "x14=fffffffc",
+                          "x15=00000000", "x16=ffffffff", "x17=00000000"])
+        # mret with mepc at its reset value: the fetch at 0 faults, then vectors to mtvec = 0 and double-faults.
+        emulator, rtl = self.assert_same_double_fault([ADDI(1, 0, 1), MRET()] + FINISH(), 1, 0, stall=0)
+        self.assertEqual(rtl.trace[1], f"2 {RAM + 4:08x} 30200073")
+
+    def test_decode_sweep_agrees_with_the_emulator(self):
+        """Every opcode x funct3 x representative funct7: the whole trace and the halt reason
+        agree, whether the word executes, traps as illegal, or faults for another reason."""
         words = set()
         for opcode in OPCODES:
             for funct3 in range(8):
@@ -368,16 +443,20 @@ class RtlTest(unittest.TestCase):
                     words.add(r_type(opcode, 1, funct3, 0, 0, funct7))
         for funct3 in range(1, 8):
             words.add(i_type(0x73, 1, funct3, 0, MTVEC))  # CSR forms on a CSR that exists
+        outcomes = {"done": 0, "double-fault": 0, "limit": 0}
         for word in sorted(words):
             with self.subTest(word=f"{word:08x}"):
                 emulator, rtl = self.run_both([word] + FINISH(), stall=0, limit=200, max_cycles=400)
-                emulator_rejects = emulator.trace[0].endswith(f"trap 2 {word:08x}")
-                if rtl.halt["halt"] == "unsupported":
-                    self.assertFalse(emulator_rejects, "the emulator must accept an unsupported word")
+                self.assertEqual(rtl.halt["halt"], emulator.halt["halt"])
+                if rtl.halt["halt"] == "limit":  # jal x1, 0 spins on both: the limits differ, the prefix must not
+                    common = min(len(rtl.trace), len(emulator.trace))
+                    self.assertEqual(rtl.trace[:common], emulator.trace[:common])
                 else:
-                    self.assertEqual(rtl.trace, emulator.trace[:len(rtl.trace)])
-                    rtl_rejects = rtl.trace[0].endswith(f"trap 2 {word:08x}")
-                    self.assertEqual(rtl_rejects, emulator_rejects, "illegal on one backend only")
+                    self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
+                outcomes[rtl.halt["halt"]] += 1
+        self.assertEqual(len(words), 143)
+        self.assertGreater(outcomes["done"], 50, "most words execute and reach the done store")
+        self.assertGreater(outcomes["double-fault"], 40, "the illegal ones and the jumps to nowhere trap")
 
     def test_memory_and_target_faults(self):
         cases = [
@@ -408,10 +487,11 @@ class RtlTest(unittest.TestCase):
         ]
         for name, words, cause, value in cases:
             with self.subTest(name=name):
-                emulator, rtl = self.assert_prefix_then_fault(words + FINISH(), cause, value, stall=2)
-                # A fetch fault is one line past the jump that caused it; every other fault is the last word.
-                self.assertEqual(len(rtl.trace), len(words) + 1 if cause == 1 else len(words))
-                self.assertNotIn("]<-", rtl.trace[-1], "a faulting store writes nothing")
+                emulator, rtl = self.assert_same_double_fault(words + FINISH(), cause, value, stall=2)
+                # A fetch fault is one line past the jump that caused it; every other fault is the
+                # last word's line; then the handler fetch at 0 adds the double-fault line.
+                self.assertEqual(len(rtl.trace), len(words) + 2 if cause == 1 else len(words) + 1)
+                self.assertNotIn("]<-", rtl.trace[-2], "a faulting store writes nothing")
         # The last RAM word, and the last halfword and byte, are inside the map.
         words = LI(1, RAM + 0x3FFFFC) + [SW(1, 1, 0), LW(2, 1, 0), LHU(3, 1, 2), LBU(4, 1, 3)] + FINISH()
         emulator, rtl = self.assert_same_pass(words, stall=0)
@@ -460,9 +540,13 @@ class RtlTest(unittest.TestCase):
         emulator, rtl = self.run_both(program_loop(), stall=0, max_cycles=335)
         self.assertEqual((rtl.halt["halt"], rtl.halt["outcome"], rtl.halt.get("done")), ("limit", "error=limit", None), rtl.stderr)
         self.assertEqual(len(rtl.trace), 77)
-        emulator, rtl = self.run_both([ADDI(1, 0, 1), ECALL()], stall=0, max_cycles=6)
-        self.assertEqual((rtl.halt["halt"], rtl.halt["cycles"], rtl.halt["cause"]), ("fault", 6, 11), rtl.stderr)
+        # ecall traps on cycle 6 and the handler fetch at 0 double-faults on cycle 7.
+        emulator, rtl = self.run_both([ADDI(1, 0, 1), ECALL()], stall=0, max_cycles=7)
+        self.assertEqual((rtl.halt["halt"], rtl.halt["cycles"], rtl.halt["cause"]), ("double-fault", 7, 1), rtl.stderr)
         self.assertEqual(rtl.stderr.count("rv32_tb: halt="), 1, rtl.stderr)
+        emulator, rtl = self.run_both([ADDI(1, 0, 1), ECALL()], stall=0, max_cycles=6)
+        self.assertEqual((rtl.halt["halt"], rtl.halt["cycles"], len(rtl.trace)), ("limit", 6, 2), rtl.stderr)
+        self.assertEqual(rtl.trace[-1], "2 80000004 00000073 trap 11 00000000", "the trap line is written before the limit")
 
     def test_testbench_refuses_bad_arguments_and_images(self):
         """Harness mistakes fail loudly on both simulators instead of reporting a pass."""
@@ -513,11 +597,9 @@ class HelperTest(unittest.TestCase):
         line = "noise\nrv32_tb: halt=done cycles=336 steps=78 stalls=0 transfers=102 done=00005555 pass\n"
         self.assertEqual(rtl_halt_line(line), {"halt": "done", "cycles": 336, "steps": 78, "stalls": 0,
                                                "transfers": 102, "done": 0x5555, "outcome": "pass"})
-        fault = "rv32_tb: halt=fault cycles=9 steps=2 stalls=0 transfers=2 cause=2 tval=deadbeef error=fault"
+        fault = "rv32_tb: halt=double-fault cycles=9 steps=2 stalls=0 transfers=2 cause=2 tval=deadbeef error=double-fault"
         self.assertEqual((rtl_halt_line(fault)["cause"], rtl_halt_line(fault)["tval"], rtl_halt_line(fault)["outcome"]),
-                         (2, 0xDEADBEEF, "error=fault"))
-        unsupported = "rv32_tb: halt=unsupported cycles=9 steps=2 stalls=0 transfers=3 pc=80000008 word=00008067 error=unsupported"
-        self.assertEqual((rtl_halt_line(unsupported)["pc"], rtl_halt_line(unsupported)["word"]), (0x80000008, 0x8067))
+                         (2, 0xDEADBEEF, "error=double-fault"))
         self.assertEqual(rtl_halt_line("rv32_tb: halt=limit cycles=200 steps=50 stalls=0 transfers=51 error=limit")["outcome"],
                          "error=limit")
         self.assertIsNone(rtl_halt_line("no halt line here"))
@@ -526,6 +608,7 @@ class HelperTest(unittest.TestCase):
                     "rv32_tb: halt=done cycles=336 steps=78 stalls=0 transfers=102 pass",
                     "rv32_tb: halt=limit cycles=335 steps=77 stalls=0 transfers=102 done=00005555 pass",
                     "rv32_tb: halt=crashed cycles=1 steps=0 stalls=0 transfers=0",
+                    "rv32_tb: halt=fault cycles=9 steps=2 stalls=0 transfers=2 cause=2 tval=deadbeef error=fault",
                     "rv32_tb: halt="):
             with self.subTest(line=bad):
                 with self.assertRaises(ValueError) as raised:
