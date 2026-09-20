@@ -73,7 +73,7 @@ The [kernel builder](programs/simd4/vector_add.py), interpreter, and runner use 
 The [RV32 machine contract](docs/rv32.md) fixes reset, the address map, the console and done-register protocol, and the ILP32 firmware ABI for our RISC-V computer. A freestanding C self-check with our own startup code, linker script, and multiply/divide runtime compiles with Homebrew Clang 22, links with lld, passes a standard-library ELF checker, and runs on QEMU's `virt` board, whose UART and test device sit at the contract's three addresses.
 
 ```sh
-make test-rv32          # Tool tests, host runtime tests, image checks, the QEMU run, and the emulator checks
+make test-rv32          # Tool tests, host runtime tests, image checks, the QEMU run, the emulator checks, and the RTL tests, lint, and synthesis
 make check-rv32-image   # Build ELF/listing/bin/hex and verify them against the contract
 make run-rv32-qemu      # Run on qemu-system-riscv32; console line and exit status must agree
 make disasm-rv32        # Print the annotated listing
@@ -86,7 +86,22 @@ QEMU boots the image with the bare `rv32i` CPU model; all 28 checks pass, the gu
 
 ## RV32 headless emulator
 
-[tools/rv32emu.c](tools/rv32emu.c) is our own machine: one C file that loads the flattened image, executes RV32I with the contract's trap, alignment, console, and done-register rules, and writes a retirement trace whose format the RTL testbench will reproduce. It runs the self-check to `PASS 807d9fad` in 32,610 instructions and executes exactly the PC sequence QEMU logs; 19 tests with an independent instruction encoder pin the hand-computed edges (signed boundaries, shifts by 31, `x0`, sub-word stores, misaligned and out-of-map traps, `ecall`/`mret`, double faults, every device edge). Untraced it runs about 400 M instructions/s. Read the [design, trace contract, and trace walkthrough](docs/rv32-emulator.md); the multicycle RTL CPU is the next milestone.
+[tools/rv32emu.c](tools/rv32emu.c) is our own machine: one C file that loads the flattened image, executes RV32I with the contract's trap, alignment, console, and done-register rules, and writes a retirement trace whose format the RTL testbench will reproduce. It runs the self-check to `PASS 807d9fad` in 32,610 instructions and executes exactly the PC sequence QEMU logs; 19 tests with an independent instruction encoder pin the hand-computed edges (signed boundaries, shifts by 31, `x0`, sub-word stores, misaligned and out-of-map traps, `ecall`/`mret`, double faults, every device edge). Untraced it runs about 400 M instructions/s. Read the [design, trace contract, and trace walkthrough](docs/rv32-emulator.md).
+
+## RV32 multicycle RTL CPU
+
+[rtl/rv32/](rtl/rv32/) is the first hardware for the machine: a register file, an add/subtract ALU, an immediate decoder, and a five-state controller driving the contract's ready/valid memory port. It runs eleven instructions (`lui`, `auipc`, `addi`, `add`, `sub`, `lw`, `sw`, `sb`, `beq`, `bne`, `jal`); everything else halts as a terminal fault with the emulator's cause code or as `unsupported`. The testbench is the RAM, console, and done register, stalls the port on request, and prints the emulator's retirement trace, so a Python test diffs the two backends line for line.
+
+```sh
+make test-rv32-rtl            # 10 differential tests: emulator vs Icarus, fixed and random stalls
+make test-rv32-rtl-verilator  # the same tests on a Verilator build of the testbench
+make lint-rv32                # verilator --Wall on the core
+make synth-rv32               # yosys: no latches; 5,643 cells, 1,331 flip-flops
+make waves-rv32               # the loop with two stall cycles per request as a VCD
+make bench-rv32-rtl           # cycles, stalls, and transfers for the loop at each stall depth
+```
+
+The 78-instruction loop produces identical traces on both backends at every stall setting; 336 cycles unstalled, 102 more per stall cycle. Read the [RTL contract](docs/rv32-rtl.md) and the [gates, waveform, and cycle walkthrough](docs/rv32-to-gates.md). Every earlier target is unchanged, and `make test-rv32` now includes the RTL tests, lint, and synthesis.
 
 ## What to read
 
@@ -101,6 +116,7 @@ QEMU boots the image with the bare `rv32i` CPU model; all 28 checks pass, the gu
 9. [SIMD4 specification](docs/simd4.md), [RTL](rtl/simd4/simd4.v), [kernel](programs/simd4/vector_add.py), and [gate/performance walkthrough](docs/simd4-to-gates.md).
 10. [RV32 machine contract](docs/rv32.md), then [start.S](programs/rv32/start.S), [link.ld](programs/rv32/link.ld), [selfcheck.c](programs/rv32/selfcheck.c), and the [C to instructions walkthrough](docs/c-to-instructions.md).
 11. [RV32 emulator](docs/rv32-emulator.md), then [rv32emu.c](tools/rv32emu.c) and [test_rv32_emu.py](tests/test_rv32_emu.py); run `make trace-rv32-emu` and follow the walkthrough in the trace.
+12. [RV32 RTL contract](docs/rv32-rtl.md), then [rv32.v](rtl/rv32/rv32.v) with its three submodules, [rv32_tb.sv](tests/rv32_tb.sv), and [test_rv32_rtl.py](tests/test_rv32_rtl.py); run `make waves-rv32` and follow the [gates walkthrough](docs/rv32-to-gates.md) in the waveform.
 
 ## Verified local tools
 
