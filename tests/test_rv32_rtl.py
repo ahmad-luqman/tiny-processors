@@ -16,6 +16,7 @@ import tempfile
 import unittest
 
 from tools.rv32_asm import *  # noqa: F401,F403
+from tools.rv32_devices import FB_SIZE, frame_hash
 from tools.rv32_image import to_hex_words
 from tools.rv32_rtl import (ROOT, Run, check_passed, compile_testbench, cycle_relation, diff_traces, has_value_changes,
                             rtl_halt_line, run_backend, run_emulator, run_rtl, simulator_command, simulator_noise, write_image)
@@ -59,13 +60,23 @@ class RtlTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.workdir.cleanup()
 
-    def run_both(self, words, stall=None, seed=None, limit=100000, max_cycles=None):
-        """Run one image on both backends; the caller decides what must agree."""
+    def run_both(self, words, stall=None, seed=None, limit=100000, max_cycles=None, checkpoints=False,
+                 input_script=None):
+        """Run one image on both backends; the caller decides what must agree. With `checkpoints`
+        both write their `frame N <hash>` lines; `input_script` is text for both `+input`/`--input`."""
         with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
             hex_path, bin_path = write_image(words, directory, "image")
-            emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace", limit=limit)
+            script = None
+            if input_script is not None:
+                script = Path(directory) / "input.txt"
+                script.write_text(input_script)
+            emu_checkpoints = Path(directory) / "emu.checkpoints" if checkpoints else None
+            rtl_checkpoints = Path(directory) / "rtl.checkpoints" if checkpoints else None
+            emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace", limit=limit,
+                                    checkpoints=emu_checkpoints, input_script=script)
             rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace",
-                          stall=stall, seed=seed, max_cycles=max_cycles)
+                          stall=stall, seed=seed, max_cycles=max_cycles, checkpoints=rtl_checkpoints,
+                          input_script=script)
         report = f"\n--- simulator output ---\n{rtl.noise}--- guest console ---\n{rtl.console}--- stderr ---\n{rtl.stderr}"
         self.assertEqual(rtl.status, 0, report)
         self.assertEqual(rtl.noise, "", "the simulator printed something of its own" + report)
@@ -563,6 +574,14 @@ class RtlTest(unittest.TestCase):
             ("word load of an unimplemented timer offset", LI(1, TIMER) + [LW(2, 1, 4)], 5, TIMER + 4),
             ("word store past the timer window", LI(1, TIMER) + [SW(1, 1, 16)], 7, TIMER + 16),
             ("fetch from the timer", LI(1, TIMER) + [JALR(0, 1, 0)], 1, TIMER),
+            ("read of the present register", LI(1, DISPLAY) + [LW(2, 1, 0)], 5, DISPLAY),
+            ("write to the frame count", LI(1, DISPLAY) + [SW(1, 1, 4)], 7, DISPLAY + 4),
+            ("byte read of the width", LI(1, DISPLAY) + [LBU(2, 1, 8)], 5, DISPLAY + 8),
+            ("halfword present", LI(1, DISPLAY) + [SH(1, 1, 0)], 7, DISPLAY),
+            ("byte store past the framebuffer", LI(1, FB + FB_SIZE) + [SB(1, 1, 0)], 7, FB + FB_SIZE),
+            ("word load past the framebuffer", LI(1, FB + FB_SIZE) + [LW(2, 1, 0)], 5, FB + FB_SIZE),
+            ("byte load below the framebuffer", LI(1, FB - 1) + [LBU(2, 1, 0)], 5, FB - 1),
+            ("fetch from the framebuffer", LI(1, FB) + [JALR(0, 1, 0)], 1, FB),
         ]
         for name, words, cause, value in cases:
             with self.subTest(name=name):
@@ -634,6 +653,43 @@ class RtlTest(unittest.TestCase):
                          [f"x2=00000003 mem[{TIMER:08x}]->00000003/4", f"x4=00000008 mem[{TIMER:08x}]->00000008/4"])
         self.assertEqual([effects(line) for line in emulator.trace[5:7]],
                          [f"x2=ffffffff mem[{TIMER:08x}]->ffffffff/4", f"x4=00000000 mem[{TIMER:08x}]->00000000/4"])
+
+    def test_display_and_framebuffer(self):
+        """WIDTH and HEIGHT, byte/halfword/word stores into the framebuffer and reads back, two
+        presents with FRAMES read between them. Both backends write the same checkpoint lines, and
+        the hash is recomputed here from the same stores so neither backend is its own oracle."""
+        last = FB_SIZE - 4
+        words = LI(1, DISPLAY) + [LW(2, 1, 8), LW(3, 1, 12), LW(4, 1, 4)]
+        words += LI(5, FB) + LI(6, 0x11223344) + [SW(6, 5, 0), SB(6, 5, 4), SH(6, 5, 6)]
+        words += LI(7, last) + [ADD(7, 7, 5), SW(6, 7, 0), LW(8, 5, 4), LBU(9, 7, 3)]
+        words += LI(10, 1) + [SW(10, 1, 0), LW(11, 1, 4), SB(6, 5, 8), SW(10, 1, 0), LW(12, 1, 4)] + FINISH()
+        emulator, rtl = self.assert_same_pass(words, stall=1, checkpoints=True)
+        pixels = bytearray(FB_SIZE)
+        pixels[0:4] = (0x11223344).to_bytes(4, "little")
+        pixels[4] = 0x44
+        pixels[6:8] = (0x3344).to_bytes(2, "little")
+        pixels[last:last + 4] = (0x11223344).to_bytes(4, "little")
+        first = frame_hash(pixels)
+        pixels[8] = 0x44
+        second = frame_hash(pixels)
+        self.assertEqual(rtl.checkpoints, [f"frame 1 {first:08x}", f"frame 2 {second:08x}"])
+        self.assertEqual(emulator.checkpoints, rtl.checkpoints)
+        self.assertEqual([effects(line) for line in rtl.trace[2:5]],
+                         [f"x2=00000140 mem[{DISPLAY + 8:08x}]->00000140/4", f"x3=000000f0 mem[{DISPLAY + 12:08x}]->000000f0/4",
+                          f"x4=00000000 mem[{DISPLAY + 4:08x}]->00000000/4"])
+        self.assertEqual([effects(line) for line in rtl.trace[9:17]],
+                         [f"mem[{FB:08x}]<-11223344/4", f"mem[{FB + 4:08x}]<-00000044/1", f"mem[{FB + 6:08x}]<-00003344/2",
+                          "x7=00013000", "x7=00012bfc", f"x7={FB + last:08x}", f"mem[{FB + last:08x}]<-11223344/4",
+                          f"x8=33440044 mem[{FB + 4:08x}]->33440044/4"])
+        self.assertEqual(effects(rtl.trace[17]), f"x9=00000011 mem[{FB + last + 3:08x}]->00000011/1")
+        self.assertEqual([effects(line) for line in rtl.trace[20:22]],
+                         [f"mem[{DISPLAY:08x}]<-00000001/4", f"x11=00000001 mem[{DISPLAY + 4:08x}]->00000001/4"])
+        self.assertEqual(effects(rtl.trace[24]), f"x12=00000002 mem[{DISPLAY + 4:08x}]->00000002/4")
+        # No present, no checkpoint; a present with the value 0 still presents.
+        emulator, rtl = self.assert_same_pass(LI(1, DISPLAY) + [SW(0, 1, 0)] + FINISH(), stall=0, checkpoints=True)
+        self.assertEqual((rtl.checkpoints, emulator.checkpoints), ([f"frame 1 {frame_hash(bytes(FB_SIZE)):08x}"],) * 2)
+        emulator, rtl = self.assert_same_pass(FINISH(), stall=0, checkpoints=True)
+        self.assertEqual((rtl.checkpoints, emulator.checkpoints), ([], []))
 
     def test_runaway_hits_the_cycle_limit(self):
         emulator, rtl = self.run_both([ADDI(1, 1, 1), JAL(0, -4)], limit=50, max_cycles=200)

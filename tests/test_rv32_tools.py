@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 
+from tools.rv32_devices import EVENT_PRESS, EVENT_VALID, FB_SIZE, event_word, frame_hash, key_code, parse_input_script
 from tools.rv32_image import (ImageError, check_image, check_listing, flatten, parse_elf,
                               to_hex_words)
 from tools.rv32_run_qemu import classify, qemu_command
@@ -220,3 +221,40 @@ class QemuDriverTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeviceHelperTests(unittest.TestCase):
+    """tools/rv32_devices.py is the reference the emulator and testbench are compared against."""
+
+    def test_frame_hash_is_the_documented_shift_add(self):
+        # Two words by hand: h = 5381; h = h*33 ^ w1; h = h*33 ^ w2, all mod 2^32.
+        h = 5381
+        h = (h * 33 ^ 0x11223344) & 0xFFFFFFFF
+        h = (h * 33 ^ 0xFFFFFFFF) & 0xFFFFFFFF
+        self.assertEqual(frame_hash(bytes.fromhex("44332211ffffffff")), h)
+        self.assertEqual(frame_hash(b""), 5381)
+        self.assertNotEqual(frame_hash(bytes(FB_SIZE)), frame_hash(bytes(FB_SIZE - 4)), "length matters")
+        with self.assertRaises(ValueError):
+            frame_hash(b"abc")
+
+    def test_event_words_and_key_codes(self):
+        self.assertEqual(event_word(True, 1), EVENT_VALID | EVENT_PRESS | 1)
+        self.assertEqual(event_word(False, 31), EVENT_VALID | 31)
+        self.assertEqual((key_code("left"), key_code("LEFT"), key_code("7"), key_code("31")), (1, 1, 7, 31))
+        for bad in ("32", "-1", "shift", ""):
+            with self.assertRaises(ValueError):
+                key_code(bad)
+        with self.assertRaises(ValueError):
+            event_word(True, 32)
+
+    def test_input_script_grammar(self):
+        text = "# a comment\n\nframe 0 down LEFT\nframe 0 up left\n  frame 3 down 5 \nframe 3 up Q\n"
+        self.assertEqual(parse_input_script(text),
+                         [(0, event_word(True, 1)), (0, event_word(False, 1)), (3, event_word(True, 5)),
+                          (3, event_word(False, 13))])
+        self.assertEqual(parse_input_script(""), [])
+        for bad in ("frame 1 down", "frame x down A", "frame 1 press A", "frame 2 down A\nframe 1 up A",
+                    "frame 1 down NOPE", "frame -1 down A", "key 1 down A", "frame 1 down A extra"):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(ValueError, "input script line"):
+                    parse_input_script(bad)

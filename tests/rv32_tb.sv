@@ -8,6 +8,7 @@
 module rv32_tb;
     parameter integer RAM_WORDS = 1048576; // the contract's 4 MiB
     parameter integer CONSOLE_BUSY = 0;    // cycles the console waits before each byte
+    parameter integer FB_WORDS = 19200;    // 320 x 240 pixels
     localparam integer STDERR = 32'h8000_0002;
 
     reg clk = 0;
@@ -18,9 +19,9 @@ module rv32_tb;
     wire [3:0] mem_strb, trap_cause;
     wire [4:0] retire_rd;
     wire [2:0] state;
-    wire console_valid, done_valid;
+    wire console_valid, done_valid, display_present;
     wire [7:0] console_byte;
-    wire [31:0] done_wdata;
+    wire [31:0] done_wdata, display_frames;
     reg mem_hold = 1; // acceptance deferred until the stall generator releases it
 
     // Stall generator and counters.
@@ -43,13 +44,13 @@ module rv32_tb;
     reg done_pending = 0;
     reg [31:0] done_word;
 
-    string image_path, trace_path, wave_path, console_path, text;
-    integer trace_fd = 0, console_fd = 0;
+    string image_path, trace_path, wave_path, console_path, checkpoints_path, text;
+    integer trace_fd = 0, console_fd = 0, checkpoints_fd = 0;
     integer image_words = 0;
     integer fd, i;
     reg finished = 0;
 
-    rv32_soc #(.RAM_WORDS(RAM_WORDS), .CONSOLE_BUSY(CONSOLE_BUSY)) dut (.*);
+    rv32_soc #(.RAM_WORDS(RAM_WORDS), .FB_WORDS(FB_WORDS), .CONSOLE_BUSY(CONSOLE_BUSY)) dut (.*);
     // The clock stops when the run ends, so the simulation drains without
     // $finish: Icarus and Verilator then exit silently and stdout stays the
     // guest console only.
@@ -99,6 +100,20 @@ module rv32_tb;
         end
     endfunction
 
+    // The checkpoint hash of docs/rv32.md: shifts and adds over the framebuffer's words in
+    // address order, read through the hierarchy the way the host would read a display's memory.
+    function [31:0] frame_hash;
+        input integer words;
+        integer k;
+        reg [31:0] h;
+        begin
+            h = 32'd5381;
+            for (k = 0; k < words; k = k + 1)
+                h = ((h << 5) + h) ^ dut.fb.mem[k];
+            frame_hash = h;
+        end
+    endfunction
+
     task finish_run;
         input string halt_name;
         begin
@@ -123,6 +138,7 @@ module rv32_tb;
             $fwrite(STDERR, "\n");
             if (trace_fd != 0) $fclose(trace_fd);
             if (console_fd != 0) $fclose(console_fd);
+            if (checkpoints_fd != 0) $fclose(checkpoints_fd);
             finished = 1;
         end
     endtask
@@ -155,6 +171,10 @@ module rv32_tb;
                         done_pending = 1;
                         done_word = done_wdata;
                     end
+                    // A present snapshots the framebuffer as it is at acceptance: every earlier
+                    // store has landed, this cycle's frame number is the count plus one.
+                    if (display_present && checkpoints_fd != 0)
+                        $fwrite(checkpoints_fd, "frame %0d %h\n", display_frames + 1, frame_hash(FB_WORDS));
                     if (!mem_fetch) begin
                         if (pending)
                             $fatal(1, "Two data transactions without a retirement between them");
@@ -282,6 +302,10 @@ module rv32_tb;
             trace_fd = $fopen(trace_path, "w");
             if (trace_fd == 0) $fatal(1, "Cannot open trace file %0s", trace_path);
         end
+        if ($value$plusargs("checkpoints=%s", checkpoints_path)) begin
+            checkpoints_fd = $fopen(checkpoints_path, "w");
+            if (checkpoints_fd == 0) $fatal(1, "Cannot open checkpoints file %0s", checkpoints_path);
+        end
         // With +console the guest's bytes go to a file and stdout carries only
         // simulator diagnostics, so the runner can fail a run on any stdout output
         // without guessing which lines are the simulator's.
@@ -296,6 +320,8 @@ module rv32_tb;
         // has no initial block, so synthesis never sees a file.
         for (i = 0; i < RAM_WORDS; i = i + 1)
             dut.ram.mem[i] = 32'd0;
+        for (i = 0; i < FB_WORDS; i = i + 1)
+            dut.fb.mem[i] = 32'd0; // unspecified by the contract; zero like the emulator's calloc
         $readmemh(image_path, dut.ram.mem, 0, image_words - 1);
         repeat (2) @(posedge clk);
         #1 reset = 0;

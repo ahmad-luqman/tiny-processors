@@ -32,6 +32,15 @@
 #define DONE_RESET 0x7777u
 #define TIMER_BASE 0x20000000u
 #define TIMER_TICKS 0x0u
+#define DISPLAY_BASE 0x20002000u
+#define DISPLAY_PRESENT 0x0u
+#define DISPLAY_FRAMES 0x4u
+#define DISPLAY_WIDTH 0x8u
+#define DISPLAY_HEIGHT 0xCu
+#define FB_BASE 0x30000000u
+#define FB_COLUMNS 320u
+#define FB_ROWS 240u
+#define FB_SIZE (FB_COLUMNS * FB_ROWS)
 
 /* mcause values (RISC-V privileged specification, machine mode, no interrupts). */
 enum cause {
@@ -69,6 +78,11 @@ typedef struct {
     uint32_t done_word;
     uint32_t second_cause, second_tval; /* the trap that could not be delivered */
     uint32_t timer_offset; /* TICKS = steps + timer_offset; a write sets the offset */
+    uint8_t *fb;           /* the framebuffer window, FB_SIZE bytes */
+    uint32_t frames;       /* presents since reset */
+    FILE *checkpoints;     /* one `frame N <hash>` line per present, or NULL */
+    const char *frames_dir; /* directory for frame-NNNN.ppm, or NULL */
+    bool output_error;     /* a frame file could not be written; the run is rejected */
     /* Effects of the current step, for the trace line. */
     int wr_reg;
     uint32_t wr_value;
@@ -174,12 +188,100 @@ static access timer_store(machine *m, uint32_t offset, int width, uint32_t value
     return ACC_FAULT;
 }
 
+static access fb_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    *value = bytes_read(m->fb + offset, width);
+    return ACC_OK;
+}
+
+static access fb_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    bytes_write(m->fb + offset, width, value);
+    return ACC_OK;
+}
+
+/* The checkpoint hash (docs/rv32.md, "Display"): shift-add over the
+ * framebuffer's little-endian words in address order, no multiply, so the
+ * firmware can compute the same value over a frame it reads back. */
+static uint32_t frame_hash(const uint8_t *pixels)
+{
+    uint32_t h = 5381u;
+    for (uint32_t i = 0; i < FB_SIZE; i += 4) {
+        h = ((h << 5) + h) ^ bytes_read(pixels + i, 4);
+    }
+    return h;
+}
+
+/* Write the frame as a binary PPM with the fixed RGB332 mapping (bits 7:5
+ * red, 4:2 green, 1:0 blue, each scaled to 0..255) so a frame can be looked
+ * at before M6 shows it in a window. */
+static bool write_ppm(const machine *m, const char *path)
+{
+    FILE *out = fopen(path, "wb");
+    if (!out) {
+        return false;
+    }
+    fprintf(out, "P6\n%u %u\n255\n", FB_COLUMNS, FB_ROWS);
+    for (uint32_t i = 0; i < FB_SIZE; i++) {
+        uint8_t p = m->fb[i];
+        uint8_t rgb[3] = {(uint8_t)(((p >> 5) & 7u) * 255u / 7u), (uint8_t)(((p >> 2) & 7u) * 255u / 7u),
+                          (uint8_t)((p & 3u) * 255u / 3u)};
+        fwrite(rgb, 1, 3, out);
+    }
+    bool ok = !ferror(out);
+    return fclose(out) == 0 && ok;
+}
+
+/* A present: the snapshot is taken now, before the storing instruction
+ * retires, and becomes checkpoint `frame N <hash>` and, when asked for, a
+ * picture. Nothing about the framebuffer changes. */
+static void present(machine *m)
+{
+    m->frames++;
+    if (m->checkpoints) {
+        fprintf(m->checkpoints, "frame %" PRIu32 " %08" PRIx32 "\n", m->frames, frame_hash(m->fb));
+    }
+    if (m->frames_dir) {
+        char path[4096];
+        int n = snprintf(path, sizeof path, "%s/frame-%04" PRIu32 ".ppm", m->frames_dir, m->frames);
+        if (n < 0 || (size_t)n >= sizeof path || !write_ppm(m, path)) {
+            fprintf(stderr, "rv32emu: cannot write frame %" PRIu32 " to %s\n", m->frames, m->frames_dir);
+            m->output_error = true;
+        }
+    }
+}
+
+static access display_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    if (width != 4) {
+        return ACC_FAULT;
+    }
+    switch (offset) {
+    case DISPLAY_FRAMES: *value = m->frames; return ACC_OK;
+    case DISPLAY_WIDTH: *value = FB_COLUMNS; return ACC_OK;
+    case DISPLAY_HEIGHT: *value = FB_ROWS; return ACC_OK;
+    default: return ACC_FAULT; /* PRESENT is write-only */
+    }
+}
+
+static access display_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    (void)value; /* any word presents */
+    if (width == 4 && offset == DISPLAY_PRESENT) {
+        present(m);
+        return ACC_OK;
+    }
+    return ACC_FAULT; /* FRAMES, WIDTH, and HEIGHT are read-only */
+}
+
 /* The memory map (docs/rv32.md). RAM is last only for readability; the
  * windows are disjoint so the order does not matter. */
 static const region REGIONS[] = {
     {"done", DONE_ADDR, 4, NULL, done_store},
     {"console", CONSOLE_BASE, 8, console_load, console_store},
     {"timer", TIMER_BASE, 16, timer_load, timer_store},
+    {"display", DISPLAY_BASE, 16, display_load, display_store},
+    {"framebuffer", FB_BASE, FB_SIZE, fb_load, fb_store},
     {"ram", RAM_BASE, RAM_SIZE, ram_load, ram_store},
 };
 
@@ -546,8 +648,8 @@ static void dump_state(const machine *m, FILE *out)
     }
     fprintf(out, "mtvec %08" PRIx32 "\nmepc %08" PRIx32 "\nmcause %08" PRIx32 "\nmtval %08" PRIx32 "\n",
             m->mtvec, m->mepc, m->mcause, m->mtval);
-    fprintf(out, "steps %" PRIu64 "\nretired %" PRIu64 "\ntraps %" PRIu64 "\nhalt %s\n",
-            m->steps, m->retired, m->traps, halt_name(m->halt));
+    fprintf(out, "steps %" PRIu64 "\nretired %" PRIu64 "\ntraps %" PRIu64 "\nframes %" PRIu32 "\nhalt %s\n",
+            m->steps, m->retired, m->traps, m->frames, halt_name(m->halt));
     if (m->halt == HALT_DONE) {
         fprintf(out, "done %08" PRIx32 "\n", m->done_word);
     }
@@ -609,17 +711,18 @@ static bool close_output(FILE *stream, const char *path)
 static void usage(void)
 {
     fputs("usage: rv32emu --image FILE [--base ADDR] [--pc ADDR] [--trace FILE] [--dump-state FILE]\n"
-          "               [--max-instructions N]\n"
+          "               [--max-instructions N] [--checkpoints FILE] [--frames DIR]\n"
           "Loads FILE at ADDR (default 0x80000000), starts at --pc (default the base), and runs\n"
           "until the done register is written. Console bytes go to stdout, the trace and state\n"
-          "to their files, and a final 'rv32emu: halt=...' line to stderr.\n",
+          "to their files, and a final 'rv32emu: halt=...' line to stderr. Each present appends\n"
+          "'frame N <hash>' to the checkpoints file and writes DIR/frame-NNNN.ppm.\n",
           stderr);
     exit(EXIT_EMULATOR_ERROR);
 }
 
 int main(int argc, char **argv)
 {
-    const char *image_path = NULL, *trace_path = NULL, *state_path = NULL;
+    const char *image_path = NULL, *trace_path = NULL, *state_path = NULL, *checkpoints_path = NULL;
     uint32_t base = RAM_BASE, start = 0;
     bool start_given = false;
     machine m;
@@ -643,6 +746,10 @@ int main(int argc, char **argv)
             state_path = value;
         } else if (!strcmp(arg, "--max-instructions")) {
             m.limit = parse_u64(value, UINT64_MAX, "instruction limit");
+        } else if (!strcmp(arg, "--checkpoints")) {
+            checkpoints_path = value;
+        } else if (!strcmp(arg, "--frames")) {
+            m.frames_dir = value;
         } else {
             usage();
         }
@@ -651,8 +758,9 @@ int main(int argc, char **argv)
         usage();
     }
     m.ram = calloc(RAM_SIZE, 1);
-    if (!m.ram) {
-        fputs("rv32emu: cannot allocate RAM\n", stderr);
+    m.fb = calloc(FB_SIZE, 1); /* unspecified by the contract; zero like the RTL testbench */
+    if (!m.ram || !m.fb) {
+        fputs("rv32emu: cannot allocate memory\n", stderr);
         return EXIT_EMULATOR_ERROR;
     }
     FILE *image = fopen(image_path, "rb");
@@ -679,6 +787,15 @@ int main(int argc, char **argv)
             return EXIT_EMULATOR_ERROR;
         }
     }
+    if (checkpoints_path) {
+        require_distinct(checkpoints_path, "checkpoints file", image_path, "image");
+        require_distinct(checkpoints_path, "checkpoints file", trace_path, "trace file");
+        m.checkpoints = fopen(checkpoints_path, "w");
+        if (!m.checkpoints) {
+            fprintf(stderr, "rv32emu: cannot write %s\n", checkpoints_path);
+            return EXIT_EMULATOR_ERROR;
+        }
+    }
 
     while (m.halt == RUNNING) {
         if (m.steps >= m.limit) {
@@ -695,9 +812,16 @@ int main(int argc, char **argv)
     if (m.trace && !close_output(m.trace, trace_path)) {
         outputs_ok = false;
     }
+    if (m.checkpoints && !close_output(m.checkpoints, checkpoints_path)) {
+        outputs_ok = false;
+    }
+    if (m.output_error) {
+        outputs_ok = false;
+    }
     if (state_path) {
         require_distinct(state_path, "state file", image_path, "image");
         require_distinct(state_path, "state file", trace_path, "trace file");
+        require_distinct(state_path, "state file", checkpoints_path, "checkpoints file");
         FILE *out = fopen(state_path, "w");
         if (!out) {
             fprintf(stderr, "rv32emu: cannot write %s\n", state_path);
@@ -739,6 +863,7 @@ int main(int argc, char **argv)
         fputc('\n', stderr);
     }
     free(m.ram);
+    free(m.fb);
     if (!outputs_ok) {
         fputs("rv32emu: outputs incomplete, run rejected\n", stderr);
         return EXIT_EMULATOR_ERROR;

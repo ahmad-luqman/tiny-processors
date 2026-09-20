@@ -67,7 +67,8 @@ def halt_line(stderr):
     return None if line is None else parse_halt_line(line, COUNTERS, ("done",))
 
 
-def emulator_command(emulator, image, trace=None, state=None, limit=None):
+def emulator_command(emulator, image, trace=None, state=None, limit=None, checkpoints=None, input_script=None,
+                     frames=None):
     command = [str(emulator), "--image", str(image)]
     if trace is not None:
         command += ["--trace", str(trace)]
@@ -75,6 +76,12 @@ def emulator_command(emulator, image, trace=None, state=None, limit=None):
         command += ["--dump-state", str(state)]
     if limit is not None:
         command += ["--max-instructions", str(limit)]
+    if checkpoints is not None:
+        command += ["--checkpoints", str(checkpoints)]
+    if input_script is not None:
+        command += ["--input", str(input_script)]
+    if frames is not None:
+        command += ["--frames", str(frames)]
     return command
 
 

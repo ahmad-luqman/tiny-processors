@@ -31,7 +31,7 @@ RV32_SELFCHECK_HEX := 807d9fad
 RV32EMU := build/rv32/rv32emu
 RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
 RV32_RTL := rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32.v
-RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_timer.v rtl/rv32/rv32_soc.v
+RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_timer.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v
 RV32_TB := tests/rv32_tb.sv
 RV32_TB_VVP := build/rv32/rv32_tb.vvp
 RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
@@ -262,7 +262,7 @@ lint-rv32-soc:
 # The memories are shrunk to 64 words so the count measures the decoder and
 # the devices; the core's own count is synth-rv32's.
 synth-rv32-soc: | build
-	yosys -Q -T -l build/rv32-soc-synth.log -p 'read_verilog $(RV32_SOC_RTL); chparam -set RAM_WORDS 64 rv32_soc; synth -top rv32_soc; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32-soc.json'
+	yosys -Q -T -l build/rv32-soc-synth.log -p 'read_verilog $(RV32_SOC_RTL); chparam -set RAM_WORDS 64 -set FB_WORDS 64 rv32_soc; synth -top rv32_soc; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32-soc.json'
 
 waves-rv32: $(RV32_TB_VVP) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl --mode waves --program loop --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl

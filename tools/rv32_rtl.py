@@ -24,7 +24,7 @@ from tools.rv32_run_emu import DEFAULT_EMULATOR, emulator_command, halt_line, la
 
 RTL_SOURCES = [ROOT / "rtl" / "rv32" / name
                for name in ("rv32_regfile.v", "rv32_alu.v", "rv32_decode.v", "rv32.v",
-                            "rv32_bus.v", "rv32_ram.v", "rv32_console.v", "rv32_done.v", "rv32_timer.v", "rv32_soc.v")]
+                            "rv32_bus.v", "rv32_ram.v", "rv32_console.v", "rv32_done.v", "rv32_timer.v", "rv32_display.v", "rv32_soc.v")]
 TESTBENCH = ROOT / "tests" / "rv32_tb.sv"
 DEFAULT_SIMULATOR = "build/rv32/rv32_tb.vvp"
 DEFAULT_OUT = "build/rv32/rtl"
@@ -39,7 +39,8 @@ REQUIRED = {"done": ("done",), "double-fault": ("cause", "tval"), "limit": ()}
 # testbench writes with +console), `noise` is anything the simulator itself
 # printed on stdout (Icarus $fatal, $readmemh, and plusarg messages, Verilator
 # %Error/%Fatal), which is empty for a clean run and always empty for the emulator.
-Run = namedtuple("Run", "status console noise stderr trace halt")
+# `checkpoints` is the `frame N <hash>` lines the backend wrote, when a file was asked for.
+Run = namedtuple("Run", "status console noise stderr trace halt checkpoints", defaults=([],))
 
 
 def compile_testbench(output, iverilog="iverilog"):
@@ -48,7 +49,8 @@ def compile_testbench(output, iverilog="iverilog"):
                     str(TESTBENCH), *map(str, RTL_SOURCES)], check=True)
 
 
-def simulator_command(simulator, image, trace=None, console=None, wave=None, stall=None, seed=None, max_cycles=None):
+def simulator_command(simulator, image, trace=None, console=None, wave=None, stall=None, seed=None, max_cycles=None,
+                      checkpoints=None, input_script=None):
     """The command line for a compiled testbench: `vvp` for a .vvp file, else a Verilator binary."""
     simulator = Path(simulator)
     if simulator.suffix == ".vvp":
@@ -68,6 +70,10 @@ def simulator_command(simulator, image, trace=None, console=None, wave=None, sta
         command.append(f"+stall-seed={seed}")
     if max_cycles is not None:
         command.append(f"+max-cycles={max_cycles}")
+    if checkpoints is not None:
+        command.append(f"+checkpoints={checkpoints}")
+    if input_script is not None:
+        command.append(f"+input={input_script}")
     return command
 
 
@@ -107,7 +113,7 @@ def simulator_noise(stdout):
     return "".join(line for line in stdout.splitlines(keepends=True) if not line.startswith(INFORMATIONAL))
 
 
-def run_backend(command, trace, parse_halt, timeout, console=None):
+def run_backend(command, trace, parse_halt, timeout, console=None, checkpoints=None):
     """Run one backend; the trace (and console) files are truncated first so a crash cannot pass.
 
     With `console`, the guest transcript is read from that file and the process's
@@ -118,6 +124,8 @@ def run_backend(command, trace, parse_halt, timeout, console=None):
     Path(trace).write_text("")
     if console is not None:
         Path(console).write_text("")
+    if checkpoints is not None:
+        Path(checkpoints).write_text("")
     completed = subprocess.run(command, capture_output=True, timeout=timeout)
     stdout, stderr = decode(completed.stdout), decode(completed.stderr)
     try:
@@ -128,21 +136,25 @@ def run_backend(command, trace, parse_halt, timeout, console=None):
         transcript, noise = stdout, ""
     else:
         transcript, noise = decode(Path(console).read_bytes()), simulator_noise(stdout)
-    return Run(completed.returncode, transcript, noise, stderr, Path(trace).read_text().splitlines(), halt)
+    lines = Path(checkpoints).read_text().splitlines() if checkpoints is not None else []
+    return Run(completed.returncode, transcript, noise, stderr, Path(trace).read_text().splitlines(), halt, lines)
 
 
-def run_rtl(simulator, image_hex, trace, stall=None, seed=None, wave=None, max_cycles=None, timeout=120):
+def run_rtl(simulator, image_hex, trace, stall=None, seed=None, wave=None, max_cycles=None, timeout=120,
+            checkpoints=None, input_script=None):
     """Run the testbench on a hex image with the documented plusargs; the console goes next to the trace."""
     console = Path(trace).with_name(Path(trace).name + ".console")
     command = simulator_command(simulator, image_hex, trace=trace, console=console, wave=wave,
-                                stall=stall, seed=seed, max_cycles=max_cycles)
-    return run_backend(command, trace, rtl_halt_line, timeout, console=console)
+                                stall=stall, seed=seed, max_cycles=max_cycles, checkpoints=checkpoints,
+                                input_script=input_script)
+    return run_backend(command, trace, rtl_halt_line, timeout, console=console, checkpoints=checkpoints)
 
 
-def run_emulator(emulator, image_bin, trace, limit=None, timeout=120):
+def run_emulator(emulator, image_bin, trace, limit=None, timeout=120, checkpoints=None, input_script=None):
     """Run the emulator on a flat image with a trace, the same way tools/rv32_run_emu.py does."""
-    command = emulator_command(emulator, image_bin, trace=trace, limit=limit)
-    return run_backend(command, trace, halt_line, timeout)
+    command = emulator_command(emulator, image_bin, trace=trace, limit=limit, checkpoints=checkpoints,
+                               input_script=input_script)
+    return run_backend(command, trace, halt_line, timeout, checkpoints=checkpoints)
 
 
 def diff_traces(rtl, emulator, context=3):

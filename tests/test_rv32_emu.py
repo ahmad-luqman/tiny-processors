@@ -19,6 +19,7 @@ import unittest
 
 # The encoder lives in tools/rv32_asm.py so the RTL tests assemble the same words.
 from tools.rv32_asm import *  # noqa: F401,F403
+from tools.rv32_devices import FB_SIZE, frame_hash
 from tools.rv32_diff_qemu import compare, qemu_pcs, trace_pcs
 from tools.rv32_run_emu import build_emulator, halt_line
 
@@ -26,18 +27,20 @@ from tools.rv32_run_emu import build_emulator, halt_line
 ROOT = Path(__file__).resolve().parents[1]
 
 
-State = namedtuple("State", "pc x mtvec mepc mcause mtval steps retired traps halt done")
-Result = namedtuple("Result", "status stdout stderr state trace halt")
+State = namedtuple("State", "pc x mtvec mepc mcause mtval steps retired traps frames halt done")
+Result = namedtuple("Result", "status stdout stderr state trace halt checkpoints", defaults=([],))
+DECIMAL_STATE = ("steps", "retired", "traps", "frames")
 
 
 def parse_state(text):
     fields = {}
     for line in text.splitlines():
         key, value = line.split()
-        fields[key] = value if key == "halt" else int(value, 16 if key not in ("steps", "retired", "traps") else 10)
+        fields[key] = value if key == "halt" else int(value, 10 if key in DECIMAL_STATE else 16)
     x = [fields[f"x{i}"] for i in range(32)]
     return State(fields["pc"], x, fields["mtvec"], fields["mepc"], fields["mcause"], fields["mtval"],
-                 fields["steps"], fields["retired"], fields["traps"], fields["halt"], fields.get("done"))
+                 fields["steps"], fields["retired"], fields["traps"], fields["frames"], fields["halt"],
+                 fields.get("done"))
 
 
 def effects(line):
@@ -57,19 +60,26 @@ class EmulatorTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.workdir.cleanup()
 
-    def run_words(self, words, limit=10000, base=RAM, extra=()):
-        """Run a raw word image and return the exit status, outputs, state, and trace lines."""
+    def run_words(self, words, limit=10000, base=RAM, extra=(), checkpoints=False, input_script=None):
+        """Run a raw word image and return the exit status, outputs, state, trace lines, and, when
+        asked for, the checkpoint lines; `input_script` is the text of an --input file."""
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             (path / "image.bin").write_bytes(b"".join(word.to_bytes(4, "little") for word in words))
             command = [str(self.emulator), "--image", str(path / "image.bin"), "--base", f"{base:#x}",
                        "--dump-state", str(path / "state"), "--trace", str(path / "trace"),
                        "--max-instructions", str(limit), *extra]
+            if checkpoints:
+                command += ["--checkpoints", str(path / "checkpoints")]
+            if input_script is not None:
+                (path / "input.txt").write_text(input_script)
+                command += ["--input", str(path / "input.txt")]
             completed = subprocess.run(command, capture_output=True, text=True)
             state = parse_state((path / "state").read_text())
             trace = (path / "trace").read_text().splitlines()
+            lines = (path / "checkpoints").read_text().splitlines() if checkpoints else []
         return Result(completed.returncode, completed.stdout, completed.stderr, state, trace,
-                      halt_line(completed.stderr))
+                      halt_line(completed.stderr), lines)
 
     def run_pass(self, words, **kwargs):
         result = self.run_words(list(words) + FINISH(), **kwargs)
@@ -296,7 +306,15 @@ class EmulatorTest(unittest.TestCase):
             ([SH(1, 2, 0)], TIMER, 7, TIMER),
             ([LW(1, 2, 4)], TIMER, 5, TIMER + 4),           # no other timer register
             ([SW(1, 2, 12)], TIMER, 7, TIMER + 12),
-            ([LW(1, 2, 16)], TIMER, 5, TIMER + 16)]         # past the window
+            ([LW(1, 2, 16)], TIMER, 5, TIMER + 16),         # past the window
+            ([LW(1, 2, 0)], DISPLAY, 5, DISPLAY),           # PRESENT is write-only
+            ([SW(1, 2, 4)], DISPLAY, 7, DISPLAY + 4),       # FRAMES, WIDTH, HEIGHT are read-only
+            ([SW(1, 2, 12)], DISPLAY, 7, DISPLAY + 12),
+            ([LHU(1, 2, 8)], DISPLAY, 5, DISPLAY + 8),      # and words
+            ([SB(1, 2, 0)], DISPLAY, 7, DISPLAY),
+            ([SB(1, 2, 0)], FB + FB_SIZE, 7, FB + FB_SIZE), # the byte past the last pixel
+            ([LW(1, 2, 0)], FB + FB_SIZE, 5, FB + FB_SIZE),
+            ([LBU(1, 2, 0)], FB - 1, 5, FB - 1)]
         for body, base, cause, tval in cases:
             with self.subTest(body=body, base=hex(base)):
                 result = self.run_trapping(LI(2, base) + LI(1, 0x5555) + body)
@@ -367,6 +385,52 @@ class EmulatorTest(unittest.TestCase):
         result = self.run_words(words)
         self.assertEqual((result.state.halt, result.state.traps, result.state.x[2]), ("done", 1, 6))
 
+    def test_display_and_framebuffer(self):
+        """Pixels are ordinary memory at every width; a present hashes them into a checkpoint line
+        computed here independently; FRAMES counts presents; the state file reports them."""
+        last = FB_SIZE - 4
+        words = LI(1, DISPLAY) + [LW(2, 1, 8), LW(3, 1, 12)] + LI(5, FB) + LI(6, 0x11223344)
+        words += [SW(6, 5, 0), SB(6, 5, 4), SH(6, 5, 6)] + LI(7, FB + last) + [SW(6, 7, 0), LW(8, 5, 4), LBU(9, 7, 3)]
+        words += [SW(0, 1, 0), LW(11, 1, 4), SB(6, 5, 8), SW(6, 1, 0), LW(12, 1, 4)]
+        result = self.run_pass(words, checkpoints=True)
+        self.assertEqual((result.state.x[2], result.state.x[3], result.state.x[8], result.state.x[9]),
+                         (320, 240, 0x33440044, 0x11))
+        self.assertEqual((result.state.x[11], result.state.x[12], result.state.frames), (1, 2, 2))
+        pixels = bytearray(FB_SIZE)
+        pixels[0:4] = (0x11223344).to_bytes(4, "little")
+        pixels[4] = 0x44
+        pixels[6:8] = (0x3344).to_bytes(2, "little")
+        pixels[last:last + 4] = (0x11223344).to_bytes(4, "little")
+        first = frame_hash(pixels)
+        pixels[8] = 0x44
+        self.assertEqual(result.checkpoints, [f"frame 1 {first:08x}", f"frame 2 {frame_hash(pixels):08x}"])
+        self.assertEqual(effects(result.trace[16]), f"mem[{DISPLAY:08x}]<-00000000/4", "the present store retires")
+        self.assertEqual(result.halt["outcome"], "pass", "the halt line does not change")
+        # Without --checkpoints nothing is written and the run is the same; a fresh frame is all zero.
+        result = self.run_pass(LI(1, DISPLAY) + [SW(0, 1, 0)])
+        self.assertEqual((result.state.frames, result.checkpoints), (1, []))
+        result = self.run_pass(LI(1, DISPLAY) + [SW(0, 1, 0)], checkpoints=True)
+        self.assertEqual(result.checkpoints, [f"frame 1 {frame_hash(bytes(FB_SIZE)):08x}"])
+
+    def test_frames_are_written_as_ppm(self):
+        """--frames DIR writes one binary PPM per present with the RGB332 mapping; an unwritable
+        directory rejects the run."""
+        words = LI(1, DISPLAY) + LI(5, FB) + LI(6, 0xE3) + [SB(6, 5, 321), SW(0, 1, 0)]
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_pass(words, extra=("--frames", directory))
+            files = sorted(Path(directory).iterdir())
+            self.assertEqual([f.name for f in files], ["frame-0001.ppm"])
+            data = files[0].read_bytes()
+            header = b"P6\n320 240\n255\n"
+            self.assertTrue(data.startswith(header))
+            self.assertEqual(len(data), len(header) + 3 * FB_SIZE)
+            self.assertEqual(data[len(header):len(header) + 3], b"\x00\x00\x00")
+            self.assertEqual(data[len(header) + 3 * 321:len(header) + 3 * 322], b"\xff\x00\xff", "0xE3: red 7, green 0, blue 3")
+        result = self.run_words(words + FINISH(), extra=("--frames", "/nonexistent/dir"))
+        self.assertEqual((result.status, result.state.frames), (2, 1))
+        self.assertIn("cannot write frame 1", result.stderr)
+        self.assertIn("outputs incomplete", result.stderr)
+
     def test_instruction_limit_and_counts(self):
         result = self.run_words([JAL(0, 0)], limit=50)
         self.assertEqual((result.status, result.state.halt, result.state.steps), (2, "limit", 50))
@@ -408,7 +472,10 @@ class EmulatorTest(unittest.TestCase):
             for extra, message in [(["--trace", str(image)], "trace file"),
                                    (["--dump-state", str(image)], "state file"),
                                    (["--trace", str(path / "t"), "--dump-state", str(path / "t")], "state file"),
-                                   (["--trace", str(path / "t"), "--dump-state", str(path / "./t")], "state file")]:
+                                   (["--trace", str(path / "t"), "--dump-state", str(path / "./t")], "state file"),
+                                   (["--checkpoints", str(image)], "checkpoints file"),
+                                   (["--trace", str(path / "t"), "--checkpoints", str(path / "t")], "checkpoints file"),
+                                   (["--checkpoints", str(path / "c"), "--dump-state", str(path / "c")], "state file")]:
                 with self.subTest(extra=extra):
                     completed = subprocess.run([str(self.emulator), "--image", str(image), *extra],
                                                capture_output=True, text=True)
