@@ -30,6 +30,8 @@
 #define DONE_PASS 0x5555u
 #define DONE_FAIL 0x3333u
 #define DONE_RESET 0x7777u
+#define TIMER_BASE 0x20000000u
+#define TIMER_TICKS 0x0u
 
 /* mcause values (RISC-V privileged specification, machine mode, no interrupts). */
 enum cause {
@@ -66,6 +68,7 @@ typedef struct {
     enum halt halt;
     uint32_t done_word;
     uint32_t second_cause, second_tval; /* the trap that could not be delivered */
+    uint32_t timer_offset; /* TICKS = steps + timer_offset; a write sets the offset */
     /* Effects of the current step, for the trace line. */
     int wr_reg;
     uint32_t wr_value;
@@ -150,11 +153,33 @@ static access done_store(machine *m, uint32_t offset, int width, uint32_t value)
     return ACC_FAULT; /* byte and halfword writes */
 }
 
+/* Device time (docs/rv32.md): a tick is one executed instruction. The load
+ * runs before this instruction is counted, so instruction N reads N - 1
+ * plus whatever a write added. */
+static access timer_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    if (width == 4 && offset == TIMER_TICKS) {
+        *value = (uint32_t)m->steps + m->timer_offset;
+        return ACC_OK;
+    }
+    return ACC_FAULT;
+}
+
+static access timer_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    if (width == 4 && offset == TIMER_TICKS) {
+        m->timer_offset = value - (uint32_t)m->steps;
+        return ACC_OK;
+    }
+    return ACC_FAULT;
+}
+
 /* The memory map (docs/rv32.md). RAM is last only for readability; the
  * windows are disjoint so the order does not matter. */
 static const region REGIONS[] = {
     {"done", DONE_ADDR, 4, NULL, done_store},
     {"console", CONSOLE_BASE, 8, console_load, console_store},
+    {"timer", TIMER_BASE, 16, timer_load, timer_store},
     {"ram", RAM_BASE, RAM_SIZE, ram_load, ram_store},
 };
 

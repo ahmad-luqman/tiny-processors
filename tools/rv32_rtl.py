@@ -24,7 +24,7 @@ from tools.rv32_run_emu import DEFAULT_EMULATOR, emulator_command, halt_line, la
 
 RTL_SOURCES = [ROOT / "rtl" / "rv32" / name
                for name in ("rv32_regfile.v", "rv32_alu.v", "rv32_decode.v", "rv32.v",
-                            "rv32_bus.v", "rv32_ram.v", "rv32_console.v", "rv32_done.v", "rv32_soc.v")]
+                            "rv32_bus.v", "rv32_ram.v", "rv32_console.v", "rv32_done.v", "rv32_timer.v", "rv32_soc.v")]
 TESTBENCH = ROOT / "tests" / "rv32_tb.sv"
 DEFAULT_SIMULATOR = "build/rv32/rv32_tb.vvp"
 DEFAULT_OUT = "build/rv32/rtl"

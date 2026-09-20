@@ -41,12 +41,18 @@ module rv32_bus #(
     output wire        done_valid,
     input  wire        done_ready,
     input  wire        done_error,
-    input  wire [31:0] done_rdata
+    input  wire [31:0] done_rdata,
+    // Timer at 0x2000_0000.
+    output wire        timer_valid,
+    input  wire        timer_ready,
+    input  wire        timer_error,
+    input  wire [31:0] timer_rdata
 );
     localparam [31:0] RAM_BASE = 32'h8000_0000;
     localparam [31:0] RAM_BYTES = RAM_WORDS * 4;
     localparam [31:0] CONSOLE_BASE = 32'h1000_0000;
     localparam [31:0] DONE_ADDR = 32'h0010_0000;
+    localparam [31:0] TIMER_BASE = 32'h2000_0000;
 
     wire req = mem_valid && !mem_hold;
     wire [31:0] ram_offset = mem_addr - RAM_BASE;
@@ -55,18 +61,20 @@ module rv32_bus #(
     wire ram_sel = (mem_addr >= RAM_BASE) && (ram_offset < RAM_BYTES);
     wire console_sel = !mem_fetch && (mem_addr[31:3] == CONSOLE_BASE[31:3]);
     wire done_sel = !mem_fetch && (mem_addr == DONE_ADDR);
-    wire none_sel = !(ram_sel || console_sel || done_sel);
+    wire timer_sel = !mem_fetch && (mem_addr[31:4] == TIMER_BASE[31:4]);
+    wire none_sel = !(ram_sel || console_sel || done_sel || timer_sel);
 
     assign ram_valid = req && ram_sel;
     assign console_valid = req && console_sel;
     assign done_valid = req && done_sel;
+    assign timer_valid = req && timer_sel;
 
     assign mem_ready = req && ((ram_sel && ram_ready) || (console_sel && console_ready) ||
-                               (done_sel && done_ready) || none_sel);
+                               (done_sel && done_ready) || (timer_sel && timer_ready) || none_sel);
     assign mem_error = (ram_sel && ram_error) || (console_sel && console_error) ||
-                       (done_sel && done_error) || none_sel;
+                       (done_sel && done_error) || (timer_sel && timer_error) || none_sel;
     assign mem_rdata = ({32{ram_sel}} & ram_rdata) | ({32{console_sel}} & console_rdata) |
-                       ({32{done_sel}} & done_rdata);
+                       ({32{done_sel}} & done_rdata) | ({32{timer_sel}} & timer_rdata);
 
     wire unused_ok = &{1'b0, mem_we};
 endmodule

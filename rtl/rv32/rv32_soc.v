@@ -53,6 +53,8 @@ module rv32_soc #(
     wire [31:0] con_rdata;
     wire dn_valid, dn_ready, dn_error;
     wire [31:0] dn_rdata;
+    wire tm_valid, tm_ready, tm_error;
+    wire [31:0] tm_rdata;
 
     rv32 core (
         .clk(clk), .reset(reset),
@@ -70,7 +72,8 @@ module rv32_soc #(
         .mem_addr(mem_addr), .mem_ready(mem_ready), .mem_error(mem_error), .mem_rdata(mem_rdata),
         .ram_valid(ram_valid), .ram_ready(ram_ready), .ram_error(ram_error), .ram_rdata(ram_rdata),
         .console_valid(con_valid), .console_ready(con_ready), .console_error(con_error), .console_rdata(con_rdata),
-        .done_valid(dn_valid), .done_ready(dn_ready), .done_error(dn_error), .done_rdata(dn_rdata)
+        .done_valid(dn_valid), .done_ready(dn_ready), .done_error(dn_error), .done_rdata(dn_rdata),
+        .timer_valid(tm_valid), .timer_ready(tm_ready), .timer_error(tm_error), .timer_rdata(tm_rdata)
     );
 
     rv32_ram #(.WORDS(RAM_WORDS)) ram (
@@ -88,5 +91,10 @@ module rv32_soc #(
         .clk(clk), .reset(reset), .valid(dn_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
         .wdata(mem_wdata), .rdata(dn_rdata), .ready(dn_ready), .error(dn_error),
         .done_valid(done_valid), .done_word(done_wdata)
+    );
+
+    rv32_timer timer (
+        .clk(clk), .reset(reset), .valid(tm_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
+        .wdata(mem_wdata), .rdata(tm_rdata), .ready(tm_ready), .error(tm_error)
     );
 endmodule

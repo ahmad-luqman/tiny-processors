@@ -40,6 +40,12 @@ def parse_state(text):
                  fields["steps"], fields["retired"], fields["traps"], fields["halt"], fields.get("done"))
 
 
+def effects(line):
+    """What a trace line says after `step pc word`: the register and memory effects, or ''."""
+    parts = line.split(" ", 3)
+    return parts[3] if len(parts) == 4 else ""
+
+
 class EmulatorTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -285,7 +291,12 @@ class EmulatorTest(unittest.TestCase):
             ([LW(1, 2, 0)], DONE, 5, DONE),                 # done register is write-only
             ([SB(1, 2, 0)], DONE, 7, DONE),                 # and word-only
             ([SH(1, 2, 0)], DONE, 7, DONE),
-            ([SW(1, 2, 4)], DONE, 7, DONE + 4)]
+            ([SW(1, 2, 4)], DONE, 7, DONE + 4),
+            ([LBU(1, 2, 0)], TIMER, 5, TIMER),              # TICKS is a word
+            ([SH(1, 2, 0)], TIMER, 7, TIMER),
+            ([LW(1, 2, 4)], TIMER, 5, TIMER + 4),           # no other timer register
+            ([SW(1, 2, 12)], TIMER, 7, TIMER + 12),
+            ([LW(1, 2, 16)], TIMER, 5, TIMER + 16)]         # past the window
         for body, base, cause, tval in cases:
             with self.subTest(body=body, base=hex(base)):
                 result = self.run_trapping(LI(2, base) + LI(1, 0x5555) + body)
@@ -338,6 +349,23 @@ class EmulatorTest(unittest.TestCase):
                 result = self.run_words(FINISH(word))
                 self.assertEqual((result.status, result.halt["outcome"]), (2, "error=undefined-done-word"))
         self.assertEqual(result.trace[-1].split()[-1], f"mem[00100000]<-{word:08x}/4", "the done store retires")
+
+    def test_timer_counts_executed_instructions(self):
+        """Device time (docs/rv32.md): a load inside instruction N reads N - 1, trapped instructions
+        count, and a write loads the count so a read n instructions later returns value + n."""
+        result = self.run_pass(LI(1, TIMER) + [LW(2, 1, 0), LW(3, 1, 0)])
+        self.assertEqual((result.state.x[2], result.state.x[3]), (2, 3))
+        self.assertEqual(effects(result.trace[2]), f"x2=00000002 mem[{TIMER:08x}]->00000002/4")
+        # The store is instruction 5; instruction 6 reads value + 1 and instruction 7 wraps to zero.
+        result = self.run_pass(LI(1, TIMER) + LI(3, 0xFFFFFFFE) + [SW(3, 1, 0), LW(2, 1, 0), LW(4, 1, 0)])
+        self.assertEqual((result.state.x[2], result.state.x[4]), (0xFFFFFFFF, 0))
+        # A trapped instruction is executed: lui, addi, csrrw, then the ecall is instruction 4; the
+        # handler's lui and addi are 5 and 6, so its lw is instruction 7 and reads 6.
+        handler_at = RAM + 0x200
+        words = LI(5, handler_at) + [CSRRW(0, MTVEC, 5), ECALL()] + FINISH(0x00013333)
+        words += [0] * ((handler_at - RAM) // 4 - len(words)) + LI(1, TIMER) + [LW(2, 1, 0)] + FINISH()
+        result = self.run_words(words)
+        self.assertEqual((result.state.halt, result.state.traps, result.state.x[2]), ("done", 1, 6))
 
     def test_instruction_limit_and_counts(self):
         result = self.run_words([JAL(0, 0)], limit=50)

@@ -558,6 +558,11 @@ class RtlTest(unittest.TestCase):
             ("jal to a non-word target", [ADDI(1, 0, 1), JAL(0, 6)], 0, RAM + 4 + 6),
             ("taken branch to a non-word target", [ADDI(1, 0, 1), BEQ(1, 1, -2)], 0, RAM + 4 - 2),
             ("fetch outside RAM", [ADDI(1, 0, 1), JAL(0, -8)], 1, RAM - 4),
+            ("byte load of the timer", LI(1, TIMER) + [LBU(2, 1, 0)], 5, TIMER),
+            ("halfword store to the timer", LI(1, TIMER) + [SH(1, 1, 0)], 7, TIMER),
+            ("word load of an unimplemented timer offset", LI(1, TIMER) + [LW(2, 1, 4)], 5, TIMER + 4),
+            ("word store past the timer window", LI(1, TIMER) + [SW(1, 1, 16)], 7, TIMER + 16),
+            ("fetch from the timer", LI(1, TIMER) + [JALR(0, 1, 0)], 1, TIMER),
         ]
         for name, words, cause, value in cases:
             with self.subTest(name=name):
@@ -598,6 +603,37 @@ class RtlTest(unittest.TestCase):
                 self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
                 self.assertEqual((rtl.halt["halt"], rtl.halt["done"], rtl.halt["outcome"]), ("done", word, outcome))
                 self.assertEqual((emulator.halt["halt"], emulator.halt["outcome"]), ("done", outcome))
+
+    def test_timer_ticks_are_clock_cycles(self):
+        """Device time (docs/rv32.md): on the RTL a TICKS read returns the number of the cycle that
+        accepts it, so the value is hand-computed from the state machine; the emulator reads its
+        instruction count instead, and that line is the only one the two traces may disagree on."""
+        read_twice = LI(1, TIMER) + [LW(2, 1, 0), LW(3, 1, 0)] + FINISH()
+        for stall in (0, 1):
+            with self.subTest(stall=stall):
+                emulator, rtl = self.run_both(read_twice, stall=stall)
+                self.assertEqual((rtl.halt["halt"], rtl.halt["outcome"]), ("done", "pass"), rtl.stderr)
+                # lui and addi take 4 cycles each (plus one stall per fetch); the first lw's MEM state
+                # is then cycle 12, or 16 with one stall on each of its three fetches and its load.
+                first = 12 + 4 * stall
+                second = first + 5 + 2 * stall
+                self.assertEqual(effects(rtl.trace[2]), f"x2={first:08x} mem[{TIMER:08x}]->{first:08x}/4")
+                self.assertEqual(effects(rtl.trace[3]), f"x3={second:08x} mem[{TIMER:08x}]->{second:08x}/4")
+                self.assertEqual(effects(emulator.trace[2]), f"x2=00000002 mem[{TIMER:08x}]->00000002/4",
+                                 "the emulator counts executed instructions")
+                self.assertEqual(rtl.trace[:2] + rtl.trace[4:], emulator.trace[:2] + emulator.trace[4:],
+                                 "everything but the timer values is identical")
+                self.assertEqual(rtl.console, emulator.console)
+        # A write loads the count: the cycle of the store is V, the first read 5 cycles later is V + 5,
+        # and the count wraps through zero on the way.
+        wrap = LI(1, TIMER) + LI(3, 0xFFFFFFFE) + [SW(3, 1, 0), LW(2, 1, 0), LW(4, 1, 0)] + FINISH()
+        emulator, rtl = self.run_both(wrap, stall=0)
+        self.assertEqual((rtl.halt["halt"], rtl.halt["outcome"]), ("done", "pass"), rtl.stderr)
+        self.assertEqual(effects(rtl.trace[4]), f"mem[{TIMER:08x}]<-fffffffe/4")
+        self.assertEqual([effects(line) for line in rtl.trace[5:7]],
+                         [f"x2=00000003 mem[{TIMER:08x}]->00000003/4", f"x4=00000008 mem[{TIMER:08x}]->00000008/4"])
+        self.assertEqual([effects(line) for line in emulator.trace[5:7]],
+                         [f"x2=ffffffff mem[{TIMER:08x}]->ffffffff/4", f"x4=00000000 mem[{TIMER:08x}]->00000000/4"])
 
     def test_runaway_hits_the_cycle_limit(self):
         emulator, rtl = self.run_both([ADDI(1, 1, 1), JAL(0, -4)], limit=50, max_cycles=200)
