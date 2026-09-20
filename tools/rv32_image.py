@@ -29,6 +29,8 @@ REQUIRED_SECTIONS = (".text", ".rodata", ".data", ".bss")
 REQUIRED_SYMBOLS = ("_start", "__bss_start", "__bss_end", "_end", "_stack_bottom", "_stack_top")
 # Base RV32I only: no M, no CSRs, no compressed, no traps in the M1 slice.
 FORBIDDEN_MNEMONIC = re.compile(r"\A(mul\w*|div\w*|rem\w*|csr\w*|fence\.i|c\.\w+|ecall|ebreak|wfi|[msu]ret|sfence\.vma)\Z")
+# What an image with a trap handler may use in addition (the M5 diagnostic): the four trap CSRs and mret.
+PRIVILEGED_MNEMONIC = re.compile(r"\A(csr\w*|mret)\Z")
 LISTING_LINE = re.compile(r"\A\s*([0-9a-f]+):\s+([0-9a-f]{2}(?: [0-9a-f]{2})*|[0-9a-f]{4,8})\s+(\S+)")
 
 Elf = namedtuple("Elf", "etype machine flags entry segments sections symbols undefined")
@@ -87,8 +89,9 @@ def parse_elf(data):
     return Elf(etype, machine, flags, entry, segments, sections, symbols, undefined)
 
 
-def check_listing(text):
-    """Return problems found in an objdump disassembly listing."""
+def check_listing(text, allow_privileged=False):
+    """Return problems found in an objdump disassembly listing; `allow_privileged` admits the CSR
+    instructions and mret that a trap handler needs (docs/rv32.md, "Behavior fixed in M2")."""
     problems = []
     for number, line in enumerate(text.splitlines(), 1):
         if "<unknown>" in line:
@@ -96,11 +99,13 @@ def check_listing(text):
             continue
         match = LISTING_LINE.match(line)
         if match and FORBIDDEN_MNEMONIC.match(match.group(3)):
+            if allow_privileged and PRIVILEGED_MNEMONIC.match(match.group(3)):
+                continue
             problems.append(f"listing line {number}: instruction outside the M1 contract: {line.strip()}")
     return problems
 
 
-def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, entry=None):
+def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, entry=None, allow_privileged=False):
     """Return a list of contract violations; an empty list means the image is acceptable."""
     entry = ram_base if entry is None else entry
     ram_end = ram_base + ram_size
@@ -169,7 +174,7 @@ def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, e
     if elf.undefined:
         problems.append("undefined symbols: " + ", ".join(sorted(elf.undefined)))
     if listing is not None:
-        problems.extend(check_listing(listing))
+        problems.extend(check_listing(listing, allow_privileged))
     return problems
 
 
@@ -213,11 +218,13 @@ def main():
     parser.add_argument("--hex", type=Path, help="write little-endian word image for $readmemh")
     parser.add_argument("--ram-base", type=lambda text: int(text, 0), default=RAM_BASE)
     parser.add_argument("--ram-size", type=lambda text: int(text, 0), default=RAM_SLICE_SIZE)
+    parser.add_argument("--allow-privileged", action="store_true",
+                        help="admit csr* and mret in the listing (an image with a trap handler)")
     args = parser.parse_args()
     try:
         elf = parse_elf(args.elf.read_bytes())
         listing = args.listing.read_text() if args.listing else None
-        problems = check_image(elf, listing, args.ram_base, args.ram_size)
+        problems = check_image(elf, listing, args.ram_base, args.ram_size, allow_privileged=args.allow_privileged)
         image = flatten(elf, args.ram_base)
         if args.bin and args.bin.read_bytes() != image:
             problems.append(f"{args.bin} differs from the flattened PT_LOAD contents ({len(image)} bytes)")

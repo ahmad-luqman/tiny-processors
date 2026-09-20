@@ -154,10 +154,11 @@ def run_rtl(simulator, image_hex, trace, stall=None, seed=None, wave=None, max_c
     return run_backend(command, trace, rtl_halt_line, timeout, console=console, checkpoints=checkpoints)
 
 
-def run_emulator(emulator, image_bin, trace, limit=None, timeout=120, checkpoints=None, input_script=None):
+def run_emulator(emulator, image_bin, trace, limit=None, timeout=120, checkpoints=None, input_script=None,
+                 frames=None):
     """Run the emulator on a flat image with a trace, the same way tools/rv32_run_emu.py does."""
     command = emulator_command(emulator, image_bin, trace=trace, limit=limit, checkpoints=checkpoints,
-                               input_script=input_script)
+                               input_script=input_script, frames=frames)
     return run_backend(command, trace, halt_line, timeout, checkpoints=checkpoints)
 
 
@@ -231,6 +232,16 @@ def main():
     parser.add_argument("--program", choices=sorted(PROGRAMS), default="loop", help="assembled program to run")
     parser.add_argument("--image", type=Path, help="a flat .bin image to run instead of an assembled program")
     parser.add_argument("--expect-console", help="the guest console output both backends must produce")
+    parser.add_argument("--expect-last-line", help="the last console line both backends must produce")
+    parser.add_argument("--expect-checkpoint", action="append", default=[], metavar="LINE",
+                        help="a `frame N <hash>` line both backends must write (repeatable)")
+    parser.add_argument("--input", type=Path, help="input script delivered to both backends (docs/rv32.md, Input)")
+    parser.add_argument("--frames", type=Path, help="directory for the emulator's frame-NNNN.ppm pictures")
+    parser.add_argument("--compare", choices=("trace", "results"), default="trace",
+                        help="`trace`: identical retirement traces and the cycle formula; `results`: identical "
+                             "console, outcome, and checkpoints, for a program that reads the timer (device time)")
+    parser.add_argument("--backend", choices=("both", "emulator"), default="both",
+                        help="`emulator` runs and checks the emulator only")
     parser.add_argument("--allow-traps", action="store_true",
                         help="accept a trace with trap lines, where the cycle formula is not exact")
     parser.add_argument("--emulator", default=DEFAULT_EMULATOR)
@@ -258,16 +269,31 @@ def main():
     else:
         name = args.program
         hex_path, bin_path = write_image(PROGRAMS[name](), out, name)
-    emulator = run_emulator(args.emulator, bin_path, out / f"{name}.emu.trace")
+    if args.frames is not None:
+        args.frames.mkdir(parents=True, exist_ok=True)
+    emulator = run_emulator(args.emulator, bin_path, out / f"{name}.emu.trace",
+                            checkpoints=out / f"{name}.emu.checkpoints", input_script=args.input, frames=args.frames)
     check_passed(emulator, "emulator")
     if args.expect_console is not None and emulator.console.rstrip("\n") != args.expect_console:
         sys.exit(f"emulator console {emulator.console!r} is not {args.expect_console!r}")
+    last_line = emulator.console.rstrip("\n").rsplit("\n", 1)[-1]
+    if args.expect_last_line is not None and last_line != args.expect_last_line:
+        sys.exit(f"emulator's last console line {last_line!r} is not {args.expect_last_line!r}")
+    for line in args.expect_checkpoint:
+        if line not in emulator.checkpoints:
+            sys.exit(f"emulator checkpoints {emulator.checkpoints} do not include {line!r}")
+    if args.backend == "emulator":
+        print(emulator.stderr.strip().splitlines()[-1])
+        print(f"emulator: {len(emulator.trace)} trace lines, {len(emulator.checkpoints)} checkpoint(s), "
+              f"console ends {last_line!r}")
+        return
 
     if args.mode == "bench":
         print("stall  cycles  stalls  transfers  steps")
         seed = BENCH_SEED if args.seed is None else args.seed
         for stall, seed in [(0, None), (1, None), (2, None), (3, None), (None, seed)]:
-            rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=seed)
+            rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=seed,
+                          checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input)
             check_passed(rtl)
             difference = diff_traces(rtl.trace, emulator.trace)
             if difference:
@@ -291,22 +317,32 @@ def main():
     else:
         stall = 0
     wave = out / f"{name}.vcd" if args.mode == "waves" else None
-    rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=args.seed, wave=wave)
+    rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=args.seed, wave=wave,
+                  checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input)
     print(emulator.stderr.strip().splitlines()[-1])
     print(rtl.stderr.strip().splitlines()[-1] if rtl.stderr.strip() else "rv32_tb: no halt line")
     check_passed(rtl)
-    difference = diff_traces(rtl.trace, emulator.trace)
-    if difference:
-        sys.exit(f"trace mismatch: {difference}")
     if rtl.console != emulator.console:
         sys.exit(f"console mismatch: RTL {rtl.console!r}, emulator {emulator.console!r}")
-    print(f"traces identical: {len(rtl.trace)} lines; {out / f'{name}.rtl.trace'}")
-    relation, holds = cycle_relation(rtl)
-    print(relation)
-    if holds is None and not args.allow_traps:
-        sys.exit("the trace has trap lines, so the cycle formula cannot be checked; pass --allow-traps if that is expected")
-    if holds is False:
-        sys.exit("the cycle count does not follow the state machine")
+    if rtl.checkpoints != emulator.checkpoints:
+        sys.exit(f"checkpoint mismatch: RTL {rtl.checkpoints}, emulator {emulator.checkpoints}")
+    if args.compare == "results":
+        # Device time: a program that reads the timer takes different paths on the two backends,
+        # so the traces are not compared; what the guest printed and presented must still agree.
+        print(f"results identical: {emulator.console.count(chr(10))} console line(s) ending {last_line!r}, "
+              f"{len(rtl.checkpoints)} checkpoint(s) {rtl.checkpoints}; RTL {len(rtl.trace)} instructions in "
+              f"{rtl.halt['cycles']} cycles, emulator {len(emulator.trace)} instructions")
+    else:
+        difference = diff_traces(rtl.trace, emulator.trace)
+        if difference:
+            sys.exit(f"trace mismatch: {difference}")
+        print(f"traces identical: {len(rtl.trace)} lines; {out / f'{name}.rtl.trace'}")
+        relation, holds = cycle_relation(rtl)
+        print(relation)
+        if holds is None and not args.allow_traps:
+            sys.exit("the trace has trap lines, so the cycle formula cannot be checked; pass --allow-traps if that is expected")
+        if holds is False:
+            sys.exit("the cycle count does not follow the state machine")
     if wave is not None:
         if not wave.exists() or not has_value_changes(wave.read_text()):
             sys.exit(f"the simulator wrote no waveform to {wave}")

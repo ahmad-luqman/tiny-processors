@@ -8,7 +8,8 @@ import sys
 import tempfile
 import unittest
 
-from tools.rv32_devices import EVENT_PRESS, EVENT_VALID, FB_SIZE, event_word, frame_hash, key_code, parse_input_script
+from tools.rv32_devices import (DIAG_EXPECTED_VALUES, EVENT_PRESS, EVENT_VALID, FB_SIZE, diag_checksum, event_word,
+                                frame_hash, key_code, parse_input_script, render_diag_frame)
 from tools.rv32_image import (ImageError, check_image, check_listing, flatten, parse_elf,
                               to_hex_words)
 from tools.rv32_run_qemu import classify, qemu_command
@@ -258,3 +259,31 @@ class DeviceHelperTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaisesRegex(ValueError, "input script line"):
                     parse_input_script(bad)
+
+    def test_diag_frame_and_checksum_match_source_and_makefile(self):
+        """The diagnostic's frame-1 hash and PASS value are derived here from the pattern and the
+        checked values, independently of any run, and must match diag.c and the Makefile."""
+        frame1 = render_diag_frame(1)
+        self.assertEqual(len(frame1), FB_SIZE)
+        self.assertEqual(frame1[0], 0, "(0 ^ 0)")
+        self.assertEqual(frame1[3 * 320 + 5], 5 ^ 3)
+        self.assertEqual(frame1[40 * 320 + 100], 0xE0, "the red box")
+        self.assertEqual(frame1[120 * 320 + 319], 0x1C, "the green row")
+        self.assertEqual(render_diag_frame(2)[200 * 320 + 10], 0x03, "the blue box in frame 2 only")
+        self.assertEqual(frame1[200 * 320 + 10], (10 ^ 200) & 0xFF)
+        makefile = (ROOT / "Makefile").read_text()
+        self.assertIn(f"RV32_DIAG_FRAME1_HEX := {frame_hash(frame1):08x}", makefile)
+        self.assertIn(f"RV32_DIAG_HEX := {diag_checksum():08x}", makefile)
+        source = (ROOT / "programs/rv32/diag.c").read_text()
+        pinned = re.search(r"#define DIAG_EXPECTED 0x([0-9a-f]{8})u", source).group(1)
+        self.assertEqual(pinned, f"{diag_checksum():08x}")
+        checks = len(re.findall(r"^\s*CHECK\(", source, re.MULTILINE))
+        self.assertEqual(checks, sum(1 for value in DIAG_EXPECTED_VALUES if value != "frame1") - 4,
+                         "one CHECK per expected value except the frame hash and the four folded events")
+
+    def test_privileged_instructions_need_the_flag(self):
+        listing = "80000000 <f>:\n80000000: 30529073 csrw mtvec, t0\n80000004: 30200073 mret\n80000008: 00000073 ecall\n"
+        self.assertEqual(len(check_listing(listing)), 3)
+        problems = check_listing(listing, allow_privileged=True)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("ecall", problems[0])

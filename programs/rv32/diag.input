@@ -1,0 +1,7 @@
+# Input script for the M5 diagnostic (docs/rv32.md, "Input"): the events
+# arrive when the present that reaches their frame retires. The firmware
+# reads them after each present and folds them into its checksum.
+frame 1 down LEFT
+frame 1 down SPACE
+frame 1 up LEFT
+frame 2 up SPACE

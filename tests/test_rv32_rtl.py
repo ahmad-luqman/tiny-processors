@@ -16,7 +16,7 @@ import tempfile
 import unittest
 
 from tools.rv32_asm import *  # noqa: F401,F403
-from tools.rv32_devices import FB_SIZE, event_word, frame_hash
+from tools.rv32_devices import FB_SIZE, diag_checksum, event_word, frame_hash, render_diag_frame
 from tools.rv32_image import to_hex_words
 from tools.rv32_rtl import (ROOT, Run, check_passed, compile_testbench, cycle_relation, diff_traces, has_value_changes,
                             rtl_halt_line, run_backend, run_emulator, run_rtl, simulator_command, simulator_noise, write_image)
@@ -514,6 +514,30 @@ class RtlTest(unittest.TestCase):
                     self.assertEqual(rtl.halt["transfers"], 40665, "32,610 fetches and 8,055 data accesses")
                     if stall is not None:
                         self.assertEqual(rtl.halt["cycles"], 138495 + stall * 40665)
+
+    def test_diag_image_when_built(self):
+        """The M5 diagnostic on the RTL: it reads the timer, so the comparison is at the results
+        level (docs/rv32.md, "Device time"): the same console transcript, the same checkpoints, and
+        the guest's own readback hash equal to the frame-1 checkpoint and to the Python render."""
+        bin_path = ROOT / "build" / "rv32" / "diag.bin"
+        if not bin_path.exists():
+            self.skipTest("run `make check-rv32-image` first")
+        script = (ROOT / "programs" / "rv32" / "diag.input").read_text()
+        frame1, frame2 = (f"frame {n} {frame_hash(render_diag_frame(n)):08x}" for n in (1, 2))
+        words = [int.from_bytes(bin_path.read_bytes()[i:i + 4], "little") for i in range(0, len(bin_path.read_bytes()), 4)]
+        emulator, rtl = self.run_both(words, stall=0, limit=10000000, max_cycles=20000000, checkpoints=True,
+                                      input_script=script)
+        for run, name in ((emulator, "emulator"), (rtl, "RTL")):
+            with self.subTest(backend=name):
+                self.assertEqual((run.halt["halt"], run.halt["outcome"]), ("done", "pass"), run.stderr)
+                self.assertEqual(run.checkpoints, [frame1, frame2])
+                lines = run.console.splitlines()
+                self.assertEqual(lines[:2], ["diag: timer ok", "diag: faults 4"])
+                self.assertEqual(lines[2], f"diag: display {frame1.split()[2]}", "the guest's readback hash is the checkpoint")
+                self.assertEqual(lines[3:], ["diag: input 4", f"PASS {diag_checksum():08x}"])
+        self.assertEqual(rtl.console, emulator.console)
+        self.assertNotEqual(rtl.trace, emulator.trace, "the timer makes the traces differ by design")
+        self.assertEqual(sum(" trap " in line for line in rtl.trace), 4)
 
     def test_decode_sweep_agrees_with_the_emulator(self):
         """Every opcode x funct3 x representative funct7: the whole trace and the halt reason

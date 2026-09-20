@@ -19,7 +19,7 @@ import unittest
 
 # The encoder lives in tools/rv32_asm.py so the RTL tests assemble the same words.
 from tools.rv32_asm import *  # noqa: F401,F403
-from tools.rv32_devices import FB_SIZE, event_word, frame_hash
+from tools.rv32_devices import FB_SIZE, diag_checksum, event_word, frame_hash, render_diag_frame
 from tools.rv32_diff_qemu import compare, qemu_pcs, trace_pcs
 from tools.rv32_run_emu import build_emulator, halt_line
 
@@ -484,6 +484,23 @@ class EmulatorTest(unittest.TestCase):
         result = self.run_pass([ADDI(1, 0, 1), ADDI(2, 1, 1)])
         self.assertEqual((result.state.steps, result.state.retired, result.state.traps), (2 + 5, 7, 0))
         self.assertEqual(result.trace[:2], ["1 80000000 00100093 x1=00000001", "2 80000004 00108113 x2=00000002"])
+
+    def test_diag_image_when_built(self):
+        """The M5 diagnostic on the emulator: every section passes, the checkpoints are the Python
+        render's hashes, and the guest's readback hash equals the frame-1 checkpoint."""
+        bin_path = ROOT / "build" / "rv32" / "diag.bin"
+        if not bin_path.exists():
+            self.skipTest("run `make check-rv32-image` first")
+        script = (ROOT / "programs" / "rv32" / "diag.input").read_text()
+        words = [int.from_bytes(bin_path.read_bytes()[i:i + 4], "little") for i in range(0, len(bin_path.read_bytes()), 4)]
+        result = self.run_words(words, limit=10000000, checkpoints=True, input_script=script)
+        self.assertEqual((result.status, result.state.halt, result.state.done), (0, "done", 0x5555), result.stderr)
+        frame1, frame2 = (f"frame {n} {frame_hash(render_diag_frame(n)):08x}" for n in (1, 2))
+        self.assertEqual(result.checkpoints, [frame1, frame2])
+        self.assertEqual(result.stdout.splitlines(),
+                         ["diag: timer ok", "diag: faults 4", f"diag: display {frame1.split()[2]}", "diag: input 4",
+                          f"PASS {diag_checksum():08x}"])
+        self.assertEqual((result.state.traps, result.state.frames, result.state.events), (4, 2, 0))
 
     def test_loading_and_start_pc(self):
         words = [ADDI(1, 0, 1)] + FINISH()

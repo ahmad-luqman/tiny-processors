@@ -71,3 +71,51 @@ def parse_input_script(text):
             raise ValueError(f"input script line {number}: {error}: {line!r}") from None
         last_frame = frame
     return events
+
+
+def render_diag_frame(frame):
+    """The framebuffer the M5 diagnostic (programs/rv32/diag.c) presents as frame 1 or 2, drawn
+    here independently: pixel (x, y) = (x ^ y) & 0xFF, a red box, a green row, then a blue box."""
+    if frame not in (1, 2):
+        raise ValueError(f"the diagnostic presents frames 1 and 2, not {frame}")
+    pixels = bytearray((x ^ y) & 0xFF for y in range(FB_ROWS) for x in range(FB_COLUMNS))
+    for y in range(40, 80):
+        for x in range(100, 200):
+            pixels[y * FB_COLUMNS + x] = 0xE0
+    for x in range(FB_COLUMNS):
+        pixels[120 * FB_COLUMNS + x] = 0x1C
+    if frame == 2:
+        for y in range(200, 220):
+            for x in range(10, 30):
+                pixels[y * FB_COLUMNS + x] = 0x03
+    return bytes(pixels)
+
+
+def fnv_fold(values):
+    """The diagnostic's checksum: FNV-1a over 32-bit values, as selfcheck.c and diag.c fold them."""
+    h = 2166136261
+    for value in values:
+        h = ((h ^ value) * 16777619) & M
+    return h
+
+
+# Every value programs/rv32/diag.c folds into its checksum, in order: the CHECK expectations and
+# the folded values (the frame-1 hash and the four events). Timer readings are never folded.
+DIAG_EXPECTED_VALUES = [
+    1, 1,                                            # timer advanced; wrapped after the write
+    4, 5, 0x50000000, 5, 0x20000000, 7, 0x20001008, 7, 0x30000000 + FB_SIZE,  # four faults
+    320, 240, 0,                                     # WIDTH, HEIGHT, FRAMES before the first present
+    "frame1",                                        # the readback hash of frame 1
+    1,                                               # FRAMES after the first present
+    3, 1 << KEYS["SPACE"],                           # COUNT and KEYS after frame 1's events
+    EVENT_VALID | EVENT_PRESS | KEYS["LEFT"], EVENT_VALID | EVENT_PRESS | KEYS["SPACE"], EVENT_VALID | KEYS["LEFT"],
+    3, 2, 1, 0,                                      # events so far, FRAMES, COUNT, KEYS after the second present
+    EVENT_VALID | KEYS["SPACE"],
+    4,                                               # events in all
+]
+
+
+def diag_checksum():
+    """The `PASS <hex>` value the diagnostic prints, derived here rather than copied from a run."""
+    frame1 = frame_hash(render_diag_frame(1))
+    return fnv_fold(frame1 if value == "frame1" else value for value in DIAG_EXPECTED_VALUES)
