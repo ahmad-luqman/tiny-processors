@@ -14,9 +14,10 @@ module rv32_tb;
 
     reg clk = 0;
     reg reset = 1;
-    wire mem_valid, mem_we, mem_fetch, retire, retire_rd_we, halted, fault, unsupported;
-    wire [31:0] mem_addr, mem_wdata, retire_pc, retire_insn, retire_rd_value, fault_value, pc;
-    wire [3:0] mem_wstrb, fault_cause;
+    wire mem_valid, mem_we, mem_fetch, retire, retire_rd_we, trap, halted;
+    wire [31:0] mem_addr, mem_wdata, retire_pc, retire_insn, retire_rd_value, trap_value, pc;
+    wire [31:0] mtvec, mepc, mcause, mtval;
+    wire [3:0] mem_strb, trap_cause;
     wire [4:0] retire_rd;
     wire [2:0] state;
     reg mem_ready = 0;
@@ -37,13 +38,13 @@ module rv32_tb;
     reg delay_chosen = 0;
     integer request_age = 0;
     reg stalled_request = 0;
-    wire [69:0] request = {mem_fetch, mem_we, mem_wstrb, mem_addr, mem_wdata};
+    wire [69:0] request = {mem_fetch, mem_we, mem_strb, mem_addr, mem_wdata};
     reg [69:0] held_request;    // the request as it was on the first stalled edge
     integer cycles = 0, steps = 0, stalls = 0, transfers = 0;
     integer max_cycles = 1000000;
 
     // The last accepted data transaction, printed at the next retirement.
-    reg pending = 0, pending_write = 0;
+    reg pending = 0, pending_write = 0, pending_error = 0;
     reg [31:0] pending_addr, pending_value;
     integer pending_width;
     reg done_pending = 0;
@@ -74,13 +75,13 @@ module rv32_tb;
             mem_error = 1'b1;
         end else if (in_console) begin
             if (mem_we)
-                mem_error = !(mem_addr[2:0] == 3'd0 && mem_wstrb == 4'b0001); // TX byte only
-            else if (mem_addr[2:0] == 3'd5) begin
+                mem_error = !(mem_addr[2:0] == 3'd0 && mem_strb == 4'b0001); // TX byte only
+            else if (mem_addr[2:0] == 3'd5 && mem_strb == 4'b0010) begin
                 mem_rdata = 32'h0000_2000; // status byte 0x20 in lane 1 of the word at +4
-                mem_error = 1'b0;
+                mem_error = 1'b0;          // a wider read of +4 is refused: the strobe says the width
             end
         end else if (mem_addr == DONE_ADDR) begin
-            mem_error = !(mem_we && mem_wstrb == 4'b1111);
+            mem_error = !(mem_we && mem_strb == 4'b1111);
         end
     end
 
@@ -141,10 +142,9 @@ module rv32_tb;
                     $fwrite(STDERR, " error=reserved-reset-word");
                 else
                     $fwrite(STDERR, " error=undefined-done-word");
-            end else if (halt_name == "fault") begin
-                $fwrite(STDERR, " cause=%0d tval=%h error=fault", fault_cause, fault_value);
-            end else if (halt_name == "unsupported") begin
-                $fwrite(STDERR, " pc=%h word=%h error=unsupported", retire_pc, retire_insn);
+            end else if (halt_name == "double-fault") begin
+                // The trap that could not be delivered; the first one is in the CSRs.
+                $fwrite(STDERR, " cause=%0d tval=%h error=double-fault", trap_cause, trap_value);
             end else begin
                 $fwrite(STDERR, " error=limit"); // even if a done store was accepted but never retired
             end
@@ -175,10 +175,10 @@ module rv32_tb;
                     // An accepted write takes effect on exactly one device.
                     if (!mem_error && mem_we) begin
                         if (in_ram) begin
-                            if (mem_wstrb[0]) ram[ram_index][7:0] <= mem_wdata[7:0];
-                            if (mem_wstrb[1]) ram[ram_index][15:8] <= mem_wdata[15:8];
-                            if (mem_wstrb[2]) ram[ram_index][23:16] <= mem_wdata[23:16];
-                            if (mem_wstrb[3]) ram[ram_index][31:24] <= mem_wdata[31:24];
+                            if (mem_strb[0]) ram[ram_index][7:0] <= mem_wdata[7:0];
+                            if (mem_strb[1]) ram[ram_index][15:8] <= mem_wdata[15:8];
+                            if (mem_strb[2]) ram[ram_index][23:16] <= mem_wdata[23:16];
+                            if (mem_strb[3]) ram[ram_index][31:24] <= mem_wdata[31:24];
                         end else if (in_console) begin
                             // The guest console: a file when +console is given, else stdout.
                             if (console_fd != 0) $fwrite(console_fd, "%c", mem_wdata[7:0]);
@@ -193,9 +193,12 @@ module rv32_tb;
                             $fatal(1, "Two data transactions without a retirement between them");
                         pending = 1;
                         pending_write = mem_we;
+                        pending_error = mem_error;
                         pending_addr = mem_addr;
-                        pending_value = mem_we ? narrowed(mem_wstrb, mem_wdata) : mem_rdata;
-                        pending_width = mem_we ? width_of(mem_wstrb) : 4;
+                        // Both directions show the strobed lanes: a store's written
+                        // bytes, a load's raw bytes before the core extends them.
+                        pending_value = narrowed(mem_strb, mem_we ? mem_wdata : mem_rdata);
+                        pending_width = width_of(mem_strb);
                     end
                 end else begin
                     stalls = stalls + 1;
@@ -223,17 +226,24 @@ module rv32_tb;
                 end
                 pending = 0;
             end
+            if (trap) begin
+                steps = steps + 1; // a trap counts as a step, as in the emulator
+                if (trace_fd != 0)
+                    $fwrite(trace_fd, "%0d %h %h trap %0d %h\n", steps, retire_pc, retire_insn, trap_cause, trap_value);
+                // A refused load or store was an accepted transaction with error:
+                // the trap line replaces its effect, so nothing carries over. A
+                // write that was accepted without error has taken effect, and the
+                // contract says a trapping instruction has none: that is a core bug.
+                if (pending && pending_write && !pending_error)
+                    $fatal(1, "Trap after an accepted write at cycle %0d", cycles);
+                pending = 0;
+            end
             // One outcome per run: a terminal outcome on the edge that also
             // reaches the cycle limit is reported as that outcome, not as a limit.
             if (retire && done_pending) begin
                 finish_run("done");
-            end else if (halted && fault) begin
-                steps = steps + 1; // a trap counts as a step, as in the emulator
-                if (trace_fd != 0)
-                    $fwrite(trace_fd, "%0d %h %h trap %0d %h\n", steps, retire_pc, retire_insn, fault_cause, fault_value);
-                finish_run("fault");
             end else if (halted) begin
-                finish_run("unsupported");
+                finish_run("double-fault");
             end else if (cycles >= max_cycles) begin
                 finish_run("limit");
             end

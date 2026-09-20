@@ -73,7 +73,7 @@ The [kernel builder](programs/simd4/vector_add.py), interpreter, and runner use 
 The [RV32 machine contract](docs/rv32.md) fixes reset, the address map, the console and done-register protocol, and the ILP32 firmware ABI for our RISC-V computer. A freestanding C self-check with our own startup code, linker script, and multiply/divide runtime compiles with Homebrew Clang 22, links with lld, passes a standard-library ELF checker, and runs on QEMU's `virt` board, whose UART and test device sit at the contract's three addresses.
 
 ```sh
-make test-rv32          # Tool tests, host runtime tests, image checks, the QEMU run, the emulator checks, and the RTL tests, lint, and synthesis
+make test-rv32          # Tool tests, host runtime tests, image checks, the QEMU run, the emulator checks, the RTL tests, the self-check on both simulators, lint, and synthesis
 make check-rv32-image   # Build ELF/listing/bin/hex and verify them against the contract
 make run-rv32-qemu      # Run on qemu-system-riscv32; console line and exit status must agree
 make disasm-rv32        # Print the annotated listing
@@ -90,18 +90,20 @@ QEMU boots the image with the bare `rv32i` CPU model; all 28 checks pass, the gu
 
 ## RV32 multicycle RTL CPU
 
-[rtl/rv32/](rtl/rv32/) is the first hardware for the machine: a register file, an add/subtract ALU, an immediate decoder, and a five-state controller driving the contract's ready/valid memory port. It runs eleven instructions (`lui`, `auipc`, `addi`, `add`, `sub`, `lw`, `sw`, `sb`, `beq`, `bne`, `jal`); everything else halts as a terminal fault with the emulator's cause code or as `unsupported`. The testbench is the RAM, console, and done register, stalls the port on request, and prints the emulator's retirement trace, so a Python test diffs the two backends line for line.
+[rtl/rv32/](rtl/rv32/) is the hardware for the machine: a register file, an ALU with a barrel shifter and one subtractor's comparison flags, an immediate decoder, the four trap CSRs, and a five-state controller driving the contract's ready/valid memory port with byte strobes in both directions. It runs all of RV32I plus `csrr*` and `mret`; illegal encodings and faults trap through `mtvec` exactly as the emulator's do, and a double fault halts both backends the same way. The testbench is the RAM, console, and done register, stalls the port on request, and prints the emulator's retirement trace, so a Python test diffs the two backends line for line, and the M1 C self-check runs on the core to `PASS 807d9fad` with the emulator's 32,610-line trace.
 
 ```sh
-make test-rv32-rtl            # 20 tests: emulator vs Icarus, differential and harness, fixed and random stalls
+make test-rv32-rtl            # 29 tests: emulator vs Icarus, differential, traps, harness, fixed and random stalls
 make test-rv32-rtl-verilator  # the same tests on a Verilator build of the testbench
+make run-rv32-rtl             # the C self-check on the RTL: PASS 807d9fad, identical trace, cycle count
+make run-rv32-rtl-verilator   # the same on Verilator with one stall cycle per request
 make lint-rv32                # verilator --Wall on the core
-make synth-rv32               # yosys: no latches; 5,777 cells, 1,331 flip-flops
-make waves-rv32               # the loop with two stall cycles per request as a VCD
+make synth-rv32               # yosys: no latches; 8,175 cells, 1,457 flip-flops
+make waves-rv32               # the loop and the M4 program with two stall cycles per request as VCDs
 make bench-rv32-rtl           # cycles, stalls, and transfers for the loop at each stall depth
 ```
 
-The 78-instruction loop produces identical traces on both backends at every stall setting; 336 cycles unstalled, 102 more per stall cycle. Read the [RTL contract](docs/rv32-rtl.md) and the [gates, waveform, and cycle walkthrough](docs/rv32-to-gates.md). Every earlier target is unchanged, and `make test-rv32` now includes the RTL tests, lint, and synthesis.
+The 78-instruction loop produces identical traces on both backends at every stall setting; 336 cycles unstalled, 102 more per stall cycle. The self-check takes 138,495 cycles for 32,610 instructions, 4.25 per instruction, and 40,665 more per stall cycle. Read the [RTL contract and coverage table](docs/rv32-rtl.md) and the [gates, waveform, and cycle walkthrough](docs/rv32-to-gates.md). Every earlier target is unchanged, and `make test-rv32` includes the RTL tests, the self-check on both simulators, lint, and synthesis.
 
 ## What to read
 

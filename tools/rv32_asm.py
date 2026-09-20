@@ -6,7 +6,9 @@ the RTL's decoders, and refuse operands that do not fit their field: a wrong
 register or immediate would otherwise encode a different valid instruction.
 Registers are numbers so nothing hides behind ABI names; `LI` and `FINISH`
 always emit a fixed number of words so program offsets stay predictable.
-`program_loop` is the canonical M3 loop that both backends run.
+`program_loop` is the canonical M3 loop that both backends run; `program_full`
+is the M4 program whose waveform shows sign extension, a discarded `x0` write,
+a stalled store, and a call with `jalr`.
 """
 
 RAM = 0x80000000
@@ -112,6 +114,8 @@ def CSRRW(rd, csr, rs1): return i_type(0x73, rd, 1, rs1, csr)
 def CSRRS(rd, csr, rs1): return i_type(0x73, rd, 2, rs1, csr)
 def CSRRC(rd, csr, rs1): return i_type(0x73, rd, 3, rs1, csr)
 def CSRRWI(rd, csr, uimm): return i_type(0x73, rd, 5, uimm, csr)
+def CSRRSI(rd, csr, uimm): return i_type(0x73, rd, 6, uimm, csr)
+def CSRRCI(rd, csr, uimm): return i_type(0x73, rd, 7, uimm, csr)
 MTVEC, MEPC, MCAUSE, MTVAL, MSTATUS = 0x305, 0x341, 0x342, 0x343, 0x300
 
 
@@ -167,6 +171,26 @@ def program_loop(n=10):
         BEQ(8, 12, 8),          # 19 taken when the loop was right
         ADDI(8, 0, 0),          # 20 skipped when the loop was right
     ] + FINISH()
+
+
+def program_full():
+    """The M4 waves program: a byte stored and loaded back with and without sign extension,
+    a discarded x0 write, a jal/jalr call and return, then the pass word."""
+    return LI(1, LOOP_DATA) + [
+        ADDI(2, 0, -128),       # 2  x2 = ffffff80
+        SB(2, 1, 0),            # 3  byte 80 into a word the image never wrote
+        LB(3, 1, 0),            # 4  x3 = ffffff80: sign extended
+        LBU(4, 1, 0),           # 5  x4 = 00000080: zero extended
+        ADD(0, 3, 4),           # 6  the sum is computed and discarded: x0
+        JAL(5, 12),             # 7  call f, x5 = return address
+        ADDI(6, 0, 1),          # 8  after the return
+        JAL(0, 12),             # 9  over f
+        SRAI(7, 3, 4),          # 10 f: x7 = fffffff8
+        JALR(0, 5, 0),          # 11 ret
+    ] + FINISH()
+
+
+PROGRAMS = {"loop": program_loop, "full": program_full}
 
 
 def words_to_hex(words):

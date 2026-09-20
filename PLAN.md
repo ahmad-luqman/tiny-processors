@@ -1,6 +1,6 @@
 # Tiny Processors: our computer and advanced SoC
 
-Updated 2026-09-20 after the [planning interview](docs/planning/full-stack-plan.md) and the completed M1, M2, and M3 sessions. The machine contract, the firmware toolchain, the headless emulator, and the first multicycle RTL CPU slice exist; no OS or accelerator for the new computer does yet.
+Updated 2026-09-21 after the [planning interview](docs/planning/full-stack-plan.md) and the completed M1 to M4 sessions. The machine contract, the firmware toolchain, the headless emulator, and a full RV32I multicycle RTL CPU that runs the C self-check exist; no devices beyond the console, OS, or accelerator for the new computer do yet.
 
 Build our own Nand2Tetris-inspired computer, preserving the completed labs. Design an RV32I CPU and matching emulator, reuse an existing C compiler, and run our own boot/menu/game runtime in a native Mac window. Pong comes first; Tetris defines the first complete computer. After Tetris, build an FP32 unit and integrate the RISC-V F extension into our CPU and emulator. GPU/NPU work also follows the playable machine: 2D acceleration, programmable 3D, and handwritten-digit recognition, integrated into an advanced SoC.
 
@@ -25,6 +25,7 @@ Read the [detailed roadmap](docs/planning/roadmap.md) for architecture proposals
 | RV32 machine contract and M1 firmware | 28-check freestanding C self-check runs on QEMU virt with the bare `rv32i` model: `PASS 807d9fad`, exit status 0; 12 tool tests and 6 host runtime tests; ELF image checks pass | [Contract](docs/rv32.md), [C to instructions](docs/c-to-instructions.md); `make test-rv32`, `make check-rv32-image`, `make run-rv32-qemu`, `make disasm-rv32` |
 | RV32 headless emulator (M2) | C emulator runs the same image to `PASS 807d9fad` in 32,610 instructions and matches QEMU's PC sequence instruction for instruction; 19 hand-computed edge tests cover arithmetic, branches, jumps, loads/stores, traps, CSRs, and devices; about 400 M instructions/s untraced | [Emulator record and trace walkthrough](docs/rv32-emulator.md); `make test-rv32-emu`, `make run-rv32-emu`, `make trace-rv32-emu`, `make diff-rv32-qemu` |
 | RV32 multicycle RTL CPU slice (M3) | Eleven-instruction core with one ready/valid memory port; a 78-instruction loop produces the emulator's trace line for line on Icarus and Verilator with 0 to 3 fixed and seeded random stall cycles; every other encoding halts as a terminal fault or `unsupported`; 20 tests (differential, decode sweep, harness), lint, and synthesis (5,777 cells, 1,331 flip-flops, no latches) pass | [RTL contract](docs/rv32-rtl.md), [gates and cycles](docs/rv32-to-gates.md); `make test-rv32-rtl`, `make test-rv32-rtl-verilator`, `make lint-rv32`, `make synth-rv32`, `make waves-rv32`, `make bench-rv32-rtl` |
+| RV32 full RV32I RTL CPU (M4) | Every RV32I instruction plus the four trap CSRs and `mret`; traps vector and a double fault halts as in the emulator; byte strobes on reads and writes; the C self-check runs on the core to `PASS 807d9fad` with the emulator's 32,610-line trace on Icarus and Verilator, unstalled and stalled, in 138,495 cycles; 29 tests, lint, and synthesis (8,175 cells, 1,457 flip-flops, no latches) pass | [RTL record and coverage table](docs/rv32-rtl.md), [gates, waves, and cycles](docs/rv32-to-gates.md); `make test-rv32-rtl`, `make run-rv32-rtl`, `make run-rv32-rtl-verilator`, `make waves-rv32` |
 
 These are recorded prior verification results, not newly rerun during planning. SAP8 stays frozen as the small teaching CPU. SIMD4 is a parallel compute prototype, not an integrated GPU or NPU. Its multiply/matrix extension moves after the playable computer.
 
@@ -43,9 +44,9 @@ These are recorded prior verification results, not newly rerun during planning. 
 
 The recommended post-Tetris order is F1 → F2 → A1 → A2 → G1 → N1 → G2 → S1. Floating-point integration must pass before programmable 3D; N1 and G2 can be reordered once their prerequisites pass. CPU FP32 support does not select the GPU or NPU numeric format. A small programmable 3D demonstration is the selected graphics goal, not commercial graphics API compatibility. Neural inference uses a small pretrained model; training hardware is outside the initial goal.
 
-## Next milestone: M4
+## Next milestone: M5
 
-Broaden the [RTL core](docs/rv32-rtl.md) to full RV32I: `jalr` and the remaining branches, the other ALU operations and shifts, byte and halfword memory access with sign and zero extension, the four CSRs with `mret` and trap vectoring, and a read-width decision for the memory port. The C self-check must run on the RTL testbench to `PASS 807d9fad` with the emulator's 32,610-line trace on both simulators, with and without stalls; lint, synthesis, and directed waves must pass, and a coverage/limitations table is published. See the [next-session checklist](docs/planning/roadmap.md#next-implementation-session-m4).
+Give the [RV32 machine](docs/rv32.md) its devices: a timer, input, debug output, and a framebuffer, as RTL peripherals behind a bus decoder and as matched emulator models, with the RAM, console, and done register moved out of the testbench into the same structure. One diagnostic firmware image must exercise every device on both backends, and scripted results and framebuffer checkpoints must agree under a documented device-time contract, since emulator instruction counts are not RTL clock counts. See the [next-session checklist](docs/planning/roadmap.md#next-implementation-session-m5).
 
 ## Later optional tracks
 

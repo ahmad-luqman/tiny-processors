@@ -42,7 +42,7 @@ RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
 .PHONY: test-simd4-model test-simd4 test-simd4-verilator sim-simd4 waves-simd4 bench-simd4 lint-simd4 synth-simd4
 .PHONY: toolchain-rv32 firmware-rv32 check-rv32-image run-rv32-qemu test-rv32-tools test-rv32-rt test-rv32 disasm-rv32
 .PHONY: toolchain-rv32-emu build-rv32-emu test-rv32-emu run-rv32-emu trace-rv32-emu diff-rv32-qemu
-.PHONY: build-rv32-rtl test-rv32-rtl test-rv32-rtl-verilator lint-rv32 synth-rv32 waves-rv32 bench-rv32-rtl
+.PHONY: build-rv32-rtl test-rv32-rtl test-rv32-rtl-verilator run-rv32-rtl run-rv32-rtl-verilator lint-rv32 synth-rv32 waves-rv32 bench-rv32-rtl
 
 build:
 	mkdir -p build
@@ -242,10 +242,10 @@ $(RV32_TB_VERILATOR): $(RV32_RTL) $(RV32_TB) | build
 
 build-rv32-rtl: $(RV32_TB_VVP)
 
-test-rv32-rtl:
+test-rv32-rtl: check-rv32-image
 	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_rtl.py' -v
 
-test-rv32-rtl-verilator: $(RV32_TB_VERILATOR)
+test-rv32-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR)
 	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_rtl.py' -v
 
 lint-rv32:
@@ -255,13 +255,20 @@ synth-rv32: | build
 	yosys -Q -T -l build/rv32-synth.log -p 'read_verilog $(RV32_RTL); synth -top rv32; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32.json'
 
 waves-rv32: $(RV32_TB_VVP) $(RV32EMU)
-	$(PYTHON) -m tools.rv32_rtl --mode waves --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
-	@echo "Open build/rv32/rtl/loop.vcd in Surfer: https://app.surfer-project.org/"
+	$(PYTHON) -m tools.rv32_rtl --mode waves --program loop --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
+	$(PYTHON) -m tools.rv32_rtl --mode waves --program full --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
+	@echo "Open build/rv32/rtl/loop.vcd or full.vcd in Surfer: https://app.surfer-project.org/"
+
+run-rv32-rtl: check-rv32-image $(RV32_TB_VVP) $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl --image build/rv32/selfcheck.bin --expect-console "PASS $(RV32_SELFCHECK_HEX)" --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
+
+run-rv32-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR) $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl --image build/rv32/selfcheck.bin --expect-console "PASS $(RV32_SELFCHECK_HEX)" --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --out build/rv32/rtl --stall 1
 
 bench-rv32-rtl: $(RV32_TB_VVP) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl --mode bench --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
 
-test-rv32: test-rv32-tools test-rv32-rt run-rv32-qemu test-rv32-emu run-rv32-emu diff-rv32-qemu test-rv32-rtl test-rv32-rtl-verilator lint-rv32 synth-rv32
+test-rv32: test-rv32-tools test-rv32-rt run-rv32-qemu test-rv32-emu run-rv32-emu diff-rv32-qemu test-rv32-rtl test-rv32-rtl-verilator run-rv32-rtl run-rv32-rtl-verilator lint-rv32 synth-rv32
 
 disasm-rv32: firmware-rv32
 	cat build/rv32/selfcheck.lst
