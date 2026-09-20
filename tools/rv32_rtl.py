@@ -18,7 +18,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tools.rv32_asm import program_loop, words_to_bytes, words_to_hex  # noqa: E402
+from tools.rv32_asm import PROGRAMS, words_to_bytes, words_to_hex  # noqa: E402
+from tools.rv32_image import to_hex_words  # noqa: E402
 from tools.rv32_run_emu import DEFAULT_EMULATOR, emulator_command, halt_line, last_halt_line, parse_halt_line  # noqa: E402
 
 RTL_SOURCES = [ROOT / "rtl" / "rv32" / name
@@ -184,12 +185,31 @@ def write_image(words, out, name):
     return hex_path, bin_path
 
 
+def cycle_relation(rtl):
+    """Relate the testbench's cycle count to the trace: 4 cycles per instruction without a data
+    access, 5 with one, plus the stalls. Returns (text, holds); `holds` is None when a trap line
+    makes the formula inapplicable (a trap costs the cycles up to the state that raised it)."""
+    steps = len(rtl.trace)
+    memory = sum("mem[" in line for line in rtl.trace)
+    traps = sum(" trap " in line for line in rtl.trace)
+    halt = rtl.halt
+    expected = 4 * (steps - memory) + 5 * memory + halt["stalls"]
+    text = (f"cycles {halt['cycles']} = 4 x {steps - memory} + 5 x {memory} + {halt['stalls']} stalls; "
+            f"transfers {halt['transfers']} = {steps} fetches + {memory} data")
+    if traps:
+        return f"{text} (not exact: {traps} trap lines)", None
+    return text, halt["cycles"] == expected and halt["transfers"] == steps + memory
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--mode", choices=("check", "waves", "bench"), default="check")
+    parser.add_argument("--program", choices=sorted(PROGRAMS), default="loop", help="assembled program to run")
+    parser.add_argument("--image", type=Path, help="a flat .bin image to run instead of an assembled program")
+    parser.add_argument("--expect-console", help="the guest console output both backends must produce")
     parser.add_argument("--emulator", default=DEFAULT_EMULATOR)
     parser.add_argument("--simulator", default=DEFAULT_SIMULATOR, help=".vvp file or Verilator binary")
-    parser.add_argument("--out", default=DEFAULT_OUT, help="directory for the loop image, traces, and VCD")
+    parser.add_argument("--out", default=DEFAULT_OUT, help="directory for the image, traces, and VCD")
     parser.add_argument("--stall", type=int, default=None, help="fixed stall cycles per request")
     parser.add_argument("--seed", type=int, default=None, help="random 0..3 stall cycles per request")
     args = parser.parse_args()
@@ -202,15 +222,26 @@ def main():
             parser.error(f"{path} does not exist; run make build-rv32-emu / build-rv32-rtl first")
 
     out = Path(args.out)
-    hex_path, bin_path = write_image(program_loop(), out, "loop")
-    emulator = run_emulator(args.emulator, bin_path, out / "loop.emu.trace")
+    if args.image is not None:
+        if not args.image.exists():
+            parser.error(f"{args.image} does not exist; run make check-rv32-image first")
+        name = args.image.stem
+        out.mkdir(parents=True, exist_ok=True)
+        hex_path, bin_path = out / f"{name}.hex", args.image
+        hex_path.write_text("".join(f"{word}\n" for word in to_hex_words(bin_path.read_bytes())))
+    else:
+        name = args.program
+        hex_path, bin_path = write_image(PROGRAMS[name](), out, name)
+    emulator = run_emulator(args.emulator, bin_path, out / f"{name}.emu.trace")
     check_passed(emulator, "emulator")
+    if args.expect_console is not None and emulator.console.rstrip("\n") != args.expect_console:
+        sys.exit(f"emulator console {emulator.console!r} is not {args.expect_console!r}")
 
     if args.mode == "bench":
         print("stall  cycles  stalls  transfers  steps")
         seed = BENCH_SEED if args.seed is None else args.seed
         for stall, seed in [(0, None), (1, None), (2, None), (3, None), (None, seed)]:
-            rtl = run_rtl(args.simulator, hex_path, out / "loop.rtl.trace", stall=stall, seed=seed)
+            rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=seed)
             check_passed(rtl)
             difference = diff_traces(rtl.trace, emulator.trace)
             if difference:
@@ -229,15 +260,21 @@ def main():
         stall = 2
     else:
         stall = 0
-    wave = out / "loop.vcd" if args.mode == "waves" else None
-    rtl = run_rtl(args.simulator, hex_path, out / "loop.rtl.trace", stall=stall, seed=args.seed, wave=wave)
+    wave = out / f"{name}.vcd" if args.mode == "waves" else None
+    rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=args.seed, wave=wave)
     print(emulator.stderr.strip().splitlines()[-1])
     print(rtl.stderr.strip().splitlines()[-1] if rtl.stderr.strip() else "rv32_tb: no halt line")
     check_passed(rtl)
     difference = diff_traces(rtl.trace, emulator.trace)
     if difference:
         sys.exit(f"trace mismatch: {difference}")
-    print(f"traces identical: {len(rtl.trace)} lines; {out / 'loop.rtl.trace'}")
+    if rtl.console != emulator.console:
+        sys.exit(f"console mismatch: RTL {rtl.console!r}, emulator {emulator.console!r}")
+    print(f"traces identical: {len(rtl.trace)} lines; {out / f'{name}.rtl.trace'}")
+    relation, holds = cycle_relation(rtl)
+    print(relation)
+    if holds is False:
+        sys.exit("the cycle count does not follow the state machine")
     if wave is not None:
         if not wave.exists() or wave.stat().st_size == 0:
             sys.exit(f"the simulator wrote no waveform to {wave}")

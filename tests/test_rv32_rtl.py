@@ -17,7 +17,7 @@ import unittest
 
 from tools.rv32_asm import *  # noqa: F401,F403
 from tools.rv32_image import to_hex_words
-from tools.rv32_rtl import (Run, check_passed, compile_testbench, diff_traces, rtl_halt_line,
+from tools.rv32_rtl import (ROOT, Run, check_passed, compile_testbench, cycle_relation, diff_traces, rtl_halt_line,
                             run_backend, run_emulator, run_rtl, simulator_command, simulator_noise, write_image)
 from tools.rv32_run_emu import build_emulator
 
@@ -432,6 +432,40 @@ class RtlTest(unittest.TestCase):
         emulator, rtl = self.assert_same_double_fault([ADDI(1, 0, 1), MRET()] + FINISH(), 1, 0, stall=0)
         self.assertEqual(rtl.trace[1], f"2 {RAM + 4:08x} 30200073")
 
+    def test_full_program_shows_the_three_observations(self):
+        # The waves program: sign extension, a discarded x0 write, a stalled store, a call and return.
+        emulator, rtl = self.assert_same_pass(program_full(), stall=2)
+        self.assertEqual([effects(line) for line in rtl.trace[3:7]],
+                         ["mem[80000100]<-00000080/1", "x3=ffffff80 mem[80000100]->00000080/1",
+                          "x4=00000080 mem[80000100]->00000080/1", ""])
+        self.assertEqual([line.split()[1] for line in rtl.trace[7:12]],
+                         [f"{RAM + i * 4:08x}" for i in (7, 10, 11, 8, 9)], "call, f, ret, after, over")
+        self.assertEqual(effects(rtl.trace[8]), "x7=fffffff8")
+        self.assertEqual((rtl.halt["cycles"], rtl.halt["stalls"]), (4 * 13 + 5 * 4 + 2 * 21, 2 * 21))
+
+    def test_selfcheck_image_when_built(self):
+        """The M1 firmware on the RTL: PASS on the console, the emulator's whole trace, the cycle formula."""
+        hex_path, bin_path = ROOT / "build" / "rv32" / "selfcheck.hex", ROOT / "build" / "rv32" / "selfcheck.bin"
+        if not hex_path.exists() or not bin_path.exists():
+            self.skipTest("run `make check-rv32-image` first")
+        with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
+            emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace")
+            self.assertEqual((emulator.halt["halt"], emulator.halt["outcome"], emulator.console),
+                             ("done", "pass", "PASS 807d9fad\n"), emulator.stderr)
+            self.assertEqual(len(emulator.trace), 32610)
+            for stall, seed in ((0, None), (1, None), (None, SEED)):
+                with self.subTest(stall=stall, seed=seed):
+                    rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", stall=stall, seed=seed)
+                    self.assertEqual((rtl.status, rtl.noise), (0, ""), rtl.stderr)
+                    self.assertEqual((rtl.halt["halt"], rtl.halt["outcome"], rtl.console),
+                                     ("done", "pass", "PASS 807d9fad\n"), rtl.stderr)
+                    self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
+                    relation, holds = cycle_relation(rtl)
+                    self.assertTrue(holds, relation)
+                    self.assertEqual(rtl.halt["transfers"], 40665, "32,610 fetches and 8,055 data accesses")
+                    if stall is not None:
+                        self.assertEqual(rtl.halt["cycles"], 138495 + stall * 40665)
+
     def test_decode_sweep_agrees_with_the_emulator(self):
         """Every opcode x funct3 x representative funct7: the whole trace and the halt reason
         agree, whether the word executes, traps as illegal, or faults for another reason."""
@@ -637,6 +671,18 @@ class HelperTest(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     check_passed(run)
 
+    def test_cycle_relation(self):
+        halt = {"cycles": 4 * 3 + 5 * 2 + 7, "stalls": 7, "transfers": 5 + 2}
+        run = Run(0, "", "", "", ["1 a b x1=1", "2 a b mem[x]<-1/4", "3 a b", "4 a b x2=2 mem[y]->0/1", "5 a b"], halt)
+        relation, holds = cycle_relation(run)
+        self.assertEqual(relation, "cycles 29 = 4 x 3 + 5 x 2 + 7 stalls; transfers 7 = 5 fetches + 2 data")
+        self.assertTrue(holds)
+        self.assertEqual(cycle_relation(run._replace(halt=dict(halt, cycles=30)))[1], False)
+        self.assertEqual(cycle_relation(run._replace(halt=dict(halt, transfers=8)))[1], False)
+        relation, holds = cycle_relation(run._replace(trace=run.trace + ["6 a b trap 2 b"]))
+        self.assertIsNone(holds, "a trap line makes the formula inapplicable")
+        self.assertIn("(not exact: 1 trap lines)", relation)
+
     def test_run_rtl_truncates_a_stale_trace(self):
         with tempfile.TemporaryDirectory() as directory:
             trace = Path(directory) / "rtl.trace"
@@ -655,6 +701,8 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(ADDI(1, 0, -1), 0xFFF00093)
         self.assertEqual(SW(1, 1, 0x800), SW(1, 1, -2048), "a 12-bit field accepts its unsigned spelling")
         self.assertEqual(len(program_loop(LOOP_MAX_N)), 18 + 8)
+        self.assertEqual(len(program_full()), 17)
+        self.assertEqual(sorted(PROGRAMS), ["full", "loop"])
         with self.assertRaises(AssertionError):
             program_loop(LOOP_MAX_N + 1)
         words = program_loop()
