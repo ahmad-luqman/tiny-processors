@@ -20,7 +20,8 @@ KEYS = {"LEFT": 1, "RIGHT": 2, "UP": 3, "DOWN": 4, "SPACE": 5, "ENTER": 6, "ESCA
 
 
 def frame_hash(pixels):
-    """The checkpoint hash of a framebuffer's bytes: shift-add over its little-endian words."""
+    """The checkpoint hash of a framebuffer's bytes: h = ((h << 5) + h) ^ word from 5381 over its
+    little-endian words (shift, add, xor; no multiply)."""
     if len(pixels) % 4:
         raise ValueError(f"{len(pixels)} bytes is not a whole number of words")
     h = 5381

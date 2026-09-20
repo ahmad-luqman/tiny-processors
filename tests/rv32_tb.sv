@@ -1,10 +1,12 @@
 `timescale 1ns/1ps
 
 // Testbench for the RV32 machine (rtl/rv32/rv32_soc.v): the host side of
-// the devices (console bytes, the done word), a stall generator that holds
-// the bus, the image loader, and the retirement trace printer that
-// reproduces docs/rv32-emulator.md's trace contract. Contract for its
-// plusargs, counters, and halt line: docs/rv32-rtl.md.
+// the devices (console bytes, the done word, frame checkpoints at each
+// present, and the scripted keyboard pushed into the input queue), a stall
+// generator that holds the bus, a second reset on request, the image loader,
+// and the retirement trace printer that reproduces docs/rv32-emulator.md's
+// trace contract. Contract for its plusargs, counters, and halt line:
+// docs/rv32-rtl.md.
 module rv32_tb;
     parameter integer RAM_WORDS = 1048576; // the contract's 4 MiB
     parameter integer CONSOLE_BUSY = 0;    // cycles the console waits before each byte
@@ -47,6 +49,7 @@ module rv32_tb;
     integer cycles = 0, steps = 0, stalls = 0, transfers = 0;
     integer max_cycles = 10000000; // +max-cycles=N; the diagnostic needs about two million
     integer reset_at = 0;       // +reset-at=N: assert reset again after counted cycle N
+    reg reset_done = 0;         // that second reset happened
 
     // The last accepted data transaction, printed at the next retirement.
     reg pending = 0, pending_write = 0, pending_error = 0;
@@ -85,17 +88,19 @@ module rv32_tb;
 
     // The host's keyboard: one event per cycle, as soon as its frame has been
     // reached (frame 0 from reset release). The device refuses guest accesses
-    // while a push is presented, so a frame's events arrive as one burst.
+    // while a push is presented, so a frame's events arrive as one burst; the
+    // push stays presented through a drop too (the device ignores a push into a
+    // full queue), or a guest pop waiting behind the burst would slip in and
+    // make room for the next event, which the emulator, queueing the whole
+    // burst in one step, would have dropped.
     always @(negedge clk) begin
         in_push = 0;
         if (!reset && next_event < events && event_frame[next_event] <= frame_reached) begin
-            if (in_full) begin
+            if (in_full)
                 $fwrite(STDERR, "rv32_tb: input queue full: dropped frame %0d event %h\n",
                         event_frame[next_event], event_word[next_event]);
-            end else begin
-                in_push = 1;
-                in_event = event_word[next_event];
-            end
+            in_push = 1;
+            in_event = event_word[next_event];
             next_event = next_event + 1;
         end
     end
@@ -128,8 +133,9 @@ module rv32_tb;
         end
     endfunction
 
-    // The checkpoint hash of docs/rv32.md: shifts and adds over the framebuffer's words in
-    // address order, read through the hierarchy the way the host would read a display's memory.
+    // The checkpoint hash of docs/rv32.md, h = ((h << 5) + h) ^ word from 5381 (shift, add, xor; no
+    // multiply), over the framebuffer's words in address order, read through the hierarchy the way
+    // the host would read a display's memory.
     function [31:0] frame_hash;
         input integer words;
         integer k;
@@ -145,6 +151,10 @@ module rv32_tb;
     task finish_run;
         input string halt_name;
         begin
+            // A host mistake that a passing guest would hide: a reset the run never reached. It is
+            // refused before any halt line exists, so the runner cannot take the run as complete.
+            if (reset_at > 0 && !reset_done)
+                $fatal(1, "+reset-at=%0d was never reached: the run ended at cycle %0d", reset_at, cycles);
             $fwrite(STDERR, "rv32_tb: halt=%0s cycles=%0d steps=%0d stalls=%0d transfers=%0d",
                     halt_name, cycles, steps, stalls, transfers);
             if (halt_name == "done") begin
@@ -164,6 +174,10 @@ module rv32_tb;
                 $fwrite(STDERR, " error=limit"); // even if a done store was accepted but never retired
             end
             $fwrite(STDERR, "\n");
+            // Scripted events whose frame the guest never presented: the runner refuses them unless told.
+            if (next_event < events)
+                $fwrite(STDERR, "rv32_tb: %0d scripted event(s) never delivered (first: frame %0d)\n",
+                        events - next_event, event_frame[next_event]);
             if (trace_fd != 0) $fclose(trace_fd);
             if (console_fd != 0) $fclose(console_fd);
             if (checkpoints_fd != 0) $fclose(checkpoints_fd);
@@ -369,7 +383,9 @@ module rv32_tb;
 
     // Read the input script (docs/rv32.md, "Input"): blank lines and `#` comments are skipped;
     // every other line is `frame N down|up KEY` with frames never decreasing. Lines are split
-    // on blanks by hand so both simulators agree on what a token is.
+    // on blanks by hand so both simulators agree on what a token is: `\r` is not a string
+    // escape in the language (Icarus reads it as `r`), $sscanf's %d accepts x and z by the
+    // standard, Icarus 13 cannot case on a string, and the simulators count a failed %s differently.
     task read_input_script;
         input string path;
         integer fd, number, frame, code, last_frame, k, tokens;
@@ -485,8 +501,10 @@ module rv32_tb;
             stalled_request = 0;
             request_age = 0;
             done_pending = 0;
+            frame_reached = 0; // the queue is cleared; events not yet pushed wait for their frame again
             repeat (2) @(posedge clk);
             #1 reset = 0;
+            reset_done = 1;
         end
     end
 endmodule

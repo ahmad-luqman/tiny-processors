@@ -18,7 +18,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tools.rv32_asm import PROGRAM_INPUTS, PROGRAMS, words_to_bytes, words_to_hex  # noqa: E402
+from tools.rv32_asm import PROGRAM_INPUTS, PROGRAMS, TIMER, words_to_bytes, words_to_hex  # noqa: E402
 from tools.rv32_image import to_hex_words  # noqa: E402
 from tools.rv32_run_emu import DEFAULT_EMULATOR, emulator_command, halt_line, last_halt_line, parse_halt_line  # noqa: E402
 
@@ -182,15 +182,22 @@ def describe(run):
             f"--- stderr ---\n{run.stderr}")
 
 
-def check_passed(run, name="simulator"):
-    """A matching trace is not enough: the backend must exit cleanly, print nothing
-    of its own, and report `halt=done ... pass`; otherwise exit with everything it printed."""
+# What a backend says on stderr when the input script and the program disagree (docs/rv32.md, "Input").
+LOST_EVENTS = ("input queue full", "never delivered")
+
+
+def check_passed(run, name="simulator", allow_lost_events=False):
+    """A matching trace is not enough: the backend must exit cleanly, print nothing of its own,
+    report `halt=done ... pass`, and, unless allowed, neither drop a scripted event nor leave one
+    undelivered; otherwise exit with everything it printed."""
     if run.status != 0 or run.noise:
         sys.exit(f"{name} failed:\n{describe(run)}")
     if run.halt is None:
         sys.exit(f"{name} printed no valid halt line:\n{describe(run)}")
     if (run.halt["halt"], run.halt["outcome"]) != ("done", "pass"):
         sys.exit(f"{name} run did not pass: {run.halt}\n{describe(run)}")
+    if not allow_lost_events and any(text in run.stderr for text in LOST_EVENTS):
+        sys.exit(f"{name} lost scripted events (pass --allow-lost-events if that is intended):\n{describe(run)}")
 
 
 def write_image(words, out, name):
@@ -234,7 +241,9 @@ def main():
     parser.add_argument("--expect-console", help="the guest console output both backends must produce")
     parser.add_argument("--expect-last-line", help="the last console line both backends must produce")
     parser.add_argument("--expect-checkpoint", action="append", default=[], metavar="LINE",
-                        help="a `frame N <hash>` line both backends must write (repeatable)")
+                        help="the `frame N <hash>` lines both backends must write, exactly and in order (repeatable)")
+    parser.add_argument("--allow-lost-events", action="store_true",
+                        help="accept a run that dropped a scripted event or never delivered one")
     parser.add_argument("--input", type=Path, help="input script delivered to both backends (docs/rv32.md, Input)")
     parser.add_argument("--frames", type=Path, help="directory for the emulator's frame-NNNN.ppm pictures")
     parser.add_argument("--compare", choices=("trace", "results"), default="trace",
@@ -245,7 +254,7 @@ def main():
     parser.add_argument("--allow-traps", action="store_true",
                         help="accept a trace with trap lines, where the cycle formula is not exact")
     parser.add_argument("--emulator", default=DEFAULT_EMULATOR)
-    parser.add_argument("--simulator", default=DEFAULT_SIMULATOR, help=".vvp file or Verilator binary")
+    parser.add_argument("--simulator", help=f".vvp file or Verilator binary (default {DEFAULT_SIMULATOR}; unused with --backend emulator)")
     parser.add_argument("--out", default=DEFAULT_OUT, help="directory for the image, traces, and VCD")
     parser.add_argument("--stall", type=int, default=None, help="fixed stall cycles per request")
     parser.add_argument("--seed", type=int, default=None, help="random 0..3 stall cycles per request")
@@ -254,8 +263,10 @@ def main():
         parser.error("--stall must not be negative")
     if args.stall is not None and args.seed is not None:
         parser.error("--stall and --seed are exclusive")
+    if args.simulator is None and args.backend == "both":
+        args.simulator = DEFAULT_SIMULATOR
     for path in (args.emulator, args.simulator):
-        if not Path(path).exists() and shutil.which(path) is None:
+        if path is not None and not Path(path).exists() and shutil.which(path) is None:
             parser.error(f"{path} does not exist; run make build-rv32-emu / build-rv32-rtl first")
 
     out = Path(args.out)
@@ -274,17 +285,18 @@ def main():
             args.input.write_text(PROGRAM_INPUTS[name])
     if args.frames is not None:
         args.frames.mkdir(parents=True, exist_ok=True)
+        for stale in args.frames.glob("frame-*.ppm"): # a previous run's frames must not survive this one
+            stale.unlink()
     emulator = run_emulator(args.emulator, bin_path, out / f"{name}.emu.trace",
                             checkpoints=out / f"{name}.emu.checkpoints", input_script=args.input, frames=args.frames)
-    check_passed(emulator, "emulator")
+    check_passed(emulator, "emulator", args.allow_lost_events)
     if args.expect_console is not None and emulator.console.rstrip("\n") != args.expect_console:
         sys.exit(f"emulator console {emulator.console!r} is not {args.expect_console!r}")
     last_line = emulator.console.rstrip("\n").rsplit("\n", 1)[-1]
     if args.expect_last_line is not None and last_line != args.expect_last_line:
         sys.exit(f"emulator's last console line {last_line!r} is not {args.expect_last_line!r}")
-    for line in args.expect_checkpoint:
-        if line not in emulator.checkpoints:
-            sys.exit(f"emulator checkpoints {emulator.checkpoints} do not include {line!r}")
+    if args.expect_checkpoint and emulator.checkpoints != args.expect_checkpoint:
+        sys.exit(f"emulator checkpoints {emulator.checkpoints} are not {args.expect_checkpoint}")
     if args.backend == "emulator":
         print(emulator.stderr.strip().splitlines()[-1])
         print(f"emulator: {len(emulator.trace)} trace lines, {len(emulator.checkpoints)} checkpoint(s), "
@@ -297,7 +309,7 @@ def main():
         for stall, seed in [(0, None), (1, None), (2, None), (3, None), (None, seed)]:
             rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=seed,
                           checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input)
-            check_passed(rtl)
+            check_passed(rtl, allow_lost_events=args.allow_lost_events)
             difference = diff_traces(rtl.trace, emulator.trace)
             if difference:
                 sys.exit(f"stall={stall} seed={seed}: {difference}")
@@ -324,17 +336,23 @@ def main():
                   checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input)
     print(emulator.stderr.strip().splitlines()[-1])
     print(rtl.stderr.strip().splitlines()[-1] if rtl.stderr.strip() else "rv32_tb: no halt line")
-    check_passed(rtl)
+    check_passed(rtl, allow_lost_events=args.allow_lost_events)
     if rtl.console != emulator.console:
         sys.exit(f"console mismatch: RTL {rtl.console!r}, emulator {emulator.console!r}")
     if rtl.checkpoints != emulator.checkpoints:
         sys.exit(f"checkpoint mismatch: RTL {rtl.checkpoints}, emulator {emulator.checkpoints}")
     if args.compare == "results":
         # Device time: a program that reads the timer takes different paths on the two backends,
-        # so the traces are not compared; what the guest printed and presented must still agree.
-        print(f"results identical: {emulator.console.count(chr(10))} console line(s) ending {last_line!r}, "
-              f"{len(rtl.checkpoints)} checkpoint(s) {rtl.checkpoints}; RTL {len(rtl.trace)} instructions in "
-              f"{rtl.halt['cycles']} cycles, emulator {len(emulator.trace)} instructions")
+        # so the traces are not compared; what the guest printed and presented must still agree,
+        # and so must the faults it took. A program that never read the timer gets the full diff.
+        if not any(f"mem[{TIMER:08x}]->" in line for line in emulator.trace):
+            sys.exit("--compare results is for a program that reads the timer; this one never did, use --compare trace")
+        rtl_traps, emulator_traps = (sum(" trap " in line for line in run.trace) for run in (rtl, emulator))
+        if rtl_traps != emulator_traps:
+            sys.exit(f"trap count mismatch: RTL {rtl_traps}, emulator {emulator_traps}")
+        print(f"results identical: {len(emulator.console.splitlines())} console line(s) ending {last_line!r}, "
+              f"{len(rtl.checkpoints)} checkpoint(s) {rtl.checkpoints}, {rtl_traps} trap(s); RTL {len(rtl.trace)} "
+              f"instructions in {rtl.halt['cycles']} cycles, emulator {len(emulator.trace)} instructions")
     else:
         difference = diff_traces(rtl.trace, emulator.trace)
         if difference:

@@ -273,6 +273,7 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertEqual(frame1[200 * 320 + 10], (10 ^ 200) & 0xFF)
         makefile = (ROOT / "Makefile").read_text()
         self.assertIn(f"RV32_DIAG_FRAME1_HEX := {frame_hash(frame1):08x}", makefile)
+        self.assertIn(f"RV32_DIAG_FRAME2_HEX := {frame_hash(render_diag_frame(2)):08x}", makefile)
         self.assertIn(f"RV32_DIAG_HEX := {diag_checksum():08x}", makefile)
         source = (ROOT / "programs/rv32/diag.c").read_text()
         pinned = re.search(r"#define DIAG_EXPECTED 0x([0-9a-f]{8})u", source).group(1)
@@ -282,8 +283,12 @@ class DeviceHelperTests(unittest.TestCase):
                          "one CHECK per expected value except the frame hash and the four folded events")
 
     def test_privileged_instructions_need_the_flag(self):
-        listing = "80000000 <f>:\n80000000: 30529073 csrw mtvec, t0\n80000004: 30200073 mret\n80000008: 00000073 ecall\n"
-        self.assertEqual(len(check_listing(listing)), 3)
+        listing = ("80000000 <f>:\n80000000: 30529073 csrw mtvec, t0\n80000004: 30200073 mret\n"
+                   "80000008: 00000073 ecall\n8000000c: 30002573 csrr a0, mstatus\n")
+        self.assertEqual(len(check_listing(listing)), 4)
         problems = check_listing(listing, allow_privileged=True)
-        self.assertEqual(len(problems), 1)
+        self.assertEqual(len(problems), 2)
         self.assertIn("ecall", problems[0])
+        self.assertIn("CSR other than the four trap CSRs", problems[1])
+        if (ROOT / "build/rv32/diag.lst").exists():
+            self.assertEqual(check_listing((ROOT / "build/rv32/diag.lst").read_text(), allow_privileged=True), [])

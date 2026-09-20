@@ -93,7 +93,7 @@ QEMU boots the image with the bare `rv32i` CPU model; all 28 checks pass, the gu
 [rtl/rv32/](rtl/rv32/) is the hardware for the machine: a register file, an ALU with a barrel shifter and one subtractor's comparison flags, an immediate decoder, the four trap CSRs, and a five-state controller driving the contract's ready/valid memory port with byte strobes in both directions. It runs all of RV32I plus `csrr*` and `mret`; illegal encodings and faults trap through `mtvec` exactly as the emulator's do, and a double fault halts both backends the same way. The testbench holds the bus to model stalls and prints the emulator's retirement trace, so a Python test diffs the two backends line for line, and the M1 C self-check runs on the core to `PASS 807d9fad` with the emulator's 32,610-line trace.
 
 ```sh
-make test-rv32-rtl            # 35 tests: emulator vs Icarus, differential, traps, devices, harness, fixed and random stalls
+make test-rv32-rtl            # 36 tests: emulator vs Icarus, differential, traps, devices, harness, fixed and random stalls
 make test-rv32-rtl-verilator  # the same tests on a Verilator build of the testbench
 make run-rv32-rtl             # the C self-check on the RTL: PASS 807d9fad, identical trace, cycle count
 make run-rv32-rtl-verilator   # the same on Verilator with one stall cycle per request
@@ -111,7 +111,7 @@ The 78-instruction loop produces identical traces on both backends at every stal
 
 ```sh
 make run-rv32-diag-emu        # the diagnostic on the emulator: PASS, checkpoints, build/rv32/frames/*.ppm
-make run-rv32-diag-rtl        # the same on Icarus, results compared with the emulator (1,666,415 cycles, about 16 s)
+make run-rv32-diag-rtl        # the same on Icarus, results compared with the emulator (1,666,436 cycles, about 16 s)
 make run-rv32-diag-rtl-verilator  # the same on Verilator with one stall per request
 make lint-rv32-soc            # verilator --Wall on the whole machine
 make synth-rv32-soc           # yosys on the machine with 64-word memories: 24,141 cells, no latches

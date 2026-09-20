@@ -34,8 +34,9 @@ RV32_IMAGE_FILES := $(foreach image,$(RV32_IMAGES),$(foreach ext,elf lst bin rea
 RV32_SELFCHECK_HEX := 807d9fad
 RV32_DIAG_HEX := 8bd87e9a
 RV32_DIAG_FRAME1_HEX := ae4eb605
+RV32_DIAG_FRAME2_HEX := 2acb5d85
 RV32_DIAG_INPUT := programs/rv32/diag.input
-RV32_DIAG_ARGS := --image build/rv32/diag.bin --input $(RV32_DIAG_INPUT) --compare results --expect-last-line "PASS $(RV32_DIAG_HEX)" --expect-checkpoint "frame 1 $(RV32_DIAG_FRAME1_HEX)" --out build/rv32/rtl
+RV32_DIAG_ARGS := --image build/rv32/diag.bin --input $(RV32_DIAG_INPUT) --compare results --expect-last-line "PASS $(RV32_DIAG_HEX)" --expect-checkpoint "frame 1 $(RV32_DIAG_FRAME1_HEX)" --expect-checkpoint "frame 2 $(RV32_DIAG_FRAME2_HEX)" --out build/rv32/rtl
 RV32EMU := build/rv32/rv32emu
 RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
 RV32_RTL := rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32.v
@@ -50,7 +51,7 @@ RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
 .PHONY: test-sap8-assembler programs-sap8
 .PHONY: test-simd4-model test-simd4 test-simd4-verilator sim-simd4 waves-simd4 bench-simd4 lint-simd4 synth-simd4
 .PHONY: toolchain-rv32 firmware-rv32 check-rv32-image run-rv32-qemu test-rv32-tools test-rv32-rt test-rv32 disasm-rv32
-.PHONY: run-rv32-diag-emu run-rv32-diag-rtl run-rv32-diag-rtl-verilator
+.PHONY: run-rv32-diag-emu run-rv32-diag-rtl run-rv32-diag-rtl-verilator disasm-rv32-diag
 .PHONY: toolchain-rv32-emu build-rv32-emu test-rv32-emu run-rv32-emu trace-rv32-emu diff-rv32-qemu
 .PHONY: build-rv32-rtl test-rv32-rtl test-rv32-rtl-verilator run-rv32-rtl run-rv32-rtl-verilator lint-rv32 synth-rv32 waves-rv32 bench-rv32-rtl
 .PHONY: lint-rv32-soc synth-rv32-soc
@@ -296,7 +297,7 @@ bench-rv32-rtl: $(RV32_TB_VVP) $(RV32EMU)
 # The device diagnostic reads the timer, so the two backends are compared at the results level
 # (console, outcome, checkpoints), not trace for trace (docs/rv32.md, "Device time").
 run-rv32-diag-emu: check-rv32-image $(RV32EMU)
-	$(PYTHON) -m tools.rv32_rtl $(RV32_DIAG_ARGS) --backend emulator --frames build/rv32/frames --emulator $(RV32EMU) --simulator $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_DIAG_ARGS) --backend emulator --frames build/rv32/frames --emulator $(RV32EMU)
 
 run-rv32-diag-rtl: check-rv32-image $(RV32_TB_VVP) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_DIAG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP)

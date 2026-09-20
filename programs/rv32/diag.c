@@ -39,6 +39,9 @@ static void fold(uint32_t value)
 
 static int failed(uint32_t number)
 {
+    if (number == 0 || number > 255) {
+        number = 255; /* 0 would become the pass word in rv32_exit */
+    }
     rv32_puts("FAIL ");
     rv32_put_udec(number);
     rv32_putc('\n');
@@ -79,7 +82,8 @@ static void set_mtvec(void (*entry)(void))
 }
 
 /* The checkpoint hash of docs/rv32.md over the framebuffer as read back
- * through the bus: shift-add, no multiply. */
+ * through the bus: h = ((h << 5) + h) ^ word from 5381; shift, add, xor, no
+ * multiply. */
 static uint32_t hash_frame(void)
 {
     uint32_t h = 5381u;
@@ -205,6 +209,9 @@ int main(void)
     rv32_put_udec(events);
     rv32_putc('\n');
 
+    if (trap_count != 4) {
+        return failed(98); /* a later, unexpected trap was resumed past silently */
+    }
     if (checksum != DIAG_EXPECTED) {
         return failed(99);
     }

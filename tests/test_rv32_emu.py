@@ -442,6 +442,17 @@ class EmulatorTest(unittest.TestCase):
         # Popping makes room; an event for a frame never presented stays with the host.
         result = self.run_pass(LI(1, INPUT) + [LW(3, 1, 0), LW(4, 1, 4)], input_script=burst + "frame 5 up 3\n")
         self.assertEqual((result.state.x[3], result.state.x[4], result.state.events), (event_word(True, 0), 15, 15))
+        self.assertIn("rv32emu: 1 scripted event(s) never delivered (first: frame 5)", result.stderr)
+        # The ring wraps: twelve popped, ten more pushed at frame 1 past entry 15 and popped in order;
+        # key 31 is the top bit of KEYS.
+        script = "".join(f"frame 0 down {code}\n" for code in range(12))
+        script += "".join(f"frame 1 down {code}\n" for code in range(22, 32))
+        words = LI(1, INPUT) + [LW(2, 1, 0)] * 12 + LI(3, DISPLAY) + [SW(0, 3, 0)] + [LW(2, 1, 0)] * 10 + [LW(4, 1, 4), LW(5, 1, 8)]
+        result = self.run_pass(words, input_script=script)
+        pops = [effects(line) for line in result.trace if f"mem[{INPUT:08x}]->" in line]
+        self.assertEqual(pops, [f"x2={event_word(True, code):08x} mem[{INPUT:08x}]->{event_word(True, code):08x}/4"
+                                for code in list(range(12)) + list(range(22, 32))])
+        self.assertEqual((result.state.x[4], result.state.x[5], result.state.events), (0, 0xFFC00FFF, 0))
 
     def test_input_script_errors(self):
         for content in ("frame 1 down\n", "frame x down A\n", "frame 1 press A\n", "frame 2 down A\nframe 1 up A\n",
@@ -501,6 +512,15 @@ class EmulatorTest(unittest.TestCase):
                          ["diag: timer ok", "diag: faults 4", f"diag: display {frame1.split()[2]}", "diag: input 4",
                           f"PASS {diag_checksum():08x}"])
         self.assertEqual((result.state.traps, result.state.frames, result.state.events), (4, 2, 0))
+        # The diagnostic detects a deviation: without the SPACE press, CHECK 16 fails and the done
+        # word carries 16; with the two frame-1 presses swapped every CHECK passes but the checksum
+        # over the popped events does not, which is the 99 of the final guard.
+        for altered, code in ((script.replace("frame 1 down SPACE\n", ""), 16),
+                              (script.replace("frame 1 down LEFT\nframe 1 down SPACE\n", "frame 1 down SPACE\nframe 1 down LEFT\n"), 99)):
+            with self.subTest(code=code):
+                result = self.run_words(words, limit=10000000, input_script=altered)
+                self.assertEqual((result.status, result.state.done, result.halt["outcome"]), (code, (code << 16) | 0x3333, f"fail={code}"))
+                self.assertEqual(result.stdout.splitlines()[-1], f"FAIL {code}")
 
     def test_loading_and_start_pc(self):
         words = [ADDI(1, 0, 1)] + FINISH()
@@ -532,11 +552,13 @@ class EmulatorTest(unittest.TestCase):
             image = path / "image.bin"
             image.write_bytes(b"".join(word.to_bytes(4, "little") for word in FINISH()))
             original = image.read_bytes()
+            (path / "s").write_text("frame 0 down A\n")  # a script an output must not truncate
             for extra, message in [(["--trace", str(image)], "trace file"),
                                    (["--dump-state", str(image)], "state file"),
                                    (["--trace", str(path / "t"), "--dump-state", str(path / "t")], "state file"),
                                    (["--trace", str(path / "t"), "--dump-state", str(path / "./t")], "state file"),
                                    (["--checkpoints", str(image)], "checkpoints file"),
+                                   (["--input", str(path / "s"), "--trace", str(path / "s")], "trace file"),
                                    (["--trace", str(path / "t"), "--checkpoints", str(path / "t")], "checkpoints file"),
                                    (["--checkpoints", str(path / "c"), "--dump-state", str(path / "c")], "state file")]:
                 with self.subTest(extra=extra):

@@ -78,7 +78,10 @@ module rv32_bus #(
     wire [31:0] ram_offset = mem_addr - RAM_BASE;
     wire [31:0] fb_offset = mem_addr - FB_BASE;
 
-    // One comparator per window; the windows are disjoint so at most one is set.
+    // One comparator per window; the windows are disjoint so at most one is set. A memory
+    // window tests only the access's first byte: that equals the emulator's whole-access test
+    // because accesses are naturally aligned (misalignment traps before decode) and every
+    // window size is a multiple of four; keep it so for any window added later.
     wire ram_sel = (mem_addr >= RAM_BASE) && (ram_offset < RAM_BYTES);
     wire console_sel = !mem_fetch && (mem_addr[31:3] == CONSOLE_BASE[31:3]);
     wire done_sel = !mem_fetch && (mem_addr == DONE_ADDR);

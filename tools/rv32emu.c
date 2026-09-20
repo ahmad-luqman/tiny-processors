@@ -261,9 +261,10 @@ static access fb_store(machine *m, uint32_t offset, int width, uint32_t value)
     return ACC_OK;
 }
 
-/* The checkpoint hash (docs/rv32.md, "Display"): shift-add over the
- * framebuffer's little-endian words in address order, no multiply, so the
- * firmware can compute the same value over a frame it reads back. */
+/* The checkpoint hash (docs/rv32.md, "Display"): h = ((h << 5) + h) ^ word
+ * from 5381 over the framebuffer's little-endian words in address order;
+ * shift, add, xor, no multiply, so the firmware can compute the same value
+ * over a frame it reads back. */
 static uint32_t frame_hash(const uint8_t *pixels)
 {
     uint32_t h = 5381u;
@@ -821,9 +822,13 @@ static void read_input_script(machine *m, const char *path)
             continue;
         }
         int fields = sscanf(line, " %15s %15s %15s %15s %15s", keyword, frame_text, direction, key, rest);
-        char *end;
-        unsigned long frame = strtoul(frame_text, &end, 10);
-        int code = key_code(key);
+        char *end = NULL;
+        unsigned long frame = 0;
+        int code = -1;
+        if (fields == 4) { /* the buffers are only filled when every field was read */
+            frame = strtoul(frame_text, &end, 10);
+            code = key_code(key);
+        }
         if (fields != 4 || strcmp(keyword, "frame") != 0 || (strcmp(direction, "down") != 0 && strcmp(direction, "up") != 0) ||
             !isdigit((unsigned char)frame_text[0]) || *end != '\0' || frame > 0xffffffffull || code < 0 || frame < last_frame) {
             fprintf(stderr, "rv32emu: input script %s line %u: expected `frame N down|up KEY` with frames in order: %s",
@@ -927,6 +932,7 @@ int main(int argc, char **argv)
     }
     if (trace_path) {
         require_distinct(trace_path, "trace file", image_path, "image");
+        require_distinct(trace_path, "trace file", input_path, "input script");
         m.trace = fopen(trace_path, "w");
         if (!m.trace) {
             fprintf(stderr, "rv32emu: cannot write %s\n", trace_path);
@@ -936,6 +942,7 @@ int main(int argc, char **argv)
     if (checkpoints_path) {
         require_distinct(checkpoints_path, "checkpoints file", image_path, "image");
         require_distinct(checkpoints_path, "checkpoints file", trace_path, "trace file");
+        require_distinct(checkpoints_path, "checkpoints file", input_path, "input script");
         m.checkpoints = fopen(checkpoints_path, "w");
         if (!m.checkpoints) {
             fprintf(stderr, "rv32emu: cannot write %s\n", checkpoints_path);
@@ -968,6 +975,7 @@ int main(int argc, char **argv)
         require_distinct(state_path, "state file", image_path, "image");
         require_distinct(state_path, "state file", trace_path, "trace file");
         require_distinct(state_path, "state file", checkpoints_path, "checkpoints file");
+        require_distinct(state_path, "state file", input_path, "input script");
         FILE *out = fopen(state_path, "w");
         if (!out) {
             fprintf(stderr, "rv32emu: cannot write %s\n", state_path);
@@ -979,6 +987,10 @@ int main(int argc, char **argv)
         }
     }
 
+    if (m.next_scripted < m.scripted) {
+        fprintf(stderr, "rv32emu: %zu scripted event(s) never delivered (first: frame %" PRIu32 ")\n",
+                m.scripted - m.next_scripted, m.script[m.next_scripted].frame);
+    }
     int status = EXIT_EMULATOR_ERROR;
     fprintf(stderr, "rv32emu: halt=%s steps=%" PRIu64 " retired=%" PRIu64 " traps=%" PRIu64 " loaded=%zu",
             halt_name(m.halt), m.steps, m.retired, m.traps, loaded);

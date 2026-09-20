@@ -29,8 +29,10 @@ REQUIRED_SECTIONS = (".text", ".rodata", ".data", ".bss")
 REQUIRED_SYMBOLS = ("_start", "__bss_start", "__bss_end", "_end", "_stack_bottom", "_stack_top")
 # Base RV32I only: no M, no CSRs, no compressed, no traps in the M1 slice.
 FORBIDDEN_MNEMONIC = re.compile(r"\A(mul\w*|div\w*|rem\w*|csr\w*|fence\.i|c\.\w+|ecall|ebreak|wfi|[msu]ret|sfence\.vma)\Z")
-# What an image with a trap handler may use in addition (the M5 diagnostic): the four trap CSRs and mret.
+# What an image with a trap handler may use in addition (the M5 diagnostic): the CSR instructions on the
+# four trap CSRs (the operand is checked below), and mret.
 PRIVILEGED_MNEMONIC = re.compile(r"\A(csr\w*|mret)\Z")
+TRAP_CSR = re.compile(r"\b(mtvec|mepc|mcause|mtval)\b")
 LISTING_LINE = re.compile(r"\A\s*([0-9a-f]+):\s+([0-9a-f]{2}(?: [0-9a-f]{2})*|[0-9a-f]{4,8})\s+(\S+)")
 
 Elf = namedtuple("Elf", "etype machine flags entry segments sections symbols undefined")
@@ -100,6 +102,9 @@ def check_listing(text, allow_privileged=False):
         match = LISTING_LINE.match(line)
         if match and FORBIDDEN_MNEMONIC.match(match.group(3)):
             if allow_privileged and PRIVILEGED_MNEMONIC.match(match.group(3)):
+                if match.group(3) == "mret" or TRAP_CSR.search(line):
+                    continue
+                problems.append(f"listing line {number}: CSR other than the four trap CSRs: {line.strip()}")
                 continue
             problems.append(f"listing line {number}: instruction outside the M1 contract: {line.strip()}")
     return problems
