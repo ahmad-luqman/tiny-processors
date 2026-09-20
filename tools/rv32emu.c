@@ -76,14 +76,24 @@ typedef struct {
 
 typedef enum { ACC_OK, ACC_FAULT, ACC_MISALIGNED } access;
 
-static bool in_ram(uint32_t addr, int width)
-{
-    return addr >= RAM_BASE && addr - RAM_BASE + (uint32_t)width <= RAM_SIZE;
-}
+/* Every window of the memory map is a region with a load and a store
+ * handler, or NULL when that direction is undefined. A handler receives the
+ * offset inside the window and decides the width and offset rules of its
+ * device; anything it refuses, and every address outside every window, is an
+ * access fault. This mirrors rtl/rv32/rv32_bus.v: one comparator per window,
+ * then the device's own decode. */
+typedef access (*load_handler)(machine *m, uint32_t offset, int width, uint32_t *value);
+typedef access (*store_handler)(machine *m, uint32_t offset, int width, uint32_t value);
 
-static uint32_t ram_read(const machine *m, uint32_t addr, int width)
+typedef struct {
+    const char *name;
+    uint32_t base, size;
+    load_handler load;
+    store_handler store;
+} region;
+
+static uint32_t bytes_read(const uint8_t *p, int width)
 {
-    const uint8_t *p = m->ram + (addr - RAM_BASE);
     uint32_t value = 0;
     for (int i = width - 1; i >= 0; i--) {
         value = (value << 8) | p[i];
@@ -91,12 +101,83 @@ static uint32_t ram_read(const machine *m, uint32_t addr, int width)
     return value;
 }
 
-static void ram_write(machine *m, uint32_t addr, int width, uint32_t value)
+static void bytes_write(uint8_t *p, int width, uint32_t value)
 {
-    uint8_t *p = m->ram + (addr - RAM_BASE);
     for (int i = 0; i < width; i++) {
         p[i] = (uint8_t)(value >> (8 * i));
     }
+}
+
+static access ram_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    *value = bytes_read(m->ram + offset, width);
+    return ACC_OK;
+}
+
+static access ram_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    bytes_write(m->ram + offset, width, value);
+    return ACC_OK;
+}
+
+static access console_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    (void)m;
+    if (width == 1 && offset == CONSOLE_STATUS) {
+        *value = CONSOLE_TX_READY; /* always ready: every byte is accepted at once */
+        return ACC_OK;
+    }
+    return ACC_FAULT; /* TX is write-only; the status is a byte; other offsets do not exist */
+}
+
+static access console_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    (void)m;
+    if (width == 1 && offset == CONSOLE_TX) {
+        fputc((int)(value & 0xff), stdout);
+        return ACC_OK;
+    }
+    return ACC_FAULT; /* the status is read-only; TX takes bytes only */
+}
+
+static access done_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    if (width == 4 && offset == 0) {
+        m->halt = HALT_DONE; /* the store still retires; the loop stops afterwards */
+        m->done_word = value;
+        return ACC_OK;
+    }
+    return ACC_FAULT; /* byte and halfword writes */
+}
+
+/* The memory map (docs/rv32.md). RAM is last only for readability; the
+ * windows are disjoint so the order does not matter. */
+static const region REGIONS[] = {
+    {"done", DONE_ADDR, 4, NULL, done_store},
+    {"console", CONSOLE_BASE, 8, console_load, console_store},
+    {"ram", RAM_BASE, RAM_SIZE, ram_load, ram_store},
+};
+
+/* The window that holds every byte of the access, or NULL. */
+static const region *find_region(uint32_t addr, int width)
+{
+    for (size_t i = 0; i < sizeof REGIONS / sizeof REGIONS[0]; i++) {
+        const region *r = &REGIONS[i];
+        if (addr >= r->base && addr - r->base + (uint32_t)width <= r->size) {
+            return r;
+        }
+    }
+    return NULL;
+}
+
+static bool in_ram(uint32_t addr, int width)
+{
+    return addr >= RAM_BASE && addr - RAM_BASE + (uint32_t)width <= RAM_SIZE;
+}
+
+static uint32_t ram_read(const machine *m, uint32_t addr, int width)
+{
+    return bytes_read(m->ram + (addr - RAM_BASE), width);
 }
 
 /* Data load. Misalignment is checked before the address is decoded. */
@@ -105,17 +186,11 @@ static access load(machine *m, uint32_t addr, int width, uint32_t *value)
     if (addr % (uint32_t)width) {
         return ACC_MISALIGNED;
     }
-    if (in_ram(addr, width)) {
-        *value = ram_read(m, addr, width);
-        return ACC_OK;
+    const region *r = find_region(addr, width);
+    if (!r || !r->load) {
+        return ACC_FAULT; /* unmapped, or a write-only window such as the done register */
     }
-    if (width == 1 && addr == CONSOLE_BASE + CONSOLE_STATUS) {
-        *value = CONSOLE_TX_READY; /* always ready: every byte is accepted at once */
-        return ACC_OK;
-    }
-    /* Console TX and other console offsets, the done register, and every
-     * unmapped address are not readable. */
-    return ACC_FAULT;
+    return r->load(m, addr - r->base, width, value);
 }
 
 static access store(machine *m, uint32_t addr, int width, uint32_t value)
@@ -123,22 +198,11 @@ static access store(machine *m, uint32_t addr, int width, uint32_t value)
     if (addr % (uint32_t)width) {
         return ACC_MISALIGNED;
     }
-    if (in_ram(addr, width)) {
-        ram_write(m, addr, width, value);
-        return ACC_OK;
+    const region *r = find_region(addr, width);
+    if (!r || !r->store) {
+        return ACC_FAULT; /* unmapped, or a read-only window */
     }
-    if (width == 1 && addr == CONSOLE_BASE + CONSOLE_TX) {
-        fputc((int)(value & 0xff), stdout);
-        return ACC_OK;
-    }
-    if (width == 4 && addr == DONE_ADDR) {
-        m->halt = HALT_DONE; /* the store still retires; the loop stops afterwards */
-        m->done_word = value;
-        return ACC_OK;
-    }
-    /* Byte or halfword writes to the done register, the console status
-     * register, other console offsets, and unmapped addresses fault. */
-    return ACC_FAULT;
+    return r->store(m, addr - r->base, width, value);
 }
 
 static void trace_effects(const machine *m)
