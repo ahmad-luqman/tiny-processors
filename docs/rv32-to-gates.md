@@ -37,7 +37,7 @@ flowchart LR
     WB --> RET["retirement port: retire and trap pulses, registered copies"]
 ```
 
-Every box that says flip-flops captures on a rising edge when the controller enables it; everything else is combinational and exists all the time. The memory itself, the console, and the done register are in the testbench, on the other side of the port. Compare this with the emulator: `step()` in `rv32emu.c` is one function that reads, decodes, executes, and writes in program order. Here those are four or five separate edges, and the "function" is spread over hardware that is all active at once, selected by `state`.
+Every box that says flip-flops captures on a rising edge when the controller enables it; everything else is combinational and exists all the time. The memory itself, the console, and the done register are on the other side of the port (in the testbench until M4; since M5 in `rv32_ram` and the devices behind the bus decoder, [SoC record](rv32-soc.md)). Compare this with the emulator: `step()` in `rv32emu.c` is one function that reads, decodes, executes, and writes in program order. Here those are four or five separate edges, and the "function" is spread over hardware that is all active at once, selected by `state`.
 
 ## 2. Register writes are flip-flops, reads are muxes
 
@@ -66,7 +66,7 @@ and the `EXECUTE` result mux picks the CSR's old value, the `jalr` target, the P
 
 ## 4. Lanes: the strobe on the way out, muxes on the way back
 
-A byte store puts the byte on all four lanes (`{4{b[7:0]}}`) and lets the strobe say which one the RAM keeps; a halfword store replicates the halfword. The strobe itself is a 2-to-4 decoder of `alu_out[1:0]` for a byte, a 1-to-2 decoder of `alu_out[1]` for a halfword, and `1111` for a word. The testbench's RAM writes each lane under its own `if (mem_strb[i])`: four enables on one word, exactly like the register file's enables on one register.
+A byte store puts the byte on all four lanes (`{4{b[7:0]}}`) and lets the strobe say which one the RAM keeps; a halfword store replicates the halfword. The strobe itself is a 2-to-4 decoder of `alu_out[1:0]` for a byte, a 1-to-2 decoder of `alu_out[1]` for a halfword, and `1111` for a word. `rv32_ram` (the testbench's RAM until M5) writes each lane under its own `if (mem_strb[i])`: four enables on one word, exactly like the register file's enables on one register.
 
 A load gets the whole aligned word back in `mdr` and must pick lanes out of it. That is two muxes and some wire:
 
@@ -109,7 +109,7 @@ The CSRs are four more 32-bit registers with two write paths each: the trap path
 
 ## 6. Inspect the waveforms
 
-`make waves-rv32` runs the loop and the M4 program with `+stall=2` into `build/rv32/rtl/loop.vcd` and `full.vcd`. Open them in [Surfer](https://app.surfer-project.org/) and add, from `rv32_tb.dut`: `clk`, `reset`, `state`, `mem_valid`, `mem_ready`, `mem_fetch`, `mem_addr`, `mem_we`, `mem_strb`, `mem_wdata`, `mem_rdata`, `ir`, `a`, `b`, `alu_out`, `mdr`, `load_value`, `rf_we`, `rd_value`, `pc`, `retire`, `retire_rd_we`, `retire_rd`, `retire_rd_value`, `trap`. Use unsigned decimal for `state` (`0 FETCH, 1 DECODE, 2 EXECUTE, 3 MEM, 4 WRITEBACK, 5 HALT`) and hex for the rest. Reset is high for the edges at 5 and 15 ns and drops at 16 ns; the first counted edge is 25 ns. With `+stall=2` every request costs three edges: two stalled, one accepting.
+`make waves-rv32` runs the loop and the M4 program with `+stall=2` into `build/rv32/rtl/loop.vcd` and `full.vcd` (and, since M5, the devices program into `devices.vcd`, read in the [SoC record](rv32-soc.md#inspect-the-waveforms)). Open them in [Surfer](https://app.surfer-project.org/) and add, from `rv32_tb.dut.core` (the core is one instance inside the machine since M5; `clk` and `reset` are also at `rv32_tb.dut`): `clk`, `reset`, `state`, `mem_valid`, `mem_ready`, `mem_fetch`, `mem_addr`, `mem_we`, `mem_strb`, `mem_wdata`, `mem_rdata`, `ir`, `a`, `b`, `alu_out`, `mdr`, `load_value`, `rf_we`, `rd_value`, `pc`, `retire`, `retire_rd_we`, `retire_rd`, `retire_rd_value`, `trap`. Use unsigned decimal for `state` (`0 FETCH, 1 DECODE, 2 EXECUTE, 3 MEM, 4 WRITEBACK, 5 HALT`) and hex for the rest. Reset is high for the edges at 5 and 15 ns and drops at 16 ns; the first counted edge is 25 ns. With `+stall=2` every request costs three edges: two stalled, one accepting.
 
 **A held request and a single retirement** (`loop.vcd`), the first instruction `auipc x5, 0` (word `00000297`):
 
@@ -135,7 +135,7 @@ The three observations the roadmap asks for are in `full.vcd`, whose program is 
 | 235 ns | `a` = `x1` = `8000_0100`, `b` = `x2` = `ffff_ff80`; `EXECUTE`. |
 | 245 ns | `alu_out` = `8000_0100`; `MEM`: `mem_valid=1`, `mem_we=1`, `mem_strb=0001` (lane 0 of the word), `mem_wdata=8080_8080` (the byte on every lane), `mem_fetch=0`. |
 | 255, 265 ns | The store is held: address, strobe, and data unchanged while `mem_ready=0`. Memory has not been written. |
-| 275 ns | Accepted: the testbench RAM captures lane 0 on this edge, exactly once. `WRITEBACK`. |
+| 275 ns | Accepted: the RAM captures lane 0 on this edge, exactly once. `WRITEBACK`. |
 | 285 ns | `retire=1`, no register write (`retire_rd_we=0`); the testbench prints `mem[80000100]<-00000080/1` from the transaction it recorded at 275 ns, narrowed by the strobe. |
 
 Nine edges: five states plus four stalls. The write happened on the edge before the retiring one; the trace line still describes it as the instruction's effect because the testbench attributes every accepted data transaction to the next retirement.
@@ -189,7 +189,7 @@ The emulator cannot produce any of these numbers. The trace it defines deliberat
 
 ## 8. What synthesis actually built
 
-`make synth-rv32` on Yosys 0.69+post: **8,175 generic cells**, no latches (`select -assert-none t:*LATCH*` passes), hierarchy preserved:
+`make synth-rv32` on Yosys 0.69+post: **8,175 generic cells**, no latches (`select -assert-none t:*LATCH*` passes), hierarchy preserved (M5 did not touch the core; the bus and the devices are counted in the [SoC record](rv32-soc.md#what-synthesis-built)):
 
 | Module | Cells | Flip-flops | Muxes | M3 cells |
 | --- | ---: | ---: | ---: | ---: |
@@ -205,7 +205,7 @@ The ALU grew from 187 cells (one adder) to 1,246: the 33-bit subtractor and its 
 
 The top level grew by 126 flip-flops. Its registers now add up to 498 bits: fifteen 32-bit registers (`pc`, `ir`, `ir_pc`, `a`, `b`, `alu_out`, `mdr`, `retire_pc`, `retire_insn`, `retire_rd_value`, `trap_value`, `mtvec`, `mepc`, `mcause`, `mtval`), `retire_rd` (5), `trap_cause` (4), `state` (3), and six single bits (`taken`, `in_trap`, `retire`, `trap`, `retire_rd_we`, `halted`). Yosys kept 465: as in M3, bits 30:0 of `retire_pc` are the same flip-flops as `ir_pc` (both capture `pc` on the same edge and differ only in reset value), and `mtvec[1:0]` are constant zero because both write paths mask them, so Yosys dropped them too. Two cells are `$_SDFFE_PP1P_` (reset to one): bit 31 of `pc` and of `ir_pc`. Two are `$_SDFF_PP0_` with no enable: `retire` and `trap`, which are assigned on every non-reset edge.
 
-The 323 top-level muxes are the operand selects, the `EXECUTE` result select, the load lane and extension muxes, the `rd` value select, the PC select (`pc + 4`, target, `mepc`, `mtvec`), the strobe and data selects on the port, the CSR read and write muxes, and the cause and value selects in `take_trap`. The decoder is 179 gates with no storage. The counts exclude the RAM and devices, which live in the testbench; there is no placement, routing, or frequency claim.
+The 323 top-level muxes are the operand selects, the `EXECUTE` result select, the load lane and extension muxes, the `rd` value select, the PC select (`pc + 4`, target, `mepc`, `mtvec`), the strobe and data selects on the port, the CSR read and write muxes, and the cause and value selects in `take_trap`. The decoder is 179 gates with no storage. The counts exclude the RAM and devices, which are counted with the machine in the [SoC record](rv32-soc.md#what-synthesis-built); there is no placement, routing, or frequency claim.
 
 ## 9. Exercises
 

@@ -1,4 +1,7 @@
 .DEFAULT_GOAL := test
+# A recipe that fails leaves no half-written target behind: an empty listing or hex file that is
+# newer than its source would otherwise be "up to date" and pass the image checks vacuously.
+.DELETE_ON_ERROR:
 PYTHON ?= python3
 
 RTL := labs/01-counter/counter.v
@@ -24,13 +27,23 @@ QEMU_RV32 ?= qemu-system-riscv32
 HOST_CC ?= cc
 RV32_ARCH := --target=riscv32-unknown-elf -march=rv32i -mabi=ilp32 -mcmodel=medlow -mno-relax
 RV32_CFLAGS := $(RV32_ARCH) -std=c11 -ffreestanding -fno-builtin -nostdlib -O2 -g -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Wextra -Werror -Iprograms/rv32
-RV32_LDFLAGS := $(RV32_ARCH) -nostdlib -static --ld-path=$(RV32_LD) -Wl,-T,programs/rv32/link.ld -Wl,-Map,build/rv32/selfcheck.map
+RV32_LDFLAGS := $(RV32_ARCH) -nostdlib -static --ld-path=$(RV32_LD) -Wl,-T,programs/rv32/link.ld
 RV32_HEADERS := programs/rv32/board.h programs/rv32/mmio.h programs/rv32/console.h programs/rv32/rt/muldiv.h
-RV32_OBJS := build/rv32/start.o build/rv32/selfcheck.o build/rv32/console.o build/rv32/muldiv.o
+RV32_COMMON_OBJS := build/rv32/start.o build/rv32/console.o build/rv32/muldiv.o
+RV32_SELFCHECK_OBJS := build/rv32/selfcheck.o $(RV32_COMMON_OBJS)
+RV32_DIAG_OBJS := build/rv32/diag.o build/rv32/trap.o $(RV32_COMMON_OBJS)
+RV32_IMAGES := selfcheck diag
+RV32_IMAGE_FILES := $(foreach image,$(RV32_IMAGES),$(foreach ext,elf lst bin readelf,build/rv32/$(image).$(ext)))
 RV32_SELFCHECK_HEX := 807d9fad
+RV32_DIAG_HEX := 8bd87e9a
+RV32_DIAG_FRAME1_HEX := ae4eb605
+RV32_DIAG_FRAME2_HEX := 2acb5d85
+RV32_DIAG_INPUT := programs/rv32/diag.input
+RV32_DIAG_ARGS := --image build/rv32/diag.bin --input $(RV32_DIAG_INPUT) --compare results --expect-last-line "PASS $(RV32_DIAG_HEX)" --expect-checkpoint "frame 1 $(RV32_DIAG_FRAME1_HEX)" --expect-checkpoint "frame 2 $(RV32_DIAG_FRAME2_HEX)"
 RV32EMU := build/rv32/rv32emu
 RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
 RV32_RTL := rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32.v
+RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_timer.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v
 RV32_TB := tests/rv32_tb.sv
 RV32_TB_VVP := build/rv32/rv32_tb.vvp
 RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
@@ -41,8 +54,10 @@ RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
 .PHONY: test-sap8-assembler programs-sap8
 .PHONY: test-simd4-model test-simd4 test-simd4-verilator sim-simd4 waves-simd4 bench-simd4 lint-simd4 synth-simd4
 .PHONY: toolchain-rv32 firmware-rv32 check-rv32-image run-rv32-qemu test-rv32-tools test-rv32-rt test-rv32 disasm-rv32
+.PHONY: run-rv32-diag-emu run-rv32-diag-rtl run-rv32-diag-rtl-verilator disasm-rv32-diag
 .PHONY: toolchain-rv32-emu build-rv32-emu test-rv32-emu run-rv32-emu trace-rv32-emu diff-rv32-qemu
 .PHONY: build-rv32-rtl test-rv32-rtl test-rv32-rtl-verilator run-rv32-rtl run-rv32-rtl-verilator lint-rv32 synth-rv32 waves-rv32 bench-rv32-rtl
+.PHONY: lint-rv32-soc synth-rv32-soc
 
 build:
 	mkdir -p build
@@ -177,16 +192,19 @@ build/rv32/%.o: programs/rv32/%.S programs/rv32/board.h | build/rv32
 build/rv32/muldiv.o: programs/rv32/rt/muldiv.c programs/rv32/rt/muldiv.h | build/rv32
 	$(RV32_CC) $(RV32_CFLAGS) -c -o $@ $<
 
-build/rv32/selfcheck.elf: $(RV32_OBJS) programs/rv32/link.ld
-	$(RV32_CC) $(RV32_LDFLAGS) -o $@ $(RV32_OBJS)
+build/rv32/selfcheck.elf: $(RV32_SELFCHECK_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(RV32_SELFCHECK_OBJS)
 
-build/rv32/selfcheck.lst: build/rv32/selfcheck.elf
+build/rv32/diag.elf: $(RV32_DIAG_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(RV32_DIAG_OBJS)
+
+build/rv32/%.lst: build/rv32/%.elf
 	$(RV32_OBJDUMP) -d -S $< > $@
 
-build/rv32/selfcheck.bin: build/rv32/selfcheck.elf
+build/rv32/%.bin: build/rv32/%.elf
 	$(RV32_OBJCOPY) -O binary $< $@
 
-build/rv32/selfcheck.readelf: build/rv32/selfcheck.elf
+build/rv32/%.readelf: build/rv32/%.elf
 	$(RV32_READELF) -h -l -S -s -A $< > $@
 
 toolchain-rv32:
@@ -202,10 +220,12 @@ toolchain-rv32-emu:
 	@command -v $(HOST_CC) >/dev/null || { echo "missing $(HOST_CC) (xcode-select --install)"; exit 1; }
 	@$(HOST_CC) --version | head -1
 
-firmware-rv32: toolchain-rv32 build/rv32/selfcheck.elf build/rv32/selfcheck.lst build/rv32/selfcheck.bin build/rv32/selfcheck.readelf
+firmware-rv32: toolchain-rv32 $(RV32_IMAGE_FILES)
 
+# The diagnostic installs a trap handler, so its listing may use the CSR instructions and mret.
 check-rv32-image: firmware-rv32
 	$(PYTHON) tools/rv32_image.py build/rv32/selfcheck.elf --listing build/rv32/selfcheck.lst --bin build/rv32/selfcheck.bin --hex build/rv32/selfcheck.hex
+	$(PYTHON) tools/rv32_image.py build/rv32/diag.elf --listing build/rv32/diag.lst --bin build/rv32/diag.bin --hex build/rv32/diag.hex --allow-privileged
 
 run-rv32-qemu: check-rv32-image
 	$(PYTHON) tools/rv32_run_qemu.py build/rv32/selfcheck.elf --qemu $(QEMU_RV32) --timeout 20 --transcript build/rv32/selfcheck.transcript --qemu-log build/rv32/qemu.log --expect-hex $(RV32_SELFCHECK_HEX)
@@ -221,7 +241,8 @@ $(RV32EMU): tools/rv32emu.c | build/rv32
 
 build-rv32-emu: toolchain-rv32-emu $(RV32EMU)
 
-test-rv32-emu:
+# The image is a prerequisite so the diagnostic test runs rather than skips.
+test-rv32-emu: check-rv32-image
 	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_emu.py' -v
 
 run-rv32-emu: check-rv32-image $(RV32EMU)
@@ -234,11 +255,11 @@ trace-rv32-emu: run-rv32-emu
 diff-rv32-qemu: run-rv32-emu
 	$(PYTHON) tools/rv32_diff_qemu.py build/rv32/selfcheck.elf build/rv32/selfcheck.trace --qemu $(QEMU_RV32) --log build/rv32/qemu-exec.log
 
-$(RV32_TB_VVP): $(RV32_RTL) $(RV32_TB) | build/rv32
-	iverilog -g2012 -Wall -s rv32_tb -o $@ $(RV32_TB) $(RV32_RTL)
+$(RV32_TB_VVP): $(RV32_SOC_RTL) $(RV32_TB) | build/rv32
+	iverilog -g2012 -Wall -s rv32_tb -o $@ $(RV32_TB) $(RV32_SOC_RTL)
 
-$(RV32_TB_VERILATOR): $(RV32_RTL) $(RV32_TB) | build
-	verilator --binary --timing --trace --top-module rv32_tb --Mdir build/verilator-rv32 -o rv32_sim $(RV32_TB) $(RV32_RTL)
+$(RV32_TB_VERILATOR): $(RV32_SOC_RTL) $(RV32_TB) | build
+	verilator --binary --timing --trace --top-module rv32_tb --Mdir build/verilator-rv32 -o rv32_sim $(RV32_TB) $(RV32_SOC_RTL)
 
 build-rv32-rtl: $(RV32_TB_VVP)
 
@@ -254,24 +275,49 @@ lint-rv32:
 synth-rv32: | build
 	yosys -Q -T -l build/rv32-synth.log -p 'read_verilog $(RV32_RTL); synth -top rv32; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32.json'
 
+lint-rv32-soc:
+	verilator --lint-only --Wall --language 1364-2005 --top-module rv32_soc $(RV32_SOC_RTL)
+
+# The memories are shrunk to 64 words so the count measures the decoder and
+# the devices; the core's own count is synth-rv32's.
+synth-rv32-soc: | build
+	yosys -Q -T -l build/rv32-soc-synth.log -p 'read_verilog $(RV32_SOC_RTL); chparam -set RAM_WORDS 64 -set FB_WORDS 64 rv32_soc; synth -top rv32_soc; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32-soc.json'
+
 waves-rv32: $(RV32_TB_VVP) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl --mode waves --program loop --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
 	$(PYTHON) -m tools.rv32_rtl --mode waves --program full --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
-	@echo "Open build/rv32/rtl/loop.vcd or full.vcd in Surfer: https://app.surfer-project.org/"
+	$(PYTHON) -m tools.rv32_rtl --mode waves --program devices --stall 0 --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
+	@echo "Open build/rv32/rtl/loop.vcd, full.vcd, or devices.vcd in Surfer: https://app.surfer-project.org/"
 
 run-rv32-rtl: check-rv32-image $(RV32_TB_VVP) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl --image build/rv32/selfcheck.bin --expect-console "PASS $(RV32_SELFCHECK_HEX)" --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
 
+# Each runner target has its own output directory, so `make -j` cannot interleave two runs' traces.
 run-rv32-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR) $(RV32EMU)
-	$(PYTHON) -m tools.rv32_rtl --image build/rv32/selfcheck.bin --expect-console "PASS $(RV32_SELFCHECK_HEX)" --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --out build/rv32/rtl --stall 1
+	$(PYTHON) -m tools.rv32_rtl --image build/rv32/selfcheck.bin --expect-console "PASS $(RV32_SELFCHECK_HEX)" --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --out build/rv32/rtl-verilator --stall 1
 
 bench-rv32-rtl: $(RV32_TB_VVP) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl --mode bench --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
 
-test-rv32: test-rv32-tools test-rv32-rt run-rv32-qemu test-rv32-emu run-rv32-emu diff-rv32-qemu test-rv32-rtl test-rv32-rtl-verilator run-rv32-rtl run-rv32-rtl-verilator lint-rv32 synth-rv32
+# The device diagnostic reads the timer, so the two backends are compared at the results level
+# (console, outcome, checkpoints, and the trap records in order), not trace for trace
+# (docs/rv32.md, "Device time").
+run-rv32-diag-emu: check-rv32-image $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_DIAG_ARGS) --backend emulator --frames build/rv32/frames --emulator $(RV32EMU) --out build/rv32/emu
+
+run-rv32-diag-rtl: check-rv32-image $(RV32_TB_VVP) $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_DIAG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
+
+run-rv32-diag-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR) $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_DIAG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/rtl-verilator
+
+test-rv32: test-rv32-tools test-rv32-rt run-rv32-qemu test-rv32-emu run-rv32-emu diff-rv32-qemu run-rv32-diag-emu test-rv32-rtl test-rv32-rtl-verilator run-rv32-rtl run-rv32-rtl-verilator run-rv32-diag-rtl run-rv32-diag-rtl-verilator lint-rv32 lint-rv32-soc synth-rv32 synth-rv32-soc
 
 disasm-rv32: firmware-rv32
 	cat build/rv32/selfcheck.lst
+
+disasm-rv32-diag: firmware-rv32
+	cat build/rv32/diag.lst
 
 clean:
 	rm -rf build

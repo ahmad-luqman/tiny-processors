@@ -30,6 +30,24 @@
 #define DONE_PASS 0x5555u
 #define DONE_FAIL 0x3333u
 #define DONE_RESET 0x7777u
+#define TIMER_BASE 0x20000000u
+#define TIMER_TICKS 0x0u
+#define INPUT_BASE 0x20001000u
+#define INPUT_EVENT 0x0u
+#define INPUT_COUNT 0x4u
+#define INPUT_KEYS 0x8u
+#define INPUT_QUEUE 16u
+#define EVENT_VALID 0x80000000u
+#define EVENT_PRESS 0x100u
+#define DISPLAY_BASE 0x20002000u
+#define DISPLAY_PRESENT 0x0u
+#define DISPLAY_FRAMES 0x4u
+#define DISPLAY_WIDTH 0x8u
+#define DISPLAY_HEIGHT 0xCu
+#define FB_BASE 0x30000000u
+#define FB_COLUMNS 320u
+#define FB_ROWS 240u
+#define FB_SIZE (FB_COLUMNS * FB_ROWS)
 
 /* mcause values (RISC-V privileged specification, machine mode, no interrupts). */
 enum cause {
@@ -49,6 +67,12 @@ enum csr { CSR_MTVEC = 0x305, CSR_MEPC = 0x341, CSR_MCAUSE = 0x342, CSR_MTVAL = 
 
 enum halt { RUNNING, HALT_DONE, HALT_DOUBLE_FAULT, HALT_LIMIT };
 
+/* One line of the input script: the event and the frame it arrives at. */
+typedef struct {
+    uint32_t frame;
+    uint32_t event;
+} scripted_event;
+
 /* Process exit status when the run did not end with a pass/fail done word. */
 #define EXIT_EMULATOR_ERROR 2
 
@@ -66,6 +90,19 @@ typedef struct {
     enum halt halt;
     uint32_t done_word;
     uint32_t second_cause, second_tval; /* the trap that could not be delivered */
+    uint32_t timer_offset; /* TICKS = steps + timer_offset; a write sets the offset */
+    uint8_t *fb;           /* the framebuffer window, FB_SIZE bytes */
+    uint32_t frames;       /* presents since reset */
+    FILE *checkpoints;     /* one `frame N <hash>` line per present, or NULL */
+    const char *frames_dir; /* directory for frame-NNNN.ppm, or NULL */
+    bool output_error;     /* a frame file could not be written; the run is rejected */
+    uint32_t queue[INPUT_QUEUE]; /* the input device: a ring of events */
+    unsigned head, count;
+    uint32_t keys;         /* one bit per key code, as events arrive */
+    scripted_event *script; /* --input, in script order with frames never decreasing (the parser
+                             * enforces it); delivered as frames are reached */
+    size_t scripted, next_scripted;
+    size_t dropped;         /* events the full queue refused; the run is rejected unless allowed */
     /* Effects of the current step, for the trace line. */
     int wr_reg;
     uint32_t wr_value;
@@ -76,14 +113,24 @@ typedef struct {
 
 typedef enum { ACC_OK, ACC_FAULT, ACC_MISALIGNED } access;
 
-static bool in_ram(uint32_t addr, int width)
-{
-    return addr >= RAM_BASE && addr - RAM_BASE + (uint32_t)width <= RAM_SIZE;
-}
+/* Every window of the memory map is a region with a load and a store
+ * handler, or NULL when that direction is undefined. A handler receives the
+ * offset inside the window and decides the width and offset rules of its
+ * device; anything it refuses, and every address outside every window, is an
+ * access fault. This mirrors rtl/rv32/rv32_bus.v: one comparator per window,
+ * then the device's own decode. */
+typedef access (*load_handler)(machine *m, uint32_t offset, int width, uint32_t *value);
+typedef access (*store_handler)(machine *m, uint32_t offset, int width, uint32_t value);
 
-static uint32_t ram_read(const machine *m, uint32_t addr, int width)
+typedef struct {
+    const char *name;
+    uint32_t base, size;
+    load_handler load;
+    store_handler store;
+} region;
+
+static uint32_t bytes_read(const uint8_t *p, int width)
 {
-    const uint8_t *p = m->ram + (addr - RAM_BASE);
     uint32_t value = 0;
     for (int i = width - 1; i >= 0; i--) {
         value = (value << 8) | p[i];
@@ -91,12 +138,240 @@ static uint32_t ram_read(const machine *m, uint32_t addr, int width)
     return value;
 }
 
-static void ram_write(machine *m, uint32_t addr, int width, uint32_t value)
+static void bytes_write(uint8_t *p, int width, uint32_t value)
 {
-    uint8_t *p = m->ram + (addr - RAM_BASE);
     for (int i = 0; i < width; i++) {
         p[i] = (uint8_t)(value >> (8 * i));
     }
+}
+
+static access ram_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    *value = bytes_read(m->ram + offset, width);
+    return ACC_OK;
+}
+
+static access ram_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    bytes_write(m->ram + offset, width, value);
+    return ACC_OK;
+}
+
+static access console_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    (void)m;
+    if (width == 1 && offset == CONSOLE_STATUS) {
+        *value = CONSOLE_TX_READY; /* always ready: every byte is accepted at once */
+        return ACC_OK;
+    }
+    return ACC_FAULT; /* TX is write-only; the status is a byte; other offsets do not exist */
+}
+
+static access console_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    (void)m;
+    if (width == 1 && offset == CONSOLE_TX) {
+        fputc((int)(value & 0xff), stdout);
+        return ACC_OK;
+    }
+    return ACC_FAULT; /* the status is read-only; TX takes bytes only */
+}
+
+static access done_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    if (width == 4 && offset == 0) {
+        m->halt = HALT_DONE; /* the store still retires; the loop stops afterwards */
+        m->done_word = value;
+        return ACC_OK;
+    }
+    return ACC_FAULT; /* byte and halfword writes */
+}
+
+/* Device time (docs/rv32.md): a tick is one executed instruction. The load
+ * runs before this instruction is counted, so instruction N reads N - 1
+ * plus whatever a write added. */
+static access timer_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    if (width == 4 && offset == TIMER_TICKS) {
+        *value = (uint32_t)m->steps + m->timer_offset;
+        return ACC_OK;
+    }
+    return ACC_FAULT;
+}
+
+static access timer_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    if (width == 4 && offset == TIMER_TICKS) {
+        m->timer_offset = value - (uint32_t)m->steps;
+        return ACC_OK;
+    }
+    return ACC_FAULT;
+}
+
+/* Input (docs/rv32.md): the host queues an event when its frame is reached,
+ * or drops it and says so when the queue is full; KEYS follows arrivals. */
+static void queue_event(machine *m, uint32_t frame, uint32_t event)
+{
+    if (m->count == INPUT_QUEUE) {
+        fprintf(stderr, "rv32emu: input queue full: dropped frame %" PRIu32 " event %08" PRIx32 "\n", frame, event);
+        m->dropped++;
+        return;
+    }
+    m->queue[(m->head + m->count) % INPUT_QUEUE] = event;
+    m->count++;
+    uint32_t bit = 1u << (event & 31u);
+    m->keys = (event & EVENT_PRESS) ? (m->keys | bit) : (m->keys & ~bit);
+}
+
+static void deliver_events(machine *m)
+{
+    while (m->next_scripted < m->scripted && m->script[m->next_scripted].frame <= m->frames) {
+        queue_event(m, m->script[m->next_scripted].frame, m->script[m->next_scripted].event);
+        m->next_scripted++;
+    }
+}
+
+static access input_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    if (width != 4) {
+        return ACC_FAULT;
+    }
+    switch (offset) {
+    case INPUT_EVENT:
+        if (m->count == 0) {
+            *value = 0;
+        } else {
+            *value = m->queue[m->head];
+            m->head = (m->head + 1) % INPUT_QUEUE;
+            m->count--;
+        }
+        return ACC_OK;
+    case INPUT_COUNT: *value = m->count; return ACC_OK;
+    case INPUT_KEYS: *value = m->keys; return ACC_OK;
+    default: return ACC_FAULT;
+    }
+}
+
+static access fb_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    *value = bytes_read(m->fb + offset, width);
+    return ACC_OK;
+}
+
+static access fb_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    bytes_write(m->fb + offset, width, value);
+    return ACC_OK;
+}
+
+/* The checkpoint hash (docs/rv32.md, "Display"): h = ((h << 5) + h) ^ word
+ * from 5381 over the framebuffer's little-endian words in address order;
+ * shift, add, xor, no multiply, so the firmware can compute the same value
+ * over a frame it reads back. */
+static uint32_t frame_hash(const uint8_t *pixels)
+{
+    uint32_t h = 5381u;
+    for (uint32_t i = 0; i < FB_SIZE; i += 4) {
+        h = ((h << 5) + h) ^ bytes_read(pixels + i, 4);
+    }
+    return h;
+}
+
+/* Write the frame as a binary PPM with the fixed RGB332 mapping (bits 7:5
+ * red, 4:2 green, 1:0 blue, each scaled to 0..255) so a frame can be looked
+ * at before M6 shows it in a window. */
+static bool write_ppm(const machine *m, const char *path)
+{
+    FILE *out = fopen(path, "wb");
+    if (!out) {
+        return false;
+    }
+    fprintf(out, "P6\n%u %u\n255\n", FB_COLUMNS, FB_ROWS);
+    for (uint32_t i = 0; i < FB_SIZE; i++) {
+        uint8_t p = m->fb[i];
+        uint8_t rgb[3] = {(uint8_t)(((p >> 5) & 7u) * 255u / 7u), (uint8_t)(((p >> 2) & 7u) * 255u / 7u),
+                          (uint8_t)((p & 3u) * 255u / 3u)};
+        fwrite(rgb, 1, 3, out);
+    }
+    bool ok = !ferror(out);
+    return fclose(out) == 0 && ok;
+}
+
+/* A present: the snapshot is taken now, before the storing instruction
+ * retires, and becomes checkpoint `frame N <hash>` and, when asked for, a
+ * picture. Nothing about the framebuffer changes. */
+static void present(machine *m)
+{
+    m->frames++;
+    deliver_events(m); /* this frame's scripted events arrive with the snapshot */
+    if (m->checkpoints) {
+        fprintf(m->checkpoints, "frame %" PRIu32 " %08" PRIx32 "\n", m->frames, frame_hash(m->fb));
+    }
+    if (m->frames_dir) {
+        char path[4096];
+        int n = snprintf(path, sizeof path, "%s/frame-%04" PRIu32 ".ppm", m->frames_dir, m->frames);
+        if (n < 0 || (size_t)n >= sizeof path || !write_ppm(m, path)) {
+            fprintf(stderr, "rv32emu: cannot write frame %" PRIu32 " to %s\n", m->frames, m->frames_dir);
+            m->output_error = true;
+        }
+    }
+}
+
+static access display_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    if (width != 4) {
+        return ACC_FAULT;
+    }
+    switch (offset) {
+    case DISPLAY_FRAMES: *value = m->frames; return ACC_OK;
+    case DISPLAY_WIDTH: *value = FB_COLUMNS; return ACC_OK;
+    case DISPLAY_HEIGHT: *value = FB_ROWS; return ACC_OK;
+    default: return ACC_FAULT; /* PRESENT is write-only */
+    }
+}
+
+static access display_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    (void)value; /* any word presents */
+    if (width == 4 && offset == DISPLAY_PRESENT) {
+        present(m);
+        return ACC_OK;
+    }
+    return ACC_FAULT; /* FRAMES, WIDTH, and HEIGHT are read-only */
+}
+
+/* The memory map (docs/rv32.md). RAM is last only for readability; the
+ * windows are disjoint so the order does not matter. */
+static const region REGIONS[] = {
+    {"done", DONE_ADDR, 4, NULL, done_store},
+    {"console", CONSOLE_BASE, 8, console_load, console_store},
+    {"timer", TIMER_BASE, 16, timer_load, timer_store},
+    {"input", INPUT_BASE, 16, input_load, NULL},
+    {"display", DISPLAY_BASE, 16, display_load, display_store},
+    {"framebuffer", FB_BASE, FB_SIZE, fb_load, fb_store},
+    {"ram", RAM_BASE, RAM_SIZE, ram_load, ram_store},
+};
+
+/* The window that holds every byte of the access, or NULL. */
+static const region *find_region(uint32_t addr, int width)
+{
+    for (size_t i = 0; i < sizeof REGIONS / sizeof REGIONS[0]; i++) {
+        const region *r = &REGIONS[i];
+        if (addr >= r->base && addr - r->base + (uint32_t)width <= r->size) {
+            return r;
+        }
+    }
+    return NULL;
+}
+
+static bool in_ram(uint32_t addr, int width)
+{
+    return addr >= RAM_BASE && addr - RAM_BASE + (uint32_t)width <= RAM_SIZE;
+}
+
+static uint32_t ram_read(const machine *m, uint32_t addr, int width)
+{
+    return bytes_read(m->ram + (addr - RAM_BASE), width);
 }
 
 /* Data load. Misalignment is checked before the address is decoded. */
@@ -105,17 +380,11 @@ static access load(machine *m, uint32_t addr, int width, uint32_t *value)
     if (addr % (uint32_t)width) {
         return ACC_MISALIGNED;
     }
-    if (in_ram(addr, width)) {
-        *value = ram_read(m, addr, width);
-        return ACC_OK;
+    const region *r = find_region(addr, width);
+    if (!r || !r->load) {
+        return ACC_FAULT; /* unmapped, or a write-only window such as the done register */
     }
-    if (width == 1 && addr == CONSOLE_BASE + CONSOLE_STATUS) {
-        *value = CONSOLE_TX_READY; /* always ready: every byte is accepted at once */
-        return ACC_OK;
-    }
-    /* Console TX and other console offsets, the done register, and every
-     * unmapped address are not readable. */
-    return ACC_FAULT;
+    return r->load(m, addr - r->base, width, value);
 }
 
 static access store(machine *m, uint32_t addr, int width, uint32_t value)
@@ -123,22 +392,11 @@ static access store(machine *m, uint32_t addr, int width, uint32_t value)
     if (addr % (uint32_t)width) {
         return ACC_MISALIGNED;
     }
-    if (in_ram(addr, width)) {
-        ram_write(m, addr, width, value);
-        return ACC_OK;
+    const region *r = find_region(addr, width);
+    if (!r || !r->store) {
+        return ACC_FAULT; /* unmapped, or a read-only window */
     }
-    if (width == 1 && addr == CONSOLE_BASE + CONSOLE_TX) {
-        fputc((int)(value & 0xff), stdout);
-        return ACC_OK;
-    }
-    if (width == 4 && addr == DONE_ADDR) {
-        m->halt = HALT_DONE; /* the store still retires; the loop stops afterwards */
-        m->done_word = value;
-        return ACC_OK;
-    }
-    /* Byte or halfword writes to the done register, the console status
-     * register, other console offsets, and unmapped addresses fault. */
-    return ACC_FAULT;
+    return r->store(m, addr - r->base, width, value);
 }
 
 static void trace_effects(const machine *m)
@@ -457,8 +715,8 @@ static void dump_state(const machine *m, FILE *out)
     }
     fprintf(out, "mtvec %08" PRIx32 "\nmepc %08" PRIx32 "\nmcause %08" PRIx32 "\nmtval %08" PRIx32 "\n",
             m->mtvec, m->mepc, m->mcause, m->mtval);
-    fprintf(out, "steps %" PRIu64 "\nretired %" PRIu64 "\ntraps %" PRIu64 "\nhalt %s\n",
-            m->steps, m->retired, m->traps, halt_name(m->halt));
+    fprintf(out, "steps %" PRIu64 "\nretired %" PRIu64 "\ntraps %" PRIu64 "\nframes %" PRIu32 "\nevents %u\nhalt %s\n",
+            m->steps, m->retired, m->traps, m->frames, m->count, halt_name(m->halt));
     if (m->halt == HALT_DONE) {
         fprintf(out, "done %08" PRIx32 "\n", m->done_word);
     }
@@ -517,27 +775,138 @@ static bool close_output(FILE *stream, const char *path)
     return ok;
 }
 
+/* A decimal field of the input script: one to nine ASCII digits (docs/rv32.md, "Input"), so
+ * every reader, including the testbench's 32-bit arithmetic, agrees on what a number is. */
+static bool decimal_ok(const char *text)
+{
+    size_t len = strlen(text);
+    if (len == 0 || len > 9) {
+        return false;
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (!isdigit((unsigned char)text[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* A key name from programs/rv32/board.h, any case, or a number 0..31; -1 otherwise. */
+static int key_code(const char *text)
+{
+    static const struct { const char *name; int code; } names[] = {
+        {"LEFT", 1}, {"RIGHT", 2}, {"UP", 3}, {"DOWN", 4}, {"SPACE", 5}, {"ENTER", 6}, {"ESCAPE", 7},
+        {"A", 8}, {"D", 9}, {"W", 10}, {"S", 11}, {"P", 12}, {"Q", 13}, {"R", 14},
+    };
+    char upper[16];
+    size_t len = strlen(text);
+    if (len == 0 || len >= sizeof upper) {
+        return -1;
+    }
+    for (size_t i = 0; i <= len; i++) {
+        upper[i] = (char)toupper((unsigned char)text[i]);
+    }
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+        if (strcmp(upper, names[i].name) == 0) {
+            return names[i].code;
+        }
+    }
+    if (!decimal_ok(text)) {
+        return -1;
+    }
+    unsigned long value = strtoul(text, NULL, 10);
+    return value < 32 ? (int)value : -1;
+}
+
+/* Read the input script (docs/rv32.md, "Input"): `frame N down|up KEY` lines with frames
+ * never decreasing; blank lines and `#` comments are skipped. Any other line is an error. */
+static void read_input_script(machine *m, const char *path)
+{
+    FILE *in = fopen(path, "r");
+    if (!in) {
+        fprintf(stderr, "rv32emu: cannot open input script %s\n", path);
+        exit(EXIT_EMULATOR_ERROR);
+    }
+    char line[256];
+    size_t capacity = 0;
+    uint32_t last_frame = 0;
+    for (unsigned number = 1; fgets(line, sizeof line, in); number++) {
+        char keyword[16], frame_text[16], direction[16], key[16], rest[16];
+        if (strchr(line, '\n') == NULL && !feof(in)) {
+            fprintf(stderr, "rv32emu: input script %s line %u is too long\n", path, number);
+            exit(EXIT_EMULATOR_ERROR);
+        }
+        if (sscanf(line, " %15s", keyword) != 1 || keyword[0] == '#') {
+            continue;
+        }
+        int fields = sscanf(line, " %15s %15s %15s %15s %15s", keyword, frame_text, direction, key, rest);
+        unsigned long frame = 0;
+        int code = -1;
+        if (fields == 4 && decimal_ok(frame_text)) { /* the buffers are only filled when every field was read */
+            frame = strtoul(frame_text, NULL, 10);
+            code = key_code(key);
+        }
+        if (fields != 4 || strcmp(keyword, "frame") != 0 || (strcmp(direction, "down") != 0 && strcmp(direction, "up") != 0) ||
+            !decimal_ok(frame_text) || code < 0 || frame < last_frame) {
+            fprintf(stderr, "rv32emu: input script %s line %u: expected `frame N down|up KEY` with frames in order: %s",
+                    path, number, line);
+            exit(EXIT_EMULATOR_ERROR);
+        }
+        if (m->scripted == capacity) {
+            capacity = capacity ? 2 * capacity : 64;
+            m->script = realloc(m->script, capacity * sizeof *m->script);
+            if (!m->script) {
+                fputs("rv32emu: cannot allocate the input script\n", stderr);
+                exit(EXIT_EMULATOR_ERROR);
+            }
+        }
+        m->script[m->scripted].frame = (uint32_t)frame;
+        m->script[m->scripted].event = EVENT_VALID | (direction[0] == 'd' ? EVENT_PRESS : 0u) | (uint32_t)code;
+        m->scripted++;
+        last_frame = (uint32_t)frame;
+    }
+    /* fopen succeeds on a directory and fgets then fails at once: without this check such a
+     * script would be an empty one, and a diagnostic waiting for its events would fail on a
+     * device check instead of on the path. */
+    if (ferror(in)) {
+        fprintf(stderr, "rv32emu: cannot read input script %s: %s\n", path, strerror(errno));
+        exit(EXIT_EMULATOR_ERROR);
+    }
+    fclose(in);
+}
+
 static void usage(void)
 {
     fputs("usage: rv32emu --image FILE [--base ADDR] [--pc ADDR] [--trace FILE] [--dump-state FILE]\n"
-          "               [--max-instructions N]\n"
+          "               [--max-instructions N] [--checkpoints FILE] [--frames DIR] [--input FILE]\n"
+          "               [--allow-lost-events]\n"
           "Loads FILE at ADDR (default 0x80000000), starts at --pc (default the base), and runs\n"
           "until the done register is written. Console bytes go to stdout, the trace and state\n"
-          "to their files, and a final 'rv32emu: halt=...' line to stderr.\n",
+          "to their files, and a final 'rv32emu: halt=...' line to stderr. Each present appends\n"
+          "'frame N <hash>' to the checkpoints file and writes DIR/frame-NNNN.ppm. The input\n"
+          "script's `frame N down|up KEY` events arrive when frame N is presented; an event the\n"
+          "full queue dropped or the guest never reached turns a pass into an error unless\n"
+          "--allow-lost-events says it was expected.\n",
           stderr);
     exit(EXIT_EMULATOR_ERROR);
 }
 
 int main(int argc, char **argv)
 {
-    const char *image_path = NULL, *trace_path = NULL, *state_path = NULL;
+    const char *image_path = NULL, *trace_path = NULL, *state_path = NULL, *checkpoints_path = NULL;
+    const char *input_path = NULL;
     uint32_t base = RAM_BASE, start = 0;
-    bool start_given = false;
+    bool start_given = false, allow_lost_events = false;
     machine m;
     memset(&m, 0, sizeof m);
     m.limit = 100000000ull;
-    for (int i = 1; i < argc; i += 2) {
-        const char *arg = argv[i], *value = i + 1 < argc ? argv[i + 1] : NULL;
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        if (!strcmp(arg, "--allow-lost-events")) { /* the one flag without a value */
+            allow_lost_events = true;
+            continue;
+        }
+        const char *value = i + 1 < argc ? argv[++i] : NULL;
         if (!value) {
             usage();
         }
@@ -554,6 +923,12 @@ int main(int argc, char **argv)
             state_path = value;
         } else if (!strcmp(arg, "--max-instructions")) {
             m.limit = parse_u64(value, UINT64_MAX, "instruction limit");
+        } else if (!strcmp(arg, "--checkpoints")) {
+            checkpoints_path = value;
+        } else if (!strcmp(arg, "--frames")) {
+            m.frames_dir = value;
+        } else if (!strcmp(arg, "--input")) {
+            input_path = value;
         } else {
             usage();
         }
@@ -562,8 +937,9 @@ int main(int argc, char **argv)
         usage();
     }
     m.ram = calloc(RAM_SIZE, 1);
-    if (!m.ram) {
-        fputs("rv32emu: cannot allocate RAM\n", stderr);
+    m.fb = calloc(FB_SIZE, 1); /* unspecified by the contract; zero like the RTL testbench */
+    if (!m.ram || !m.fb) {
+        fputs("rv32emu: cannot allocate memory\n", stderr);
         return EXIT_EMULATOR_ERROR;
     }
     FILE *image = fopen(image_path, "rb");
@@ -576,17 +952,40 @@ int main(int argc, char **argv)
         return EXIT_EMULATOR_ERROR;
     }
     size_t loaded = fread(m.ram + (base - RAM_BASE), 1, RAM_SIZE - (base - RAM_BASE), image);
+    if (ferror(image)) { /* a directory opens but does not read; without this it would be an empty image */
+        fprintf(stderr, "rv32emu: cannot read %s: %s\n", image_path, strerror(errno));
+        return EXIT_EMULATOR_ERROR;
+    }
+    if (loaded == 0) { /* an empty image would run as an illegal instruction at the reset PC */
+        fprintf(stderr, "rv32emu: %s is empty\n", image_path);
+        return EXIT_EMULATOR_ERROR;
+    }
     if (fgetc(image) != EOF) {
         fprintf(stderr, "rv32emu: %s does not fit in RAM at %08" PRIx32 "\n", image_path, base);
         return EXIT_EMULATOR_ERROR;
     }
     fclose(image);
     m.pc = start_given ? start : RAM_BASE; /* reset PC from the contract */
+    if (input_path) {
+        read_input_script(&m, input_path);
+        deliver_events(&m); /* frame 0's events are queued before the first instruction */
+    }
     if (trace_path) {
         require_distinct(trace_path, "trace file", image_path, "image");
+        require_distinct(trace_path, "trace file", input_path, "input script");
         m.trace = fopen(trace_path, "w");
         if (!m.trace) {
             fprintf(stderr, "rv32emu: cannot write %s\n", trace_path);
+            return EXIT_EMULATOR_ERROR;
+        }
+    }
+    if (checkpoints_path) {
+        require_distinct(checkpoints_path, "checkpoints file", image_path, "image");
+        require_distinct(checkpoints_path, "checkpoints file", trace_path, "trace file");
+        require_distinct(checkpoints_path, "checkpoints file", input_path, "input script");
+        m.checkpoints = fopen(checkpoints_path, "w");
+        if (!m.checkpoints) {
+            fprintf(stderr, "rv32emu: cannot write %s\n", checkpoints_path);
             return EXIT_EMULATOR_ERROR;
         }
     }
@@ -606,9 +1005,17 @@ int main(int argc, char **argv)
     if (m.trace && !close_output(m.trace, trace_path)) {
         outputs_ok = false;
     }
+    if (m.checkpoints && !close_output(m.checkpoints, checkpoints_path)) {
+        outputs_ok = false;
+    }
+    if (m.output_error) {
+        outputs_ok = false;
+    }
     if (state_path) {
         require_distinct(state_path, "state file", image_path, "image");
         require_distinct(state_path, "state file", trace_path, "trace file");
+        require_distinct(state_path, "state file", checkpoints_path, "checkpoints file");
+        require_distinct(state_path, "state file", input_path, "input script");
         FILE *out = fopen(state_path, "w");
         if (!out) {
             fprintf(stderr, "rv32emu: cannot write %s\n", state_path);
@@ -620,6 +1027,11 @@ int main(int argc, char **argv)
         }
     }
 
+    if (m.next_scripted < m.scripted) {
+        fprintf(stderr, "rv32emu: %zu scripted event(s) never delivered (first: frame %" PRIu32 ")\n",
+                m.scripted - m.next_scripted, m.script[m.next_scripted].frame);
+    }
+    size_t lost = m.dropped + (m.scripted - m.next_scripted);
     int status = EXIT_EMULATOR_ERROR;
     fprintf(stderr, "rv32emu: halt=%s steps=%" PRIu64 " retired=%" PRIu64 " traps=%" PRIu64 " loaded=%zu",
             halt_name(m.halt), m.steps, m.retired, m.traps, loaded);
@@ -650,8 +1062,17 @@ int main(int argc, char **argv)
         fputc('\n', stderr);
     }
     free(m.ram);
+    free(m.fb);
+    free(m.script);
     if (!outputs_ok) {
         fputs("rv32emu: outputs incomplete, run rejected\n", stderr);
+        return EXIT_EMULATOR_ERROR;
+    }
+    /* The script and the program disagreed: the guest's pass says nothing about the events it
+     * never saw, so a passing run is rejected unless the caller meant it (a drop test). A guest
+     * that failed or was halted keeps its own status; the events it missed are reported above. */
+    if (lost > 0 && !allow_lost_events && status == 0) {
+        fprintf(stderr, "rv32emu: %zu scripted event(s) lost, run rejected (--allow-lost-events accepts this)\n", lost);
         return EXIT_EMULATOR_ERROR;
     }
     return status;

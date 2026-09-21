@@ -8,6 +8,9 @@ import sys
 import tempfile
 import unittest
 
+from tools.rv32_asm import CONSOLE, DISPLAY, DONE, FB, INPUT, RAM, TIMER
+from tools.rv32_devices import (DIAG_EXPECTED_VALUES, EVENT_PRESS, EVENT_VALID, FB_SIZE, KEYS, QUEUE_SIZE, diag_checksum,
+                                event_word, frame_hash, is_decimal, key_code, parse_input_script, render_diag_frame)
 from tools.rv32_image import (ImageError, check_image, check_listing, flatten, parse_elf,
                               to_hex_words)
 from tools.rv32_run_qemu import classify, qemu_command
@@ -155,7 +158,12 @@ class ImageCheckerTests(unittest.TestCase):
                      "80000008: 0000         \t<unknown>", "80000008: 00 00 00 00  \tmul\ta0, a0, a1"):
             with self.subTest(text=text):
                 self.assertEqual(len(check_listing(text)), 1)
-        self.assertEqual(check_listing("  /* mul by hand */\n; div in a comment\nadd a0, a0, a1"), [])
+        self.assertEqual(check_listing(good + "  /* mul by hand */\n; div in a comment\nadd a0, a0, a1\n"), [])
+        # A listing with nothing in it would pass every rule; that is what a failed objdump leaves behind.
+        for empty in ("", "  /* mul by hand */\n; div in a comment\nadd a0, a0, a1\n"):
+            with self.subTest(empty=empty):
+                self.assertEqual(check_listing(empty), ["listing has no instruction lines"])
+                self.assertEqual(check_listing(empty, allow_privileged=True), ["listing has no instruction lines"])
 
     def test_selfcheck_expected_checksum_matches_source_and_makefile(self):
         checksum = 2166136261
@@ -216,6 +224,112 @@ class QemuDriverTests(unittest.TestCase):
         self.assertIn("unrecognized", classify(0, "PASS 807d9fa\n", False).reason)
         self.assertIn("unrecognized", classify(0, "FAIL 0\n", False).reason)
         self.assertIn("unrecognized", classify(0, "FAIL 1000\n", False).reason)
+
+
+class DeviceHelperTests(unittest.TestCase):
+    """tools/rv32_devices.py is the reference the emulator and testbench are compared against."""
+
+    def test_frame_hash_is_the_documented_shift_add(self):
+        # Two words by hand: h = 5381; h = h*33 ^ w1; h = h*33 ^ w2, all mod 2^32.
+        h = 5381
+        h = (h * 33 ^ 0x11223344) & 0xFFFFFFFF
+        h = (h * 33 ^ 0xFFFFFFFF) & 0xFFFFFFFF
+        self.assertEqual(frame_hash(bytes.fromhex("44332211ffffffff")), h)
+        self.assertEqual(frame_hash(b""), 5381)
+        self.assertNotEqual(frame_hash(bytes(FB_SIZE)), frame_hash(bytes(FB_SIZE - 4)), "length matters")
+        with self.assertRaises(ValueError):
+            frame_hash(b"abc")
+
+    def test_event_words_and_key_codes(self):
+        self.assertEqual(event_word(True, 1), EVENT_VALID | EVENT_PRESS | 1)
+        self.assertEqual(event_word(False, 31), EVENT_VALID | 31)
+        self.assertEqual((key_code("left"), key_code("LEFT"), key_code("7"), key_code("31")), (1, 1, 7, 31))
+        self.assertEqual(key_code("000000001"), 1, "nine digits is the most a number may have")
+        for bad in ("32", "-1", "shift", "", "0000000001", "٣"):  # ten digits; an Arabic-Indic three
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    key_code(bad)
+        self.assertEqual([is_decimal(t) for t in ("0", "999999999", "0000000001", "", "1x", "٣", "-1")],
+                         [True, True, False, False, False, False, False])
+        with self.assertRaises(ValueError):
+            event_word(True, 32)
+
+    def test_input_script_grammar(self):
+        text = "# a comment\n\nframe 0 down LEFT\nframe 0 up left\n  frame 3 down 5 \nframe 3 up Q\n"
+        self.assertEqual(parse_input_script(text),
+                         [(0, event_word(True, 1)), (0, event_word(False, 1)), (3, event_word(True, 5)),
+                          (3, event_word(False, 13))])
+        self.assertEqual(parse_input_script(""), [])
+        self.assertEqual(parse_input_script("frame 0 down A\r\nframe 000000009 up 000000001\r\n"),
+                         [(0, event_word(True, 8)), (9, event_word(False, 1))], "CRLF and nine-digit numbers")
+        for bad in ("frame 1 down", "frame x down A", "frame 1 press A", "frame 2 down A\nframe 1 up A",
+                    "frame 1 down NOPE", "frame -1 down A", "key 1 down A", "frame 1 down A extra",
+                    "frame 0000000001 down A", "frame 0 down 0000000001", "frame ٣ down A"):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(ValueError, "input script line"):
+                    parse_input_script(bad)
+
+    def test_diag_frame_and_checksum_match_source_and_makefile(self):
+        """The diagnostic's frame-1 hash and PASS value are derived here from the pattern and the
+        checked values, independently of any run, and must match diag.c and the Makefile."""
+        frame1 = render_diag_frame(1)
+        self.assertEqual(len(frame1), FB_SIZE)
+        self.assertEqual(frame1[0], 0, "(0 ^ 0)")
+        self.assertEqual(frame1[3 * 320 + 5], 5 ^ 3)
+        self.assertEqual(frame1[40 * 320 + 100], 0xE0, "the red box")
+        self.assertEqual(frame1[120 * 320 + 319], 0x1C, "the green row")
+        self.assertEqual(render_diag_frame(2)[200 * 320 + 10], 0x03, "the blue box in frame 2 only")
+        self.assertEqual(frame1[200 * 320 + 10], (10 ^ 200) & 0xFF)
+        makefile = (ROOT / "Makefile").read_text()
+        self.assertIn(f"RV32_DIAG_FRAME1_HEX := {frame_hash(frame1):08x}", makefile)
+        self.assertIn(f"RV32_DIAG_FRAME2_HEX := {frame_hash(render_diag_frame(2)):08x}", makefile)
+        self.assertIn(f"RV32_DIAG_HEX := {diag_checksum():08x}", makefile)
+        source = (ROOT / "programs/rv32/diag.c").read_text()
+        pinned = re.search(r"#define DIAG_EXPECTED 0x([0-9a-f]{8})u", source).group(1)
+        self.assertEqual(pinned, f"{diag_checksum():08x}")
+        checks = len(re.findall(r"^\s*CHECK\(", source, re.MULTILINE))
+        self.assertEqual(checks, sum(1 for value in DIAG_EXPECTED_VALUES if value != "frame1") - 4,
+                         "one CHECK per expected value except the frame hash and the four folded events")
+
+    def test_privileged_instructions_need_the_flag(self):
+        listing = ("80000000 <f>:\n80000000: 30529073 csrw mtvec, t0\n80000004: 30200073 mret\n"
+                   "80000008: 00000073 ecall\n8000000c: 30002573 csrr a0, mstatus\n")
+        self.assertEqual(len(check_listing(listing)), 4)
+        problems = check_listing(listing, allow_privileged=True)
+        self.assertEqual(len(problems), 2)
+        self.assertIn("ecall", problems[0])
+        self.assertIn("CSR other than the four trap CSRs", problems[1])
+        if (ROOT / "build/rv32/diag.lst").exists():
+            self.assertEqual(check_listing((ROOT / "build/rv32/diag.lst").read_text(), allow_privileged=True), [])
+
+    def test_key_table_and_windows_agree_across_languages(self):
+        """The key table lives in board.h, the emulator, the testbench, and this module's KEYS; the
+        window bases in board.h, the bus, the machine's memory instances, and the assembler. None of
+        the copies is parsed by the others, so this test pins them to each other."""
+        header = (ROOT / "programs/rv32/board.h").read_text()
+        emulator = (ROOT / "tools/rv32emu.c").read_text()
+        testbench = (ROOT / "tests/rv32_tb.sv").read_text()
+        expected = {name: str(code) for name, code in KEYS.items()}
+        self.assertEqual(dict(re.findall(r"#define RV32_KEY_(\w+)\s+(\d+)", header)), expected, "board.h")
+        self.assertEqual(dict(re.findall(r'\{"(\w+)", (\d+)\}', emulator)), expected, "rv32emu.c")
+        self.assertEqual(dict(re.findall(r'\(u == "(\w+)"\) key_code = (\d+);', testbench)), expected, "rv32_tb.sv")
+        self.assertRegex(header, rf"#define RV32_INPUT_QUEUE\s+{QUEUE_SIZE}\b")
+        self.assertRegex(header, rf"#define RV32_EVENT_VALID\s+{EVENT_VALID:#010x}\b")
+        self.assertRegex(header, rf"#define RV32_EVENT_PRESS\s+{EVENT_PRESS:#010x}\b")
+        self.assertIn(f"32'h{EVENT_VALID:08x} | ((token2 == \"down\") ? 32'h{EVENT_PRESS:x} : 32'h0)".replace("8000_0000", "80000000"),
+                      testbench.replace("8000_0000", "80000000"))
+        bases = {"RAM": RAM, "CONSOLE": CONSOLE, "DONE": DONE, "TIMER": TIMER, "INPUT": INPUT, "DISPLAY": DISPLAY, "FB": FB}
+        header_bases = {name: int(value, 16) for name, value in re.findall(r"#define RV32_(\w+)_BASE\s+0x([0-9a-fA-F]+)", header)}
+        self.assertEqual(header_bases, {name: bases[name] for name in header_bases}, "board.h")
+        self.assertEqual(set(header_bases) >= {"TIMER", "INPUT", "DISPLAY", "FB"}, True)
+        bus = (ROOT / "rtl/rv32/rv32_bus.v").read_text()
+        bus_bases = {name.replace("_BASE", "").replace("_ADDR", ""): int(value.replace("_", ""), 16)
+                     for name, value in re.findall(r"localparam \[31:0\] (\w+) = 32'h([0-9a-fA-F_]+);", bus)}
+        self.assertEqual(bus_bases, bases, "rv32_bus.v")
+        machine = (ROOT / "rtl/rv32/rv32_soc.v").read_text()
+        instances = re.findall(r"rv32_ram #\(\.WORDS\((\w+)\), \.BASE\(32'h([0-9a-fA-F_]+)\)\)", machine)
+        self.assertEqual([(words, int(value.replace("_", ""), 16)) for words, value in instances],
+                         [("RAM_WORDS", RAM), ("FB_WORDS", FB)], "rv32_soc.v's memories index from the bus's bases")
 
 
 if __name__ == "__main__":

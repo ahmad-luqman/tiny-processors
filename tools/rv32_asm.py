@@ -14,6 +14,12 @@ a stalled store, and a call with `jalr`.
 RAM = 0x80000000
 CONSOLE = 0x10000000
 DONE = 0x00100000
+TIMER = 0x20000000
+INPUT = 0x20001000
+DISPLAY = 0x20002000
+FB = 0x30000000
+FB_SIZE = 320 * 240
+UNMAPPED = 0x50000000  # no window: the probe address for "outside the map" tests
 M = 0xFFFFFFFF
 
 
@@ -190,7 +196,27 @@ def program_full():
     ] + FINISH()
 
 
-PROGRAMS = {"loop": program_loop, "full": program_full}
+def program_devices():
+    """The M5 waves program: the guest's first load waits while the host is still pushing the
+    frame-0 events, then the input queue pops, the display answers a read and a present in the
+    same cycle as the request, and a console byte leaves; then the pass word."""
+    return LI(1, INPUT) + [
+        LW(2, 1, 0),            # 3  EVENT: pops the first scripted event; held while the burst lands
+        LW(3, 1, 4),            # 4  COUNT: the rest
+    ] + LI(4, DISPLAY) + [
+        LW(5, 4, 8),            # 7  WIDTH = 320: display_sel and mem_ready in one cycle
+        SW(0, 4, 0),            # 8  PRESENT: display_present pulses, display_frames becomes 1
+        LW(6, 4, 4),            # 9  FRAMES = 1
+    ] + LI(7, CONSOLE) + LI(8, ord("A")) + [
+        SB(8, 7, 0),            # 14 console_valid with the byte
+    ] + FINISH()
+
+
+# The input script a program needs; the runner writes it when none is given on the command line.
+# Thirteen frame-0 events take thirteen cycles to push, one more than the first load's MEM cycle.
+PROGRAM_INPUTS = {"devices": "".join(f"frame 0 down {code}\n" for code in range(13))}
+
+PROGRAMS = {"loop": program_loop, "full": program_full, "devices": program_devices}
 
 
 def words_to_hex(words):
