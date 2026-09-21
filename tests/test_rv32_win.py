@@ -147,6 +147,10 @@ class WindowTest(unittest.TestCase):
             self.assertEqual(status, 2)
             self.assertIn("record file", stderr)
             self.assertIn("would overwrite", stderr)
+            status, _, stderr = self.run_window("--image", str(image), "--record", f"{directory}/out", "--checkpoints", f"{directory}/./out")
+            self.assertEqual(status, 2)
+            self.assertIn("checkpoints file", stderr)
+            self.assertFalse((Path(directory) / "out").exists(), "nothing was created")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -675,14 +676,46 @@ uint32_t emu_parse_u32(const char *text, const char *what)
     return (uint32_t)emu_parse_u64(text, 0xffffffffull, what);
 }
 
-/* True when both names refer to one file: same spelling, or same device and inode when both exist. */
+/* The canonical spelling of a path that may not exist yet: the real path of its directory (which
+ * must exist for the file to be created) joined with its last component. `out`, `./out`, `x//out`,
+ * and `link/out` for a symlinked directory all become one string. Returns false when the directory
+ * cannot be resolved; the caller then falls back to the spelling. */
+static bool canonical(const char *path, char *out, size_t size)
+{
+    const char *slash = strrchr(path, '/');
+    char directory[PATH_MAX], resolved[PATH_MAX];
+    const char *name = slash ? slash + 1 : path;
+    if (slash == NULL) {
+        strcpy(directory, ".");
+    } else if (slash == path) {
+        strcpy(directory, "/");
+    } else if ((size_t)(slash - path) >= sizeof directory) {
+        return false;
+    } else {
+        memcpy(directory, path, (size_t)(slash - path));
+        directory[slash - path] = '\0';
+    }
+    if (*name == '\0' || realpath(directory, resolved) == NULL) {
+        return false;
+    }
+    int n = snprintf(out, size, "%s/%s", resolved, name);
+    return n > 0 && (size_t)n < size;
+}
+
+/* True when both names refer to one file: same spelling, same canonical spelling, or same device
+ * and inode when both exist. The canonical form catches two spellings of a file that does not
+ * exist yet, which is the case for every output before the run. */
 static bool same_file(const char *a, const char *b)
 {
     struct stat sa, sb;
+    char ca[PATH_MAX], cb[PATH_MAX];
     if (!a || !b) {
         return false;
     }
     if (strcmp(a, b) == 0) {
+        return true;
+    }
+    if (canonical(a, ca, sizeof ca) && canonical(b, cb, sizeof cb) && strcmp(ca, cb) == 0) {
         return true;
     }
     return stat(a, &sa) == 0 && stat(b, &sb) == 0 && sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;

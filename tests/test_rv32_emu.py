@@ -652,6 +652,8 @@ class EmulatorTest(unittest.TestCase):
             image.write_bytes(b"".join(word.to_bytes(4, "little") for word in FINISH()))
             original = image.read_bytes()
             (path / "s").write_text("frame 0 down A\n")  # a script an output must not truncate
+            (path / "real").mkdir()
+            (path / "link").symlink_to(path / "real")
             for extra, message in [(["--trace", str(image)], "trace file"),
                                    (["--dump-state", str(image)], "state file"),
                                    (["--trace", str(path / "t"), "--dump-state", str(path / "t")], "state file"),
@@ -666,7 +668,13 @@ class EmulatorTest(unittest.TestCase):
                                    (["--record", str(path / "r"), "--checkpoints", str(path / "r")], "checkpoints file"),
                                    (["--record", str(path / "r"), "--dump-state", str(path / "r")], "state file"),
                                    (["--frames", str(image)], "frames directory"),
-                                   (["--input", str(path / "s"), "--frames", str(path / "s")], "frames directory")]:
+                                   (["--input", str(path / "s"), "--frames", str(path / "s")], "frames directory"),
+                                   # Two spellings of one file that does not exist yet (pathlib would fold `./` away,
+                                   # so the strings are built by hand), and a symlinked directory.
+                                   (["--record", f"{path}/out", "--checkpoints", f"{path}/./out"], "checkpoints file"),
+                                   (["--trace", f"{path}//out", "--record", f"{path}/out"], "trace file"),
+                                   (["--record", f"{path}/link/out", "--checkpoints", f"{path}/real/out"], "checkpoints file"),
+                                   (["--input", f"{path}/./s", "--trace", str(path / "s")], "trace file")]:
                 with self.subTest(extra=extra):
                     completed = subprocess.run([str(self.emulator), "--image", str(image), *extra],
                                                capture_output=True, text=True)
