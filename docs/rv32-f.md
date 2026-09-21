@@ -163,8 +163,8 @@ memory sizes). Strict lint, `check -assert` and no-latch assertions pass.
 | Synthesized unit | Generic cells | Flip-flops |
 | --- | ---: | ---: |
 | F1 standalone FPU, unchanged | 25,685 | 1,530 |
-| F2 CPU including FPU | 42,034 | 4,162 |
-| F2 SoC with small memories | 58,062 | 8,915 |
+| F2 CPU including FPU | 42,006 | 4,162 |
+| F2 SoC with small memories | 57,999 | 8,915 |
 
 The pre-F2 CPU was 8,175 cells/1,457 flip-flops. Module-context optimization
 means the integrated FPU's mapped count can differ from standalone synthesis;
