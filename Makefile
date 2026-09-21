@@ -425,3 +425,64 @@ test-rv32-capstone-sanitize: | build/rv32
 	mkdir -p build/rv32/host
 	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fno-builtin -fsanitize=address,undefined -fno-omit-frame-pointer -DRV32_NATIVE_MAIN -Iprograms/rv32 tests/rv32_capstone_native.c programs/rv32/runtime.c programs/rv32/tetris_game.c programs/rv32/pong_game.c programs/rv32/gfx.c programs/rv32/gfx_text.c -o build/rv32/host/capstone-sanitize
 	build/rv32/host/capstone-sanitize
+
+# F1: standalone floating-point hardware. SoftFloat is a host test oracle only.
+FP32_RTL := rtl/fp32/fp32.v
+FP32_REF_OBJ := build/fp32/fp32_ref.o $(patsubst third_party/softfloat/%.c,build/fp32/softfloat/%.o,$(wildcard third_party/softfloat/*.c))
+FP32_REF_FLAGS := -std=c11 -O2 -Wall -Wextra -Werror -DSOFTFLOAT_FAST_INT64 -DSOFTFLOAT_ROUND_ODD -DINLINE_LEVEL=5 -Ithird_party/softfloat -Ithird_party/softfloat/include
+FP32_REF_HEADERS := $(wildcard third_party/softfloat/*.h third_party/softfloat/include/*.h)
+FP32_REF := build/fp32/reference
+FP32_TB := tests/fp32_tb.sv
+FP32_SEED ?= 20260921
+FP32_RANDOM ?= 100
+.PHONY: test-fp32 test-fp32-verilator test-fp32-tools lint-fp32 synth-fp32 waves-fp32 bench-fp32
+
+build/fp32:
+	mkdir -p $@
+
+build/fp32/fp32_ref.o: tools/fp32_ref.c $(FP32_REF_HEADERS) | build/fp32
+	$(HOST_CC) $(FP32_REF_FLAGS) -c $< -o $@
+
+# Upstream RISCV NaN helpers intentionally ignore payload parameters.
+build/fp32/softfloat/%.o: third_party/softfloat/%.c $(FP32_REF_HEADERS) | build/fp32
+	mkdir -p build/fp32/softfloat
+	$(HOST_CC) $(FP32_REF_FLAGS) -Wno-unused-parameter -c $< -o $@
+
+$(FP32_REF): $(FP32_REF_OBJ)
+	$(HOST_CC) $(FP32_REF_OBJ) -o $@
+
+build/fp32/fp32.vvp: $(FP32_RTL) $(FP32_TB) | build/fp32
+	iverilog -g2012 -Wall -s fp32_tb -o $@ $(FP32_TB) $(FP32_RTL)
+
+build/verilator-fp32/fp32_sim: $(FP32_RTL) $(FP32_TB)
+	verilator --binary --timing --trace --top-module fp32_tb --Mdir build/verilator-fp32 -o fp32_sim $(FP32_TB) $(FP32_RTL)
+
+build/fp32/protocol.vvp: $(FP32_RTL) tests/fp32_protocol_tb.sv | build/fp32
+	iverilog -g2012 -Wall -s fp32_protocol_tb -o $@ tests/fp32_protocol_tb.sv $(FP32_RTL)
+
+build/verilator-fp32-protocol/protocol_sim: $(FP32_RTL) tests/fp32_protocol_tb.sv
+	verilator --binary --timing --trace --top-module fp32_protocol_tb --Mdir build/verilator-fp32-protocol -o protocol_sim tests/fp32_protocol_tb.sv $(FP32_RTL)
+
+test-fp32-tools: $(FP32_REF) build/fp32/fp32.vvp
+	$(PYTHON) -m unittest discover -s tests -p 'test_fp32.py' -v
+
+test-fp32: $(FP32_REF) build/fp32/fp32.vvp build/fp32/protocol.vvp test-fp32-tools
+	$(PYTHON) tools/fp32_vectors.py --seed $(FP32_SEED) --random $(FP32_RANDOM)
+	vvp build/fp32/protocol.vvp
+
+test-fp32-verilator: $(FP32_REF) build/verilator-fp32/fp32_sim build/verilator-fp32-protocol/protocol_sim
+	$(PYTHON) tools/fp32_vectors.py --simulator build/verilator-fp32/fp32_sim --work build/fp32/verilator --seed $(FP32_SEED) --random $(FP32_RANDOM)
+	./build/verilator-fp32-protocol/protocol_sim
+
+lint-fp32:
+	verilator --lint-only --Wall --language 1364-2005 --top-module fp32 $(FP32_RTL)
+
+synth-fp32: | build/fp32
+	yosys -Q -T -l build/fp32/synth.log -p 'read_verilog $(FP32_RTL); synth -top fp32; check -assert; select -assert-none t:$$dlatch* t:$$adlatch* t:$$_DLATCH_* t:$$_DLATCHSR_*; stat; write_json build/fp32/fp32.json'
+
+waves-fp32: $(FP32_REF) build/fp32/fp32.vvp build/fp32/protocol.vvp
+	$(PYTHON) tools/fp32_vectors.py --anchors-only --wave build/fp32/arithmetic.vcd
+	vvp build/fp32/protocol.vvp +wave=build/fp32/protocol.vcd
+
+bench-fp32: $(FP32_REF) build/verilator-fp32/fp32_sim
+	$(PYTHON) tools/fp32_vectors.py --simulator build/verilator-fp32/fp32_sim --anchors-only --work build/fp32/bench
