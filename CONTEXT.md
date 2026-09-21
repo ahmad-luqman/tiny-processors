@@ -64,7 +64,7 @@ _Avoid_: complete GPU, graphics renderer, NPU.
 **Learning milestone**:
 A bounded working artifact with verified behavior, an explanation connecting its source to the hardware or software it represents, and exercises for understanding it.
 
-**CPU FPU**:
+**Standalone FP32 FPU**:
 The standalone multicycle FP32 hardware verified in F1, with arithmetic, conversions, comparisons and exact exception flags. F2 will connect it to CPU instructions. See [the contract and gates](docs/fp32.md).
 _Avoid_: GPU floating-point lanes, NPU numeric format, software floating-point runtime.
 
@@ -72,7 +72,7 @@ _Avoid_: GPU floating-point lanes, NPU numeric format, software floating-point r
 The longer-term project direction of integrating general-purpose processing, graphics processing, and neural-network acceleration with the memory and peripherals that make them a computer system.
 _Avoid_: completed hardware, current SIMD4 implementation.
 
-**SoftFloat reference**:
+**SoftFloat oracle**:
 The independent, pinned host software used to calculate expected FP32 result
 bits and exception flags in F1 tests.
 _Avoid_: our hardware FPU, guest software floating-point emulation, CPU F support.

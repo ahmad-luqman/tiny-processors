@@ -107,9 +107,9 @@ GPU FP32/other formats and NPU integer/other formats remain independent choices.
 
 F1 completed on 2026-09-21. The [FP32 record](../fp32.md) fixes the standalone
 request/response contract, all five rounding modes and per-operation flags.
-Our RTL matches the pinned SoftFloat oracle on 70,399 vectors on both simulators
-and 259,399 additional Verilator stress vectors. Reset/backpressure checks,
-lint, latch-free synthesis (25,346 cells; 1,530 flip-flops) and short waves pass.
+Our RTL matches the pinned SoftFloat oracle on 70,407 vectors on both simulators
+and 259,407 additional Verilator stress vectors. Reset/backpressure checks,
+lint, latch-free synthesis (25,685 cells; 1,530 flip-flops) and short waves pass.
 F1 changes no CPU instructions, emulator behavior, MMIO, or guest firmware.
 
 1. Inspect Git status, preserve commands, start a branch, and end with one PR.

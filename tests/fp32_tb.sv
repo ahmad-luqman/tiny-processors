@@ -11,17 +11,44 @@ module fp32_tb;
     wire [4:0] flags;
     wire error;
     fp32 dut(.*);
-    integer file, count=0, scan, latency, stall, max_latency=0, total_latency=0;
+    integer file, count=0, scan, read_count, latency, stall, max_latency=0, total_latency=0;
     integer op_in, rm_in, err_in, flags_in, k;
     integer latency_min[0:31], latency_max[0:31], samples[0:31];
     reg [31:0] a_in,b_in,c_in,expected;
     reg [4:0] expected_flags;
     string vectors, wave;
+    string line_buffer;
+    integer token_index;
+    reg in_token;
+    reg [7:0] token_char;
+    string t_op,t_rm,t_a,t_b,t_c,t_result,t_flags,t_error,t_extra;
     task tick;
         begin @(posedge clk); #1; end
     endtask
     task drive;
         begin @(negedge clk); end
+    endtask
+    // Validate the token before accumulating it; %h into a 32-bit variable
+    // would silently truncate over-width values and admit x/z digits.
+    task parse_number;
+        input string token;
+        input integer base, max_digits;
+        output reg [31:0] value;
+        integer j, digit;
+        reg [7:0] ch;
+        begin
+            if (token.len() == 0 || token.len() > max_digits)
+                $fatal(1,"malformed vector %0d (numeric field width)",count);
+            value=0;
+            for(j=0;j<token.len();j=j+1) begin
+                ch=token[j]; digit=-1;
+                if(ch>="0" && ch<="9") digit=32'(ch)-48;
+                else if(base==16 && ch>="a" && ch<="f") digit=32'(ch)-87;
+                else if(base==16 && ch>="A" && ch<="F") digit=32'(ch)-55;
+                if(digit<0 || digit>=base) $fatal(1,"malformed vector %0d (numeric field character)",count);
+                value=value*32'(base)+32'(digit);
+            end
+        end
     endtask
     task send_request;
         begin
@@ -40,9 +67,37 @@ module fp32_tb;
         file=$fopen(vectors,"r");
         if (file == 0) $fatal(1,"cannot open vectors");
         tick(); drive(); reset=0;
-        while (!$feof(file)) begin
-            scan=$fscanf(file,"%d %d %h %h %h %h %h %d\n",op_in,rm_in,a_in,b_in,c_in,expected,flags_in,err_in);
+        read_count=$fgets(line_buffer,file);
+        while (read_count != 0) begin
+            if(line_buffer.len() > 256 || line_buffer[line_buffer.len()-1] != 8'd10) $fatal(1,"malformed vector %0d (unterminated or overlong line)",count);
+            // As in rv32_tb, split tokens ourselves: Icarus and Verilator
+            // disagree on sscanf's count when an optional ninth %s hits EOF.
+            scan=0; in_token=0;
+            t_op=""; t_rm=""; t_a=""; t_b=""; t_c="";
+            t_result=""; t_flags=""; t_error=""; t_extra="";
+            for(token_index=0;token_index<line_buffer.len();token_index=token_index+1) begin
+                token_char=line_buffer[token_index];
+                if(token_char==8'h20 || token_char==8'h09 || token_char==8'h0a || token_char==8'h0d) in_token=0;
+                else begin
+                    if(!in_token) begin scan=scan+1; in_token=1; end
+                    case(scan)
+                        1: t_op={t_op,string'(token_char)};
+                        2: t_rm={t_rm,string'(token_char)};
+                        3: t_a={t_a,string'(token_char)};
+                        4: t_b={t_b,string'(token_char)};
+                        5: t_c={t_c,string'(token_char)};
+                        6: t_result={t_result,string'(token_char)};
+                        7: t_flags={t_flags,string'(token_char)};
+                        8: t_error={t_error,string'(token_char)};
+                        default: t_extra={t_extra,string'(token_char)};
+                    endcase
+                end
+            end
             if (scan != 8) $fatal(1,"malformed vector %0d (%0d fields)",count,scan);
+            parse_number(t_op,10,2,op_in); parse_number(t_rm,10,1,rm_in);
+            parse_number(t_a,16,8,a_in); parse_number(t_b,16,8,b_in); parse_number(t_c,16,8,c_in);
+            parse_number(t_result,16,8,expected); parse_number(t_flags,16,2,flags_in);
+            parse_number(t_error,10,1,err_in);
             if (op_in<0 || op_in>31 || rm_in<0 || rm_in>7 || err_in<0 || err_in>1 || flags_in<0 || flags_in>31)
                 $fatal(1,"out-of-range vector");
             expected_flags=5'(flags_in);
@@ -72,7 +127,9 @@ module fp32_tb;
             if (resp_valid || !req_ready) $fatal(1,"response did not consume exactly once");
             drive(); resp_ready=0;
             count=count+1;
+            read_count=$fgets(line_buffer,file);
         end
+        if (!$feof(file)) $fatal(1,"cannot read vectors");
         $fclose(file);
         if (count == 0) $fatal(1,"empty vector file");
         if ($test$plusargs("stats")) begin
