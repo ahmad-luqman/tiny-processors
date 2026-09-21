@@ -22,7 +22,7 @@ from tools.rv32_devices import FB_SIZE, diag_checksum, event_word, frame_hash, r
 from tools.rv32_image import to_hex_words
 from tools.rv32_rtl import (ROOT, Run, check_passed, compile_testbench, cycle_relation, diff_traces, has_value_changes,
                             rtl_halt_line, run_backend, run_emulator, run_rtl, simulator_command, simulator_noise, write_image)
-from tools.rv32_run_emu import build_emulator
+from tools.rv32_run_emu import build_emulator, emulator_command
 
 STALLS = (0, 1, 3)
 SEED = 7
@@ -63,9 +63,10 @@ class RtlTest(unittest.TestCase):
         cls.workdir.cleanup()
 
     def run_both(self, words, stall=None, seed=None, limit=100000, max_cycles=None, checkpoints=False,
-                 input_script=None, reset_at=None, simulator=None):
+                 input_script=None, reset_at=None, simulator=None, allow_lost_events=False):
         """Run one image on both backends; the caller decides what must agree. With `checkpoints`
-        both write their `frame N <hash>` lines; `input_script` is text for both `+input`/`--input`."""
+        both write their `frame N <hash>` lines; `input_script` is text for both `+input`/`--input`;
+        `allow_lost_events` tells both that a dropped or undelivered event is expected."""
         with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
             hex_path, bin_path = write_image(words, directory, "image")
             script = None
@@ -75,10 +76,10 @@ class RtlTest(unittest.TestCase):
             emu_checkpoints = Path(directory) / "emu.checkpoints" if checkpoints else None
             rtl_checkpoints = Path(directory) / "rtl.checkpoints" if checkpoints else None
             emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace", limit=limit,
-                                    checkpoints=emu_checkpoints, input_script=script)
+                                    checkpoints=emu_checkpoints, input_script=script, allow_lost_events=allow_lost_events)
             rtl = run_rtl(simulator or self.simulator, hex_path, Path(directory) / "rtl.trace",
                           stall=stall, seed=seed, max_cycles=max_cycles, checkpoints=rtl_checkpoints,
-                          input_script=script, reset_at=reset_at)
+                          input_script=script, reset_at=reset_at, allow_lost_events=allow_lost_events)
         report = f"\n--- simulator output ---\n{rtl.noise}--- guest console ---\n{rtl.console}--- stderr ---\n{rtl.stderr}"
         self.assertEqual(rtl.status, 0, report)
         self.assertEqual(rtl.noise, "", "the simulator printed something of its own" + report)
@@ -613,6 +614,11 @@ class RtlTest(unittest.TestCase):
             ("byte read of an event", LI(1, INPUT) + [LBU(2, 1, 0)], 5, INPUT),
             ("halfword read of the count", LI(1, INPUT) + [LHU(2, 1, 4)], 5, INPUT + 4),
             ("read of an unimplemented input offset", LI(1, INPUT) + [LW(2, 1, 12)], 5, INPUT + 12),
+            ("misaligned load inside a device window", LI(1, TIMER + 2) + [LW(2, 1, 0)], 4, TIMER + 2),
+            ("aligned halfword inside a device window", LI(1, TIMER + 2) + [LHU(2, 1, 0)], 5, TIMER + 2),
+            ("load from the palette window reserved for M6", LI(1, 0x20003000) + [LW(2, 1, 0)], 5, 0x20003000),
+            ("store to the palette window reserved for M6", LI(1, 0x20003000) + [SW(1, 1, 0)], 7, 0x20003000),
+            ("fetch from the first word past RAM", LI(1, RAM + 0x400000) + [JALR(0, 1, 0)], 1, RAM + 0x400000),
         ]
         for name, words, cause, value in cases:
             with self.subTest(name=name):
@@ -721,6 +727,12 @@ class RtlTest(unittest.TestCase):
         self.assertEqual([effects(line) for line in rtl.trace[20:22]],
                          [f"mem[{DISPLAY:08x}]<-00000001/4", f"x11=00000001 mem[{DISPLAY + 4:08x}]->00000001/4"])
         self.assertEqual(effects(rtl.trace[24]), f"x12=00000002 mem[{DISPLAY + 4:08x}]->00000002/4")
+        # The last two pixels as one halfword, read back as a halfword and as the last word.
+        words = LI(5, FB + FB_SIZE - 2) + LI(6, 0xBEEF) + [SH(6, 5, 0), LHU(7, 5, 0), LW(8, 5, -2)] + FINISH()
+        emulator, rtl = self.assert_same_pass(words, stall=0)
+        self.assertEqual([effects(line) for line in rtl.trace if "mem[" in line][:3],
+                         [f"mem[{FB + FB_SIZE - 2:08x}]<-0000beef/2", f"x7=0000beef mem[{FB + FB_SIZE - 2:08x}]->0000beef/2",
+                          f"x8=beef0000 mem[{FB + FB_SIZE - 4:08x}]->beef0000/4"])
         # No present, no checkpoint; a present with the value 0 still presents.
         emulator, rtl = self.assert_same_pass(LI(1, DISPLAY) + [SW(0, 1, 0)] + FINISH(), stall=0, checkpoints=True)
         self.assertEqual((rtl.checkpoints, emulator.checkpoints), ([f"frame 1 {frame_hash(bytes(FB_SIZE)):08x}"],) * 2)
@@ -758,7 +770,7 @@ class RtlTest(unittest.TestCase):
                          [f"x3=00000010 mem[{INPUT + 4:08x}]->00000010/4", f"x4=0000ffff mem[{INPUT + 8:08x}]->0000ffff/4"])
         self.assertGreater(rtl.halt["stalls"], 0, "the load waited for the burst")
         # A seventeenth event at the same frame is dropped by the host and reported on stderr.
-        emulator, rtl = self.assert_same_pass(words, stall=0, input_script=burst + "frame 1 down 16\n")
+        emulator, rtl = self.assert_same_pass(words, stall=0, input_script=burst + "frame 1 down 16\n", allow_lost_events=True)
         self.assertEqual(effects(rtl.trace[5]), f"x3=00000010 mem[{INPUT + 4:08x}]->00000010/4")
         self.assertEqual(effects(rtl.trace[6]), f"x4=0000ffff mem[{INPUT + 8:08x}]->0000ffff/4", "a dropped event never arrives")
         for run, name in ((rtl, "rv32_tb"), (emulator, "rv32emu")):
@@ -766,17 +778,40 @@ class RtlTest(unittest.TestCase):
         # Two drops with a pop waiting behind the burst: the host must keep pushing through the drops,
         # or the waiting pop would slip in between and make room for the eighteenth event on the RTL only.
         words = LI(1, INPUT) + LI(2, DISPLAY) + [SW(0, 2, 0), LW(3, 1, 0), LW(4, 1, 4)] + FINISH()
-        emulator, rtl = self.assert_same_pass(words, stall=0, input_script=burst + "frame 1 down 16\nframe 1 down 17\n")
+        emulator, rtl = self.assert_same_pass(words, stall=0, input_script=burst + "frame 1 down 16\nframe 1 down 17\n",
+                                              allow_lost_events=True)
         self.assertEqual([effects(line) for line in rtl.trace[5:7]],
                          [f"x3={event_word(True, 0):08x} mem[{INPUT:08x}]->{event_word(True, 0):08x}/4",
                           f"x4=0000000f mem[{INPUT + 4:08x}]->0000000f/4"])
         self.assertEqual(rtl.stderr.count("dropped frame 1"), 2)
         # Events for a frame that is never presented stay with the host, which says so.
         emulator, rtl = self.assert_same_pass(LI(1, INPUT) + [LW(3, 1, 4)] + FINISH(), stall=0,
-                                              input_script="frame 3 down A\n")
+                                              input_script="frame 3 down A\n", allow_lost_events=True)
         self.assertEqual(effects(rtl.trace[2]), f"x3=00000000 mem[{INPUT + 4:08x}]->00000000/4")
         for run, name in ((rtl, "rv32_tb"), (emulator, "rv32emu")):
             self.assertIn(f"{name}: 1 scripted event(s) never delivered (first: frame 3)", run.stderr)
+        # A guest that halts right after a present leaves the RTL host still pushing that frame's burst;
+        # the halt accounts for the rest against the queue's room, so eight events are delivered on both
+        # backends and a seventeenth is the same drop on both. Without the flag a lost event rejects the
+        # run after its halt line on both backends: the guest's pass says nothing about events it never saw.
+        present_then_halt = LI(30, DONE) + LI(31, 0x5555) + LI(2, DISPLAY) + [SW(0, 2, 0), SW(31, 30, 0)]
+        emulator, rtl = self.assert_same_pass(present_then_halt, stall=0, input_script="".join(f"frame 1 down {c}\n" for c in range(8)))
+        self.assertNotIn("scripted", rtl.stderr + emulator.stderr)
+        emulator, rtl = self.assert_same_pass(present_then_halt, stall=0, allow_lost_events=True,
+                                              input_script="".join(f"frame 1 down {c}\n" for c in range(17)))
+        for run, name in ((rtl, "rv32_tb"), (emulator, "rv32emu")):
+            self.assertIn(f"{name}: input queue full: dropped frame 1 event {event_word(True, 16):08x}", run.stderr)
+            self.assertNotIn("never delivered", run.stderr)
+        with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
+            hex_path, bin_path = write_image(present_then_halt, directory, "image")
+            script = Path(directory) / "input.txt"
+            script.write_text("".join(f"frame 1 down {c}\n" for c in range(17)))
+            emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace", input_script=script)
+            rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", stall=0, input_script=script)
+        self.assertNotEqual((emulator.status, rtl.status), (0, 0))
+        self.assertEqual((emulator.halt["outcome"], rtl.halt["outcome"]), ("pass", "pass"), "the halt lines were printed first")
+        self.assertIn("rv32emu: 1 scripted event(s) lost, run rejected", emulator.stderr)
+        self.assertIn("1 scripted event(s) lost, run rejected", rtl.noise, "the testbench's $fatal names the loss")
         # The ring wraps: twelve events popped, then ten more pushed at frame 1 (the tail passes
         # entry 15) and popped (the head passes it too), in script order; key 31 is the top bit of KEYS.
         script = "".join(f"frame 0 down {code}\n" for code in range(12))
@@ -811,34 +846,37 @@ class RtlTest(unittest.TestCase):
 
     def test_reset_during_a_held_store(self):
         """+reset-at=N resets the machine while a store is being held: it never lands, the timer,
-        frame count, and input queue restart from zero, and the program runs again to its end."""
+        frame count, input queue, and held keys restart from zero, and the program runs again to its end."""
         marker = RAM + 0x1000
-        words = LI(1, marker) + [LW(2, 1, 0)] + LI(6, TIMER) + [LW(5, 6, 0)] + LI(7, INPUT) + [LW(8, 7, 4)]
+        words = LI(1, marker) + [LW(2, 1, 0)] + LI(6, TIMER) + [LW(5, 6, 0)] + LI(7, INPUT) + [LW(8, 7, 4), LW(11, 7, 8)]
         words += LI(9, DISPLAY) + [SW(0, 9, 0), LW(10, 9, 4)] + LI(3, 0xC0DE) + [SW(3, 1, 0), LW(4, 1, 0)] + FINISH()
-        # With +stall=3 every request takes four cycles: the fifteen instructions before the store take
-        # 10 x 7 + 5 x 11 = 125 cycles, the store's fetch ends at 129, decode 130, execute 131, and its
-        # MEM state is held on 132, 133, and 134 before acceptance on 135. Reset after cycle 133.
-        script = "frame 0 down A\nframe 0 up A\n"
-        emulator, rtl = self.run_both(words, stall=3, reset_at=133, input_script=script)
+        # With +stall=3 every request takes four cycles: the sixteen instructions before the store take
+        # 10 x 7 + 6 x 11 = 136 cycles, the store's fetch ends at 140, decode 141, execute 142, and its
+        # MEM state is held on 143, 144, and 145 before acceptance on 146. Reset after cycle 144.
+        script = "frame 0 down A\n"  # a press that is never released: KEYS must still clear on reset
+        emulator, rtl = self.run_both(words, stall=3, reset_at=144, input_script=script, allow_lost_events=True)
         self.assertEqual((rtl.halt["halt"], rtl.halt["outcome"]), ("done", "pass"), rtl.stderr)
         restarts = [i for i, line in enumerate(rtl.trace) if line.split()[1] == f"{RAM:08x}"]
-        self.assertEqual(restarts, [0, 15], "the machine restarted once, after the fifteenth instruction")
-        first, second = rtl.trace[:15], rtl.trace[15:]
+        self.assertEqual(restarts, [0, 16], "the machine restarted once, after the sixteenth instruction")
+        first, second = rtl.trace[:16], rtl.trace[16:]
         self.assertEqual(effects(first[2]), f"x2=00000000 mem[{marker:08x}]->00000000/4")
         self.assertEqual(effects(second[2]), f"x2=00000000 mem[{marker:08x}]->00000000/4", "the held store never landed")
         self.assertEqual(effects(first[5]), effects(second[5]), "the timer restarted from zero")
-        self.assertEqual(effects(first[8]), f"x8=00000002 mem[{INPUT + 4:08x}]->00000002/4")
+        self.assertEqual(effects(first[8]), f"x8=00000001 mem[{INPUT + 4:08x}]->00000001/4")
         self.assertEqual(effects(second[8]), f"x8=00000000 mem[{INPUT + 4:08x}]->00000000/4", "the queue was cleared")
-        self.assertEqual(effects(first[12]), f"x10=00000001 mem[{DISPLAY + 4:08x}]->00000001/4")
-        self.assertEqual(effects(second[12]), f"x10=00000001 mem[{DISPLAY + 4:08x}]->00000001/4", "frames restarted")
-        self.assertEqual([effects(line) for line in second[15:17]],
+        self.assertEqual(effects(first[9]), f"x11=00000100 mem[{INPUT + 8:08x}]->00000100/4", "A is held")
+        self.assertEqual(effects(second[9]), f"x11=00000000 mem[{INPUT + 8:08x}]->00000000/4", "the held keys were cleared")
+        self.assertEqual(effects(first[13]), f"x10=00000001 mem[{DISPLAY + 4:08x}]->00000001/4")
+        self.assertEqual(effects(second[13]), f"x10=00000001 mem[{DISPLAY + 4:08x}]->00000001/4", "frames restarted")
+        self.assertEqual([effects(line) for line in second[16:18]],
                          [f"mem[{marker:08x}]<-0000c0de/4", f"x4=0000c0de mem[{marker:08x}]->0000c0de/4"])
-        # The second run is the emulator's run, apart from the step numbers, the timer value, and the
-        # queue count (the emulator's run had no reset, so its frame 0 events are still queued).
+        # The second run is the emulator's run, apart from the step numbers, the timer value, the queue
+        # count, and the held keys (the emulator's run had no reset, so its frame 0 press is still there).
         self.assertEqual([line.split()[1:3] for line in second], [line.split()[1:3] for line in emulator.trace])
-        self.assertEqual([effects(line) for i, line in enumerate(second) if i not in (5, 8)],
-                         [effects(line) for i, line in enumerate(emulator.trace) if i not in (5, 8)])
+        self.assertEqual([effects(line) for i, line in enumerate(second) if i not in (5, 8, 9)],
+                         [effects(line) for i, line in enumerate(emulator.trace) if i not in (5, 8, 9)])
         self.assertEqual(rtl.halt["steps"], len(rtl.trace))
+        self.assertNotIn("scripted", rtl.stderr, "the press was delivered before the reset, so nothing was lost")
 
     def test_runaway_hits_the_cycle_limit(self):
         emulator, rtl = self.run_both([ADDI(1, 1, 1), JAL(0, -4)], limit=50, max_cycles=200)
@@ -857,6 +895,12 @@ class RtlTest(unittest.TestCase):
         emulator, rtl = self.run_both(program_loop(), stall=0, max_cycles=335)
         self.assertEqual((rtl.halt["halt"], rtl.halt["outcome"], rtl.halt.get("done")), ("limit", "error=limit", None), rtl.stderr)
         self.assertEqual(len(rtl.trace), 77)
+        # A reset on that same cycle forgets the accepted done word: the program runs again from the
+        # start and passes on its second done store, 336 counted cycles later.
+        emulator, rtl = self.run_both(program_loop(), stall=0, reset_at=335)
+        self.assertEqual((rtl.halt["halt"], rtl.halt["outcome"], rtl.halt["cycles"]), ("done", "pass", 335 + 336), rtl.stderr)
+        self.assertEqual([i for i, line in enumerate(rtl.trace) if line.split()[1] == f"{RAM:08x}"], [0, 77])
+        self.assertEqual(rtl.trace[77:], [f"{78 + i} " + line.split(" ", 1)[1] for i, line in enumerate(emulator.trace)])
         # ecall traps on cycle 6 and the handler fetch at 0 double-faults on cycle 7.
         emulator, rtl = self.run_both([ADDI(1, 0, 1), ECALL()], stall=0, max_cycles=7)
         self.assertEqual((rtl.halt["halt"], rtl.halt["cycles"], rtl.halt["cause"]), ("double-fault", 7, 1), rtl.stderr)
@@ -895,7 +939,8 @@ class RtlTest(unittest.TestCase):
                     self.assertIsNone(result.halt)
             script = Path(directory) / "input.txt"
             for content in ("frame 1 down\n", "frame x down A\n", "frame 1 press A\n", "frame 2 down A\nframe 1 up A\n",
-                            "frame 1 down NOPE\n", "frame 1 down 32\n", "key 1 down A\n", "frame 1 down A extra\n"):
+                            "frame 1 down NOPE\n", "frame 1 down 32\n", "key 1 down A\n", "frame 1 down A extra\n",
+                            "frame 0000000001 down A\n", "frame 0 down 0000000001\n"):  # a number is at most nine digits
                 with self.subTest(script=content):
                     script.write_text(content)
                     result = run([f"+input={script}"])
@@ -905,9 +950,16 @@ class RtlTest(unittest.TestCase):
             script.write_text("# only a comment\n\n  frame 0 down Left  \n")
             result = run([f"+input={script}"])
             self.assertEqual((result.status, result.halt["outcome"]), (0, "pass"), result.noise)
+            script.write_text("frame 0 down A\r\nframe 000000000 up 000000008\r\n")  # CRLF; nine-digit numbers
+            result = run([f"+input={script}"])
+            self.assertEqual((result.status, result.halt["outcome"]), (0, "pass"), result.noise)
             result = run([f"+input={Path(directory) / 'missing.txt'}"])
             self.assertNotEqual(result.status, 0)
             self.assertIn("Cannot open input script", result.noise)
+            result = run([f"+input={directory}"])  # opens, but does not read: not an empty script
+            self.assertNotEqual(result.status, 0)
+            self.assertIsNone(result.halt)
+            self.assertIn("Cannot read input script", result.noise)
             result = run(image=Path(directory) / "missing.hex")
             self.assertNotEqual(result.status, 0)
             self.assertIn("Cannot open", result.noise)
@@ -1003,7 +1055,7 @@ class RunnerTest(unittest.TestCase):
         script.write_text("frame 5 down A\n")
         result = self.run_results(self.emulator, "--input", str(script))
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("lost scripted events", result.stderr)
+        self.assertIn("scripted event(s) lost, run rejected", result.stderr, "the backend's own rejection")
         result = self.run_results(self.emulator, "--input", str(script), "--allow-lost-events")
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -1055,6 +1107,12 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(simulator_command("build/verilator-rv32/rv32_sim", "img.hex", wave="w", seed=7, max_cycles=9),
                          ["build/verilator-rv32/rv32_sim", "+verilator+quiet", "+image=img.hex", "+wave=w",
                           "+stall-seed=7", "+max-cycles=9"])
+        # The lost-events flag reaches both backends; the runner itself no longer reads their messages.
+        self.assertEqual(simulator_command("x.vvp", "i.hex", input_script="s", allow_lost_events=True)[-2:],
+                         ["+input=s", "+allow-lost-events"])
+        self.assertEqual(emulator_command("e", "i.bin", input_script="s", allow_lost_events=True)[-3:],
+                         ["--input", "s", "--allow-lost-events"])
+        self.assertNotIn("+allow-lost-events", simulator_command("x.vvp", "i.hex", input_script="s"))
 
     def test_check_passed_rejects_anything_but_a_clean_pass(self):
         good = Run(0, "ERROR: guest text is fine\n", "", "rv32_tb: halt=done ...", [], {"halt": "done", "outcome": "pass"})

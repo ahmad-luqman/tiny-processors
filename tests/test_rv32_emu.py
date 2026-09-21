@@ -60,9 +60,11 @@ class EmulatorTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.workdir.cleanup()
 
-    def run_words(self, words, limit=10000, base=RAM, extra=(), checkpoints=False, input_script=None):
+    def run_words(self, words, limit=10000, base=RAM, extra=(), checkpoints=False, input_script=None,
+                  allow_lost_events=False):
         """Run a raw word image and return the exit status, outputs, state, trace lines, and, when
-        asked for, the checkpoint lines; `input_script` is the text of an --input file."""
+        asked for, the checkpoint lines; `input_script` is the text of an --input file, and
+        `allow_lost_events` passes the flag that keeps a dropped or undelivered event from failing the run."""
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             (path / "image.bin").write_bytes(b"".join(word.to_bytes(4, "little") for word in words))
@@ -74,6 +76,8 @@ class EmulatorTest(unittest.TestCase):
             if input_script is not None:
                 (path / "input.txt").write_text(input_script)
                 command += ["--input", str(path / "input.txt")]
+            if allow_lost_events:
+                command.append("--allow-lost-events")
             completed = subprocess.run(command, capture_output=True, text=True)
             # A run refused before it starts (a bad argument or script) writes no state or trace.
             state = parse_state((path / "state").read_text()) if (path / "state").exists() else None
@@ -308,6 +312,10 @@ class EmulatorTest(unittest.TestCase):
             ([LW(1, 2, 4)], TIMER, 5, TIMER + 4),           # no other timer register
             ([SW(1, 2, 12)], TIMER, 7, TIMER + 12),
             ([LW(1, 2, 16)], TIMER, 5, TIMER + 16),         # past the window
+            ([LW(1, 2, 2)], TIMER, 4, TIMER + 2),           # misalignment is decided before the window
+            ([LHU(1, 2, 2)], TIMER, 5, TIMER + 2),          # an aligned halfword inside the window is refused by it
+            ([LW(1, 2, 0)], 0x20003000, 5, 0x20003000),     # the palette window reserved for M6 is unmapped in M5
+            ([SW(1, 2, 0)], 0x20003000, 7, 0x20003000),
             ([LW(1, 2, 0)], DISPLAY, 5, DISPLAY),           # PRESENT is write-only
             ([SW(1, 2, 4)], DISPLAY, 7, DISPLAY + 4),       # FRAMES, WIDTH, HEIGHT are read-only
             ([SW(1, 2, 12)], DISPLAY, 7, DISPLAY + 12),
@@ -329,6 +337,12 @@ class EmulatorTest(unittest.TestCase):
                                                             SH(1, 2, 2), SB(1, 2, 3), LW(1, 2, 4)])
         self.assertEqual((result.state.x[10], result.state.x[11]), (5, RAM + 0x400000), "only the last access faults")
         self.assertEqual(result.state.retired, 2 + 1 + 2 + 6 + 3 + 5, "the six in-bounds accesses retired")
+        # The last two framebuffer bytes as a halfword, then the byte past them.
+        result = self.run_trapping(LI(2, FB + FB_SIZE - 2) + LI(1, 0xBEEF) + [SH(1, 2, 0), LHU(1, 2, 0), LW(1, 2, 2)])
+        self.assertEqual((result.state.x[1], result.state.x[10], result.state.x[11]), (0xBEEF, 5, FB + FB_SIZE))
+        # A fetch from the first word past RAM is a fetch fault, like one from below it.
+        result = self.run_trapping(LI(2, RAM + 0x400000) + [JALR(0, 2, 0)])
+        self.assertEqual((result.state.x[10], result.state.x[11]), (1, RAM + 0x400000))
 
     def test_double_fault_halts_with_report(self):
         result = self.run_words([ECALL()] + FINISH())
@@ -434,15 +448,24 @@ class EmulatorTest(unittest.TestCase):
         self.assertEqual(effects(result.trace[6]), f"x5={event_word(True, 1):08x} mem[{INPUT:08x}]->{event_word(True, 1):08x}/4")
         # Sixteen events fill the queue; the seventeenth is dropped and reported; KEYS shows arrivals only.
         burst = "".join(f"frame 0 down {code}\n" for code in range(17))
-        result = self.run_pass(LI(1, INPUT) + [LW(3, 1, 4), LW(4, 1, 8)], input_script=burst)
+        words = LI(1, INPUT) + [LW(3, 1, 4), LW(4, 1, 8)]
+        result = self.run_pass(words, input_script=burst, allow_lost_events=True)
         self.assertEqual((x := result.state.x)[3], 16)
         self.assertEqual(x[4], 0xFFFF)
         self.assertEqual(result.state.events, 16)
         self.assertIn(f"rv32emu: input queue full: dropped frame 0 event {event_word(True, 16):08x}", result.stderr)
+        # Without the flag the same run is rejected after its halt line: the guest passed, the host did not.
+        result = self.run_words(words + FINISH(), input_script=burst)
+        self.assertEqual((result.status, result.state.done, result.halt["outcome"]), (2, 0x5555, "pass"))
+        self.assertIn("rv32emu: 1 scripted event(s) lost, run rejected", result.stderr)
         # Popping makes room; an event for a frame never presented stays with the host.
-        result = self.run_pass(LI(1, INPUT) + [LW(3, 1, 0), LW(4, 1, 4)], input_script=burst + "frame 5 up 3\n")
+        result = self.run_pass(LI(1, INPUT) + [LW(3, 1, 0), LW(4, 1, 4)], input_script=burst + "frame 5 up 3\n",
+                               allow_lost_events=True)
         self.assertEqual((result.state.x[3], result.state.x[4], result.state.events), (event_word(True, 0), 15, 15))
         self.assertIn("rv32emu: 1 scripted event(s) never delivered (first: frame 5)", result.stderr)
+        result = self.run_words(LI(1, INPUT) + [LW(3, 1, 0)] + FINISH(), input_script="frame 5 up 3\n")
+        self.assertEqual(result.status, 2)
+        self.assertIn("rv32emu: 1 scripted event(s) lost, run rejected", result.stderr)
         # The ring wraps: twelve popped, ten more pushed at frame 1 past entry 15 and popped in order;
         # key 31 is the top bit of KEYS.
         script = "".join(f"frame 0 down {code}\n" for code in range(12))
@@ -457,7 +480,8 @@ class EmulatorTest(unittest.TestCase):
     def test_input_script_errors(self):
         for content in ("frame 1 down\n", "frame x down A\n", "frame 1 press A\n", "frame 2 down A\nframe 1 up A\n",
                         "frame 1 down NOPE\n", "frame 1 down 32\n", "key 1 down A\n", "frame 1 down A extra\n",
-                        "frame 1 down A " + "x" * 300 + "\n"):
+                        "frame 1 down A " + "x" * 300 + "\n",
+                        "frame 0000000001 down A\n", "frame 0 down 0000000001\n"):  # a number is at most nine digits
             with self.subTest(script=content):
                 result = self.run_words(FINISH(), input_script=content)
                 self.assertEqual(result.status, 2)
@@ -465,9 +489,15 @@ class EmulatorTest(unittest.TestCase):
                 self.assertIn("input script", result.stderr)
         result = self.run_pass([], input_script="# only a comment\n\n  frame 0 down Left  \n")
         self.assertEqual(result.state.events, 1)
+        result = self.run_pass([], input_script="frame 0 down A\r\nframe 000000000 up 000000008\r\n")
+        self.assertEqual(result.state.events, 2, "CRLF lines and nine-digit numbers are accepted")
         result = self.run_words(FINISH(), extra=("--input", "/nonexistent/input.txt"))
         self.assertEqual((result.status, result.halt), (2, None))
         self.assertIn("cannot open input script", result.stderr)
+        # A directory opens but does not read: that must not become an empty script.
+        result = self.run_words(FINISH(), extra=("--input", str(ROOT / "tools")))
+        self.assertEqual((result.status, result.halt), (2, None))
+        self.assertIn("cannot read input script", result.stderr)
 
     def test_frames_are_written_as_ppm(self):
         """--frames DIR writes one binary PPM per present with the RGB332 mapping; an unwritable
@@ -521,6 +551,20 @@ class EmulatorTest(unittest.TestCase):
                 result = self.run_words(words, limit=10000000, input_script=altered)
                 self.assertEqual((result.status, result.state.done, result.halt["outcome"]), (code, (code << 16) | 0x3333, f"fail={code}"))
                 self.assertEqual(result.stdout.splitlines()[-1], f"FAIL {code}")
+                self.assertNotIn("run rejected", result.stderr, "a failed guest keeps its own code")
+                if code == 16:
+                    self.assertIn("never delivered", result.stderr, "a guest that stops early leaves later events unread")
+
+    def test_empty_or_unreadable_image_is_refused(self):
+        """An empty image, or a directory, would run as an illegal instruction at the reset PC and be
+        reported as the guest's double fault; both are refused before the run instead."""
+        result = self.run_words([])
+        self.assertEqual((result.status, result.halt, result.state), (2, None, None))
+        self.assertIn("is empty", result.stderr)
+        completed = subprocess.run([str(self.emulator), "--image", str(ROOT / "tools")], capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("cannot read", completed.stderr)
+        self.assertNotIn("halt=", completed.stderr)
 
     def test_loading_and_start_pc(self):
         words = [ADDI(1, 0, 1)] + FINISH()

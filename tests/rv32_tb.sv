@@ -10,7 +10,7 @@
 module rv32_tb;
     parameter integer RAM_WORDS = 1048576; // the contract's 4 MiB
     parameter integer CONSOLE_BUSY = 0;    // cycles the console waits before each byte
-    parameter integer FB_WORDS = 19200;    // 320 x 240 pixels
+    parameter integer FB_WORDS = 19200;    // 320 x 240 one-byte pixels, as 32-bit words
     localparam integer STDERR = 32'h8000_0002;
 
     reg clk = 0;
@@ -34,6 +34,8 @@ module rv32_tb;
     reg [31:0] event_word [0:MAX_EVENTS-1];
     integer events = 0, next_event = 0;
     integer frame_reached = 0; // the frame count the guest has observably reached
+    integer dropped = 0;       // pushes the full queue refused
+    reg allow_lost_events = 0; // +allow-lost-events: a dropped or undelivered event is not a failure
     reg mem_hold = 1; // acceptance deferred until the stall generator releases it
 
     // Stall generator and counters.
@@ -71,8 +73,9 @@ module rv32_tb;
     initial while (!finished) #5 clk = ~clk;
 
     // Hold the bus away from the sampling edge; the delay is chosen once per
-    // request. The machine answers in the cycle the hold is released, so
-    // `mem_ready` is what this block used to drive directly.
+    // request. Releasing the hold lets the slave's `ready` through in the same
+    // cycle, so the stall counts equal the ones this block produced when it
+    // drove `mem_ready` itself, before the machine had a bus.
     always @(negedge clk) begin
         if (reset || !mem_valid) begin
             mem_hold = 1;
@@ -96,9 +99,11 @@ module rv32_tb;
     always @(negedge clk) begin
         in_push = 0;
         if (!reset && next_event < events && event_frame[next_event] <= frame_reached) begin
-            if (in_full)
+            if (in_full) begin
                 $fwrite(STDERR, "rv32_tb: input queue full: dropped frame %0d event %h\n",
                         event_frame[next_event], event_word[next_event]);
+                dropped = dropped + 1;
+            end
             in_push = 1;
             in_event = event_word[next_event];
             next_event = next_event + 1;
@@ -150,6 +155,7 @@ module rv32_tb;
 
     task finish_run;
         input string halt_name;
+        integer room, lost;
         begin
             // A host mistake that a passing guest would hide: a reset the run never reached. It is
             // refused before any halt line exists, so the runner cannot take the run as complete.
@@ -174,7 +180,23 @@ module rv32_tb;
                 $fwrite(STDERR, " error=limit"); // even if a done store was accepted but never retired
             end
             $fwrite(STDERR, "\n");
-            // Scripted events whose frame the guest never presented: the runner refuses them unless told.
+            // The contract delivers a frame's events when the present retires; this host pushes them
+            // one per cycle afterwards, so a guest that halts within a few cycles of a present leaves
+            // some still waiting. They would have landed exactly as the emulator's did, because no pop
+            // can follow the last retirement: account for them against the queue's remaining room,
+            // reporting the ones the full queue would have refused the way the push block does.
+            room = 16 - {27'd0, dut.input_device.count};
+            while (next_event < events && event_frame[next_event] <= frame_reached) begin
+                if (room > 0) begin
+                    room = room - 1;
+                end else begin
+                    $fwrite(STDERR, "rv32_tb: input queue full: dropped frame %0d event %h\n",
+                            event_frame[next_event], event_word[next_event]);
+                    dropped = dropped + 1;
+                end
+                next_event = next_event + 1;
+            end
+            // Scripted events whose frame the guest never presented.
             if (next_event < events)
                 $fwrite(STDERR, "rv32_tb: %0d scripted event(s) never delivered (first: frame %0d)\n",
                         events - next_event, event_frame[next_event]);
@@ -182,6 +204,12 @@ module rv32_tb;
             if (console_fd != 0) $fclose(console_fd);
             if (checkpoints_fd != 0) $fclose(checkpoints_fd);
             finished = 1;
+            // The script and the program disagreed: the guest's pass says nothing about the events it
+            // never saw, so a passing run is rejected after its halt line, unless the caller meant it;
+            // a guest that failed or was halted keeps its own outcome, with the loss reported above.
+            lost = dropped + (events - next_event);
+            if (lost > 0 && !allow_lost_events && halt_name == "done" && done_word == 32'h5555)
+                $fatal(1, "%0d scripted event(s) lost, run rejected (+allow-lost-events accepts this)", lost);
         end
     endtask
 
@@ -337,7 +365,8 @@ module rv32_tb;
         end
     endfunction
 
-    // A decimal of at most nine digits, or -1. Written by hand because $sscanf's %d accepts
+    // A decimal of one to nine ASCII digits (the contract's rule for the script's numbers, so
+    // 32-bit arithmetic cannot overflow), or -1. Written by hand because $sscanf's %d accepts
     // x and z as digits and Verilator and Icarus count a failed %s differently.
     function integer decimal_of;
         input string text;
@@ -424,7 +453,7 @@ module rv32_tb;
                 if (tokens != 4 || token0 != "frame" || (token2 != "down" && token2 != "up"))
                     $fatal(1, "Input script %0s line %0d: expected `frame N down|up KEY`", path, number);
                 frame = decimal_of(token1);
-                if (frame < 0) $fatal(1, "Input script %0s line %0d: frame %0s is not a number", path, number, token1);
+                if (frame < 0) $fatal(1, "Input script %0s line %0d: frame %0s is not one to nine digits", path, number, token1);
                 code = key_code(token3);
                 if (code < 0) $fatal(1, "Input script %0s line %0d: unknown key %0s", path, number, token3);
                 if (frame < last_frame)
@@ -435,6 +464,10 @@ module rv32_tb;
                 events = events + 1;
                 last_frame = frame;
             end
+            // $fopen succeeds on a directory and $fgets then fails at once: without this check such
+            // a script would be an empty one and a guest waiting for its events would fail on a
+            // device check instead of on the path.
+            if ($ferror(fd, line) != 0) $fatal(1, "Cannot read input script %0s: %0s", path, line);
             $fclose(fd);
         end
     endtask
@@ -442,6 +475,7 @@ module rv32_tb;
     initial begin
         if (!$value$plusargs("image=%s", image_path)) $fatal(1, "Missing +image=FILE");
         if ($value$plusargs("input=%s", input_path)) read_input_script(input_path);
+        if ($test$plusargs("allow-lost-events")) allow_lost_events = 1;
         if ($value$plusargs("stall=%s", text)) begin
             stall = plusarg_count("stall", text, 0);
             stall_given = 1;

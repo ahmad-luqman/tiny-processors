@@ -68,7 +68,7 @@ def halt_line(stderr):
 
 
 def emulator_command(emulator, image, trace=None, state=None, limit=None, checkpoints=None, input_script=None,
-                     frames=None):
+                     frames=None, allow_lost_events=False):
     command = [str(emulator), "--image", str(image)]
     if trace is not None:
         command += ["--trace", str(trace)]
@@ -82,6 +82,8 @@ def emulator_command(emulator, image, trace=None, state=None, limit=None, checkp
         command += ["--input", str(input_script)]
     if frames is not None:
         command += ["--frames", str(frames)]
+    if allow_lost_events:
+        command.append("--allow-lost-events")
     return command
 
 

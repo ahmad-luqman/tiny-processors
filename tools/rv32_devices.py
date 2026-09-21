@@ -37,12 +37,18 @@ def event_word(press, code):
     return EVENT_VALID | (EVENT_PRESS if press else 0) | code
 
 
+def is_decimal(text):
+    """The script's rule for a number: one to nine ASCII digits, so every reader (this one, C's
+    strtoul, the testbench's 32-bit arithmetic) accepts exactly the same tokens."""
+    return 1 <= len(text) <= 9 and text.isascii() and text.isdigit()
+
+
 def key_code(text):
     """A key name from board.h (any case) or a number 0..31."""
     name = text.upper()
     if name in KEYS:
         return KEYS[name]
-    if text.isdigit() and int(text) < 32:
+    if is_decimal(text) and int(text) < 32:
         return int(text)
     raise ValueError(f"unknown key {text!r}")
 
@@ -62,8 +68,8 @@ def parse_input_script(text):
         try:
             if len(tokens) != 4 or tokens[0] != "frame" or tokens[2] not in ("down", "up"):
                 raise ValueError("expected `frame N down|up KEY`")
-            if not tokens[1].isdigit():
-                raise ValueError(f"frame {tokens[1]!r} is not a number")
+            if not is_decimal(tokens[1]):
+                raise ValueError(f"frame {tokens[1]!r} is not one to nine digits")
             frame = int(tokens[1])
             if frame < last_frame:
                 raise ValueError(f"frame {frame} comes after frame {last_frame}")

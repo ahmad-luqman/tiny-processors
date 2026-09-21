@@ -99,8 +99,10 @@ typedef struct {
     uint32_t queue[INPUT_QUEUE]; /* the input device: a ring of events */
     unsigned head, count;
     uint32_t keys;         /* one bit per key code, as events arrive */
-    scripted_event *script; /* --input, sorted by frame; delivered as frames are reached */
+    scripted_event *script; /* --input, in script order with frames never decreasing (the parser
+                             * enforces it); delivered as frames are reached */
     size_t scripted, next_scripted;
+    size_t dropped;         /* events the full queue refused; the run is rejected unless allowed */
     /* Effects of the current step, for the trace line. */
     int wr_reg;
     uint32_t wr_value;
@@ -212,6 +214,7 @@ static void queue_event(machine *m, uint32_t frame, uint32_t event)
 {
     if (m->count == INPUT_QUEUE) {
         fprintf(stderr, "rv32emu: input queue full: dropped frame %" PRIu32 " event %08" PRIx32 "\n", frame, event);
+        m->dropped++;
         return;
     }
     m->queue[(m->head + m->count) % INPUT_QUEUE] = event;
@@ -772,6 +775,22 @@ static bool close_output(FILE *stream, const char *path)
     return ok;
 }
 
+/* A decimal field of the input script: one to nine ASCII digits (docs/rv32.md, "Input"), so
+ * every reader, including the testbench's 32-bit arithmetic, agrees on what a number is. */
+static bool decimal_ok(const char *text)
+{
+    size_t len = strlen(text);
+    if (len == 0 || len > 9) {
+        return false;
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (!isdigit((unsigned char)text[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /* A key name from programs/rv32/board.h, any case, or a number 0..31; -1 otherwise. */
 static int key_code(const char *text)
 {
@@ -792,12 +811,11 @@ static int key_code(const char *text)
             return names[i].code;
         }
     }
-    char *end;
-    unsigned long value = strtoul(text, &end, 10);
-    if (isdigit((unsigned char)text[0]) && *end == '\0' && value < 32) {
-        return (int)value;
+    if (!decimal_ok(text)) {
+        return -1;
     }
-    return -1;
+    unsigned long value = strtoul(text, NULL, 10);
+    return value < 32 ? (int)value : -1;
 }
 
 /* Read the input script (docs/rv32.md, "Input"): `frame N down|up KEY` lines with frames
@@ -822,15 +840,14 @@ static void read_input_script(machine *m, const char *path)
             continue;
         }
         int fields = sscanf(line, " %15s %15s %15s %15s %15s", keyword, frame_text, direction, key, rest);
-        char *end = NULL;
         unsigned long frame = 0;
         int code = -1;
-        if (fields == 4) { /* the buffers are only filled when every field was read */
-            frame = strtoul(frame_text, &end, 10);
+        if (fields == 4 && decimal_ok(frame_text)) { /* the buffers are only filled when every field was read */
+            frame = strtoul(frame_text, NULL, 10);
             code = key_code(key);
         }
         if (fields != 4 || strcmp(keyword, "frame") != 0 || (strcmp(direction, "down") != 0 && strcmp(direction, "up") != 0) ||
-            !isdigit((unsigned char)frame_text[0]) || *end != '\0' || frame > 0xffffffffull || code < 0 || frame < last_frame) {
+            !decimal_ok(frame_text) || code < 0 || frame < last_frame) {
             fprintf(stderr, "rv32emu: input script %s line %u: expected `frame N down|up KEY` with frames in order: %s",
                     path, number, line);
             exit(EXIT_EMULATOR_ERROR);
@@ -848,6 +865,13 @@ static void read_input_script(machine *m, const char *path)
         m->scripted++;
         last_frame = (uint32_t)frame;
     }
+    /* fopen succeeds on a directory and fgets then fails at once: without this check such a
+     * script would be an empty one, and a diagnostic waiting for its events would fail on a
+     * device check instead of on the path. */
+    if (ferror(in)) {
+        fprintf(stderr, "rv32emu: cannot read input script %s: %s\n", path, strerror(errno));
+        exit(EXIT_EMULATOR_ERROR);
+    }
     fclose(in);
 }
 
@@ -855,11 +879,14 @@ static void usage(void)
 {
     fputs("usage: rv32emu --image FILE [--base ADDR] [--pc ADDR] [--trace FILE] [--dump-state FILE]\n"
           "               [--max-instructions N] [--checkpoints FILE] [--frames DIR] [--input FILE]\n"
+          "               [--allow-lost-events]\n"
           "Loads FILE at ADDR (default 0x80000000), starts at --pc (default the base), and runs\n"
           "until the done register is written. Console bytes go to stdout, the trace and state\n"
           "to their files, and a final 'rv32emu: halt=...' line to stderr. Each present appends\n"
           "'frame N <hash>' to the checkpoints file and writes DIR/frame-NNNN.ppm. The input\n"
-          "script's `frame N down|up KEY` events arrive when frame N is presented.\n",
+          "script's `frame N down|up KEY` events arrive when frame N is presented; an event the\n"
+          "full queue dropped or the guest never reached turns a pass into an error unless\n"
+          "--allow-lost-events says it was expected.\n",
           stderr);
     exit(EXIT_EMULATOR_ERROR);
 }
@@ -869,12 +896,17 @@ int main(int argc, char **argv)
     const char *image_path = NULL, *trace_path = NULL, *state_path = NULL, *checkpoints_path = NULL;
     const char *input_path = NULL;
     uint32_t base = RAM_BASE, start = 0;
-    bool start_given = false;
+    bool start_given = false, allow_lost_events = false;
     machine m;
     memset(&m, 0, sizeof m);
     m.limit = 100000000ull;
-    for (int i = 1; i < argc; i += 2) {
-        const char *arg = argv[i], *value = i + 1 < argc ? argv[i + 1] : NULL;
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        if (!strcmp(arg, "--allow-lost-events")) { /* the one flag without a value */
+            allow_lost_events = true;
+            continue;
+        }
+        const char *value = i + 1 < argc ? argv[++i] : NULL;
         if (!value) {
             usage();
         }
@@ -920,6 +952,14 @@ int main(int argc, char **argv)
         return EXIT_EMULATOR_ERROR;
     }
     size_t loaded = fread(m.ram + (base - RAM_BASE), 1, RAM_SIZE - (base - RAM_BASE), image);
+    if (ferror(image)) { /* a directory opens but does not read; without this it would be an empty image */
+        fprintf(stderr, "rv32emu: cannot read %s: %s\n", image_path, strerror(errno));
+        return EXIT_EMULATOR_ERROR;
+    }
+    if (loaded == 0) { /* an empty image would run as an illegal instruction at the reset PC */
+        fprintf(stderr, "rv32emu: %s is empty\n", image_path);
+        return EXIT_EMULATOR_ERROR;
+    }
     if (fgetc(image) != EOF) {
         fprintf(stderr, "rv32emu: %s does not fit in RAM at %08" PRIx32 "\n", image_path, base);
         return EXIT_EMULATOR_ERROR;
@@ -991,6 +1031,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "rv32emu: %zu scripted event(s) never delivered (first: frame %" PRIu32 ")\n",
                 m.scripted - m.next_scripted, m.script[m.next_scripted].frame);
     }
+    size_t lost = m.dropped + (m.scripted - m.next_scripted);
     int status = EXIT_EMULATOR_ERROR;
     fprintf(stderr, "rv32emu: halt=%s steps=%" PRIu64 " retired=%" PRIu64 " traps=%" PRIu64 " loaded=%zu",
             halt_name(m.halt), m.steps, m.retired, m.traps, loaded);
@@ -1025,6 +1066,13 @@ int main(int argc, char **argv)
     free(m.script);
     if (!outputs_ok) {
         fputs("rv32emu: outputs incomplete, run rejected\n", stderr);
+        return EXIT_EMULATOR_ERROR;
+    }
+    /* The script and the program disagreed: the guest's pass says nothing about the events it
+     * never saw, so a passing run is rejected unless the caller meant it (a drop test). A guest
+     * that failed or was halted keeps its own status; the events it missed are reported above. */
+    if (lost > 0 && !allow_lost_events && status == 0) {
+        fprintf(stderr, "rv32emu: %zu scripted event(s) lost, run rejected (--allow-lost-events accepts this)\n", lost);
         return EXIT_EMULATOR_ERROR;
     }
     return status;
