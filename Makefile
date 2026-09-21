@@ -574,4 +574,4 @@ waves-rv32-f: $(RV32EMU) $(RV32_TB_VVP)
 bench-rv32-f: run-rv32-f-rtl run-rv32-f-rtl-verilator
 
 run-rv32-f-soft-qemu: check-rv32-f-image
-	$(PYTHON) tools/rv32_run_qemu.py build/rv32/floatsoft.elf --expect-hex c0800000 --transcript build/rv32/floatsoft.qemu.transcript --qemu-log build/rv32/floatsoft.qemu.log
+	$(PYTHON) tools/rv32_run_qemu.py build/rv32/floatsoft.elf --qemu $(QEMU_RV32) --expect-hex c0800000 --transcript build/rv32/floatsoft.qemu.transcript --qemu-log build/rv32/floatsoft.qemu.log
