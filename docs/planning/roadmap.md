@@ -110,7 +110,7 @@ Tetris rules and controls, explains reset-to-menu-to-game and input-to-pixel,
 and records acceptance. `make run-rv32-capstone` builds one image and launches
 both games from the menu. Both games were played by the user. The 68-frame
 acceptance replay matches the native build, emulator, Icarus and stalled
-Verilator: `PASS ea60197e`, 2,191,706 identical retired instructions. Standalone
+Verilator: `PASS ea60197e`, 2,220,509 identical retired instructions. Standalone
 Pong and all previous lab commands are preserved.
 
 1. Inspect Git status, preserve commands, start a branch, and end with one PR.

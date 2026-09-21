@@ -123,7 +123,7 @@ class Pong:
 
 
 def run_script(lib, events, max_frames=100000, trace=None, game_factory=Pong):
-    """Run the guest loop of pong.c on `events` ([(frame, word)] from parse_input_script) and return
+    """Run the shared guest loop of pong.c/capstone.c on `events` ([(frame, word)] from parse_input_script) and return
     (checkpoint lines, checksum, frames). The input device is modelled as the backends do: an event
     arrives when its frame is presented (frame 0 before the first iteration), KEYS follows arrivals,
     and a queue of more than 16 events is an error here rather than a drop, because a script that

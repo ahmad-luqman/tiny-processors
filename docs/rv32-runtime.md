@@ -2,7 +2,7 @@
 
 ## Behavior contract
 
-One RV32I image boots to a two-entry menu. UP/DOWN selects Pong or Tetris;
+One RV32I image boots to a two-entry menu. UP/DOWN toggles the selection between Pong and Tetris;
 ENTER starts a fresh game. ESCAPE returns to the menu. Q ends the session
 with `PASS <state checksum>`. P pauses and R restarts a game. At game over,
 the result remains for 180 presented frames (R can restart), then the menu
@@ -10,8 +10,8 @@ returns. Standalone M6 Pong keeps its original controls and recording.
 
 Each iteration drains queued events, checks quit, reads KEYS, advances one
 logical frame, draws, and presents. Events delivered by present N affect
-iteration N+1. A screen transition consumes the rest of that event batch;
-held controls are blocked until released. No game reads the device timer.
+iteration N+1. A screen transition consumes the rest of that event batch except Q, which always ends the session;
+held game controls are blocked until released. No game reads the device timer.
 The window paces presents at 60 fps; backend clock rates do not change rules.
 
 | Tetris behavior | Rule |
@@ -20,7 +20,7 @@ The window paces presents at 60 fps; backend clock rates do not change rules.
 | Piece IDs | I, O, T, S, Z, J, L (0 through 6) |
 | Spawn | Rotation 0, bounding-box origin (3,0); occupied cells must fit |
 | Rotation | UP, clockwise in a fixed 4×4 box for I, 3×3 for others; O unchanged; no kicks |
-| Motion | LEFT/RIGHT immediate, first repeat after 12 frames, then every 4; opposing keys cancel |
+| Motion | LEFT/RIGHT immediate, first repeat after 12 frames, then every 4; opposing keys cancel; spawning resets repeat so a held direction moves immediately again |
 | Gravity | One downward move every 30 active frames; DOWN changes interval to 3 |
 | Drop/lock | SPACE drops to the lowest legal row and locks; a blocked gravity move locks immediately |
 | Clear | Remove all full rows simultaneously; compact survivors downward, zero the top |
@@ -73,6 +73,7 @@ SDL3 prerequisites documented in the README. No additional dependencies.
 ```sh
 make run-rv32-capstone                 # build, check, boot the menu, record at 60 fps
 make test-rv32-capstone                # native rules/rendering and the pinned session, -O0 and -O2
+make test-rv32-capstone-sanitize        # the same directed C checks under ASan and UBSan
 make run-rv32-capstone-emu             # 68 checkpoint hashes and PASS ea60197e
 make run-rv32-capstone-rtl             # same image and script on Icarus
 make run-rv32-capstone-rtl-verilator   # same, with one stall per bus request
@@ -124,7 +125,7 @@ so a menu DOWN cannot become a Tetris soft drop. An automatic game-over return
 happens after input draining and does not discard the next frame's new presses.
 
 The application struct is 624 bytes, with no heap or recursion. The verified
-image is 15,796 bytes; code, initialized data and `.bss` end at `0x80004024`,
+image is 15,804 bytes; code, initialized data and `.bss` end at `0x8000402c`,
 well below the stack bottom `0x8003c000`. A 200-byte cell cache lets Tetris scan
 the board and draw only changed cells; there is no second full framebuffer in
 RAM. Text and numbers redraw only when their values or game phase change.
@@ -134,10 +135,10 @@ In `build/rv32/emu/capstone.emu.trace`, frame 28 supplies LEFT. Its event and
 held-key read, the x-coordinate store, and first erased pixel are:
 
 ```text
-1346849 800004ac 00092583 x11=80000101 mem[20001000]->80000101/4
-1346923 80000488 00892583 x11=00000002 mem[20001008]->00000002/4
-1347085 80001c0c 1c852223 mem[80003fc8]<-00000002/4
-1347390 800033ac 00880023 mem[30001932]<-00000000/1
+1361255 800004ac 00092583 x11=80000101 mem[20001000]->80000101/4
+1361329 80000488 00892583 x11=00000002 mem[20001008]->00000002/4
+1361491 80001c08 1c852223 mem[80003fd0]<-00000002/4
+1361796 800033a8 00880023 mem[30001932]<-00000000/1
 ```
 
 `0x80000101` is a LEFT press, and `0x2` is its held bit. `tetris_frame` changes
@@ -166,9 +167,9 @@ Addresses and step numbers describe this build and can move after edits.
   at both `-O0` and `-O2`, and under AddressSanitizer/UndefinedBehaviorSanitizer;
   the 68-frame native session matches the pinned hashes.
 - Emulator, Icarus and Verilator: `PASS ea60197e`, 68 identical checkpoints and
-  2,191,706 identical retirement lines, zero traps. Icarus: 9,184,808 cycles;
-  Verilator with one stall/request: 11,794,498 cycles, 2,609,690 transfers.
-  The cycle relation is exact: `4 × 1,773,722 + 5 × 417,984 + stalls`.
+  2,220,509 identical retirement lines, zero traps. Icarus: 9,304,243 cycles;
+  Verilator with one stall/request: 11,946,959 cycles, 2,642,716 transfers.
+  The cycle relation is exact: `4 × 1,798,302 + 5 × 422,207 + stalls`.
 - All existing RV32 suites, QEMU reference checks, strict lint and the existing
   aggregate synthesis checks passed; the new stalled capstone needed its
   explicitly documented 20-million-cycle budget. No RTL changed.
@@ -179,10 +180,10 @@ Addresses and step numbers describe this build and can move after edits.
 - The user confirmed playing both Pong and Tetris from the real menu. The
   first live recording (Pong) replayed all 1,200 checkpoints and `PASS ef82a348`
   exactly. The longer live session is kept locally under `build/rv32/`;
-  the first 36,430 recorded checkpoints also replay exactly on the current
-  firmware. That prefix replay adds Q at frame 36,432 only to an offline copy
+  the first 36,430 recorded checkpoints also replay exactly on the pre-review
+  firmware (`6517eea`). That prefix replay adds Q at frame 36,432 only to an offline copy
   to bound execution; the original recording is untouched. Its terminal
-  `PASS c245f086` belongs to that derived replay, not the still-open window.
+  `PASS c245f086` belongs to that derived replay, not the original window session.
 
 The first complete computer is achieved. F1 is next; no floating-point or
 accelerator work is included in M7.

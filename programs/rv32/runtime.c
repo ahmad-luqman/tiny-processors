@@ -34,8 +34,9 @@ void runtime_event(struct runtime *r, uint32_t event)
     if (!(event & RV32_EVENT_VALID)) return;
     uint32_t code = event & RV32_EVENT_CODE_MASK, bit = 1u << code;
     if (!(event & RV32_EVENT_PRESS)) { r->blocked &= ~bit; return; }
-    if (r->transition || (r->blocked & bit) || r->quit) return;
+    /* Q ends the session even in a screen-transition batch. */
     if (code == RV32_KEY_Q) { r->quit = 1; return; }
+    if (r->transition || (r->blocked & bit) || r->quit) return;
     if (code == RV32_KEY_ESCAPE && r->screen != RUNTIME_MENU) {
         change_screen(r, RUNTIME_MENU);
     } else if (r->screen == RUNTIME_MENU) {
@@ -48,6 +49,7 @@ void runtime_event(struct runtime *r, uint32_t event)
         }
         if (r->screen == RUNTIME_PONG) {
             pong_event(&r->pong, event);
+            /* Remove our PAUSED overlay, which Pong's dirty rectangles do not track. */
             if (code == RV32_KEY_P) r->pong.needs_full_redraw = 1;
         }
         else tetris_event(&r->tetris, event);
@@ -98,7 +100,7 @@ void runtime_draw(struct runtime *r, const struct gfx_surface *s)
         gfx_draw_text(s, 70, r->selected ? 130 : 90, ">", 3, 0xfc);
         gfx_draw_text(s, 36, 190, "UP DOWN SELECT ENTER PLAY", 2, 0xff);
         gfx_draw_text(s, 36, 213, "Q QUIT", 2, 0x92);
-        gfx_draw_text(s, 36, 170, r->selected ? "ARROWS MOVE SPACE DROP" : "W S AND UP DOWN MOVE SPACE SERVE", 1, 0x92);
+        gfx_draw_text(s, 36, 170, r->selected ? "LEFT RIGHT MOVE UP ROTATE SPACE DROP" : "W S AND UP DOWN MOVE SPACE SERVE", 1, 0x92);
     }
     r->dirty = 0;
 }

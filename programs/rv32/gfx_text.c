@@ -1,7 +1,8 @@
 /* Text extensions for M7; the standalone M6 drawing object is preserved. */
 #include "gfx.h"
 
-/* Original letter drawings: bit 2 is the left pixel; five rows per glyph. */
+/* Original letter drawings: bit 2 is the left pixel; five rows per glyph.
+ * Text supports A-Z, 0-9, >, - and :. Other characters advance one blank cell. */
 static const uint8_t LETTERS[26][5] = {
     {2,5,7,5,5}, {6,5,6,5,6}, {3,4,4,4,3}, {6,5,5,5,6}, /* ABCD */
     {7,4,6,4,7}, {7,4,6,4,4}, {3,4,5,5,3}, {5,5,7,5,5}, /* EFGH */

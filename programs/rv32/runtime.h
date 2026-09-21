@@ -8,7 +8,7 @@ struct runtime {
     struct pong pong;
     struct tetris tetris;
     uint32_t screen, selected, quit, blocked, transition, dirty, over_frames, frames;
-    uint32_t history; /* finished game checksums, retained across restart/menu */
+    uint32_t history; /* checksums folded on screen changes (0 from menu) and R presses */
 };
 void runtime_init(struct runtime *r);
 void runtime_event(struct runtime *r, uint32_t event);

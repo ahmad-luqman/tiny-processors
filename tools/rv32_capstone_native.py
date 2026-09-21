@@ -9,7 +9,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tools.rv32_pong_native import make_surface, run_script  # noqa: E402
+from tools.rv32_pong_native import Surface, make_surface, run_script  # noqa: E402
 from tools.rv32_devices import parse_input_script  # noqa: E402
 
 INPUT = ROOT / "programs/rv32/capstone.input"
@@ -30,7 +30,7 @@ def build(optimization="O2"):
         ("runtime_init", None, [ctypes.c_void_p]),
         ("runtime_event", None, [ctypes.c_void_p, ctypes.c_uint32]),
         ("runtime_frame", None, [ctypes.c_void_p, ctypes.c_uint32]),
-        ("runtime_draw", None, [ctypes.c_void_p, ctypes.c_void_p]),
+        ("runtime_draw", None, [ctypes.c_void_p, ctypes.POINTER(Surface)]),
         *((name, ctypes.c_uint32, [ctypes.c_void_p]) for name in
           ("runtime_checksum", "native_quit", "native_screen", "native_tetris_score", "native_tetris_lines")),
     ):
@@ -64,9 +64,14 @@ def main():
     parser.add_argument("--input", type=Path, default=INPUT)
     parser.add_argument("--write", action="store_true")
     args = parser.parse_args()
-    checkpoints, checksum, frames = run_session(build(), parse_input_script(args.input.read_text()))
+    try:
+        events = parse_input_script(args.input.read_text())
+        checkpoints, checksum, frames = run_session(build(), events)
+    except (OSError, ValueError) as error:
+        sys.exit(f"{args.input}: {error}")
     if args.write:
         EXPECTED.write_text("\n".join(checkpoints) + "\n")
+        print(f"wrote {len(checkpoints)} checkpoint(s) to {EXPECTED.relative_to(ROOT)}")
     print(f"{frames} frames, PASS {checksum:08x}")
 
 

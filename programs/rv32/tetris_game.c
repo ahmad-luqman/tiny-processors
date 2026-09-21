@@ -128,6 +128,7 @@ static void lock_piece(struct tetris *t)
         for (uint32_t x = 0; x < TETRIS_W; x++) t->board[dest][x] = 0;
         dest--;
     }
+    /* No full row survives a lock; the new piece spans at most four rows, so cleared <= 4. */
     static const uint32_t points[5] = {0, 100, 300, 500, 800};
     t->score = add_saturated(t->score, points[cleared]);
     t->lines = add_saturated(t->lines, cleared);

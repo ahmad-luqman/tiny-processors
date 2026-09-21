@@ -1126,7 +1126,7 @@ class RunnerTest(unittest.TestCase):
             self.assertIn("--max-cycles", result.stderr)
         result = self.run_results(self.emulator, "--max-cycles", "1")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("halt=limit cycles=1", result.stdout + result.stderr)
+        self.assertRegex(result.stdout + result.stderr, r"halt=limit cycles=1\b")
         result = self.run_results(self.emulator, "--max-cycles", "10000")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

@@ -392,7 +392,7 @@ clean:
 
 # M7: one image, the same script/checkpoints on the native model and both machines.
 RV32_CAPSTONE_HEX := ea60197e
-RV32_CAPSTONE_ARGS := --image build/rv32/capstone.bin --input programs/rv32/capstone.input --expect-last-line "PASS $(RV32_CAPSTONE_HEX)" --expect-checkpoints programs/rv32/capstone.expected --timeout 300 --max-cycles 20000000
+RV32_CAPSTONE_ARGS := --image build/rv32/capstone.bin --input programs/rv32/capstone.input --expect-last-line "PASS $(RV32_CAPSTONE_HEX)" --expect-checkpoints programs/rv32/capstone.expected --timeout 300
 .PHONY: test-rv32-capstone run-rv32-capstone run-rv32-capstone-emu run-rv32-capstone-rtl run-rv32-capstone-rtl-verilator frames-rv32-capstone disasm-rv32-capstone
 
 test-rv32-capstone:
@@ -406,10 +406,10 @@ run-rv32-capstone-emu: check-rv32-image $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_CAPSTONE_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32/emu
 
 run-rv32-capstone-rtl: check-rv32-image $(RV32_TB_VVP) $(RV32EMU)
-	$(PYTHON) -m tools.rv32_rtl $(RV32_CAPSTONE_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
+	$(PYTHON) -m tools.rv32_rtl $(RV32_CAPSTONE_ARGS) --max-cycles 20000000 --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
 
 run-rv32-capstone-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR) $(RV32EMU)
-	$(PYTHON) -m tools.rv32_rtl $(RV32_CAPSTONE_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/rtl-verilator
+	$(PYTHON) -m tools.rv32_rtl $(RV32_CAPSTONE_ARGS) --max-cycles 20000000 --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/rtl-verilator
 
 frames-rv32-capstone: check-rv32-image $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_CAPSTONE_ARGS) --backend emulator --frames build/rv32/capstone-frames --emulator $(RV32EMU) --out build/rv32/emu
@@ -418,3 +418,10 @@ disasm-rv32-capstone: firmware-rv32
 	cat build/rv32/capstone.lst
 
 test-rv32: test-rv32-capstone run-rv32-capstone-emu run-rv32-capstone-rtl run-rv32-capstone-rtl-verilator
+
+# Compile the same directed C checks as a standalone sanitized executable.
+.PHONY: test-rv32-capstone-sanitize
+test-rv32-capstone-sanitize: | build/rv32
+	mkdir -p build/rv32/host
+	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fno-builtin -fsanitize=address,undefined -fno-omit-frame-pointer -DRV32_NATIVE_MAIN -Iprograms/rv32 tests/rv32_capstone_native.c programs/rv32/runtime.c programs/rv32/tetris_game.c programs/rv32/pong_game.c programs/rv32/gfx.c programs/rv32/gfx_text.c -o build/rv32/host/capstone-sanitize
+	build/rv32/host/capstone-sanitize
