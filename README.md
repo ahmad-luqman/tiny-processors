@@ -1,6 +1,23 @@
 # Tiny Processors
 
-Learning Verilog by building small CPUs, parallel compute hardware, and an end-to-end computer. The next direction is our own RV32I CPU and native Mac emulator running C, a small OS/runtime, Pong, and Tetris; FP32 hardware and CPU F-extension integration follow Tetris, before programmable 3D; GPU/NPU integration also follows the playable machine. See [the roadmap](PLAN.md) and the [detailed full-stack plan](docs/planning/roadmap.md).
+Learning Verilog by building small CPUs, parallel compute hardware, and an end-to-end computer. Our RV32I CPU and native Mac emulator run C, a small OS/runtime, Pong, and Tetris; FP32 hardware and CPU F-extension integration follow Tetris, before programmable 3D; GPU/NPU integration also follows the playable machine. See [the roadmap](PLAN.md) and the [detailed full-stack plan](docs/planning/roadmap.md).
+
+## Play the complete computer (M7)
+
+```sh
+make run-rv32-capstone
+```
+
+This builds one firmware image and boots the menu in the native window.
+UP/DOWN selects, ENTER launches, ESCAPE returns, and Q quits. Pong uses W/S
+and UP/DOWN with SPACE to serve. Tetris uses LEFT/RIGHT to move, UP to rotate,
+DOWN to soft-drop, and SPACE to hard-drop. Both support P to pause and R to
+restart. The session is recorded under `build/rv32/`.
+
+See [the runtime and Tetris record](docs/rv32-runtime.md) for the rules,
+prerequisites, deterministic replay commands, reset-to-menu walkthrough, and
+acceptance evidence. `make test-rv32` includes the capstone; `make test` still
+runs the original counter. Standalone `make run-rv32-pong` is preserved.
 
 ## Start here
 

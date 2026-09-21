@@ -122,13 +122,13 @@ class Pong:
         self.lib.pong_set_ball(self.state, x, y, vx, vy)
 
 
-def run_script(lib, events, max_frames=100000, trace=None):
-    """Run the guest loop of pong.c on `events` ([(frame, word)] from parse_input_script) and return
+def run_script(lib, events, max_frames=100000, trace=None, game_factory=Pong):
+    """Run the shared guest loop of pong.c/capstone.c on `events` ([(frame, word)] from parse_input_script) and return
     (checkpoint lines, checksum, frames). The input device is modelled as the backends do: an event
     arrives when its frame is presented (frame 0 before the first iteration), KEYS follows arrivals,
     and a queue of more than 16 events is an error here rather than a drop, because a script that
     overflows the queue cannot be replayed exactly. Stops with ValueError if nothing quits."""
-    game = Pong(lib)
+    game = game_factory(lib)
     queue, keys, checkpoints = [], 0, []
     pending = list(events)  # parse_input_script keeps frames non-decreasing
     next_event = 0

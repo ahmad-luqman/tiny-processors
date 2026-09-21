@@ -77,7 +77,7 @@ Each row is a bounded milestone, potentially split into several verified commits
 | M4 — completed 2026-09-21 ([record](../rv32-rtl.md), [gates](../rv32-to-gates.md)) | Broader RV32I execution: complete planned instruction coverage, byte/halfword/word behavior, jumps, signedness, alignment, and fault semantics. Run freestanding C with stack, globals, calls, and required helpers. Differential tests, both RTL simulators where practical, lint, synthesis, and directed waves pass. Publish a coverage/limitations table. | Predict sign extension, discarded x0 writes, and stalled stores. Relate instruction count to clock count. | 3–6 |
 | M5 — completed 2026-09-21 ([record](../rv32-soc.md), [contract](../rv32.md#behavior-fixed-in-m5)) | Matched RAM/device models and RTL peripherals for timer, input, debug output, framebuffer, and faults. One diagnostic firmware image exercises them on both backends; scripted results and framebuffer checks agree under the documented time contract. | Decode an MMIO address into a peripheral select. Show why a framebuffer store is ordinary data movement until something displays it. | 2–4 |
 | M6 — completed 2026-09-21 ([record](../rv32-window.md), [contract](../rv32.md#behavior-fixed-in-m6)) | Native Mac frontend, software drawing routines, and Pong. Test collision/scoring separately, replay input deterministically, and play manually. Verify a bounded RTL replay reaches expected guest state and image checkpoints. | Follow a key event to a guest register read, paddle update, and pixel store; inspect timer wrap handling. | 2–4 |
-| M7 — M6 | Boot menu, reusable runtime services, and Tetris. Test rotations/collisions, line clearing, scoring, game over/restart, and repeatable random seeds. A documented command builds and launches the capstone; both games work from the menu. Preserve a short RTL acceptance replay. | Trace reset-to-menu-to-game. Explain which services qualify as our first OS/runtime and which OS features remain absent. | 2–4 |
+| M7 — completed 2026-09-21 ([record](../rv32-runtime.md)) | Boot menu, reusable runtime services, and Tetris. Test rotations/collisions, line clearing, scoring, game over/restart, and repeatable random seeds. A documented command builds and launches the capstone; both games work from the menu. Preserve a short RTL acceptance replay. | Trace reset-to-menu-to-game. Explain which services qualify as our first OS/runtime and which OS features remain absent. | 2–4 |
 | F1 — M7 | Standalone FP32 arithmetic unit, built in increments: add/subtract, multiply, fused multiply-add, divide/square root, and conversion/comparison support needed by F. Compare exact result bits and exception flags with an independent reference across rounding modes, ordinary/edge values, and seeded vectors. Check handshake/reset behavior, lint, synthesis, and short waves. | Trace exponent alignment, significand arithmetic, normalization, and rounding; explain why fused multiply-add has one final rounding. | 5–10 |
 | F2 — F1/M4 | Integrate the complete F instruction/state contract into CPU and emulator: floating registers, loads/stores, arithmetic, moves/classification/sign operations, comparisons/conversions, and floating-point CSRs with required Zicsr support. Compare retirement effects and run compiled C float programs. Publish instruction/rounding/exception coverage and preserve integer-only firmware regressions. | Follow C float operands through ABI, registers, FPU request/completion, result writeback, and accrued flags. | 2–4 |
 | A1 — M7 | Resume parallel arithmetic: defined multiply/accumulate widths and a small matrix kernel, building on SIMD4 where appropriate. Compare extreme and ordinary cases against a software model; report transfers, cycles, and stalls. | Work one dot product by hand; predict overflow and the effect of serialized memory. | 2–4 |
@@ -103,16 +103,25 @@ Select and verify the compiler ISA/ABI flags at F2. Either preserve the integer 
 
 GPU FP32/other formats and NPU integer/other formats remain independent choices. The CPU FPU may help with reference computations or scene setup, but does not automatically create floating-point GPU lanes or change the digit model's quantization contract.
 
-## Next implementation session: M7
+## Next implementation session: F1
 
-M6 completed on 2026-09-21; its record is [docs/rv32-window.md](../rv32-window.md) (the decisions, the emulator as a core library, the SDL3 window and its recording, the drawing routines, Pong's rules and dirty rectangles, a key press followed to a pixel store, measured cycles, exercises) and the contract's [Behavior fixed in M6](../rv32.md#behavior-fixed-in-m6) (host keys arrive at presents, a recording is a script, time enters only through pacing, `halt=stopped`, RGB332 kept). The machine now has a window to play in: `make run-rv32-pong` runs Pong at 60 frames a second and records the session; the 200-frame scripted session replays to the same checkpoints on the native build, the emulator, Icarus (about 2 M cycles, 22 s), and Verilator (2 s), trace for trace. The guest has `gfx` (clear, clipped rectangles, 3×5 digits) and a game loop contract (pop events, step, draw, present) that M7's runtime can generalise.
+M7 completed on 2026-09-21. The [runtime record](../rv32-runtime.md) fixes the
+Tetris rules and controls, explains reset-to-menu-to-game and input-to-pixel,
+and records acceptance. `make run-rv32-capstone` builds one image and launches
+both games from the menu. Both games were played by the user. The 68-frame
+acceptance replay matches the native build, emulator, Icarus and stalled
+Verilator: `PASS ea60197e`, 2,220,509 identical retired instructions. Standalone
+Pong and all previous lab commands are preserved.
 
-1. Inspect Git status and preserve every existing command, including the M6 targets. Start a branch and end with one pull request.
-2. Specify Tetris (the deferred choice below): the field, the seven pieces and their rotations, the collision and locking rules, line clearing, scoring, the fall speed, game over and restart, and the random sequence (a seeded generator in the guest, never the timer, so a replay is exact). Write the rules as a table before the C.
-3. Build the runtime services both games share out of M6's pieces: a frame loop that pops events and reads KEYS, `gfx` drawing, a font for the menu's words (extend the 3×5 glyphs or add a small letter set with recorded provenance), and a static memory layout with a documented stack; add a bounded allocator only if a game needs one.
-4. Write the boot menu (reset to menu, a key launches a game, ESCAPE or a game over returns to it) and Tetris in freestanding C, tested natively like `test_rv32_pong.py`: rotations against every wall, collisions, single and multiple line clears, scoring, game over, restart, and the seeded sequence.
-5. One firmware image holds the menu and both games; one documented command builds it and launches the window. Script a session that boots to the menu, plays some of each game, and quits; pin its checkpoints and replay it on the emulator and, bounded, on the RTL; play both games by hand.
-6. Lint, synthesize only if the RTL changed, update this roadmap, and stop before F1.
+1. Inspect Git status, preserve commands, start a branch, and end with one PR.
+2. Fix the standalone FP32 request/result/flags interface, supported rounding
+   modes, reset/handshake behavior, and independent exact reference before RTL.
+3. Implement in verified increments: add/subtract, multiply, fused
+   multiply-add, divide/square root, then conversion/comparison support for F.
+4. Check exact result bits and flags on directed edges and seeded vectors;
+   verify stalls and reset. Retain failing seeds and minimize disagreements.
+5. Lint, synthesize, inspect short waves, explain alignment/normalization/
+   rounding and storage costs, update the roadmap, and stop before F2.
 
 ## Verification and learning discipline
 
@@ -133,7 +142,7 @@ Complete milestones autonomously, then explain what changed, why it works, how i
 | RTL core microarchitecture and excluded-encoding behavior | Decided in M3 and M4: five-state multicycle controller, one port with byte strobes in both directions, full RV32I plus the four CSRs and `mret`, traps vector through `mtvec`, a double fault halts as in the emulator, every other encoding is illegal | 4 or 5 cycles per instruction plus stalls; 8,175 cells, 1,457 flip-flops; the self-check takes 138,495 cycles for 32,610 instructions |
 | Display format/resolution | Decided in M5: 320×240, one 8-bit pixel per byte, RGB332 fixed mapping, a framebuffer window at 0x3000_0000, presents as checkpoints; a palette window reserved at 0x2000_3000 | Measured: a full fill plus readback costs about 240 k instructions on the emulator and 1.7 M RTL cycles for the whole diagnostic |
 | Native window and input library, host-time timer mode | Decided in M6: SDL 3.4.16 (zlib) from Homebrew, integer scaling, presents paced to `--fps`; no host-time timer mode, the timer counts instructions in every mode; RGB332 kept and the palette window left reserved | A recorded session replays identically on every backend; Pong's 200-frame session is trace-identical on the RTL |
-| Exact Tetris rules and controls | M7 specification | Small consistent ruleset, tested rotations, restart; no online services |
+| Exact Tetris rules and controls | Decided in M7: [runtime contract](../rv32-runtime.md) | 10×20, seven-bag seed 1, clockwise rotations without kicks, 30-frame gravity, soft/hard drop, pause/restart, menu return |
 | FPU microarchitecture and independent reference | F1, before arithmetic RTL | Multicycle FP32 with exact result/flag comparisons; split implementation into verified operations |
 | Floating-point compiler flags, ABI, and CSR contract | F2, before linking float firmware | Explicit compatible objects/libraries; retain integer firmware regression |
 | Matrix/NPU precision, saturation, rounding, accumulator width | A1/N1 before arithmetic RTL | Integer arithmetic with explicit bounds and independently checked conversion |

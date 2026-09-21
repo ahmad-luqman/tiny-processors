@@ -329,6 +329,7 @@ def main():
     parser.add_argument("--simulator", help=f".vvp file or Verilator binary (default {DEFAULT_SIMULATOR}; unused with --backend emulator)")
     parser.add_argument("--out", default=DEFAULT_OUT, help="directory for the image, traces, and VCD")
     parser.add_argument("--timeout", type=float, default=120.0, help="seconds each backend may run (default 120)")
+    parser.add_argument("--max-cycles", type=int, help="RTL cycle budget (default: testbench budget of 10000000)")
     parser.add_argument("--stall", type=int, default=None, help="fixed stall cycles per request")
     parser.add_argument("--seed", type=int, default=None, help="random 0..3 stall cycles per request")
     args = parser.parse_args()
@@ -336,6 +337,8 @@ def main():
         parser.error("--stall must not be negative")
     if args.stall is not None and args.seed is not None:
         parser.error("--stall and --seed are exclusive")
+    if args.max_cycles is not None and not 1 <= args.max_cycles <= 2147483647:
+        parser.error("--max-cycles must be in 1..2147483647")
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
     if args.simulator is None and args.backend == "both":
@@ -397,7 +400,7 @@ def main():
         seed = BENCH_SEED if args.seed is None else args.seed
         for stall, seed in [(0, None), (1, None), (2, None), (3, None), (None, seed)]:
             rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=seed,
-                          timeout=args.timeout, checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input,
+                          timeout=args.timeout, max_cycles=args.max_cycles, checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input,
                           allow_lost_events=args.allow_lost_events)
             check_passed(rtl)
             mismatch = compare_backends(rtl, emulator, args.compare)  # the same agreement as a check run
@@ -421,7 +424,7 @@ def main():
         stall = 0
     wave = out / f"{name}.vcd" if args.mode == "waves" else None
     rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=args.seed, wave=wave,
-                  timeout=args.timeout, checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input,
+                  timeout=args.timeout, max_cycles=args.max_cycles, checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input,
                   allow_lost_events=args.allow_lost_events)
     print(emulator.stderr.strip().splitlines()[-1])
     print(rtl.stderr.strip().splitlines()[-1] if rtl.stderr.strip() else "rv32_tb: no halt line")

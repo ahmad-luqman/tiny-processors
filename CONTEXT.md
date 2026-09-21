@@ -9,7 +9,7 @@ Our own educational computer spanning hardware, system software, and a playable 
 _Avoid_: reproduction of the Hack/Jack course platform, completed advanced SoC.
 
 **First OS/runtime**:
-The system software for the first playable computer: boot and menu behavior plus display, input, timing, and memory services used by the game.
+The M7 system software for the first playable computer: boot and menu behavior plus polling input, frame timing, shared drawing, and static memory services used by Pong and Tetris. See [the runtime record](docs/rv32-runtime.md).
 _Avoid_: Unix-like OS, multitasking OS, host operating system.
 
 **Guest machine**:

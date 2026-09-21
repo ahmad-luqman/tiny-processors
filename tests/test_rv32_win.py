@@ -78,6 +78,30 @@ class WindowTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(replayed.read_text(), checkpoints.read_text())
 
+    def test_capstone_session_records_and_replays(self):
+        """The combined menu/game firmware uses the real frontend/core boundary."""
+        image = ROOT / "build/rv32/capstone.bin"
+        if not image.exists():
+            self.skipTest("build/rv32/capstone.bin is not built (make check-rv32-image)")
+        script = ROOT / "programs/rv32/capstone.input"
+        expected = ROOT / "programs/rv32/capstone.expected"
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoints = Path(directory) / "window.checkpoints"
+            record = Path(directory) / "window.input"
+            status, stdout, stderr = self.run_window(
+                "--image", str(image), "--input", str(script),
+                "--checkpoints", str(checkpoints), "--record", str(record))
+            self.assertEqual(status, 0, stderr)
+            self.assertEqual(checkpoints.read_text(), expected.read_text())
+            self.assertEqual(parse_input_script(record.read_text()), parse_input_script(script.read_text()))
+            replayed = Path(directory) / "replayed.checkpoints"
+            completed = subprocess.run(
+                [str(self.emulator), "--image", str(image), "--input", str(record),
+                 "--checkpoints", str(replayed)], capture_output=True, text=True, timeout=60)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout, stdout)
+            self.assertEqual(replayed.read_text(), checkpoints.read_text())
+
     def test_record_starts_with_frame_zero_and_replays_a_present_only_guest(self):
         """The record file is opened before frame 0's events are delivered, so a script's frame-0
         lines are recorded; a bad script or an aliased output truncates nothing."""

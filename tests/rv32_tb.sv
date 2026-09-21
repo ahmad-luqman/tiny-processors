@@ -50,7 +50,7 @@ module rv32_tb;
     wire [69:0] request = {mem_fetch, mem_we, mem_strb, mem_addr, mem_wdata};
     reg [69:0] held_request;    // the request as it was on the first stalled edge
     integer cycles = 0, steps = 0, stalls = 0, transfers = 0;
-    integer max_cycles = 10000000; // +max-cycles=N; the diagnostic needs about two million
+    integer max_cycles = 10000000; // +max-cycles=N; the diagnostic needs ~2M, stalled M7 requests 20M
     integer reset_at = 0;       // +reset-at=N: assert reset again after counted cycle N
     reg reset_done = 0;         // that second reset happened
 

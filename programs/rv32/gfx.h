@@ -27,4 +27,9 @@ void gfx_draw_number(const struct gfx_surface *s, int32_t x, int32_t y, uint32_t
 /* The glyph's row `row` (0 is the top) as three bits, bit 2 the left column. */
 uint8_t gfx_glyph_row(uint32_t digit, uint32_t row);
 
+/* Original uppercase 3x5 font; digits reuse the M6 table; unsupported characters are blank. */
+uint8_t gfx_char_row(uint32_t character, uint32_t row);
+void gfx_draw_text(const struct gfx_surface *s, int32_t x, int32_t y, const char *text, uint32_t scale, uint8_t color);
+/* Full unsigned decimal range, using fixed decimal places rather than repeated subtraction of ten. */
+void gfx_draw_uint(const struct gfx_surface *s, int32_t x, int32_t y, uint32_t value, uint32_t scale, uint8_t color);
 #endif
