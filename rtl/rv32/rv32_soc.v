@@ -10,7 +10,7 @@
 // through the input push port; the host decides what they mean.
 module rv32_soc #(
     parameter integer RAM_WORDS = 1048576,
-    parameter integer FB_WORDS = 19200, // 320 x 240 bytes
+    parameter integer FB_WORDS = 19200, // 320 x 240 one-byte pixels, as 32-bit words
     parameter integer CONSOLE_BUSY = 0
 ) (
     input  wire        clk,
@@ -92,7 +92,9 @@ module rv32_soc #(
         .fb_valid(fb_valid), .fb_ready(fb_ready), .fb_error(fb_error), .fb_rdata(fb_rdata)
     );
 
-    rv32_ram #(.WORDS(RAM_WORDS)) ram (
+    // The memories index from their window's base, which is the bus's business: the two
+    // BASE values below repeat rv32_bus.v's RAM_BASE and FB_BASE, and a test pins them equal.
+    rv32_ram #(.WORDS(RAM_WORDS), .BASE(32'h8000_0000)) ram (
         .clk(clk), .reset(reset), .valid(ram_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
         .wdata(mem_wdata), .rdata(ram_rdata), .ready(ram_ready), .error(ram_error)
     );
@@ -127,7 +129,7 @@ module rv32_soc #(
     );
 
     // The pixels: ordinary memory behind its own window (docs/rv32.md, "framebuffer").
-    rv32_ram #(.WORDS(FB_WORDS)) fb (
+    rv32_ram #(.WORDS(FB_WORDS), .BASE(32'h3000_0000)) fb (
         .clk(clk), .reset(reset), .valid(fb_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
         .wdata(mem_wdata), .rdata(fb_rdata), .ready(fb_ready), .error(fb_error)
     );

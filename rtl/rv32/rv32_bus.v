@@ -13,8 +13,9 @@
 // a device window is refused like an unmapped address. An address that
 // selects nothing is answered at once with `ready` and `error`.
 //
-// Adding a slave means one select, one `_valid`, and one term in each of the
-// three OR-reductions below.
+// Adding a slave means one select, one `_valid`, one term in `none_sel`, and
+// one term in each of the three OR-reductions below. Forgetting `none_sel`
+// makes the new window answer as unmapped (`error`) and as its slave at once.
 module rv32_bus #(
     parameter integer RAM_WORDS = 1048576,
     parameter integer FB_WORDS = 19200
@@ -80,8 +81,9 @@ module rv32_bus #(
 
     // One comparator per window; the windows are disjoint so at most one is set. A memory
     // window tests only the access's first byte: that equals the emulator's whole-access test
-    // because accesses are naturally aligned (misalignment traps before decode) and every
-    // window size is a multiple of four; keep it so for any window added later.
+    // because accesses are naturally aligned (misalignment traps before decode), every window
+    // base is word aligned, and every window size is a multiple of four; keep it so for any
+    // window added later.
     wire ram_sel = (mem_addr >= RAM_BASE) && (ram_offset < RAM_BYTES);
     wire console_sel = !mem_fetch && (mem_addr[31:3] == CONSOLE_BASE[31:3]);
     wire done_sel = !mem_fetch && (mem_addr == DONE_ADDR);
@@ -112,5 +114,7 @@ module rv32_bus #(
                        ({32{input_sel}} & input_rdata) | ({32{display_sel}} & display_rdata) |
                        ({32{fb_sel}} & fb_rdata);
 
+    // `mem_we` is routed to the slaves by the machine, not decoded here: a write to a
+    // read-only register is the slave's refusal, so the decoder stays direction-blind.
     wire unused_ok = &{1'b0, mem_we};
 endmodule

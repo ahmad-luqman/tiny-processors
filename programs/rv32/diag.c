@@ -11,8 +11,10 @@
  * with `PASS <8 hex digits>` or `FAIL <n>`; the runner compares the whole
  * transcript and the checkpoints between backends.
  *
- * DIAG_EXPECTED and the frame-1 hash are recomputed independently by
- * tests/test_rv32_tools.py from the pattern drawn below.
+ * DIAG_EXPECTED and the frame-1 hash are derived independently in
+ * tools/rv32_devices.py from the pattern drawn below and the list of expected
+ * values; tests/test_rv32_tools.py requires that derivation, this file, and
+ * the Makefile to agree.
  */
 #include <stdint.h>
 
@@ -20,12 +22,13 @@
 #include "console.h"
 #include "mmio.h"
 
-#define DIAG_EXPECTED 0x8bd87e9au /* FNV-1a fold of the 27 checked values; also the Makefile's RV32_DIAG_HEX */
+#define DIAG_EXPECTED 0x8bd87e9au /* FNV-1a fold of 27 values: the 22 CHECKs, the frame-1 hash, four events; the Makefile's RV32_DIAG_HEX */
 #define DIAG_UNMAPPED 0x50000000u /* no window there (tools/rv32_asm.py UNMAPPED) */
 #define FB_WORDS (RV32_FB_SIZE / 4u)
 
 static uint32_t checksum = 2166136261u;
 
+/* An optimisation barrier: the timer wait loop below counts with it so the compiler keeps the loop. */
 static uint32_t opaque(uint32_t x)
 {
     __asm__ volatile("" : "+r"(x));
@@ -103,7 +106,9 @@ static void draw_frame_one(void)
         for (uint32_t x = 0; x < RV32_DISPLAY_COLUMNS; x += 4) {
             uint32_t v = (x ^ y) & 0xFFu;
             uint32_t word = v | (v << 8) | (v << 16) | (v << 24);
-            mmio_write32(row + x, word ^ 0x03020100u); /* lanes 1..3 are x+1..x+3 */
+            /* x is a multiple of 4, so (x + i) == (x ^ i) for i < 4: xoring lane i with i makes
+             * it ((x + i) ^ y) & 0xFF, the pixel at x + i, in one word store. */
+            mmio_write32(row + x, word ^ 0x03020100u);
         }
         row += RV32_DISPLAY_COLUMNS;
     }

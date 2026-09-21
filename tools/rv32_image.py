@@ -95,11 +95,14 @@ def check_listing(text, allow_privileged=False):
     """Return problems found in an objdump disassembly listing; `allow_privileged` admits the CSR
     instructions and mret that a trap handler needs (docs/rv32.md, "Behavior fixed in M2")."""
     problems = []
+    instructions = 0
     for number, line in enumerate(text.splitlines(), 1):
         if "<unknown>" in line:
             problems.append(f"listing line {number}: undecodable instruction: {line.strip()}")
+            instructions += 1
             continue
         match = LISTING_LINE.match(line)
+        instructions += bool(match)
         if match and FORBIDDEN_MNEMONIC.match(match.group(3)):
             if allow_privileged and PRIVILEGED_MNEMONIC.match(match.group(3)):
                 if match.group(3) == "mret" or TRAP_CSR.search(line):
@@ -107,6 +110,10 @@ def check_listing(text, allow_privileged=False):
                 problems.append(f"listing line {number}: CSR other than the four trap CSRs: {line.strip()}")
                 continue
             problems.append(f"listing line {number}: instruction outside the M1 contract: {line.strip()}")
+    # A listing with nothing to check passes every rule vacuously: a failed objdump that left an
+    # empty file would otherwise hollow out the whole check.
+    if instructions == 0:
+        problems.append("listing has no instruction lines")
     return problems
 
 

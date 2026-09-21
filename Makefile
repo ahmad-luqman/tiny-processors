@@ -1,4 +1,7 @@
 .DEFAULT_GOAL := test
+# A recipe that fails leaves no half-written target behind: an empty listing or hex file that is
+# newer than its source would otherwise be "up to date" and pass the image checks vacuously.
+.DELETE_ON_ERROR:
 PYTHON ?= python3
 
 RTL := labs/01-counter/counter.v
@@ -36,7 +39,7 @@ RV32_DIAG_HEX := 8bd87e9a
 RV32_DIAG_FRAME1_HEX := ae4eb605
 RV32_DIAG_FRAME2_HEX := 2acb5d85
 RV32_DIAG_INPUT := programs/rv32/diag.input
-RV32_DIAG_ARGS := --image build/rv32/diag.bin --input $(RV32_DIAG_INPUT) --compare results --expect-last-line "PASS $(RV32_DIAG_HEX)" --expect-checkpoint "frame 1 $(RV32_DIAG_FRAME1_HEX)" --expect-checkpoint "frame 2 $(RV32_DIAG_FRAME2_HEX)" --out build/rv32/rtl
+RV32_DIAG_ARGS := --image build/rv32/diag.bin --input $(RV32_DIAG_INPUT) --compare results --expect-last-line "PASS $(RV32_DIAG_HEX)" --expect-checkpoint "frame 1 $(RV32_DIAG_FRAME1_HEX)" --expect-checkpoint "frame 2 $(RV32_DIAG_FRAME2_HEX)"
 RV32EMU := build/rv32/rv32emu
 RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
 RV32_RTL := rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32.v
@@ -238,7 +241,8 @@ $(RV32EMU): tools/rv32emu.c | build/rv32
 
 build-rv32-emu: toolchain-rv32-emu $(RV32EMU)
 
-test-rv32-emu:
+# The image is a prerequisite so the diagnostic test runs rather than skips.
+test-rv32-emu: check-rv32-image
 	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_emu.py' -v
 
 run-rv32-emu: check-rv32-image $(RV32EMU)
@@ -288,22 +292,24 @@ waves-rv32: $(RV32_TB_VVP) $(RV32EMU)
 run-rv32-rtl: check-rv32-image $(RV32_TB_VVP) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl --image build/rv32/selfcheck.bin --expect-console "PASS $(RV32_SELFCHECK_HEX)" --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
 
+# Each runner target has its own output directory, so `make -j` cannot interleave two runs' traces.
 run-rv32-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR) $(RV32EMU)
-	$(PYTHON) -m tools.rv32_rtl --image build/rv32/selfcheck.bin --expect-console "PASS $(RV32_SELFCHECK_HEX)" --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --out build/rv32/rtl --stall 1
+	$(PYTHON) -m tools.rv32_rtl --image build/rv32/selfcheck.bin --expect-console "PASS $(RV32_SELFCHECK_HEX)" --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --out build/rv32/rtl-verilator --stall 1
 
 bench-rv32-rtl: $(RV32_TB_VVP) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl --mode bench --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
 
 # The device diagnostic reads the timer, so the two backends are compared at the results level
-# (console, outcome, checkpoints), not trace for trace (docs/rv32.md, "Device time").
+# (console, outcome, checkpoints, and the trap records in order), not trace for trace
+# (docs/rv32.md, "Device time").
 run-rv32-diag-emu: check-rv32-image $(RV32EMU)
-	$(PYTHON) -m tools.rv32_rtl $(RV32_DIAG_ARGS) --backend emulator --frames build/rv32/frames --emulator $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_DIAG_ARGS) --backend emulator --frames build/rv32/frames --emulator $(RV32EMU) --out build/rv32/emu
 
 run-rv32-diag-rtl: check-rv32-image $(RV32_TB_VVP) $(RV32EMU)
-	$(PYTHON) -m tools.rv32_rtl $(RV32_DIAG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_DIAG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
 
 run-rv32-diag-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR) $(RV32EMU)
-	$(PYTHON) -m tools.rv32_rtl $(RV32_DIAG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1
+	$(PYTHON) -m tools.rv32_rtl $(RV32_DIAG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/rtl-verilator
 
 test-rv32: test-rv32-tools test-rv32-rt run-rv32-qemu test-rv32-emu run-rv32-emu diff-rv32-qemu run-rv32-diag-emu test-rv32-rtl test-rv32-rtl-verilator run-rv32-rtl run-rv32-rtl-verilator run-rv32-diag-rtl run-rv32-diag-rtl-verilator lint-rv32 lint-rv32-soc synth-rv32 synth-rv32-soc
 

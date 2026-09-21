@@ -2,13 +2,16 @@
 
 // Word-organised memory behind the bus: an asynchronous read of the whole
 // aligned word (a continuous assign, so the array never enters a sensitivity
-// list) and a strobe-masked write at the accepting edge. The bus guarantees
-// that `addr` lies inside this memory's window, so the index cannot overrun
-// even when WORDS is not a power of two (the framebuffer is 19,200 words).
-// Contents are unspecified at reset: the testbench zero-fills and loads the
-// image through the hierarchy, and synthesis sees no initial block.
+// list) and a strobe-masked write at the accepting edge. The word index is
+// the offset from BASE, the window's first address, so the memory does not
+// care where the bus placed it; the bus guarantees that `addr` lies inside
+// the window, so the index cannot overrun even when WORDS is not a power of
+// two (the framebuffer is 19,200 words). Contents are unspecified at reset:
+// the testbench zero-fills and loads the image through the hierarchy, and
+// synthesis sees no initial block.
 module rv32_ram #(
-    parameter integer WORDS = 1048576 // the contract's 4 MiB
+    parameter integer WORDS = 1048576,       // the contract's 4 MiB
+    parameter [31:0] BASE = 32'h8000_0000    // must equal the bus's window base for this instance
 ) (
     input  wire        clk,
     input  wire        reset,
@@ -24,7 +27,8 @@ module rv32_ram #(
     localparam integer INDEX_BITS = $clog2(WORDS);
 
     reg [31:0] mem [0:WORDS-1];
-    wire [INDEX_BITS-1:0] index = addr[INDEX_BITS+1:2];
+    wire [31:0] offset = addr - BASE;
+    wire [INDEX_BITS-1:0] index = offset[INDEX_BITS+1:2];
 
     assign rdata = mem[index];
     assign ready = valid; // answers in the same cycle; a slow memory is modelled by the bus hold
@@ -39,5 +43,5 @@ module rv32_ram #(
         end
     end
 
-    wire unused_ok = &{1'b0, reset, addr[31:INDEX_BITS+2], addr[1:0]};
+    wire unused_ok = &{1'b0, reset, offset[31:INDEX_BITS+2], offset[1:0]};
 endmodule
