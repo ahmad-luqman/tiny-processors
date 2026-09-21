@@ -34,22 +34,30 @@ WINDOW_SOURCES = (ROOT / "tools" / "rv32win.c", ROOT / "tools" / "rv32emu_core.c
 
 
 def sdl3_flags():
-    """(cflags, libs) from pkg-config for SDL3, or None when it is not installed."""
+    """(cflags, libs) from pkg-config for SDL3; RuntimeError says which of pkg-config or SDL3 is missing."""
     try:
         cflags = subprocess.run(["pkg-config", "--cflags", "sdl3"], capture_output=True, text=True, check=True).stdout
         libs = subprocess.run(["pkg-config", "--libs", "sdl3"], capture_output=True, text=True, check=True).stdout
-    except (OSError, subprocess.CalledProcessError):
-        return None
+    except FileNotFoundError:
+        raise RuntimeError("pkg-config is not installed (brew install pkg-config)") from None
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(f"pkg-config does not know sdl3 (brew install sdl3): {error.stderr.strip()}") from None
     return cflags.split(), libs.split()
+
+
+def sdl3_missing():
+    """Why the window cannot be built, or None when it can; the tests skip with this reason."""
+    try:
+        sdl3_flags()
+    except RuntimeError as error:
+        return str(error)
+    return None
 
 
 def build_window(output):
     """Compile the window (tools/rv32win.c and the core) into `output` as the Makefile does;
-    raises RuntimeError when SDL3 is missing."""
-    flags = sdl3_flags()
-    if flags is None:
-        raise RuntimeError("SDL3 is not installed (brew install sdl3)")
-    cflags, libs = flags
+    raises RuntimeError when pkg-config or SDL3 is missing."""
+    cflags, libs = sdl3_flags()
     compiler = os.environ.get("HOST_CC", "cc")
     subprocess.run([compiler, *EMULATOR_CFLAGS, *cflags, "-o", str(output), *map(str, WINDOW_SOURCES), *libs], check=True)
 

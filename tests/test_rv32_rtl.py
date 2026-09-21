@@ -552,7 +552,8 @@ class RtlTest(unittest.TestCase):
             self.skipTest("build/rv32/pong.bin is not built (make check-rv32-image)")
         expected = [line for line in PONG_EXPECTED.read_text().splitlines() if line and not line.startswith("#")]
         pinned = re.search(r"^RV32_PONG_HEX := ([0-9a-f]{8})$", (ROOT / "Makefile").read_text(), re.M).group(1)
-        words = [int.from_bytes(image.read_bytes()[i:i + 4], "little") for i in range(0, len(image.read_bytes()), 4)]
+        data = image.read_bytes()
+        words = [int.from_bytes(data[i:i + 4], "little") for i in range(0, len(data), 4)]
         emulator, rtl = self.run_both(words, stall=1, limit=10_000_000, max_cycles=20_000_000, checkpoints=True,
                                       input_script=PONG_INPUT.read_text())
         self.assertEqual(emulator.status, 0, emulator.stderr)
@@ -833,7 +834,7 @@ class RtlTest(unittest.TestCase):
         self.assertNotEqual(emulator.status, 0)
         self.assertNotEqual(rtl.status, 0)
         self.assertEqual((emulator.halt["outcome"], rtl.halt["outcome"]), ("pass", "pass"), "the halt lines were printed first")
-        self.assertIn("rv32emu: 1 scripted event(s) lost, run rejected", emulator.stderr)
+        self.assertIn("rv32emu: 1 input event(s) lost, run rejected", emulator.stderr)
         self.assertIn("1 scripted event(s) lost, run rejected", rtl.noise, "the testbench's $fatal names the loss")
         # A long script: five thousand frames, one event each, presented and popped in a loop. Neither
         # backend has a length limit (the testbench's arrays grow), and nothing is lost.
@@ -1091,7 +1092,7 @@ class RunnerTest(unittest.TestCase):
         script.write_text("frame 5 down A\n")
         result = self.run_results(self.emulator, "--input", str(script))
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("scripted event(s) lost, run rejected", result.stderr, "the backend's own rejection")
+        self.assertIn("event(s) lost, run rejected", result.stderr, "the backend's own rejection")
         result = self.run_results(self.emulator, "--input", str(script), "--allow-lost-events")
         self.assertEqual(result.returncode, 0, result.stderr)
         # A script that names one of the run's own files would be truncated before the backends start.
@@ -1143,18 +1144,34 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("--expect-checkpoints", result.stderr)
         self.assertIn("names a file this run writes", result.stderr)
         for bad in ("0", "-1", "x"):
-            result = self.run_results(self.emulator, "--timeout", bad)
-            self.assertNotEqual(result.returncode, 0)
+            with self.subTest(timeout=bad):
+                result = self.run_results(self.emulator, "--timeout", bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("--timeout", result.stderr)
         slow = self.wrapper("slow", "sleep 2")
         result = self.run_results(slow, "--timeout", "0.5")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("TimeoutExpired", result.stderr)
+        self.assertIn("did not finish within 0.5 s", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        # An empty or malformed expected file is refused, not compared vacuously.
+        expected.write_text("# nothing here\n\n")
+        result = self.run_results(self.emulator, "--expect-checkpoints", str(expected))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("has no `frame N <hash>` lines", result.stderr)
+        expected.write_text(f"{blank}\nframe 2 xyz\n")
+        result = self.run_results(self.emulator, "--expect-checkpoints", str(expected))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("line 2 is not `frame N <hash>`", result.stderr)
+        result = self.run_results(self.emulator, "--expect-checkpoints", str(Path(self.workdir.name)))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("is not a file", result.stderr)
         # Scripted input, no timer: the default trace mode, and the relation holds with the pushes.
         script = Path(self.workdir.name) / "burst.txt"
         script.write_text("".join(f"frame 0 down {code}\n" for code in range(16)))
         result = self.run_results(self.emulator, "--input", str(script), program="devices", compare="trace")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("traces identical", result.stdout)
+
 
 class HelperTest(unittest.TestCase):
     def test_diff_traces_reports_first_difference_with_context(self):

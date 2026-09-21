@@ -176,7 +176,7 @@ void pong_frame(struct pong *p, uint32_t keys)
 
 static int32_t pixels(int32_t fixed)
 {
-    return fixed >> PONG_FP; /* arithmetic shift; positions are never negative on screen */
+    return fixed >> PONG_FP; /* arithmetic shift: it floors, so a ball leaving the field rounds outward and fill_rect clips it */
 }
 
 static uint32_t overlaps(int32_t ax, int32_t ay, int32_t aw, int32_t ah, int32_t bx, int32_t by, int32_t bw, int32_t bh)

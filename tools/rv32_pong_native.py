@@ -24,7 +24,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tools.rv32_devices import EVENT_PRESS, FB_SIZE, KEYS, QUEUE_SIZE, frame_hash, parse_input_script  # noqa: E402
+from tools.rv32_devices import EVENT_PRESS, FB_SIZE, QUEUE_SIZE, frame_hash, parse_input_script  # noqa: E402
 
 SOURCES = (ROOT / "programs/rv32/gfx.c", ROOT / "programs/rv32/pong_game.c")
 HOST_DIR = ROOT / "build/rv32/host"
@@ -129,8 +129,10 @@ def run_script(lib, events, max_frames=100000, trace=None):
     overflows the queue cannot be replayed exactly. Stops with ValueError if nothing quits."""
     game = Pong(lib)
     queue, keys, checkpoints = [], 0, []
-    pending = sorted(events, key=lambda item: item[0])  # parse_input_script already keeps the order
+    pending = list(events)  # parse_input_script keeps frames non-decreasing
     next_event = 0
+    if len(game.buffer) != FB_SIZE:
+        raise ValueError(f"the surface is {len(game.buffer)} bytes, not a {FB_SIZE}-byte frame")
 
     def deliver(frame):
         nonlocal next_event, keys
@@ -169,7 +171,10 @@ def main():
     args = parser.parse_args()
     lib = build(args.O)
     trace = [] if args.trace else None
-    checkpoints, checksum, frames = run_script(lib, parse_input_script(args.input.read_text()), trace=trace)
+    try:
+        checkpoints, checksum, frames = run_script(lib, parse_input_script(args.input.read_text()), trace=trace)
+    except ValueError as error:
+        sys.exit(f"{args.input}: {error}")
     if trace is not None:
         for frame, phase, scores, ball, velocity, paddles in trace:
             print(f"frame {frame:4d} {phase:6s} {scores[0]}-{scores[1]} ball {ball} v {velocity} paddles {paddles}")

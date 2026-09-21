@@ -204,9 +204,8 @@ uint32_t emu_frame_hash(const uint8_t *pixels)
     return h;
 }
 
-/* Write the frame as a binary PPM with the fixed RGB332 mapping (bits 7:5
- * red, 4:2 green, 1:0 blue, each scaled to 0..255) so a frame can be looked
- * at without the window. */
+/* The fixed RGB332 mapping (bits 7:5 red, 4:2 green, 1:0 blue, each scaled
+ * to 0..255), shared by the PPM writer and the window's table. */
 void emu_rgb332(uint8_t pixel, uint8_t rgb[3])
 {
     rgb[0] = (uint8_t)(((pixel >> 5) & 7u) * 255u / 7u);
@@ -214,6 +213,7 @@ void emu_rgb332(uint8_t pixel, uint8_t rgb[3])
     rgb[2] = (uint8_t)((pixel & 3u) * 255u / 3u);
 }
 
+/* Write the frame as a binary PPM so it can be looked at without the window. */
 static bool write_ppm(const machine *m, const char *path)
 {
     FILE *out = fopen(path, "wb");
@@ -696,15 +696,19 @@ void emu_require_distinct(const char *path, const char *what, const char *other_
     }
 }
 
-/* Close an output stream, reporting any write error that reached it. */
+/* Close an output stream, reporting any write error that reached it. The flush comes first so
+ * the errno reported is the write's own, not whatever the last unrelated call left behind. */
 bool emu_close_output(FILE *stream, const char *path)
 {
-    bool ok = !ferror(stream);
+    errno = 0;
+    bool ok = fflush(stream) == 0 && !ferror(stream);
+    int reason = errno;
     if (fclose(stream) != 0) {
         ok = false;
+        reason = errno;
     }
     if (!ok) {
-        fprintf(stderr, "%s: error writing %s: %s\n", emu_prog, path, strerror(errno));
+        fprintf(stderr, "%s: error writing %s: %s\n", emu_prog, path, reason ? strerror(reason) : "write error");
     }
     return ok;
 }
@@ -979,7 +983,7 @@ int emu_exit_status(const machine *m, int status, bool outputs_ok, bool allow_lo
      * that failed or was halted keeps its own status; the events it missed are reported above. */
     size_t lost = m->dropped + (m->scripted - m->next_scripted);
     if (lost > 0 && !allow_lost_events && status == 0) {
-        fprintf(stderr, "%s: %zu scripted event(s) lost, run rejected (--allow-lost-events accepts this)\n", emu_prog, lost);
+        fprintf(stderr, "%s: %zu input event(s) lost, run rejected (--allow-lost-events accepts this)\n", emu_prog, lost);
         return EXIT_EMULATOR_ERROR;
     }
     return status;

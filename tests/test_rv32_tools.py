@@ -312,10 +312,9 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertLessEqual(max(sum(1 for f, _ in events if f == frame) for frame, _ in events), 2,
                              "at most two events a frame keeps the queue far from full")
         expected = (ROOT / "programs/rv32/pong.expected").read_text().splitlines()
-        self.assertEqual(expected, [f"frame {n} " + line.split(" ")[2] for n, line in enumerate(expected, 1)])
-        self.assertEqual(len(expected), 200)
         for line in expected:
             self.assertRegex(line, r"^frame \d+ [0-9a-f]{8}$")
+        self.assertEqual([line.split(" ")[1] for line in expected], [str(n) for n in range(1, 201)], "one line per frame, in order")
         makefile = (ROOT / "Makefile").read_text()
         self.assertRegex(makefile, re.compile(r"^RV32_PONG_HEX := [0-9a-f]{8}$", re.M))
         self.assertIn("RV32_PONG_ARGS := --image build/rv32/pong.bin --input $(RV32_PONG_INPUT) "

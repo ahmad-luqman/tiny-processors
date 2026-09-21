@@ -10,6 +10,7 @@ with context.
 """
 
 import argparse
+import re
 from collections import namedtuple
 from pathlib import Path
 import shutil
@@ -132,7 +133,11 @@ def run_backend(command, trace, parse_halt, timeout, console=None, checkpoints=N
         Path(console).write_text("")
     if checkpoints is not None:
         Path(checkpoints).write_text("")
-    completed = subprocess.run(command, capture_output=True, timeout=timeout)
+    try:
+        completed = subprocess.run(command, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        sys.exit(f"{command[0]} did not finish within {timeout} s; raise --timeout or bound the run "
+                 f"(a partial trace is in {trace})")
     stdout, stderr = decode(completed.stdout), decode(completed.stderr)
     try:
         halt = parse_halt(stderr)
@@ -258,9 +263,27 @@ def refuse_aliased_input(script, out, name, frames=None, option="--input"):
 
 
 def read_expected_checkpoints(path):
-    """The `frame N <hash>` lines of an expected-checkpoints file; blank lines and `#` comments are skipped."""
+    """The `frame N <hash>` lines of an expected-checkpoints file; blank lines and `#` comments are
+    skipped. A file with no lines, or a malformed one, is refused: an empty expectation would compare
+    nothing and pass."""
+    if not path.is_file():
+        sys.exit(f"--expect-checkpoints {path} is not a file")
     lines = [line.strip() for line in path.read_text().splitlines()]
-    return [line for line in lines if line and not line.startswith("#")]
+    lines = [line for line in lines if line and not line.startswith("#")]
+    if not lines:
+        sys.exit(f"--expect-checkpoints {path} has no `frame N <hash>` lines")
+    for number, line in enumerate(lines, 1):
+        if not re.fullmatch(r"frame \d+ [0-9a-f]{8}", line):
+            sys.exit(f"--expect-checkpoints {path}: line {number} is not `frame N <hash>`: {line!r}")
+    return lines
+
+
+def first_checkpoint_difference(observed, expected):
+    """Where two checkpoint lists first differ, for a message that does not print 200 lines."""
+    for index, (got, want) in enumerate(zip(observed, expected), 1):
+        if got != want:
+            return f"line {index}: got {got!r}, expected {want!r}"
+    return f"{len(observed)} line(s) observed, {len(expected)} expected"
 
 
 def cycle_relation(rtl):
@@ -329,7 +352,7 @@ def main():
         if not args.expect_checkpoints.exists():
             parser.error(f"{args.expect_checkpoints} does not exist")
         refuse_aliased_input(args.expect_checkpoints, out, name, args.frames, option="--expect-checkpoints")
-        args.expect_checkpoint += read_expected_checkpoints(args.expect_checkpoints)
+        args.expect_checkpoint += read_expected_checkpoints(args.expect_checkpoints)  # never empty
     if args.image is not None:
         if not args.image.exists():
             parser.error(f"{args.image} does not exist; run make check-rv32-image first")
@@ -362,7 +385,7 @@ def main():
     if args.expect_last_line is not None and last_line != args.expect_last_line:
         sys.exit(f"emulator's last console line {last_line!r} is not {args.expect_last_line!r}")
     if args.expect_checkpoint and emulator.checkpoints != args.expect_checkpoint:
-        sys.exit(f"emulator checkpoints {emulator.checkpoints} are not {args.expect_checkpoint}")
+        sys.exit(f"emulator checkpoints are not the expected ones: {first_checkpoint_difference(emulator.checkpoints, args.expect_checkpoint)}")
     if args.backend == "emulator":
         print(emulator.stderr.strip().splitlines()[-1])
         print(f"emulator: {len(emulator.trace)} trace lines, {len(emulator.checkpoints)} checkpoint(s), "

@@ -459,7 +459,7 @@ class EmulatorTest(unittest.TestCase):
         # Without the flag the same run is rejected after its halt line: the guest passed, the host did not.
         result = self.run_words(words + FINISH(), input_script=burst)
         self.assertEqual((result.status, result.state.done, result.halt["outcome"]), (2, 0x5555, "pass"))
-        self.assertIn("rv32emu: 1 scripted event(s) lost, run rejected", result.stderr)
+        self.assertIn("rv32emu: 1 input event(s) lost, run rejected", result.stderr)
         # Popping makes room; an event for a frame never presented stays with the host.
         result = self.run_pass(LI(1, INPUT) + [LW(3, 1, 0), LW(4, 1, 4)], input_script=burst + "frame 5 up 3\n",
                                allow_lost_events=True)
@@ -467,7 +467,7 @@ class EmulatorTest(unittest.TestCase):
         self.assertIn("rv32emu: 1 scripted event(s) never delivered (first: frame 5)", result.stderr)
         result = self.run_words(LI(1, INPUT) + [LW(3, 1, 0)] + FINISH(), input_script="frame 5 up 3\n")
         self.assertEqual(result.status, 2)
-        self.assertIn("rv32emu: 1 scripted event(s) lost, run rejected", result.stderr)
+        self.assertIn("rv32emu: 1 input event(s) lost, run rejected", result.stderr)
         # The ring wraps: twelve popped, ten more pushed at frame 1 past entry 15 and popped in order;
         # key 31 is the top bit of KEYS.
         script = "".join(f"frame 0 down {code}\n" for code in range(12))
@@ -499,7 +499,7 @@ class EmulatorTest(unittest.TestCase):
             self.assertIn("dropped frame 0 event", result.stderr)
             replay = self.run_words(LI(1, INPUT) + [LW(3, 1, 4)] + FINISH(), input_script=record.read_text())
             self.assertEqual((replay.status, replay.state.x[3]), (2, 16))
-            self.assertIn("1 scripted event(s) lost", replay.stderr)
+            self.assertIn("1 input event(s) lost", replay.stderr)
             # An unwritable record is refused before the run.
             completed = subprocess.run([str(self.emulator), "--image", str(self.image_path(words)), "--record", directory],
                                        capture_output=True, text=True)
@@ -542,13 +542,14 @@ class EmulatorTest(unittest.TestCase):
             self.skipTest("build/rv32/pong.bin is not built (make check-rv32-image)")
         expected = [line for line in PONG_EXPECTED.read_text().splitlines() if line and not line.startswith("#")]
         pinned = re.search(r"^RV32_PONG_HEX := ([0-9a-f]{8})$", (ROOT / "Makefile").read_text(), re.M).group(1)
-        words = [int.from_bytes(image.read_bytes()[i:i + 4], "little") for i in range(0, len(image.read_bytes()), 4)]
+        data = image.read_bytes()
+        words = [int.from_bytes(data[i:i + 4], "little") for i in range(0, len(data), 4)]
         result = self.run_words(words, limit=10_000_000, checkpoints=True, input_script=PONG_INPUT.read_text())
         self.assertEqual((result.status, result.halt["outcome"]), (0, "pass"), result.stderr)
         self.assertEqual(result.checkpoints, expected)
         self.assertEqual((result.stdout, result.state.frames, result.state.traps), (f"PASS {pinned}\n", 200, 0))
         self.assertFalse(any(f"mem[{TIMER:08x}]" in line for line in result.trace), "Pong never reads the timer")
-        # One frame later the quit is not seen yet, so the guest presents once more and the script's Q is lost.
+        # A Q one frame later is popped one iteration later, so the guest presents once more first.
         later = PONG_INPUT.read_text().replace("frame 200 down Q", "frame 201 down Q")
         result = self.run_words(words, limit=10_000_000, checkpoints=True, input_script=later)
         self.assertEqual((result.status, len(result.checkpoints)), (0, 201))

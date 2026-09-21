@@ -83,25 +83,31 @@ int main(int argc, char **argv)
         return EXIT_EMULATOR_ERROR;
     }
     m.pc = start_given ? start : RAM_BASE; /* reset PC from the contract */
-    /* Every output is checked against every input and every other output before anything is
-     * written, so no option can name a file another one reads or writes. */
-    if (record_path) {
-        emu_require_distinct(record_path, "record file", image_path, "image");
-        emu_require_distinct(record_path, "record file", input_path, "input script");
+    /* Every output is checked against the inputs and every other output, and the script is
+     * parsed, before any output is created: a refused run truncates nothing. The state file is
+     * written after the run and is checked here too. */
+    const char *inputs[][2] = {{image_path, "image"}, {input_path, "input script"}};
+    const char *outputs[][2] = {{record_path, "record file"}, {trace_path, "trace file"}, {checkpoints_path, "checkpoints file"},
+                                {state_path, "state file"}, {frames_dir, "frames directory"}};
+    for (size_t i = 0; i < sizeof outputs / sizeof outputs[0]; i++) {
+        for (size_t j = 0; j < sizeof inputs / sizeof inputs[0]; j++) {
+            emu_require_distinct(outputs[i][0], outputs[i][1], inputs[j][0], inputs[j][1]);
+        }
+        for (size_t j = 0; j < i; j++) {
+            emu_require_distinct(outputs[i][0], outputs[i][1], outputs[j][0], outputs[j][1]);
+        }
+    }
+    if (input_path) {
+        emu_read_input_script(&m, input_path); /* exits on a bad script */
+    }
+    if (record_path) { /* opened before frame 0's events are delivered, so they are recorded too */
         m.record = fopen(record_path, "w");
         if (!m.record) {
             fprintf(stderr, "rv32emu: cannot write %s\n", record_path);
             return EXIT_EMULATOR_ERROR;
         }
     }
-    if (input_path) {
-        emu_read_input_script(&m, input_path);
-        emu_deliver_events(&m); /* frame 0's events are queued before the first instruction */
-    }
     if (trace_path) {
-        emu_require_distinct(trace_path, "trace file", image_path, "image");
-        emu_require_distinct(trace_path, "trace file", input_path, "input script");
-        emu_require_distinct(trace_path, "trace file", record_path, "record file");
         m.trace = fopen(trace_path, "w");
         if (!m.trace) {
             fprintf(stderr, "rv32emu: cannot write %s\n", trace_path);
@@ -109,20 +115,15 @@ int main(int argc, char **argv)
         }
     }
     if (checkpoints_path) {
-        emu_require_distinct(checkpoints_path, "checkpoints file", image_path, "image");
-        emu_require_distinct(checkpoints_path, "checkpoints file", trace_path, "trace file");
-        emu_require_distinct(checkpoints_path, "checkpoints file", input_path, "input script");
-        emu_require_distinct(checkpoints_path, "checkpoints file", record_path, "record file");
         m.checkpoints = fopen(checkpoints_path, "w");
         if (!m.checkpoints) {
             fprintf(stderr, "rv32emu: cannot write %s\n", checkpoints_path);
             return EXIT_EMULATOR_ERROR;
         }
     }
-    if (frames_dir) {
-        emu_require_distinct(frames_dir, "frames directory", image_path, "image");
-        emu_require_distinct(frames_dir, "frames directory", input_path, "input script");
-        m.frames_dir = frames_dir;
+    m.frames_dir = frames_dir;
+    if (input_path) {
+        emu_deliver_events(&m); /* frame 0's events are queued before the first instruction */
     }
 
     while (emu_run_until(&m, UINT64_MAX) != EMU_STOP_HALTED) {
@@ -130,11 +131,6 @@ int main(int argc, char **argv)
     }
     bool outputs_ok = emu_finish_outputs(&m, trace_path, checkpoints_path, record_path);
     if (state_path) {
-        emu_require_distinct(state_path, "state file", image_path, "image");
-        emu_require_distinct(state_path, "state file", trace_path, "trace file");
-        emu_require_distinct(state_path, "state file", checkpoints_path, "checkpoints file");
-        emu_require_distinct(state_path, "state file", input_path, "input script");
-        emu_require_distinct(state_path, "state file", record_path, "record file");
         FILE *out = fopen(state_path, "w");
         if (!out) {
             fprintf(stderr, "rv32emu: cannot write %s\n", state_path);

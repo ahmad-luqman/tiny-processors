@@ -258,19 +258,24 @@ $(RV32EMU): tools/rv32emu.c $(RV32EMU_CORE) | build/rv32
 build-rv32-emu: toolchain-rv32-emu $(RV32EMU)
 
 toolchain-rv32-win: toolchain-rv32-emu
+	@command -v pkg-config >/dev/null || { echo "missing pkg-config (brew install pkg-config)"; exit 1; }
 	@pkg-config --exists sdl3 || { echo "missing SDL3 (brew install sdl3)"; exit 1; }
 	@echo "SDL3 $$(pkg-config --modversion sdl3)"
 
-$(RV32WIN): tools/rv32win.c $(RV32EMU_CORE) | build/rv32
+# The toolchain check is a prerequisite of the binary, so every target that needs the window says
+# what to install rather than failing on a missing header.
+$(RV32WIN): tools/rv32win.c $(RV32EMU_CORE) | build/rv32 toolchain-rv32-win
 	$(HOST_CC) $(RV32EMU_CFLAGS) $(SDL3_CFLAGS) -o $@ tools/rv32win.c tools/rv32emu_core.c $(SDL3_LIBS)
 
 build-rv32-win: toolchain-rv32-win $(RV32WIN)
 
-# The window's tests run it under SDL's dummy video driver; they skip when SDL3 is not installed.
-test-rv32-win: check-rv32-image
+# The window's tests run it under SDL's dummy video driver. SDL3 is a prerequisite of test-rv32, as
+# LLVM and the simulators are: the toolchain check fails with the install hint rather than letting the
+# tests skip.
+test-rv32-win: toolchain-rv32-win check-rv32-image
 	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_win.py' -v
 
-# The image is a prerequisite so the diagnostic test runs rather than skips.
+# The images are prerequisites so the diagnostic and Pong tests run rather than skip.
 test-rv32-emu: check-rv32-image
 	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_emu.py' -v
 
@@ -347,8 +352,9 @@ test-rv32-pong:
 	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_pong.py' -v
 
 run-rv32-pong: check-rv32-image $(RV32WIN)
+	@echo "W/S and UP/DOWN move, SPACE serves, P pauses, R restarts; end with Q (closing the window reports halt=stopped, status 2)."
+	@echo "The session is recorded to build/rv32/pong.recorded.input; replay it with rv32emu --input or rv32win --input."
 	$(RV32WIN) --image build/rv32/pong.bin --scale 3 --record build/rv32/pong.recorded.input
-	@echo "recorded: build/rv32/pong.recorded.input (replay it with rv32emu --input or rv32win --input)"
 
 run-rv32-pong-emu: check-rv32-image $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_PONG_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32/emu

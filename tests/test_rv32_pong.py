@@ -77,6 +77,11 @@ class PongTest(unittest.TestCase):
             lib.gfx_clear(surface, 0)
             lib.gfx_draw_number(surface, 0, 0, 105, 1, 1)  # 105 shows 05
             self.assertEqual("".join("#" if buffer[x] else "." for x in range(8)), "###.###.")
+            for value, tens, ones in ((0, 0, 0), (99, 9, 9), (100, 0, 0), (9, 0, 9)):
+                lib.gfx_clear(surface, 0)
+                lib.gfx_draw_number(surface, 0, 0, value, 1, 1)
+                rows = ["".join("#" if buffer[y * 16 + x] else "." for x in range(7)) for y in range(5)]
+                self.assertEqual(rows, [f"{GLYPHS[tens][y]}.{GLYPHS[ones][y]}" for y in range(5)], value)
         self.each(check)
 
     def test_fill_rect_clips_and_clear_covers_everything(self):
@@ -96,6 +101,7 @@ class PongTest(unittest.TestCase):
                     inside = 1 <= x < 18 and 2 <= y < 5
                     if inside:
                         self.assertEqual(buffer[y * 20 + x], 9, (x, y))
+            self.assertEqual(sum(buffer), 4 * 7 + 2 * 3 + 17 * 3 * 9, "nothing outside the three rows was touched")
             lib.gfx_clear(surface, 0xE3)
             self.assertEqual(set(buffer), {0xE3})
         self.each(check)
@@ -141,6 +147,11 @@ class PongTest(unittest.TestCase):
             game.set_ball(WIDTH * FP, 100 * FP, 4 * FP, 0)
             game.frame(0)
             self.assertEqual((game.scores, game.phase), ((9, 1), "over"))
+            right = Pong(lib)
+            for _ in range(9):
+                right.set_ball(-4 * FP, 100 * FP, -4 * FP, 0)
+                right.frame(0)
+            self.assertEqual((right.scores, right.phase), ((0, 9), "over"), "the right player can win too")
             game.event(press("SPACE"))
             game.frame(held("W", "UP"))
             self.assertEqual((game.phase, game.paddles), ("over", (108, 108)), "nothing moves after the win")
@@ -171,6 +182,11 @@ class PongTest(unittest.TestCase):
             game.set_ball((LEFT_X + PADDLE_W + 2) * FP, 106 * FP, -4 * FP, 0)  # 106..110 meets the top of 108..132; centre 108: 12 above
             game.frame(0)
             self.assertEqual((game.ball, game.velocity), ((LEFT_X + PADDLE_W, 106), (4 * FP, (-12 * FP) >> 2)))
+            # One fixed-point unit of overlap at the paddle's top: the offset is -13 px and 3/4, and the
+            # arithmetic shift floors (a division would round toward zero and give -895).
+            game.set_ball((RIGHT_X - BALL - 2) * FP, 108 * FP - BALL * FP + 1, 4 * FP, 0)
+            game.frame(0)
+            self.assertEqual(game.velocity, (-4 * FP, -896))
             # Just missing: the ball's bottom at the paddle's top does not touch.
             game.set_ball((RIGHT_X - BALL - 2) * FP, (108 - BALL) * FP, 4 * FP, 0)
             game.frame(0)
@@ -210,33 +226,49 @@ class PongTest(unittest.TestCase):
     def test_drawing_is_the_same_incrementally_and_from_scratch(self):
         """Dirty-rectangle drawing must leave the surface exactly as one full redraw of the same state
         would: the reference replays the same frames on a game that never drew, whose first draw is a
-        full one, and the two surfaces must match at every frame, including score changes and the
-        ball crossing the net and the score digits."""
-        script = "frame 0 down SPACE\nframe 3 down DOWN\nframe 30 up DOWN\nframe 40 down W\nframe 116 down SPACE\nframe 130 down Q\n"
-        events = parse_input_script(script)
-        def check(lib):
-            incremental = Pong(lib)
-            keys, frames_keys = 0, []
-            for frame in range(1, 130):
+        full one, and the two surfaces must match at every frame. The first session scores a point and
+        crosses the net; the second starts the ball inside the score band, crosses both digit boxes,
+        and restarts with R, so every restore branch of pong_draw runs."""
+        session = parse_input_script("frame 0 down SPACE\nframe 3 down DOWN\nframe 30 up DOWN\nframe 40 down W\n"
+                                     "frame 116 down SPACE\nframe 130 down Q\n")
+        scores = parse_input_script("frame 60 down R\nframe 62 down SPACE\n")
+        for level, lib in self.libraries.items():
+            with self.subTest(level=level, session="rally"):
+                game = self.compare_incremental_with_full(lib, session, 130)
+                self.assertEqual(game.scores, (1, 0), "the script scored a point, so the digits were redrawn")
+            with self.subTest(level=level, session="scores"):
+                game = self.compare_incremental_with_full(lib, scores, 90, place=(100 * FP, 10 * FP, 4 * FP, 0))
+                self.assertEqual((game.scores, game.phase), ((0, 0), "play"), "R reset the game after the ball crossed the digits")
+
+    def compare_incremental_with_full(self, lib, events, frames, place=None):
+        """Replay `events` for `frames` frames drawing incrementally, against a game that never drew and
+        redraws from scratch at every frame over a garbage-filled surface; with `place` the ball starts
+        there, in play. Returns the incremental game."""
+        incremental = Pong(lib)
+        if place is not None:
+            incremental.set_ball(*place)
+        keys, frames_keys = 0, []
+        for frame in range(1, frames):
+            for at, word in events:
+                if at == frame - 1:
+                    keys = (keys | (1 << (word & 31))) if word & EVENT_PRESS else (keys & ~(1 << (word & 31)))
+                    incremental.event(word)
+            frames_keys.append(keys)
+            incremental.frame(keys)
+            incremental.draw()
+            fresh = Pong(lib)
+            if place is not None:
+                fresh.set_ball(*place)
+            for n, k in enumerate(frames_keys, 1):
                 for at, word in events:
-                    if at == frame - 1:
-                        keys = (keys | (1 << (word & 31))) if word & EVENT_PRESS else (keys & ~(1 << (word & 31)))
-                        incremental.event(word)
-                frames_keys.append(keys)
-                incremental.frame(keys)
-                incremental.draw()
-                fresh = Pong(lib)
-                for n, k in enumerate(frames_keys, 1):
-                    for at, word in events:
-                        if at == n - 1:
-                            fresh.event(word)
-                    fresh.frame(k)
-                lib.gfx_clear(fresh.surface, 0x55)  # a full redraw does not depend on what was there
-                fresh.draw()
-                self.assertEqual(incremental.pixels(), fresh.pixels(), f"frame {frame}")
-                self.assertEqual(incremental.scores, fresh.scores)
-            self.assertEqual(incremental.scores, (1, 0), "the script scored a point, so the digits were redrawn")
-        self.each(check)
+                    if at == n - 1:
+                        fresh.event(word)
+                fresh.frame(k)
+            lib.gfx_clear(fresh.surface, 0x55)  # a full redraw does not depend on what was there
+            fresh.draw()
+            self.assertEqual(incremental.pixels(), fresh.pixels(), f"frame {frame}")
+            self.assertEqual(incremental.scores, fresh.scores)
+        return incremental
 
     def test_session_matches_expected_file_and_makefile(self):
         events = parse_input_script(INPUT.read_text())
@@ -262,11 +294,11 @@ class PongTest(unittest.TestCase):
         self.assertEqual(by_frame[171][0], "play")
         self.assertEqual((by_frame[199][3][1], by_frame[200][3][1]), (-640, 640), "the top wall at frame 200")
         # A script that quits with events still to come, or never quits, is refused.
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "come after the quit"):
             run_script(self.libraries["O2"], events + [(201, press("A"))])
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "no quit within 300"):
             run_script(self.libraries["O2"], events[:-1], max_frames=300)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "would overflow at frame 0"):
             run_script(self.libraries["O2"], [(0, press("A"))] * 17 + [(1, press("Q"))])
 
 

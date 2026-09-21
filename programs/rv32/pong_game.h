@@ -70,7 +70,7 @@ void pong_draw(struct pong *p, const struct gfx_surface *s);
 /* FNV-1a over the scores, positions, and counters: the PASS word of a session. */
 uint32_t pong_checksum(const struct pong *p);
 
-/* Read-only views for the host tests, in pixels. */
+/* Read-only views for the host tests: positions in pixels, velocities in fixed point. */
 uint32_t pong_quit(const struct pong *p);
 uint32_t pong_phase_of(const struct pong *p);
 uint32_t pong_score(const struct pong *p, uint32_t right_side);
@@ -80,6 +80,6 @@ int32_t pong_ball_vx(const struct pong *p);
 int32_t pong_ball_vy(const struct pong *p);
 int32_t pong_left_y(const struct pong *p);
 int32_t pong_right_y(const struct pong *p);
-void pong_set_ball(struct pong *p, int32_t x, int32_t y, int32_t vx, int32_t vy); /* fixed point; the tests place the ball */
+void pong_set_ball(struct pong *p, int32_t x, int32_t y, int32_t vx, int32_t vy); /* fixed point; also puts the game in play, so a test can place a ball from any phase */
 
 #endif

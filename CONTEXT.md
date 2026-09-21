@@ -34,7 +34,7 @@ The rule that a timer tick is a clock cycle on the RTL and an executed instructi
 _Avoid_: wall-clock time, a claim that the backends run at the same speed.
 
 **Session recording**:
-The `frame N down|up KEY` script a host writes of every event it offered to the input queue, typed or scripted, so a hand-played session replays identically on every backend.
+The `frame N down|up KEY` script a host writes of every event it offered to the input queue, typed or scripted, so a hand-played session replays identically on every backend (trace for trace when the guest never reads the timer, at the results level otherwise).
 _Avoid_: a video, a save file, a trace.
 
 **Frame checkpoint**:

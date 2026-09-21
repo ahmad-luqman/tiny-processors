@@ -20,7 +20,7 @@ struct gfx_surface {
 void gfx_clear(const struct gfx_surface *s, uint8_t color);
 /* Fill the rectangle clipped to the surface; an empty or fully outside one draws nothing. */
 void gfx_fill_rect(const struct gfx_surface *s, int32_t x, int32_t y, int32_t w, int32_t h, uint8_t color);
-/* One decimal digit from the 3x5 glyph table, each cell `scale` pixels square; the background is left alone. */
+/* One decimal digit from the 3x5 glyph table, each cell `scale` pixels square; the background is left alone, and a value above 9 draws nothing. */
 void gfx_draw_digit(const struct gfx_surface *s, int32_t x, int32_t y, uint32_t digit, uint32_t scale, uint8_t color);
 /* Two digits, 00..99, one cell apart; wider values show their last two digits. */
 void gfx_draw_number(const struct gfx_surface *s, int32_t x, int32_t y, uint32_t value, uint32_t scale, uint8_t color);

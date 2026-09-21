@@ -4,7 +4,8 @@
  * scaled by an integer, with host keys turned into the contract's key events.
  * Time enters only through pacing: presents are throttled to --fps, the timer
  * stays an instruction counter, so a session recorded with --record replays
- * identically on rv32emu and on the RTL. Console bytes go to stdout and
+ * identically on rv32emu and on the RTL (trace for trace when the guest never
+ * reads the timer, at the results level otherwise). Console bytes go to stdout and
  * nothing else does; diagnostics and the final `rv32win: halt=...` line go
  * to stderr with the headless exit status.
  *
@@ -20,7 +21,6 @@
 #include <string.h>
 
 #define SLICE 250000u        /* instructions between event pumps when the guest does not present */
-#define PENDING_MAX 64u      /* host events between two presents; a full list drops with a message */
 #define MAX_SCALE 8u
 
 /* Host keys and the contract's key codes (programs/rv32/board.h);
@@ -46,7 +46,8 @@ static void usage(void)
 {
     fputs("usage: rv32win --image FILE [--base ADDR] [--pc ADDR] [--scale N] [--fps N] [--input FILE]\n"
           "               [--record FILE] [--checkpoints FILE] [--max-instructions N] [--allow-lost-events]\n"
-          "Runs FILE as rv32emu does and shows each present in a window scaled by N (1..8, default 3),\n"
+          "Runs FILE as rv32emu does, with no instruction limit unless --max-instructions, and shows\n"
+          "each present in a window scaled by N (1..8, default 3),\n"
           "at most N presents per second (default 60; 0 runs unthrottled). Keys become the contract's\n"
           "events at the next present: arrows, space, return, escape, A, D, W, S, P, Q, R. A scripted\n"
           "--input replays as on rv32emu; --record writes every event, typed or scripted, as a script\n"
@@ -58,6 +59,7 @@ static void usage(void)
 static int fail_sdl(const char *what)
 {
     fprintf(stderr, "rv32win: %s: %s\n", what, SDL_GetError());
+    SDL_Quit(); /* harmless before SDL_Init; the process is about to exit */
     return EXIT_EMULATOR_ERROR;
 }
 
@@ -134,30 +136,16 @@ int main(int argc, char **argv)
         return EXIT_EMULATOR_ERROR;
     }
     m.pc = start_given ? start : RAM_BASE;
-    if (record_path) { /* opened before the script so frame 0's events are recorded too */
-        emu_require_distinct(record_path, "record file", image_path, "image");
-        emu_require_distinct(record_path, "record file", input_path, "input script");
-        m.record = fopen(record_path, "w");
-        if (!m.record) {
-            fprintf(stderr, "rv32win: cannot write %s\n", record_path);
-            return EXIT_EMULATOR_ERROR;
-        }
-    }
+    /* Refuse every aliased pair, parse the script, and open SDL before any output file is
+     * created, so a refused run truncates nothing. */
+    emu_require_distinct(record_path, "record file", image_path, "image");
+    emu_require_distinct(record_path, "record file", input_path, "input script");
+    emu_require_distinct(checkpoints_path, "checkpoints file", image_path, "image");
+    emu_require_distinct(checkpoints_path, "checkpoints file", input_path, "input script");
+    emu_require_distinct(checkpoints_path, "checkpoints file", record_path, "record file");
     if (input_path) {
-        emu_read_input_script(&m, input_path);
-        emu_deliver_events(&m);
+        emu_read_input_script(&m, input_path); /* exits on a bad script */
     }
-    if (checkpoints_path) {
-        emu_require_distinct(checkpoints_path, "checkpoints file", image_path, "image");
-        emu_require_distinct(checkpoints_path, "checkpoints file", input_path, "input script");
-        emu_require_distinct(checkpoints_path, "checkpoints file", record_path, "record file");
-        m.checkpoints = fopen(checkpoints_path, "w");
-        if (!m.checkpoints) {
-            fprintf(stderr, "rv32win: cannot write %s\n", checkpoints_path);
-            return EXIT_EMULATOR_ERROR;
-        }
-    }
-
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         return fail_sdl("cannot initialise SDL");
     }
@@ -167,23 +155,41 @@ int main(int argc, char **argv)
                                      SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY, &window, &renderer)) {
         return fail_sdl("cannot open a window");
     }
-    /* The guest's 320x240 is scaled by the largest integer that fits the window; the rest is black. */
-    SDL_SetRenderLogicalPresentation(renderer, (int)FB_COLUMNS, (int)FB_ROWS, SDL_LOGICAL_PRESENTATION_INTEGER_SCALE);
+    /* The guest's 320x240 is scaled by the largest integer that fits the window; the rest is the
+     * clear colour, black. */
     SDL_Texture *texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING,
                                              (int)FB_COLUMNS, (int)FB_ROWS);
-    if (!texture) {
-        return fail_sdl("cannot create the frame texture");
+    if (!texture || !SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255) ||
+        !SDL_SetRenderLogicalPresentation(renderer, (int)FB_COLUMNS, (int)FB_ROWS, SDL_LOGICAL_PRESENTATION_INTEGER_SCALE) ||
+        !SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST) /* pixels stay square blocks */) {
+        return fail_sdl("cannot set up the frame texture");
     }
-    SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST); /* pixels stay square blocks */
     uint32_t lut[256];
     for (unsigned p = 0; p < 256; p++) {
         uint8_t rgb[3];
         emu_rgb332((uint8_t)p, rgb);
         lut[p] = 0xff000000u | ((uint32_t)rgb[0] << 16) | ((uint32_t)rgb[1] << 8) | rgb[2];
     }
+    if (record_path) { /* opened before frame 0's events are delivered, so they are recorded too */
+        m.record = fopen(record_path, "w");
+        if (!m.record) {
+            fprintf(stderr, "rv32win: cannot write %s\n", record_path);
+            return EXIT_EMULATOR_ERROR;
+        }
+    }
+    if (checkpoints_path) {
+        m.checkpoints = fopen(checkpoints_path, "w");
+        if (!m.checkpoints) {
+            fprintf(stderr, "rv32win: cannot write %s\n", checkpoints_path);
+            return EXIT_EMULATOR_ERROR;
+        }
+    }
+    if (input_path) {
+        emu_deliver_events(&m); /* frame 0's events are queued before the first instruction */
+    }
 
-    uint32_t pending[PENDING_MAX];
-    unsigned pending_count = 0;
+    uint32_t *pending = NULL; /* host keys polled since the last present; grows as needed */
+    size_t pending_count = 0, pending_capacity = 0;
     bool closing = false, render_ok = true;
     uint64_t period = fps ? 1000000000ull / fps : 0, next_frame = SDL_GetTicksNS();
     for (;;) {
@@ -197,11 +203,15 @@ int main(int argc, char **argv)
                     continue;
                 }
                 uint32_t event = EVENT_VALID | (e.type == SDL_EVENT_KEY_DOWN ? EVENT_PRESS : 0u) | (uint32_t)code;
-                if (pending_count == PENDING_MAX) {
-                    fprintf(stderr, "rv32win: too many keys before a present: dropped event %08x\n", event);
-                } else {
-                    pending[pending_count++] = event;
+                if (pending_count == pending_capacity) {
+                    pending_capacity = pending_capacity ? 2 * pending_capacity : 64;
+                    pending = realloc(pending, pending_capacity * sizeof *pending);
+                    if (!pending) {
+                        fprintf(stderr, "rv32win: cannot allocate the key list\n");
+                        return EXIT_EMULATOR_ERROR;
+                    }
                 }
+                pending[pending_count++] = event; /* every key reaches the queue and the record */
             }
         }
         if (closing) {
@@ -215,18 +225,18 @@ int main(int argc, char **argv)
         if (stop == EMU_STOP_BUDGET) {
             continue; /* no present yet: pump events again so the window stays alive */
         }
-        /* A present. The frame's scripted events were queued by the core; the host's keys since
-         * the last present join the same frame, so a recording of them is a script. */
-        for (unsigned i = 0; i < pending_count; i++) {
+        /* A present. The frame's scripted events were queued by the core; the host's keys polled
+         * since the last present join the same frame, so a recording of them is a script. More
+         * than the queue holds is dropped there, recorded and counted like a scripted burst. */
+        for (size_t i = 0; i < pending_count; i++) {
             emu_queue_event(&m, m.frames, pending[i]);
         }
         pending_count = 0;
         if (!upload_frame(texture, m.fb, lut) || !SDL_RenderClear(renderer) ||
             !SDL_RenderTexture(renderer, texture, NULL, NULL) || !SDL_RenderPresent(renderer)) {
-            if (render_ok) {
-                fprintf(stderr, "rv32win: cannot draw the frame: %s\n", SDL_GetError());
-            }
+            fprintf(stderr, "rv32win: cannot draw the frame: %s\n", SDL_GetError());
             render_ok = false;
+            closing = true; /* a window that no longer shows the game is not worth playing in */
         }
         if (period) {
             next_frame += period;
@@ -245,5 +255,6 @@ int main(int argc, char **argv)
     SDL_DestroyWindow(window);
     SDL_Quit();
     emu_free(&m);
+    free(pending);
     return emu_exit_status(&m, status, outputs_ok, allow_lost_events);
 }

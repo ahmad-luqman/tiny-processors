@@ -86,7 +86,7 @@ typedef struct {
     scripted_event *script; /* --input, in script order with frames never decreasing (the parser
                              * enforces it); delivered as frames are reached */
     size_t scripted, next_scripted;
-    size_t dropped;         /* events the full queue refused; the run is rejected unless allowed */
+    size_t dropped;         /* events the full queue refused; a passing run is rejected unless allowed */
     FILE *record;           /* every event offered to the queue as a script line, or NULL */
     /* Effects of the current step, for the trace line. */
     int wr_reg;
@@ -127,8 +127,9 @@ emu_stop emu_run_until(machine *m, uint64_t budget);
 uint32_t emu_frame_hash(const uint8_t *pixels);
 void emu_rgb332(uint8_t pixel, uint8_t rgb[3]);
 
-/* Reporting. emu_finish_outputs flushes the console and closes the trace, checkpoints, and
- * record streams (NULL paths are skipped), returning false when any output is incomplete.
+/* Reporting. emu_finish_outputs flushes the console and closes whichever of the trace, checkpoints,
+ * and record streams are open (a path is only for the message), returning false when any output is
+ * incomplete.
  * emu_report_halt prints the undelivered-events line and the halt line to stderr and returns
  * the status the halt alone implies. emu_exit_status folds in incomplete outputs and lost
  * scripted events, printing why, and returns the process status. */
