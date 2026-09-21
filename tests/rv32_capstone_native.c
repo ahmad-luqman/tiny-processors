@@ -164,14 +164,14 @@ int check_transitions(void)
     r.tetris.phase=TETRIS_OVER;
     for (uint32_t i=0; i<180; i++) { runtime_frame(&r,0); CHECK(r.screen==RUNTIME_TETRIS); }
     runtime_frame(&r,0); CHECK(r.screen==RUNTIME_MENU);
-    runtime_frame(&r,0); runtime_event(&r,PRESS(UP)); runtime_event(&r,PRESS(ENTER)); runtime_frame(&r,0);
+    runtime_event(&r,PRESS(UP)); runtime_event(&r,PRESS(ENTER)); runtime_frame(&r,0);
     r.pong.phase=PONG_OVER;
     for (uint32_t i=0; i<30; i++) runtime_frame(&r,0);
     runtime_event(&r,PRESS(R)); CHECK(r.over_frames==0 && r.pong.phase==PONG_SERVE);
     r.pong.phase=PONG_OVER;
     for (uint32_t i=0; i<181; i++) runtime_frame(&r,0);
     CHECK(r.screen==RUNTIME_MENU);
-    runtime_frame(&r,0); runtime_event(&r,PRESS(Q)); CHECK(r.quit);
+    runtime_event(&r,PRESS(Q)); CHECK(r.quit);
     return 0;
 }
 

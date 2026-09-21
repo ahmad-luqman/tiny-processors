@@ -392,7 +392,7 @@ clean:
 
 # M7: one image, the same script/checkpoints on the native model and both machines.
 RV32_CAPSTONE_HEX := ea60197e
-RV32_CAPSTONE_ARGS := --image build/rv32/capstone.bin --input programs/rv32/capstone.input --expect-last-line "PASS $(RV32_CAPSTONE_HEX)" --expect-checkpoints programs/rv32/capstone.expected --timeout 300
+RV32_CAPSTONE_ARGS := --image build/rv32/capstone.bin --input programs/rv32/capstone.input --expect-last-line "PASS $(RV32_CAPSTONE_HEX)" --expect-checkpoints programs/rv32/capstone.expected --timeout 300 --max-cycles 20000000
 .PHONY: test-rv32-capstone run-rv32-capstone run-rv32-capstone-emu run-rv32-capstone-rtl run-rv32-capstone-rtl-verilator frames-rv32-capstone disasm-rv32-capstone
 
 test-rv32-capstone:

@@ -56,6 +56,7 @@ void runtime_event(struct runtime *r, uint32_t event)
 
 void runtime_frame(struct runtime *r, uint32_t keys)
 {
+    uint32_t held = keys;
     r->frames++;
     r->blocked &= keys;
     keys &= ~r->blocked;
@@ -69,7 +70,13 @@ void runtime_frame(struct runtime *r, uint32_t keys)
         over = r->tetris.phase == TETRIS_OVER;
     }
     if (over) {
-        if (++r->over_frames > 180) change_screen(r, RUNTIME_MENU);
+        if (++r->over_frames > 180) {
+            change_screen(r, RUNTIME_MENU);
+            /* This transition follows event draining: there is no old batch
+             * left to swallow. Only keys actually held stay blocked. */
+            r->blocked = held;
+            r->transition = 0;
+        }
     } else r->over_frames = 0;
 }
 
