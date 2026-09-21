@@ -1,5 +1,7 @@
 """Oracle integration and fail-closed differential harness tests."""
 from pathlib import Path
+import hashlib
+import json
 import subprocess
 import tempfile
 import unittest
@@ -11,6 +13,13 @@ SIM = ROOT/'build/fp32/fp32.vvp'
 
 
 class Fp32ToolsTest(unittest.TestCase):
+    def test_vendored_reference_fingerprints(self):
+        directory=ROOT/'third_party/softfloat'
+        manifest=json.loads((directory/'SHA256SUMS.json').read_text())
+        for name,digest in manifest.items():
+            with self.subTest(name=name):
+                self.assertEqual(hashlib.sha256((directory/name).read_bytes()).hexdigest(),digest)
+
     def test_literal_reference_anchors(self):
         self.assertEqual(oracle(REF,[r[:5] for r in ANCHORS]),[r[5:] for r in ANCHORS])
 
@@ -46,7 +55,7 @@ class Fp32ToolsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as work:
             path=Path(work)/'bad.txt'
             cases=(None,'','nonsense\n','0 0 0 0 0\n','32 0 0 0 0 0 0 0\n',
-                   '0 8 0 0 0 0 0 0\n','0 0 3f800000 3f800000 0 0 0 0\n')
+                   '0 8 0 0 0 0 0 0\n','0 0 0 0 0 0 20 0\n','0 0 3f800000 3f800000 0 0 0 0\n')
             for contents in cases:
                 with self.subTest(contents=contents):
                     if contents is not None: path.write_text(contents)

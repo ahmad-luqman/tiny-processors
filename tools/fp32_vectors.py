@@ -80,6 +80,32 @@ def requests(seed, random_count, operations):
         yield op,0,0,0,0
 
 
+def cancellation_requests(seed, count):
+    """Choose c near the exact product using Python integers, not host floats.
+
+    These are inputs, not expected answers: SoftFloat still supplies every
+    result/flag. Concentrating c here exercises information that a rounded
+    multiply followed by add loses, across the full normal exponent range.
+    """
+    rng = random.Random(seed ^ 0xF1)
+    for _ in range(count):
+        ea = rng.randrange(1,255)
+        eb = rng.randrange(max(1,128-ea),min(255,382-ea))
+        ma, mb = rng.randrange(1<<23,1<<24), rng.randrange(1<<23,1<<24)
+        product = ma*mb
+        shift = product.bit_length()-24
+        exp = ea+eb-254+product.bit_length()-47
+        c_mag = ((exp+127)<<23) | ((product>>shift)&0x7fffff)
+        c_mag = max(0,min(0x7f7fffff,c_mag+rng.randrange(-2,3)))
+        sa,sb = rng.randrange(2),rng.randrange(2)
+        a,b = (sa<<31)|(ea<<23)|(ma&0x7fffff), (sb<<31)|(eb<<23)|(mb&0x7fffff)
+        for op in (3,4,5,6):
+            product_sign = sa ^ sb ^ (op in (5,6))
+            c_sign = product_sign ^ 1 ^ (op in (4,6))
+            for rm in range(5):
+                yield op,rm,a,b,(c_sign<<31)|c_mag
+
+
 def oracle(reference, rows):
     text = ''.join(f'{op} {rm} {a:08x} {b:08x} {c:08x}\n' for op,rm,a,b,c in rows)
     run = subprocess.run([str(reference)],input=text,text=True,capture_output=True,timeout=120,check=True)
@@ -110,21 +136,26 @@ def main():
     p.add_argument('--work',type=Path,default=ROOT/'build/fp32')
     p.add_argument('--wave',type=Path)
     p.add_argument('--anchors-only',action='store_true')
+    p.add_argument('--cancellation',type=int,default=100)
+    p.add_argument('--stats',action='store_true')
     args=p.parse_args()
     try:
         ops=list(map(int,args.ops.split(',')))
-        if not ops or any(op<0 or op>17 for op in ops) or args.random<0:
+        if not ops or any(op<0 or op>17 for op in ops) or args.random<0 or args.cancellation<0:
             raise ValueError('operations must be 0..17 and random count nonnegative')
         anchors=oracle(args.reference,[row[:5] for row in ANCHORS])
         if anchors != [row[5:] for row in ANCHORS]:
             raise ValueError(f'oracle does not match literal anchors: {[(i,a,ANCHORS[i][5:]) for i,a in enumerate(anchors) if a != ANCHORS[i][5:]]}')
         rows=[row[:5] for row in ANCHORS] if args.anchors_only else list(requests(args.seed,args.random,ops))
+        if not args.anchors_only:
+            rows.extend(row for row in cancellation_requests(args.seed,args.cancellation) if row[0] in ops)
         answers=oracle(args.reference,rows)
         args.work.mkdir(parents=True,exist_ok=True)
         path=args.work/f'vectors-{args.seed}.txt'
         path.write_text(vector_text(rows,answers))
         sim=args.simulator.resolve()
         command=(['vvp',str(sim)] if sim.suffix=='.vvp' else [str(sim)])+[f'+vectors={path.resolve()}']
+        if args.stats: command.append('+stats')
         if args.wave: command.append(f'+wave={args.wave.resolve()}')
         run=subprocess.run(command,text=True,capture_output=True,timeout=600)
         print(run.stdout,end=''); print(run.stderr,end='',file=sys.stderr)

@@ -485,4 +485,4 @@ waves-fp32: $(FP32_REF) build/fp32/fp32.vvp build/fp32/protocol.vvp
 	vvp build/fp32/protocol.vvp +wave=build/fp32/protocol.vcd
 
 bench-fp32: $(FP32_REF) build/verilator-fp32/fp32_sim
-	$(PYTHON) tools/fp32_vectors.py --simulator build/verilator-fp32/fp32_sim --anchors-only --work build/fp32/bench
+	$(PYTHON) tools/fp32_vectors.py --simulator build/verilator-fp32/fp32_sim --anchors-only --stats --work build/fp32/bench
