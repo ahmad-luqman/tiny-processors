@@ -729,6 +729,23 @@ void emu_require_distinct(const char *path, const char *what, const char *other_
     }
 }
 
+/* Refuse a file inside a directory the run writes frames into: a present would overwrite an
+ * output or an input named like a frame there, and the pairwise check above only sees a file
+ * against a directory. The directory must exist for frames to be written at all; if it does not
+ * resolve, the run fails on the first frame instead. */
+void emu_require_outside(const char *path, const char *what, const char *directory, const char *other)
+{
+    char inside[PATH_MAX], resolved[PATH_MAX];
+    if (!path || !directory || realpath(directory, resolved) == NULL || !canonical(path, inside, sizeof inside)) {
+        return;
+    }
+    size_t length = strlen(resolved);
+    if (strncmp(inside, resolved, length) == 0 && inside[length] == '/' && strchr(inside + length + 1, '/') == NULL) {
+        fprintf(stderr, "%s: %s %s is inside the %s %s, where a frame could overwrite it\n", emu_prog, what, path, other, directory);
+        exit(EXIT_EMULATOR_ERROR);
+    }
+}
+
 /* Close an output stream, reporting any write error that reached it. The flush comes first so
  * the errno reported is the write's own, not whatever the last unrelated call left behind. */
 bool emu_close_output(FILE *stream, const char *path)

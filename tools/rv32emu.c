@@ -97,6 +97,13 @@ int main(int argc, char **argv)
             emu_require_distinct(outputs[i][0], outputs[i][1], outputs[j][0], outputs[j][1]);
         }
     }
+    /* Nothing the run reads or writes may sit in the frames directory, where frame-NNNN.ppm files appear. */
+    for (size_t i = 0; i + 1 < sizeof outputs / sizeof outputs[0]; i++) {
+        emu_require_outside(outputs[i][0], outputs[i][1], frames_dir, "frames directory");
+    }
+    for (size_t j = 0; j < sizeof inputs / sizeof inputs[0]; j++) {
+        emu_require_outside(inputs[j][0], inputs[j][1], frames_dir, "frames directory");
+    }
     if (input_path) {
         emu_read_input_script(&m, input_path); /* exits on a bad script */
     }

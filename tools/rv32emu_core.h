@@ -144,6 +144,7 @@ int emu_exit_status(const machine *m, int status, bool outputs_ok, bool allow_lo
 uint64_t emu_parse_u64(const char *text, uint64_t max, const char *what);
 uint32_t emu_parse_u32(const char *text, const char *what);
 void emu_require_distinct(const char *path, const char *what, const char *other_path, const char *other);
+void emu_require_outside(const char *path, const char *what, const char *directory, const char *other);
 bool emu_close_output(FILE *stream, const char *path);
 
 #endif

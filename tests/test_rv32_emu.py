@@ -674,14 +674,19 @@ class EmulatorTest(unittest.TestCase):
                                    (["--record", f"{path}/out", "--checkpoints", f"{path}/./out"], "checkpoints file"),
                                    (["--trace", f"{path}//out", "--record", f"{path}/out"], "trace file"),
                                    (["--record", f"{path}/link/out", "--checkpoints", f"{path}/real/out"], "checkpoints file"),
-                                   (["--input", f"{path}/./s", "--trace", str(path / "s")], "trace file")]:
+                                   (["--input", f"{path}/./s", "--trace", str(path / "s")], "trace file"),
+                                   # Inside the frames directory a present could overwrite the file, whatever its name.
+                                   (["--frames", str(path / "real"), "--record", str(path / "real/frame-0001.ppm")], "record file"),
+                                   (["--frames", str(path / "real"), "--checkpoints", f"{path}/link/c"], "checkpoints file"),
+                                   (["--frames", str(path / "real"), "--input", str(path / "real/s")], "input script")]:
                 with self.subTest(extra=extra):
                     completed = subprocess.run([str(self.emulator), "--image", str(image), *extra],
                                                capture_output=True, text=True)
                     self.assertEqual(completed.returncode, 2)
                     self.assertIn(f"{message} ", completed.stderr)
-                    self.assertIn("would overwrite", completed.stderr)
+                    self.assertRegex(completed.stderr, "would overwrite|where a frame could overwrite")
                     self.assertEqual(image.read_bytes(), original, "the image is never touched")
+                    self.assertEqual(sorted(p.name for p in path.iterdir()), ["image.bin", "link", "real", "s"], "nothing was created")
 
     def test_trace_write_failure_rejects_the_run(self):
         words = [ADDI(1, 1, 1)] * 400 + FINISH()
