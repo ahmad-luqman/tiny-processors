@@ -33,7 +33,9 @@ RV32_COMMON_OBJS := build/rv32/start.o build/rv32/console.o build/rv32/muldiv.o
 RV32_SELFCHECK_OBJS := build/rv32/selfcheck.o $(RV32_COMMON_OBJS)
 RV32_DIAG_OBJS := build/rv32/diag.o build/rv32/trap.o $(RV32_COMMON_OBJS)
 RV32_PONG_OBJS := build/rv32/pong.o build/rv32/pong_game.o build/rv32/gfx.o $(RV32_COMMON_OBJS)
-RV32_IMAGES := selfcheck diag pong
+RV32_CAPSTONE_OBJS := build/rv32/gfx_text.o build/rv32/capstone.o build/rv32/runtime.o build/rv32/tetris_game.o build/rv32/pong_game.o build/rv32/gfx.o $(RV32_COMMON_OBJS)
+RV32_HEADERS += programs/rv32/runtime.h programs/rv32/tetris_game.h
+RV32_IMAGES := selfcheck diag pong capstone
 RV32_IMAGE_FILES := $(foreach image,$(RV32_IMAGES),$(foreach ext,elf lst bin readelf,build/rv32/$(image).$(ext)))
 RV32_SELFCHECK_HEX := 807d9fad
 RV32_DIAG_HEX := 8bd87e9a
@@ -213,6 +215,9 @@ build/rv32/diag.elf: $(RV32_DIAG_OBJS) programs/rv32/link.ld
 build/rv32/pong.elf: $(RV32_PONG_OBJS) programs/rv32/link.ld
 	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(RV32_PONG_OBJS)
 
+build/rv32/capstone.elf: $(RV32_CAPSTONE_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(RV32_CAPSTONE_OBJS)
+
 build/rv32/%.lst: build/rv32/%.elf
 	$(RV32_OBJDUMP) -d -S $< > $@
 
@@ -242,6 +247,8 @@ check-rv32-image: firmware-rv32
 	$(PYTHON) tools/rv32_image.py build/rv32/selfcheck.elf --listing build/rv32/selfcheck.lst --bin build/rv32/selfcheck.bin --hex build/rv32/selfcheck.hex
 	$(PYTHON) tools/rv32_image.py build/rv32/diag.elf --listing build/rv32/diag.lst --bin build/rv32/diag.bin --hex build/rv32/diag.hex --allow-privileged
 	$(PYTHON) tools/rv32_image.py build/rv32/pong.elf --listing build/rv32/pong.lst --bin build/rv32/pong.bin --hex build/rv32/pong.hex
+
+	$(PYTHON) tools/rv32_image.py build/rv32/capstone.elf --listing build/rv32/capstone.lst --bin build/rv32/capstone.bin --hex build/rv32/capstone.hex
 
 run-rv32-qemu: check-rv32-image
 	$(PYTHON) tools/rv32_run_qemu.py build/rv32/selfcheck.elf --qemu $(QEMU_RV32) --timeout 20 --transcript build/rv32/selfcheck.transcript --qemu-log build/rv32/qemu.log --expect-hex $(RV32_SELFCHECK_HEX)
@@ -382,3 +389,32 @@ disasm-rv32-pong: firmware-rv32
 
 clean:
 	rm -rf build
+
+# M7: one image, the same script/checkpoints on the native model and both machines.
+RV32_CAPSTONE_HEX := ea60197e
+RV32_CAPSTONE_ARGS := --image build/rv32/capstone.bin --input programs/rv32/capstone.input --expect-last-line "PASS $(RV32_CAPSTONE_HEX)" --expect-checkpoints programs/rv32/capstone.expected --timeout 300
+.PHONY: test-rv32-capstone run-rv32-capstone run-rv32-capstone-emu run-rv32-capstone-rtl run-rv32-capstone-rtl-verilator frames-rv32-capstone disasm-rv32-capstone
+
+test-rv32-capstone:
+	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_capstone.py' -v
+
+run-rv32-capstone: check-rv32-image $(RV32WIN)
+	@echo "UP/DOWN select, ENTER plays, ESC returns, Q quits. Both games: P pauses, R restarts."
+	$(RV32WIN) --image build/rv32/capstone.bin --scale 3 --record build/rv32/capstone.recorded.input --checkpoints build/rv32/capstone.recorded.checkpoints
+
+run-rv32-capstone-emu: check-rv32-image $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_CAPSTONE_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32/emu
+
+run-rv32-capstone-rtl: check-rv32-image $(RV32_TB_VVP) $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_CAPSTONE_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
+
+run-rv32-capstone-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR) $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_CAPSTONE_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/rtl-verilator
+
+frames-rv32-capstone: check-rv32-image $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_CAPSTONE_ARGS) --backend emulator --frames build/rv32/capstone-frames --emulator $(RV32EMU) --out build/rv32/emu
+
+disasm-rv32-capstone: firmware-rv32
+	cat build/rv32/capstone.lst
+
+test-rv32: test-rv32-capstone run-rv32-capstone-emu run-rv32-capstone-rtl run-rv32-capstone-rtl-verilator

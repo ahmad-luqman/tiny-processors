@@ -1,0 +1,107 @@
+#include "runtime.h"
+#include "board.h"
+
+static uint32_t game_checksum(const struct runtime *r)
+{
+    if (r->screen == RUNTIME_PONG) return pong_checksum(&r->pong);
+    if (r->screen == RUNTIME_TETRIS) return tetris_checksum(&r->tetris);
+    return 0;
+}
+
+static void change_screen(struct runtime *r, uint32_t screen)
+{
+    r->history = (r->history ^ game_checksum(r)) * 16777619u;
+    r->screen = screen;
+    r->blocked = UINT32_MAX;
+    r->transition = r->dirty = 1;
+    r->over_frames = 0;
+    if (screen == RUNTIME_PONG) pong_init(&r->pong);
+    if (screen == RUNTIME_TETRIS) tetris_init(&r->tetris, 1);
+}
+
+void runtime_init(struct runtime *r)
+{
+    pong_init(&r->pong);
+    tetris_init(&r->tetris, 1);
+    r->screen = RUNTIME_MENU;
+    r->selected = r->quit = r->blocked = r->transition = r->over_frames = r->frames = 0;
+    r->dirty = 1;
+    r->history = 2166136261u;
+}
+
+void runtime_event(struct runtime *r, uint32_t event)
+{
+    if (!(event & RV32_EVENT_VALID)) return;
+    uint32_t code = event & RV32_EVENT_CODE_MASK, bit = 1u << code;
+    if (!(event & RV32_EVENT_PRESS)) { r->blocked &= ~bit; return; }
+    if (r->transition || (r->blocked & bit) || r->quit) return;
+    if (code == RV32_KEY_Q) { r->quit = 1; return; }
+    if (code == RV32_KEY_ESCAPE && r->screen != RUNTIME_MENU) {
+        change_screen(r, RUNTIME_MENU);
+    } else if (r->screen == RUNTIME_MENU) {
+        if (code == RV32_KEY_UP || code == RV32_KEY_DOWN) { r->selected ^= 1; r->dirty = 1; }
+        else if (code == RV32_KEY_ENTER) change_screen(r, r->selected ? RUNTIME_TETRIS : RUNTIME_PONG);
+    } else {
+        if (code == RV32_KEY_R) {
+            r->history = (r->history ^ game_checksum(r)) * 16777619u;
+            r->over_frames = 0;
+        }
+        if (r->screen == RUNTIME_PONG) {
+            pong_event(&r->pong, event);
+            if (code == RV32_KEY_P) r->pong.needs_full_redraw = 1;
+        }
+        else tetris_event(&r->tetris, event);
+    }
+}
+
+void runtime_frame(struct runtime *r, uint32_t keys)
+{
+    r->frames++;
+    r->blocked &= keys;
+    keys &= ~r->blocked;
+    r->transition = 0;
+    uint32_t over = 0;
+    if (r->screen == RUNTIME_PONG) {
+        pong_frame(&r->pong, keys);
+        over = r->pong.phase == PONG_OVER;
+    } else if (r->screen == RUNTIME_TETRIS) {
+        tetris_frame(&r->tetris, keys);
+        over = r->tetris.phase == TETRIS_OVER;
+    }
+    if (over) {
+        if (++r->over_frames > 180) change_screen(r, RUNTIME_MENU);
+    } else r->over_frames = 0;
+}
+
+void runtime_draw(struct runtime *r, const struct gfx_surface *s)
+{
+    if (r->screen == RUNTIME_PONG) {
+        pong_draw(&r->pong, s);
+        if (r->pong.phase == PONG_OVER || r->pong.phase == PONG_PAUSED) {
+            gfx_fill_rect(s, 40, 108, 240, 24, 0);
+            gfx_draw_text(s, 48, 116, r->pong.phase == PONG_OVER ? "GAME OVER - R RESTART" :
+                          "PAUSED - P RESUME", 2, 0xff);
+        }
+    } else if (r->screen == RUNTIME_TETRIS) tetris_draw(&r->tetris, s);
+    else if (r->dirty) {
+        gfx_clear(s, 0);
+        gfx_draw_text(s, 40, 26, "TINY COMPUTER", 4, 0x1f);
+        gfx_draw_text(s, 100, 90, "PONG", 3, 0xff);
+        gfx_draw_text(s, 100, 130, "TETRIS", 3, 0xff);
+        gfx_draw_text(s, 70, r->selected ? 130 : 90, ">", 3, 0xfc);
+        gfx_draw_text(s, 36, 190, "UP DOWN SELECT ENTER PLAY", 2, 0xff);
+        gfx_draw_text(s, 36, 213, "Q QUIT", 2, 0x92);
+        gfx_draw_text(s, 36, 170, r->selected ? "ARROWS MOVE SPACE DROP" : "W S AND UP DOWN MOVE SPACE SERVE", 1, 0x92);
+    }
+    r->dirty = 0;
+}
+
+uint32_t runtime_checksum(const struct runtime *r)
+{
+    uint32_t h = r->history;
+#define HASH(v) h = (h ^ (uint32_t)(v)) * 16777619u
+    HASH(r->screen); HASH(r->selected); HASH(r->frames); HASH(r->over_frames);
+    HASH(r->blocked); HASH(r->quit); HASH(game_checksum(r));
+#undef HASH
+    return h;
+}
