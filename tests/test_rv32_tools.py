@@ -303,7 +303,7 @@ class DeviceHelperTests(unittest.TestCase):
             self.assertEqual(check_listing((ROOT / "build/rv32/diag.lst").read_text(), allow_privileged=True), [])
 
     def test_key_table_and_windows_agree_across_languages(self):
-        """The key table lives in board.h, the emulator, the testbench, and this module's KEYS; the
+        """The key table lives in board.h, the emulator, the window, the testbench, and this module's KEYS; the
         window bases in board.h, the bus, the machine's memory instances, and the assembler. None of
         the copies is parsed by the others, so this test pins them to each other."""
         header = (ROOT / "programs/rv32/board.h").read_text()
@@ -313,6 +313,10 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertEqual(dict(re.findall(r"#define RV32_KEY_(\w+)\s+(\d+)", header)), expected, "board.h")
         self.assertEqual(dict(re.findall(r'\{"(\w+)", (\d+)\}', emulator)), expected, "rv32emu_core.c")
         self.assertEqual(dict(re.findall(r'\(u == "(\w+)"\) key_code = (\d+);', testbench)), expected, "rv32_tb.sv")
+        window = (ROOT / "tools/rv32win.c").read_text()
+        host_names = {"RETURN": "ENTER"}  # SDL names the key by its keycap
+        keymap = {host_names.get(name, name): code for name, code in re.findall(r"\{SDL_SCANCODE_(\w+), (\d+)\}", window)}
+        self.assertEqual(keymap, expected, "rv32win.c")
         self.assertRegex(header, rf"#define RV32_INPUT_QUEUE\s+{QUEUE_SIZE}\b")
         self.assertRegex(header, rf"#define RV32_EVENT_VALID\s+{EVENT_VALID:#010x}\b")
         self.assertRegex(header, rf"#define RV32_EVENT_PRESS\s+{EVENT_PRESS:#010x}\b")

@@ -43,6 +43,10 @@ RV32_DIAG_ARGS := --image build/rv32/diag.bin --input $(RV32_DIAG_INPUT) --compa
 RV32EMU := build/rv32/rv32emu
 RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
 RV32EMU_CORE := tools/rv32emu_core.c tools/rv32emu_core.h
+RV32WIN := build/rv32/rv32win
+# Recursive `=`: pkg-config runs only where the window is built, so a machine without SDL3 still runs every test.
+SDL3_CFLAGS = $(shell pkg-config --cflags sdl3 2>/dev/null)
+SDL3_LIBS = $(shell pkg-config --libs sdl3 2>/dev/null)
 RV32_RTL := rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32.v
 RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_timer.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v
 RV32_TB := tests/rv32_tb.sv
@@ -241,6 +245,19 @@ $(RV32EMU): tools/rv32emu.c $(RV32EMU_CORE) | build/rv32
 	$(HOST_CC) $(RV32EMU_CFLAGS) -o $@ tools/rv32emu.c tools/rv32emu_core.c
 
 build-rv32-emu: toolchain-rv32-emu $(RV32EMU)
+
+toolchain-rv32-win: toolchain-rv32-emu
+	@pkg-config --exists sdl3 || { echo "missing SDL3 (brew install sdl3)"; exit 1; }
+	@echo "SDL3 $$(pkg-config --modversion sdl3)"
+
+$(RV32WIN): tools/rv32win.c $(RV32EMU_CORE) | build/rv32
+	$(HOST_CC) $(RV32EMU_CFLAGS) $(SDL3_CFLAGS) -o $@ tools/rv32win.c tools/rv32emu_core.c $(SDL3_LIBS)
+
+build-rv32-win: toolchain-rv32-win $(RV32WIN)
+
+# The window's tests run it under SDL's dummy video driver; they skip when SDL3 is not installed.
+test-rv32-win: check-rv32-image
+	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_win.py' -v
 
 # The image is a prerequisite so the diagnostic test runs rather than skips.
 test-rv32-emu: check-rv32-image
