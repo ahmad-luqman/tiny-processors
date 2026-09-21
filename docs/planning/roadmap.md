@@ -78,7 +78,7 @@ Each row is a bounded milestone, potentially split into several verified commits
 | M5 — completed 2026-09-21 ([record](../rv32-soc.md), [contract](../rv32.md#behavior-fixed-in-m5)) | Matched RAM/device models and RTL peripherals for timer, input, debug output, framebuffer, and faults. One diagnostic firmware image exercises them on both backends; scripted results and framebuffer checks agree under the documented time contract. | Decode an MMIO address into a peripheral select. Show why a framebuffer store is ordinary data movement until something displays it. | 2–4 |
 | M6 — completed 2026-09-21 ([record](../rv32-window.md), [contract](../rv32.md#behavior-fixed-in-m6)) | Native Mac frontend, software drawing routines, and Pong. Test collision/scoring separately, replay input deterministically, and play manually. Verify a bounded RTL replay reaches expected guest state and image checkpoints. | Follow a key event to a guest register read, paddle update, and pixel store; inspect timer wrap handling. | 2–4 |
 | M7 — completed 2026-09-21 ([record](../rv32-runtime.md)) | Boot menu, reusable runtime services, and Tetris. Test rotations/collisions, line clearing, scoring, game over/restart, and repeatable random seeds. A documented command builds and launches the capstone; both games work from the menu. Preserve a short RTL acceptance replay. | Trace reset-to-menu-to-game. Explain which services qualify as our first OS/runtime and which OS features remain absent. | 2–4 |
-| F1 — M7 | Standalone FP32 arithmetic unit, built in increments: add/subtract, multiply, fused multiply-add, divide/square root, and conversion/comparison support needed by F. Compare exact result bits and exception flags with an independent reference across rounding modes, ordinary/edge values, and seeded vectors. Check handshake/reset behavior, lint, synthesis, and short waves. | Trace exponent alignment, significand arithmetic, normalization, and rounding; explain why fused multiply-add has one final rounding. | 5–10 |
+| F1 — completed 2026-09-21 ([record](../fp32.md)) | Standalone FP32 arithmetic unit, built in increments: add/subtract, multiply, fused multiply-add, divide/square root, and conversion/comparison support needed by F. Compare exact result bits and exception flags with an independent reference across rounding modes, ordinary/edge values, and seeded vectors. Check handshake/reset behavior, lint, synthesis, and short waves. | Trace exponent alignment, significand arithmetic, normalization, and rounding; explain why fused multiply-add has one final rounding. | 5–10 |
 | F2 — F1/M4 | Integrate the complete F instruction/state contract into CPU and emulator: floating registers, loads/stores, arithmetic, moves/classification/sign operations, comparisons/conversions, and floating-point CSRs with required Zicsr support. Compare retirement effects and run compiled C float programs. Publish instruction/rounding/exception coverage and preserve integer-only firmware regressions. | Follow C float operands through ABI, registers, FPU request/completion, result writeback, and accrued flags. | 2–4 |
 | A1 — M7 | Resume parallel arithmetic: defined multiply/accumulate widths and a small matrix kernel, building on SIMD4 where appropriate. Compare extreme and ordinary cases against a software model; report transfers, cycles, and stalls. | Work one dot product by hand; predict overflow and the effect of serialized memory. | 2–4 |
 | A2 — A1/M5 | CPU-commanded accelerator integration with shared buffers, driver, completion polling, and error/reset semantics. CPU launches and checks matrix work; stalled-memory and interrupted-transfer tests pass. | Trace descriptor/register writes through bus decode to accelerator state. Explain ownership and exactly-once memory effects. | 2–4 |
@@ -103,25 +103,26 @@ Select and verify the compiler ISA/ABI flags at F2. Either preserve the integer 
 
 GPU FP32/other formats and NPU integer/other formats remain independent choices. The CPU FPU may help with reference computations or scene setup, but does not automatically create floating-point GPU lanes or change the digit model's quantization contract.
 
-## Next implementation session: F1
+## Next implementation session: F2
 
-M7 completed on 2026-09-21. The [runtime record](../rv32-runtime.md) fixes the
-Tetris rules and controls, explains reset-to-menu-to-game and input-to-pixel,
-and records acceptance. `make run-rv32-capstone` builds one image and launches
-both games from the menu. Both games were played by the user. The 68-frame
-acceptance replay matches the native build, emulator, Icarus and stalled
-Verilator: `PASS ea60197e`, 2,220,509 identical retired instructions. Standalone
-Pong and all previous lab commands are preserved.
+F1 completed on 2026-09-21. The [FP32 record](../fp32.md) fixes the standalone
+request/response contract, all five rounding modes and per-operation flags.
+Our RTL matches the pinned SoftFloat oracle on 70,407 vectors on both simulators
+and 259,407 additional Verilator stress vectors. Reset/backpressure checks,
+lint, latch-free synthesis (25,685 cells; 1,530 flip-flops) and short waves pass.
+F1 changes no CPU instructions, emulator behavior, MMIO, or guest firmware.
 
 1. Inspect Git status, preserve commands, start a branch, and end with one PR.
-2. Fix the standalone FP32 request/result/flags interface, supported rounding
-   modes, reset/handshake behavior, and independent exact reference before RTL.
-3. Implement in verified increments: add/subtract, multiply, fused
-   multiply-add, divide/square root, then conversion/comparison support for F.
-4. Check exact result bits and flags on directed edges and seeded vectors;
-   verify stalls and reset. Retain failing seeds and minimize disagreements.
-5. Lint, synthesize, inspect short waves, explain alignment/normalization/
-   rounding and storage costs, update the roadmap, and stop before F2.
+2. Fix the complete F architectural contract, floating-register retirement
+   effects, floating CSRs and Zicsr behavior, dynamic rounding, illegal encodings,
+   reset/trap cancellation, and compatible compiler ISA/ABI flags before integration.
+3. Integrate the standalone FPU with CPU issue/completion and writeback. Add
+   floating registers, loads/stores, moves/sign/classification and all F operations.
+4. Implement matching emulator behavior using independently verified arithmetic;
+   compare floating writes, accrued flags, CSR changes and memory effects.
+5. Run compiled float programs with runtime inputs, inspect their disassembly,
+   and preserve integer firmware and lab regressions. Publish instruction,
+   rounding and exception coverage, waves, cycles, gates and exercises.
 
 ## Verification and learning discipline
 
@@ -143,7 +144,7 @@ Complete milestones autonomously, then explain what changed, why it works, how i
 | Display format/resolution | Decided in M5: 320×240, one 8-bit pixel per byte, RGB332 fixed mapping, a framebuffer window at 0x3000_0000, presents as checkpoints; a palette window reserved at 0x2000_3000 | Measured: a full fill plus readback costs about 240 k instructions on the emulator and 1.7 M RTL cycles for the whole diagnostic |
 | Native window and input library, host-time timer mode | Decided in M6: SDL 3.4.16 (zlib) from Homebrew, integer scaling, presents paced to `--fps`; no host-time timer mode, the timer counts instructions in every mode; RGB332 kept and the palette window left reserved | A recorded session replays identically on every backend; Pong's 200-frame session is trace-identical on the RTL |
 | Exact Tetris rules and controls | Decided in M7: [runtime contract](../rv32-runtime.md) | 10×20, seven-bag seed 1, clockwise rotations without kicks, 30-frame gravity, soft/hard drop, pause/restart, menu return |
-| FPU microarchitecture and independent reference | F1, before arithmetic RTL | Multicycle FP32 with exact result/flag comparisons; split implementation into verified operations |
+| FPU microarchitecture and independent reference | Decided in F1 ([record](../fp32.md)) | Multicycle hardware with exact 576-bit accumulation, iterative divide/square root, shared rounding; pinned SoftFloat RISCV oracle, exact bits/flags |
 | Floating-point compiler flags, ABI, and CSR contract | F2, before linking float firmware | Explicit compatible objects/libraries; retain integer firmware regression |
 | Matrix/NPU precision, saturation, rounding, accumulator width | A1/N1 before arithmetic RTL | Integer arithmetic with explicit bounds and independently checked conversion |
 | Pretrained model/dataset, weight license, accuracy target | N1 before implementing kernels | Small classifier whose operations fit the planned engine; lock a test set and accuracy target before acceptance testing |

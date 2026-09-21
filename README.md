@@ -1,6 +1,6 @@
 # Tiny Processors
 
-Learning Verilog by building small CPUs, parallel compute hardware, and an end-to-end computer. Our RV32I CPU and native Mac emulator run C, a small OS/runtime, Pong, and Tetris; FP32 hardware and CPU F-extension integration follow Tetris, before programmable 3D; GPU/NPU integration also follows the playable machine. See [the roadmap](PLAN.md) and the [detailed full-stack plan](docs/planning/roadmap.md).
+Learning Verilog by building small CPUs, parallel compute hardware, and an end-to-end computer. Our RV32I CPU and native Mac emulator run C, a small OS/runtime, Pong, and Tetris; the standalone FP32 hardware unit is verified, and CPU F-extension integration is next before programmable 3D; GPU/NPU integration also follows the playable machine. See [the roadmap](PLAN.md) and the [detailed full-stack plan](docs/planning/roadmap.md).
 
 ## Play the complete computer (M7)
 
@@ -18,6 +18,22 @@ See [the runtime and Tetris record](docs/rv32-runtime.md) for the rules,
 prerequisites, deterministic replay commands, reset-to-menu walkthrough, and
 acceptance evidence. `make test-rv32` includes the capstone; `make test` still
 runs the original counter. Standalone `make run-rv32-pong` is preserved.
+
+## Standalone hardware floating point (F1)
+
+```sh
+make test-fp32             # Exact bits/flags against the SoftFloat test oracle
+make test-fp32-verilator   # Same checks on the second RTL simulator
+make lint-fp32 synth-fp32  # Synthesizable hardware, generic gates and storage
+make waves-fp32 bench-fp32 # Short traces and operation latency
+```
+
+Our Verilog FPU implements add/subtract, multiply, fused multiply-add,
+divide/square root, integer conversions, comparisons and min/max, with all five
+rounding modes. SoftFloat is only an independent **host test reference**; the
+hardware does the arithmetic. See [the FP32 contract, gates and waveform
+walkthrough](docs/fp32.md). F1 is standalone: connecting it to the RV32 CPU and
+emulator, with floating registers and CSRs, is F2. Existing games remain RV32I.
 
 ## Start here
 
