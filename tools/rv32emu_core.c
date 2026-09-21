@@ -1,4 +1,3 @@
-#include "rv32_fp.h"
 /* rv32emu_core: the RV32 machine as a library; see rv32emu_core.h for the
  * API and docs/rv32-emulator.md for the record. Every device model here
  * mirrors a module of rtl/rv32; the two are compared trace for trace.
@@ -8,6 +7,7 @@
 #define _DARWIN_C_SOURCE 1 /* O_NOFOLLOW is hidden under the strict POSIX define */
 #endif
 #include "rv32emu_core.h"
+#include "rv32_fp.h"
 
 #include <ctype.h>
 #include <errno.h>

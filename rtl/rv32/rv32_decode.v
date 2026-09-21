@@ -2,8 +2,9 @@
 
 // Combinational instruction decoder: register fields, the sign-extended
 // immediate for each format, one flag per instruction class, and the
-// `illegal` check that follows the machine contract (the emulator traps the
-// same words). Every valid word sets exactly one class flag, or none for
+// integer/memory `illegal` check (compute F encodings use rv32_fdecode).
+// The emulator traps the
+// same words. Every valid word sets exactly one class flag, or none for
 // `fence`, which retires with no effect; the core executes all of them.
 module rv32_decode (
     input  wire [31:0] insn,
@@ -42,7 +43,7 @@ module rv32_decode (
     assign rs2 = insn[24:20];
     assign funct3 = insn[14:12];
 
-    // The four existing CSRs; any other number is illegal on the machine.
+    // Four trap CSRs and the three floating aliases; other numbers are illegal.
     wire csr_exists = (csr == 12'h001) || (csr == 12'h002) || (csr == 12'h003) || (csr == 12'h305) || (csr == 12'h341) || (csr == 12'h342) || (csr == 12'h343);
     assign is_mret = (insn == 32'h30200073);
 

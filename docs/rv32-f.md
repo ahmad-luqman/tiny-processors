@@ -49,7 +49,10 @@ lines remain byte-identical. State dumps include f0..f31 and fcsr.
 Float firmware uses `-march=rv32if_zicsr -mabi=ilp32` with separate build
 objects. Arguments/results cross C call boundaries in integer ABI registers;
 the compiler moves them into floating registers for arithmetic. No incompatible
-hard-float ABI objects or host libraries are linked into guest firmware.
+hard-float ABI objects or host libraries are linked into guest firmware. The
+separate `floatsoft` benchmark compiles the vendored generic SoftFloat C sources
+as RV32I guest code, with four compiler libcalls and a 32-bit-limb multiply helper.
+This benchmark never participates in hardware execution or the emulator adapter.
 
 The emulator uses pinned Berkeley SoftFloat as host arithmetic, with independent
 ISA decode and per-machine accrued state. It sets rounding, tininess and clears

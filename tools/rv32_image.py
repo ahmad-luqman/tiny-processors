@@ -91,7 +91,35 @@ def parse_elf(data):
     return Elf(etype, machine, flags, entry, segments, sections, symbols, undefined)
 
 
-def check_listing(text, allow_privileged=False):
+F_OPCODES = {0x07, 0x27, 0x43, 0x47, 0x4b, 0x4f, 0x53}
+
+
+def valid_f_word(word):
+    """Static RV32F encoding validation; dynamic frm is runtime state."""
+    op, f3, f7, rs2 = word & 127, (word >> 12) & 7, word >> 25, (word >> 20) & 31
+    rm_ok = f3 <= 4 or f3 == 7
+    if op in (0x07, 0x27): return f3 == 2
+    if op in (0x43, 0x47, 0x4b, 0x4f): return (word >> 25) & 3 == 0 and rm_ok
+    if op != 0x53: return False
+    if f7 in (0x00, 0x04, 0x08, 0x0c): return rm_ok
+    if f7 == 0x2c: return rs2 == 0 and rm_ok
+    if f7 in (0x60, 0x68): return rs2 <= 1 and rm_ok
+    if f7 in (0x10, 0x50): return f3 <= 2
+    if f7 == 0x14: return f3 <= 1
+    if f7 == 0x70: return rs2 == 0 and f3 <= 1
+    if f7 == 0x78: return rs2 == 0 and f3 == 0
+    return False
+
+
+def listing_word(encoded):
+    """LLVM prints either little-endian bytes or a single instruction word."""
+    if " " in encoded:
+        raw = bytes.fromhex(encoded)
+        return int.from_bytes(raw, "little") if len(raw) == 4 else None
+    return int(encoded, 16) if len(encoded) == 8 else None
+
+
+def check_listing(text, allow_privileged=False, allow_f=False):
     """Return problems found in an objdump disassembly listing; `allow_privileged` admits the CSR
     instructions and mret that a trap handler needs (docs/rv32.md, "Behavior fixed in M2")."""
     problems = []
@@ -103,6 +131,17 @@ def check_listing(text, allow_privileged=False):
             continue
         match = LISTING_LINE.match(line)
         instructions += bool(match)
+        word = listing_word(match.group(2)) if match else None
+        if word is not None and word & 127 in F_OPCODES:
+            if not allow_f or not valid_f_word(word):
+                problems.append(f"listing line {number}: floating instruction outside selected ISA: {line.strip()}")
+            continue
+        if word is not None and word & 127 == 0x73 and (word >> 12) & 7:
+            csr = word >> 20
+            if csr in (1, 2, 3):
+                if not allow_f or (word >> 12) & 7 == 4:
+                    problems.append(f"listing line {number}: floating CSR outside selected ISA: {line.strip()}")
+                continue
         if match and FORBIDDEN_MNEMONIC.match(match.group(3)):
             if allow_privileged and PRIVILEGED_MNEMONIC.match(match.group(3)):
                 if match.group(3) == "mret" or TRAP_CSR.search(line):
@@ -117,7 +156,7 @@ def check_listing(text, allow_privileged=False):
     return problems
 
 
-def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, entry=None, allow_privileged=False):
+def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, entry=None, allow_privileged=False, allow_f=False):
     """Return a list of contract violations; an empty list means the image is acceptable."""
     entry = ram_base if entry is None else entry
     ram_end = ram_base + ram_size
@@ -186,7 +225,7 @@ def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, e
     if elf.undefined:
         problems.append("undefined symbols: " + ", ".join(sorted(elf.undefined)))
     if listing is not None:
-        problems.extend(check_listing(listing, allow_privileged))
+        problems.extend(check_listing(listing, allow_privileged, allow_f))
     return problems
 
 
@@ -232,11 +271,12 @@ def main():
     parser.add_argument("--ram-size", type=lambda text: int(text, 0), default=RAM_SLICE_SIZE)
     parser.add_argument("--allow-privileged", action="store_true",
                         help="admit csr* and mret in the listing (an image with a trap handler)")
+    parser.add_argument("--allow-f", action="store_true", help="admit RV32F and floating CSRs, retaining ILP32")
     args = parser.parse_args()
     try:
         elf = parse_elf(args.elf.read_bytes())
         listing = args.listing.read_text() if args.listing else None
-        problems = check_image(elf, listing, args.ram_base, args.ram_size, allow_privileged=args.allow_privileged)
+        problems = check_image(elf, listing, args.ram_base, args.ram_size, allow_privileged=args.allow_privileged, allow_f=args.allow_f)
         image = flatten(elf, args.ram_base)
         if args.bin and args.bin.read_bytes() != image:
             problems.append(f"{args.bin} differs from the flattened PT_LOAD contents ({len(image)} bytes)")

@@ -1,8 +1,8 @@
 `timescale 1ns/1ps
 
-// Multicycle RV32I core: FETCH, DECODE, EXECUTE, MEM, WRITEBACK, one
-// ready/valid memory port with byte strobes in both directions, the four
-// trap CSRs, and retirement in the last state. A trap vectors to mtvec; a
+// Multicycle RV32IF core: the integer path plus FP_ISSUE/FP_WAIT. One
+// ready/valid memory port, four trap CSRs, floating CSRs, and atomic
+// register/flag retirement in WRITEBACK. See docs/rv32-f.md. A trap vectors to mtvec; a
 // second trap before the handler retires an instruction halts the core
 // (the emulator's double-fault rule). The contract is docs/rv32-rtl.md;
 // the datapath and controller are explained in docs/rv32-to-gates.md.
@@ -334,7 +334,7 @@ module rv32 (
                             CSR_MEPC: mepc <= {csr_new[31:2], 2'b00};   // IALIGN is 32
                             CSR_MCAUSE: mcause <= csr_new;
                             12'h343: mtval <= csr_new;
-                            default: begin end // CSR_MTVAL: the decoder admits no other number
+                            default: begin end // Floating CSRs were handled above.
                         endcase
                     end
                     in_trap <= 1'b0;

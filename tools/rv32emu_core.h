@@ -7,7 +7,7 @@
  * emu_run_until reports, and host keys enter through emu_queue_event at the
  * same point scripted events do.
  *
- * Build: cc -std=c11 -O2 -Wall -Wextra -Werror -o rv32emu rv32emu.c rv32emu_core.c
+ * Build: make build-rv32-emu (links the pinned host SoftFloat objects)
  */
 #ifndef RV32EMU_CORE_H
 #define RV32EMU_CORE_H
