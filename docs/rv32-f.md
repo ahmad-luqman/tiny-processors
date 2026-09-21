@@ -201,7 +201,7 @@ Payload ports have meaning only with their enables, so unrelated changes on
 
 - Nine architectural tests pass on each simulator: 45 literal anchors in both
   static and dynamic modes, the 1,080-request seeded corpus, all register roles,
-  traps, memory faults and 24 reset positions across short/iterative operations.
+  traps, memory faults and reset positions across short/iterative operations.
 - Five F2 tool tests pass, including explicit ISA/ILP32 checks, disassembly,
   patched runtime inputs, complete floating state dumps and multiply glue.
 - All three compiled images pass on emulator and both RTL simulators. The
