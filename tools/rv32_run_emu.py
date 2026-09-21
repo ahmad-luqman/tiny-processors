@@ -18,15 +18,16 @@ sys.path.insert(0, str(ROOT))
 from tools.rv32_run_qemu import classify  # noqa: E402
 
 DEFAULT_EMULATOR = "build/rv32/rv32emu"
-EMULATOR_SOURCE = ROOT / "tools" / "rv32emu.c"
+EMULATOR_SOURCES = (ROOT / "tools" / "rv32emu.c", ROOT / "tools" / "rv32emu_core.c")
 EMULATOR_CFLAGS = ("-std=c11", "-O2", "-Wall", "-Wextra", "-Werror")  # the Makefile's RV32EMU_CFLAGS
 COUNTERS = ("steps", "retired", "traps", "loaded")
 
 
 def build_emulator(output):
-    """Compile tools/rv32emu.c into `output` with the Makefile's flags; HOST_CC picks the compiler."""
+    """Compile the headless emulator (its main and the core) into `output` with the Makefile's
+    flags; HOST_CC picks the compiler."""
     compiler = os.environ.get("HOST_CC", "cc")
-    subprocess.run([compiler, *EMULATOR_CFLAGS, "-o", str(output), str(EMULATOR_SOURCE)], check=True)
+    subprocess.run([compiler, *EMULATOR_CFLAGS, "-o", str(output), *map(str, EMULATOR_SOURCES)], check=True)
 
 
 def last_halt_line(stderr, prefix):
@@ -61,9 +62,10 @@ def parse_halt_line(line, decimal, hexadecimal):
     return fields
 
 
-def halt_line(stderr):
-    """Parse the emulator's final `rv32emu: halt=... ` line into a dict, or None if absent."""
-    line = last_halt_line(stderr, "rv32emu:")
+def halt_line(stderr, prefix="rv32emu:"):
+    """Parse the emulator's final `rv32emu: halt=... ` line (the window's says `rv32win:`) into a
+    dict, or None if absent."""
+    line = last_halt_line(stderr, prefix)
     return None if line is None else parse_halt_line(line, COUNTERS, ("done",))
 
 

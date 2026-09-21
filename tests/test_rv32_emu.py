@@ -19,7 +19,7 @@ import unittest
 
 # The encoder lives in tools/rv32_asm.py so the RTL tests assemble the same words.
 from tools.rv32_asm import *  # noqa: F401,F403
-from tools.rv32_devices import FB_SIZE, diag_checksum, event_word, frame_hash, render_diag_frame
+from tools.rv32_devices import FB_SIZE, KEYS, diag_checksum, event_word, frame_hash, render_diag_frame
 from tools.rv32_diff_qemu import compare, qemu_pcs, trace_pcs
 from tools.rv32_run_emu import build_emulator, halt_line
 
@@ -477,6 +477,39 @@ class EmulatorTest(unittest.TestCase):
                                 for code in list(range(12)) + list(range(22, 32))])
         self.assertEqual((result.state.x[4], result.state.x[5], result.state.events), (0, 0xFFC00FFF, 0))
 
+    def test_record_writes_every_offered_event_as_a_replayable_script(self):
+        """--record lists every event the host offered, scripted or not, at the frame it was offered,
+        before the queue decides: a replay of the record reproduces the run, drops included."""
+        script = "frame 0 down LEFT\nframe 0 up left\nframe 1 down A\nframe 2 up 8\nframe 2 down 20\n"
+        words = LI(1, INPUT) + LI(2, DISPLAY) + [LW(3, 1, 0), LW(3, 1, 0), SW(0, 2, 0), LW(3, 1, 0), SW(0, 2, 0), LW(3, 1, 0), LW(3, 1, 0)]
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / "record.txt"
+            result = self.run_pass(words, input_script=script, extra=["--record", str(record)], checkpoints=True)
+            self.assertEqual(record.read_text(), "frame 0 down LEFT\nframe 0 up LEFT\nframe 1 down A\nframe 2 up A\nframe 2 down 20\n")
+            replay = self.run_pass(words, input_script=record.read_text(), checkpoints=True)
+            self.assertEqual((replay.trace, replay.checkpoints), (result.trace, result.checkpoints))
+            # A burst the queue cannot hold is recorded whole, so the replay drops the same event.
+            burst = "".join(f"frame 0 down {code}\n" for code in range(17))
+            result = self.run_pass(LI(1, INPUT) + [LW(3, 1, 4)], input_script=burst, allow_lost_events=True,
+                                   extra=["--record", str(record)])
+            names = {code: name for name, code in KEYS.items()}
+            self.assertEqual(record.read_text(), "".join(f"frame 0 down {names.get(code, code)}\n" for code in range(17)))
+            self.assertIn("dropped frame 0 event", result.stderr)
+            replay = self.run_words(LI(1, INPUT) + [LW(3, 1, 4)] + FINISH(), input_script=record.read_text())
+            self.assertEqual((replay.status, replay.state.x[3]), (2, 16))
+            self.assertIn("1 scripted event(s) lost", replay.stderr)
+            # An unwritable record is refused before the run.
+            completed = subprocess.run([str(self.emulator), "--image", str(self.image_path(words)), "--record", directory],
+                                       capture_output=True, text=True)
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn(f"rv32emu: cannot write {directory}", completed.stderr)
+
+    def image_path(self, words):
+        """A flat image of `words` in the class workdir, for tests that need a stable path."""
+        path = Path(self.workdir.name) / "image.bin"
+        path.write_bytes(b"".join(word.to_bytes(4, "little") for word in list(words) + FINISH()))
+        return path
+
     def test_input_script_errors(self):
         for content in ("frame 1 down\n", "frame x down A\n", "frame 1 press A\n", "frame 2 down A\nframe 1 up A\n",
                         "frame 1 down NOPE\n", "frame 1 down 32\n", "key 1 down A\n", "frame 1 down A extra\n",
@@ -604,7 +637,14 @@ class EmulatorTest(unittest.TestCase):
                                    (["--checkpoints", str(image)], "checkpoints file"),
                                    (["--input", str(path / "s"), "--trace", str(path / "s")], "trace file"),
                                    (["--trace", str(path / "t"), "--checkpoints", str(path / "t")], "checkpoints file"),
-                                   (["--checkpoints", str(path / "c"), "--dump-state", str(path / "c")], "state file")]:
+                                   (["--checkpoints", str(path / "c"), "--dump-state", str(path / "c")], "state file"),
+                                   (["--record", str(image)], "record file"),
+                                   (["--input", str(path / "s"), "--record", str(path / "s")], "record file"),
+                                   (["--record", str(path / "r"), "--trace", str(path / "r")], "trace file"),
+                                   (["--record", str(path / "r"), "--checkpoints", str(path / "r")], "checkpoints file"),
+                                   (["--record", str(path / "r"), "--dump-state", str(path / "r")], "state file"),
+                                   (["--frames", str(image)], "frames directory"),
+                                   (["--input", str(path / "s"), "--frames", str(path / "s")], "frames directory")]:
                 with self.subTest(extra=extra):
                     completed = subprocess.run([str(self.emulator), "--image", str(image), *extra],
                                                capture_output=True, text=True)

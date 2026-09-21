@@ -307,11 +307,11 @@ class DeviceHelperTests(unittest.TestCase):
         window bases in board.h, the bus, the machine's memory instances, and the assembler. None of
         the copies is parsed by the others, so this test pins them to each other."""
         header = (ROOT / "programs/rv32/board.h").read_text()
-        emulator = (ROOT / "tools/rv32emu.c").read_text()
+        emulator = (ROOT / "tools/rv32emu_core.c").read_text()
         testbench = (ROOT / "tests/rv32_tb.sv").read_text()
         expected = {name: str(code) for name, code in KEYS.items()}
         self.assertEqual(dict(re.findall(r"#define RV32_KEY_(\w+)\s+(\d+)", header)), expected, "board.h")
-        self.assertEqual(dict(re.findall(r'\{"(\w+)", (\d+)\}', emulator)), expected, "rv32emu.c")
+        self.assertEqual(dict(re.findall(r'\{"(\w+)", (\d+)\}', emulator)), expected, "rv32emu_core.c")
         self.assertEqual(dict(re.findall(r'\(u == "(\w+)"\) key_code = (\d+);', testbench)), expected, "rv32_tb.sv")
         self.assertRegex(header, rf"#define RV32_INPUT_QUEUE\s+{QUEUE_SIZE}\b")
         self.assertRegex(header, rf"#define RV32_EVENT_VALID\s+{EVENT_VALID:#010x}\b")

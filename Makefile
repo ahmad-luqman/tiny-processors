@@ -42,6 +42,7 @@ RV32_DIAG_INPUT := programs/rv32/diag.input
 RV32_DIAG_ARGS := --image build/rv32/diag.bin --input $(RV32_DIAG_INPUT) --compare results --expect-last-line "PASS $(RV32_DIAG_HEX)" --expect-checkpoint "frame 1 $(RV32_DIAG_FRAME1_HEX)" --expect-checkpoint "frame 2 $(RV32_DIAG_FRAME2_HEX)"
 RV32EMU := build/rv32/rv32emu
 RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
+RV32EMU_CORE := tools/rv32emu_core.c tools/rv32emu_core.h
 RV32_RTL := rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32.v
 RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_timer.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v
 RV32_TB := tests/rv32_tb.sv
@@ -236,8 +237,8 @@ test-rv32-tools:
 test-rv32-rt:
 	$(PYTHON) -m unittest discover -s tests -p 'test_rv32_rt.py' -v
 
-$(RV32EMU): tools/rv32emu.c | build/rv32
-	$(HOST_CC) $(RV32EMU_CFLAGS) -o $@ $<
+$(RV32EMU): tools/rv32emu.c $(RV32EMU_CORE) | build/rv32
+	$(HOST_CC) $(RV32EMU_CFLAGS) -o $@ tools/rv32emu.c tools/rv32emu_core.c
 
 build-rv32-emu: toolchain-rv32-emu $(RV32EMU)
 
