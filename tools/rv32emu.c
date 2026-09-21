@@ -108,26 +108,27 @@ int main(int argc, char **argv)
         emu_read_input_script(&m, input_path); /* exits on a bad script */
     }
     if (record_path) { /* opened before frame 0's events are delivered, so they are recorded too */
-        m.record = fopen(record_path, "w");
+        m.record = emu_open_output(record_path, "record file");
         if (!m.record) {
-            fprintf(stderr, "rv32emu: cannot write %s\n", record_path);
             return EXIT_EMULATOR_ERROR;
         }
     }
     if (trace_path) {
-        m.trace = fopen(trace_path, "w");
+        m.trace = emu_open_output(trace_path, "trace file");
         if (!m.trace) {
-            fprintf(stderr, "rv32emu: cannot write %s\n", trace_path);
             return EXIT_EMULATOR_ERROR;
         }
     }
     if (checkpoints_path) {
-        m.checkpoints = fopen(checkpoints_path, "w");
+        m.checkpoints = emu_open_output(checkpoints_path, "checkpoints file");
         if (!m.checkpoints) {
-            fprintf(stderr, "rv32emu: cannot write %s\n", checkpoints_path);
             return EXIT_EMULATOR_ERROR;
         }
     }
+    /* Names have been compared every way a name can be; the open files settle it. */
+    emu_require_distinct_streams(m.record, record_path, "record file", m.trace, trace_path, "trace file");
+    emu_require_distinct_streams(m.record, record_path, "record file", m.checkpoints, checkpoints_path, "checkpoints file");
+    emu_require_distinct_streams(m.trace, trace_path, "trace file", m.checkpoints, checkpoints_path, "checkpoints file");
     m.frames_dir = frames_dir;
     if (input_path) {
         emu_deliver_events(&m); /* frame 0's events are queued before the first instruction */
@@ -138,9 +139,8 @@ int main(int argc, char **argv)
     }
     bool outputs_ok = emu_finish_outputs(&m, trace_path, checkpoints_path, record_path);
     if (state_path) {
-        FILE *out = fopen(state_path, "w");
+        FILE *out = emu_open_output(state_path, "state file");
         if (!out) {
-            fprintf(stderr, "rv32emu: cannot write %s\n", state_path);
             return EXIT_EMULATOR_ERROR;
         }
         emu_dump_state(&m, out);

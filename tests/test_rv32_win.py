@@ -151,6 +151,11 @@ class WindowTest(unittest.TestCase):
             self.assertEqual(status, 2)
             self.assertIn("checkpoints file", stderr)
             self.assertFalse((Path(directory) / "out").exists(), "nothing was created")
+            (Path(directory) / "rl").symlink_to(Path(directory) / "target")
+            status, _, stderr = self.run_window("--image", str(image), "--record", f"{directory}/rl")
+            self.assertEqual(status, 2)
+            self.assertIn("is a symbolic link", stderr)
+            self.assertFalse((Path(directory) / "target").exists(), "the link was not followed")
 
 
 if __name__ == "__main__":

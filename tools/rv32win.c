@@ -171,19 +171,18 @@ int main(int argc, char **argv)
         lut[p] = 0xff000000u | ((uint32_t)rgb[0] << 16) | ((uint32_t)rgb[1] << 8) | rgb[2];
     }
     if (record_path) { /* opened before frame 0's events are delivered, so they are recorded too */
-        m.record = fopen(record_path, "w");
+        m.record = emu_open_output(record_path, "record file");
         if (!m.record) {
-            fprintf(stderr, "rv32win: cannot write %s\n", record_path);
             return EXIT_EMULATOR_ERROR;
         }
     }
     if (checkpoints_path) {
-        m.checkpoints = fopen(checkpoints_path, "w");
+        m.checkpoints = emu_open_output(checkpoints_path, "checkpoints file");
         if (!m.checkpoints) {
-            fprintf(stderr, "rv32win: cannot write %s\n", checkpoints_path);
             return EXIT_EMULATOR_ERROR;
         }
     }
+    emu_require_distinct_streams(m.record, record_path, "record file", m.checkpoints, checkpoints_path, "checkpoints file");
     if (input_path) {
         emu_deliver_events(&m); /* frame 0's events are queued before the first instruction */
     }

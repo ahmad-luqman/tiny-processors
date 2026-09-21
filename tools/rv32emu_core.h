@@ -145,6 +145,8 @@ uint64_t emu_parse_u64(const char *text, uint64_t max, const char *what);
 uint32_t emu_parse_u32(const char *text, const char *what);
 void emu_require_distinct(const char *path, const char *what, const char *other_path, const char *other);
 void emu_require_outside(const char *path, const char *what, const char *directory, const char *other);
+FILE *emu_open_output(const char *path, const char *what);
+void emu_require_distinct_streams(FILE *a, const char *a_path, const char *a_what, FILE *b, const char *b_path, const char *b_what);
 bool emu_close_output(FILE *stream, const char *path);
 
 #endif

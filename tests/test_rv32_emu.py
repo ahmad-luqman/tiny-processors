@@ -672,6 +672,8 @@ class EmulatorTest(unittest.TestCase):
             (path / "s").write_text("frame 0 down A\n")  # a script an output must not truncate
             (path / "real").mkdir()
             (path / "link").symlink_to(path / "real")
+            (path / "rl").symlink_to(path / "target")  # two dangling links to one missing file
+            (path / "cl").symlink_to(path / "target")
             for extra, message in [(["--trace", str(image)], "trace file"),
                                    (["--dump-state", str(image)], "state file"),
                                    (["--trace", str(path / "t"), "--dump-state", str(path / "t")], "state file"),
@@ -696,15 +698,19 @@ class EmulatorTest(unittest.TestCase):
                                    # Inside the frames directory a present could overwrite the file, whatever its name.
                                    (["--frames", str(path / "real"), "--record", str(path / "real/frame-0001.ppm")], "record file"),
                                    (["--frames", str(path / "real"), "--checkpoints", f"{path}/link/c"], "checkpoints file"),
-                                   (["--frames", str(path / "real"), "--input", str(path / "real/s")], "input script")]:
+                                   (["--frames", str(path / "real"), "--input", str(path / "real/s")], "input script"),
+                                   # Outputs are real files: a symbolic link, dangling or not, is refused before it is followed.
+                                   (["--record", str(path / "rl"), "--checkpoints", str(path / "cl")], "record file"),
+                                   (["--trace", str(path / "rl")], "trace file"),
+                                   (["--dump-state", str(path / "rl")], "state file")]:
                 with self.subTest(extra=extra):
                     completed = subprocess.run([str(self.emulator), "--image", str(image), *extra],
                                                capture_output=True, text=True)
                     self.assertEqual(completed.returncode, 2)
                     self.assertIn(f"{message} ", completed.stderr)
-                    self.assertRegex(completed.stderr, "would overwrite|where a frame could overwrite")
+                    self.assertRegex(completed.stderr, "would overwrite|where a frame could overwrite|is a symbolic link")
                     self.assertEqual(image.read_bytes(), original, "the image is never touched")
-                    self.assertEqual(sorted(p.name for p in path.iterdir()), ["image.bin", "link", "real", "s"], "nothing was created")
+                    self.assertEqual(sorted(p.name for p in path.iterdir()), ["cl", "image.bin", "link", "real", "rl", "s"], "nothing was created")
 
     def test_trace_write_failure_rejects_the_run(self):
         words = [ADDI(1, 1, 1)] * 400 + FINISH()

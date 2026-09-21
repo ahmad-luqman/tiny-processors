@@ -3,6 +3,9 @@
  * mirrors a module of rtl/rv32; the two are compared trace for trace.
  */
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1 /* O_NOFOLLOW is hidden under the strict POSIX define */
+#endif
 #include "rv32emu_core.h"
 
 #include <ctype.h>
@@ -11,7 +14,9 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 const char *emu_prog = "rv32emu";
 
@@ -29,7 +34,7 @@ enum cause {
 
 /* The only CSRs that exist; every other number is an illegal instruction. */
 enum csr { CSR_MTVEC = 0x305, CSR_MEPC = 0x341, CSR_MCAUSE = 0x342, CSR_MTVAL = 0x343 };
-typedef enum { ACC_OK, ACC_FAULT, ACC_MISALIGNED } access;
+typedef enum { ACC_OK, ACC_FAULT, ACC_MISALIGNED } mem_access; /* not `access`: unistd.h owns that name */
 
 /* Every window of the memory map is a region with a load and a store
  * handler, or NULL when that direction is undefined. A handler receives the
@@ -37,8 +42,8 @@ typedef enum { ACC_OK, ACC_FAULT, ACC_MISALIGNED } access;
  * device; anything it refuses, and every address outside every window, is an
  * access fault. This mirrors rtl/rv32/rv32_bus.v: one comparator per window,
  * then the device's own decode. */
-typedef access (*load_handler)(machine *m, uint32_t offset, int width, uint32_t *value);
-typedef access (*store_handler)(machine *m, uint32_t offset, int width, uint32_t value);
+typedef mem_access (*load_handler)(machine *m, uint32_t offset, int width, uint32_t *value);
+typedef mem_access (*store_handler)(machine *m, uint32_t offset, int width, uint32_t value);
 
 typedef struct {
     const char *name;
@@ -63,19 +68,19 @@ static void bytes_write(uint8_t *p, int width, uint32_t value)
     }
 }
 
-static access ram_load(machine *m, uint32_t offset, int width, uint32_t *value)
+static mem_access ram_load(machine *m, uint32_t offset, int width, uint32_t *value)
 {
     *value = bytes_read(m->ram + offset, width);
     return ACC_OK;
 }
 
-static access ram_store(machine *m, uint32_t offset, int width, uint32_t value)
+static mem_access ram_store(machine *m, uint32_t offset, int width, uint32_t value)
 {
     bytes_write(m->ram + offset, width, value);
     return ACC_OK;
 }
 
-static access console_load(machine *m, uint32_t offset, int width, uint32_t *value)
+static mem_access console_load(machine *m, uint32_t offset, int width, uint32_t *value)
 {
     (void)m;
     if (width == 1 && offset == CONSOLE_STATUS) {
@@ -85,7 +90,7 @@ static access console_load(machine *m, uint32_t offset, int width, uint32_t *val
     return ACC_FAULT; /* TX is write-only; the status is a byte; other offsets do not exist */
 }
 
-static access console_store(machine *m, uint32_t offset, int width, uint32_t value)
+static mem_access console_store(machine *m, uint32_t offset, int width, uint32_t value)
 {
     (void)m;
     if (width == 1 && offset == CONSOLE_TX) {
@@ -95,7 +100,7 @@ static access console_store(machine *m, uint32_t offset, int width, uint32_t val
     return ACC_FAULT; /* the status is read-only; TX takes bytes only */
 }
 
-static access done_store(machine *m, uint32_t offset, int width, uint32_t value)
+static mem_access done_store(machine *m, uint32_t offset, int width, uint32_t value)
 {
     if (width == 4 && offset == 0) {
         m->halt = HALT_DONE; /* the store still retires; the loop stops afterwards */
@@ -108,7 +113,7 @@ static access done_store(machine *m, uint32_t offset, int width, uint32_t value)
 /* Device time (docs/rv32.md): a tick is one executed instruction. The load
  * runs before this instruction is counted, so instruction N reads N - 1
  * plus whatever a write added. */
-static access timer_load(machine *m, uint32_t offset, int width, uint32_t *value)
+static mem_access timer_load(machine *m, uint32_t offset, int width, uint32_t *value)
 {
     if (width == 4 && offset == TIMER_TICKS) {
         *value = (uint32_t)m->steps + m->timer_offset;
@@ -117,7 +122,7 @@ static access timer_load(machine *m, uint32_t offset, int width, uint32_t *value
     return ACC_FAULT;
 }
 
-static access timer_store(machine *m, uint32_t offset, int width, uint32_t value)
+static mem_access timer_store(machine *m, uint32_t offset, int width, uint32_t value)
 {
     if (width == 4 && offset == TIMER_TICKS) {
         m->timer_offset = value - (uint32_t)m->steps;
@@ -159,7 +164,7 @@ void emu_deliver_events(machine *m)
     }
 }
 
-static access input_load(machine *m, uint32_t offset, int width, uint32_t *value)
+static mem_access input_load(machine *m, uint32_t offset, int width, uint32_t *value)
 {
     if (width != 4) {
         return ACC_FAULT;
@@ -180,13 +185,13 @@ static access input_load(machine *m, uint32_t offset, int width, uint32_t *value
     }
 }
 
-static access fb_load(machine *m, uint32_t offset, int width, uint32_t *value)
+static mem_access fb_load(machine *m, uint32_t offset, int width, uint32_t *value)
 {
     *value = bytes_read(m->fb + offset, width);
     return ACC_OK;
 }
 
-static access fb_store(machine *m, uint32_t offset, int width, uint32_t value)
+static mem_access fb_store(machine *m, uint32_t offset, int width, uint32_t value)
 {
     bytes_write(m->fb + offset, width, value);
     return ACC_OK;
@@ -255,7 +260,7 @@ static void present(machine *m)
     }
 }
 
-static access display_load(machine *m, uint32_t offset, int width, uint32_t *value)
+static mem_access display_load(machine *m, uint32_t offset, int width, uint32_t *value)
 {
     if (width != 4) {
         return ACC_FAULT;
@@ -268,7 +273,7 @@ static access display_load(machine *m, uint32_t offset, int width, uint32_t *val
     }
 }
 
-static access display_store(machine *m, uint32_t offset, int width, uint32_t value)
+static mem_access display_store(machine *m, uint32_t offset, int width, uint32_t value)
 {
     (void)value; /* any word presents */
     if (width == 4 && offset == DISPLAY_PRESENT) {
@@ -313,7 +318,7 @@ static uint32_t ram_read(const machine *m, uint32_t addr, int width)
 }
 
 /* Data load. Misalignment is checked before the address is decoded. */
-static access load(machine *m, uint32_t addr, int width, uint32_t *value)
+static mem_access load(machine *m, uint32_t addr, int width, uint32_t *value)
 {
     if (addr % (uint32_t)width) {
         return ACC_MISALIGNED;
@@ -325,7 +330,7 @@ static access load(machine *m, uint32_t addr, int width, uint32_t *value)
     return r->load(m, addr - r->base, width, value);
 }
 
-static access store(machine *m, uint32_t addr, int width, uint32_t value)
+static mem_access store(machine *m, uint32_t addr, int width, uint32_t value)
 {
     if (addr % (uint32_t)width) {
         return ACC_MISALIGNED;
@@ -442,7 +447,7 @@ static void step(machine *m)
                               | (int32_t)((word >> 9) & 0x800u) | (int32_t)((word >> 20) & 0x7feu));
     uint32_t result = 0;
     bool writes_rd = false;
-    access status;
+    mem_access status;
 
     switch (opcode) {
     case 0x37: /* LUI */
@@ -729,6 +734,42 @@ void emu_require_distinct(const char *path, const char *what, const char *other_
 {
     if (same_file(path, other_path)) {
         fprintf(stderr, "%s: %s %s would overwrite the %s\n", emu_prog, what, path, other);
+        exit(EXIT_EMULATOR_ERROR);
+    }
+}
+
+/* Create an output file without following a symbolic link: a link can point anywhere, including
+ * at a file that does not exist yet and that another output's link also points at, which no
+ * comparison of names can see. Outputs are real files. NULL and a message on failure. */
+FILE *emu_open_output(const char *path, const char *what)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0666);
+    if (fd < 0) {
+        if (errno == ELOOP || errno == EMLINK) {
+            fprintf(stderr, "%s: %s %s is a symbolic link; outputs are written to real files\n", emu_prog, what, path);
+        } else {
+            fprintf(stderr, "%s: cannot write %s\n", emu_prog, path);
+        }
+        return NULL;
+    }
+    FILE *stream = fdopen(fd, "w");
+    if (!stream) {
+        fprintf(stderr, "%s: cannot write %s\n", emu_prog, path);
+        close(fd);
+    }
+    return stream;
+}
+
+/* After the outputs are open, the last word on aliasing: two open streams on one file (same device
+ * and inode) would overwrite each other however they were named. Exits with a message. */
+void emu_require_distinct_streams(FILE *a, const char *a_path, const char *a_what, FILE *b, const char *b_path, const char *b_what)
+{
+    struct stat sa, sb;
+    if (!a || !b) {
+        return;
+    }
+    if (fstat(fileno(a), &sa) == 0 && fstat(fileno(b), &sb) == 0 && sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino) {
+        fprintf(stderr, "%s: %s %s and %s %s are one file\n", emu_prog, a_what, a_path, b_what, b_path);
         exit(EXIT_EMULATOR_ERROR);
     }
 }
