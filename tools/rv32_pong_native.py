@@ -42,7 +42,8 @@ def build(optimization):
     """Compile the game and the drawing routines into a shared library at -O0 or -O2."""
     HOST_DIR.mkdir(parents=True, exist_ok=True)
     library = HOST_DIR / f"librv32pong-{optimization}.dylib"
-    command = [os.environ.get("HOST_CC", "cc"), "-shared", f"-{optimization}", "-std=c11", "-fno-builtin",
+    # -fPIC: a shared library must be position independent; Mach-O always is, ELF only when asked.
+    command = [os.environ.get("HOST_CC", "cc"), "-shared", "-fPIC", f"-{optimization}", "-std=c11", "-fno-builtin",
                "-Wall", "-Wextra", "-Werror", f"-I{ROOT / 'programs/rv32'}", "-o", str(library), *map(str, SOURCES)]
     subprocess.run(command, check=True)
     lib = ctypes.CDLL(str(library))

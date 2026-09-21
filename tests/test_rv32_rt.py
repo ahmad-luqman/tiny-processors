@@ -62,7 +62,7 @@ def ref_rem(n, d):
 def build(optimization):
     HOST_DIR.mkdir(parents=True, exist_ok=True)
     library = HOST_DIR / f"librv32rt-{optimization}.dylib"
-    command = [os.environ.get("HOST_CC", "cc"), "-shared", f"-{optimization}", "-std=c11",
+    command = [os.environ.get("HOST_CC", "cc"), "-shared", "-fPIC", f"-{optimization}", "-std=c11",
                "-fno-builtin", "-Wall", "-Wextra", "-Werror", "-o", str(library), str(SOURCE)]
     subprocess.run(command, check=True)
     lib = ctypes.CDLL(str(library))
