@@ -28,18 +28,19 @@ class FloatingTest(unittest.TestCase):
             # Rotate through all destinations, including f0 and x0, and alias sources.
             rd = i % 32
             words += [CSRRWI(0, 3, 0)]
-            words += fli(1, a) + fli(2, b) + fli(3, c)
+            words += fli(1, a ^ 0xffffffff if op in (9, 10) else a) + fli(2, b) + fli(3, c)
             if op in (9, 10): words += LI(1, a)
             if dynamic: words += [CSRRWI(0, 2, rm)]
             words.append(arithmetic(op, 7 if dynamic else rm, rd))
             effect = '' if 11 <= op <= 15 and rd == 0 else f' {"x" if 11 <= op <= 15 else "f"}{rd}={result:08x}'
             if flags: effect += f' fcsr={((rm << 5) if dynamic else 0) | flags:02x}'
-            checks.append((len(words)-1, effect))
+            checks.append((len(words)-1, effect, (op, rm, a, b, c)))
             words += [CSRRS(7, 1, 0)]
-            checks.append((len(words)-1, f' x7={flags:08x}'))
+            checks.append((len(words)-1, f' x7={flags:08x}', (op, rm, a, b, c)))
         emu, rtl = self.assert_same_pass(words + FINISH(), seed=seed, max_cycles=3000000)
-        for index, effect in checks:
-            self.assertEqual(' '.join(emu.trace[index].split(' ')[3:]), effect.lstrip(), emu.trace[index])
+        for index, effect, request in checks:
+            self.assertEqual(integer_tests.effects(emu.trace[index]), effect.lstrip(),
+                             f'request={request}, trace={emu.trace[index]}')
         self.assertTrue(cycle_relation(rtl)[1], cycle_relation(rtl))
 
     def test_literal_numeric_anchors_static_and_dynamic(self):
@@ -79,7 +80,8 @@ class FloatingTest(unittest.TestCase):
             CSRRWI(5, 1, 0), CSRRCI(6, 2, 3), CSRRSI(7, 1, 9),
             CSRRWI(8, 2, 0), CSRRC(9, 1, 1), CSRRS(10, 3, 0), CSRRWI(0, 3, 0)]
         # DZ then NV then exact: accrued bits persist; comparison to x0 still raises NV.
-        words += fli(1, 0x3f800000) + fli(2, 0) + [arithmetic(7, 0)]
+        words += fli(1, 0x3f800000) + fli(2, 0) + [arithmetic(7, 0), arithmetic(7, 0)]
+        repeated_flags = (len(words)-2, len(words)-1)
         words += fli(1, 0x7fc00000) + [arithmetic(14, 0, rd=0), CSRRS(11, 1, 0)]
         words += fli(1, 0x3f800000) + fli(2, 0x3f800000) + [arithmetic(0, 0), CSRRS(12, 1, 0)]
         # Zero operand register is a write, unlike rs1=x0; immediate zero set is a read.
@@ -87,7 +89,10 @@ class FloatingTest(unittest.TestCase):
         emu, _ = self.assert_same_pass(words + FINISH())
         for effect in ('x3=0000001f', 'x4=00000007', 'x10=00000000', 'x11=00000018', 'x12=00000018', 'x14=00000000'):
             self.assertTrue(any(line.endswith(effect) for line in emu.trace), effect)
-        self.assertTrue(any(line.endswith('fcsr=18') for line in emu.trace))
+        for index in repeated_flags:
+            self.assertEqual(integer_tests.effects(emu.trace[index]), 'f4=7f800000 fcsr=08')
+        self.assertEqual(integer_tests.effects(emu.trace[len(words)-4]), 'fcsr=18')
+        self.assertEqual(integer_tests.effects(emu.trace[len(words)-3]), 'x13=00000018')
 
     def test_illegal_encodings_and_rounding(self):
         bad = [fp(1, 1, 1, 2), fp(0x2c, 1, 1, 1), fp(0x60, 1, 1, 2), fp(0x68, 1, 1, 2),
@@ -101,6 +106,14 @@ class FloatingTest(unittest.TestCase):
         for rm in (5, 6, 7):
             word = arithmetic(0, 7)
             self.assert_same_double_fault([CSRRWI(0, 2, rm), word], 2, word)
+        # Non-rounding min/max and comparisons ignore even reserved frm.
+        words = [CSRRWI(0, 2, 7)] + fli(1, 0x3f800000) + fli(2, 0x40000000)
+        expected = [(13, 'x4=00000000'), (14, 'x4=00000001'), (15, 'x4=00000001'),
+                    (16, 'f4=3f800000'), (17, 'f4=40000000')]
+        for op, _ in expected: words.append(arithmetic(op, 0))
+        emu, _ = self.assert_same_pass(words + FINISH())
+        for index, (_, effect) in enumerate(expected, len(words)-len(expected)):
+            self.assertEqual(integer_tests.effects(emu.trace[index]), effect)
         # A valid static mode ignores an invalid frm.
         self.assert_same_pass([CSRRWI(0, 2, 7), arithmetic(0, 0)] + FINISH())
 
@@ -118,8 +131,22 @@ class FloatingTest(unittest.TestCase):
             # Source and destination coincide, including rs3=f31 and rd=f0.
             words += [arithmetic(3, 0, reg, reg, (reg+1) % 32, reg), fp(0x70, 9, reg)]
             checks.append((len(words)-1, 'x9=40000000' if reg < 31 else 'x9=40400000'))
+        words += fli(0, 0x40000000) + [arithmetic(3, 0, 0, 0, 0, 0)]
+        checks.append((len(words)-1, 'f0=40c00000'))
+        for mode, expected in ((0, 0x40c00000), (1, 0xc0c00000), (2, 0x40c00000)):
+            words += [fp(0x10, 0, 0, 0, mode)]
+            checks.append((len(words)-1, f'f0={expected:08x}'))
         emu, _ = self.assert_same_pass(words + FINISH(), seed=31)
         for index, expected in checks: self.assertTrue(emu.trace[index].endswith(expected), emu.trace[index])
+
+    def test_fpu_wait_latency_is_pinned_independently_of_counter_identity(self):
+        # F1's 1/3 division takes 32 clocks acceptance-to-valid, plus the CPU's
+        # issue and response-acceptance clocks. Stalling memory must not change it.
+        words = fli(1, 0x3f800000) + fli(2, 0x40400000) + [arithmetic(7, 0)] + FINISH()
+        for stall in (0, 3):
+            _, rtl = self.assert_same_pass(words, stall=stall)
+            self.assertEqual(rtl.halt['fp_waits'], 34)
+            self.assertEqual(rtl.halt['cycles'], 4*len(words) + 1 + 34 + stall*(len(words)+1))
 
     def test_reset_discards_pending_fpu_result(self):
         # Prefix observes reset state, so a replay also catches stale registers/flags.

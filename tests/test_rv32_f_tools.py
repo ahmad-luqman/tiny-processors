@@ -6,6 +6,8 @@ import random
 import subprocess
 import tempfile
 import unittest
+from types import SimpleNamespace
+from tools.rv32_rtl import check_fp_waits
 
 from tools.rv32_f_asm import arithmetic, fp, flw, fsw, fli
 from tools.rv32_asm import CSRRW, CSRRWI, FINISH, words_to_bytes
@@ -85,6 +87,14 @@ class FloatingToolsTest(unittest.TestCase):
             self.assertEqual(state['fcsr'], '1f')
             self.assertEqual(state['x0'], '00000000')
             for reg in range(1,31): self.assertEqual(state[f'f{reg}'], '00000000')
+
+    def test_latency_pin_rejects_drift(self):
+        check_fp_waits(SimpleNamespace(halt={'fp_waits': 34}), 34)
+        check_fp_waits(SimpleNamespace(halt={}), 0)
+        with self.assertRaisesRegex(SystemExit, 'FPU wait cycles: got 35, expected 34'):
+            check_fp_waits(SimpleNamespace(halt={'fp_waits': 35}), 34)
+        with self.assertRaisesRegex(SystemExit, 'FPU wait cycles: got 0, expected 34'):
+            check_fp_waits(SimpleNamespace(halt={}), 34)
 
     def test_software_multiply_helper_extremes_and_seeded(self):
         # Benchmark glue must not silently break high products or carries.

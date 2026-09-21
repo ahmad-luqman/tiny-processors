@@ -308,6 +308,12 @@ def cycle_relation(rtl):
     return text, halt["cycles"] == expected and halt["transfers"] == steps + memory
 
 
+def check_fp_waits(rtl, expected):
+    """A workload-specific latency pin, independent of the accounting identity."""
+    if expected is not None and rtl.halt.get("fp_waits", 0) != expected:
+        sys.exit(f"FPU wait cycles: got {rtl.halt.get('fp_waits', 0)}, expected {expected}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--mode", choices=("check", "waves", "bench"), default="check")
@@ -338,7 +344,11 @@ def main():
     parser.add_argument("--max-cycles", type=int, help="RTL cycle budget (default: testbench budget of 10000000)")
     parser.add_argument("--stall", type=int, default=None, help="fixed stall cycles per request")
     parser.add_argument("--seed", type=int, default=None, help="random 0..3 stall cycles per request")
+    parser.add_argument("--expect-fp-waits", type=int, help="pin total RTL FPU issue/wait cycles")
     args = parser.parse_args()
+    if args.expect_fp_waits is not None:
+        if args.expect_fp_waits < 0: parser.error("--expect-fp-waits must not be negative")
+        if args.backend == "emulator": parser.error("--expect-fp-waits requires the RTL backend")
     if args.stall is not None and args.stall < 0:
         parser.error("--stall must not be negative")
     if args.stall is not None and args.seed is not None:
@@ -409,6 +419,7 @@ def main():
                           timeout=args.timeout, max_cycles=args.max_cycles, checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input,
                           allow_lost_events=args.allow_lost_events)
             check_passed(rtl)
+            check_fp_waits(rtl, args.expect_fp_waits)
             mismatch = compare_backends(rtl, emulator, args.compare)  # the same agreement as a check run
             if mismatch:
                 sys.exit(f"stall={stall} seed={seed}: {mismatch}")
@@ -435,6 +446,7 @@ def main():
     print(emulator.stderr.strip().splitlines()[-1])
     print(rtl.stderr.strip().splitlines()[-1] if rtl.stderr.strip() else "rv32_tb: no halt line")
     check_passed(rtl)
+    check_fp_waits(rtl, args.expect_fp_waits)
     mismatch = compare_backends(rtl, emulator, args.compare)
     if mismatch:
         sys.exit(mismatch)

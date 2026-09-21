@@ -552,14 +552,14 @@ run-rv32-f-emu: check-rv32-f-image $(RV32EMU)
 	$(PYTHON) tools/rv32_run_emu.py build/rv32/floatsoft.bin --expect-hex c0800000
 
 run-rv32-f-rtl: check-rv32-f-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatcheck.bin --expect-last-line 'PASS c0800000' --out build/rv32/f-rtl
-	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatconvert.bin --expect-last-line 'PASS 4f800003' --out build/rv32/f-rtl
-	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatsoft.bin --expect-last-line 'PASS c0800000' --out build/rv32/f-rtl
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatcheck.bin --expect-fp-waits 5081 --expect-last-line 'PASS c0800000' --out build/rv32/f-rtl
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatconvert.bin --expect-fp-waits 89 --expect-last-line 'PASS 4f800003' --out build/rv32/f-rtl
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatsoft.bin --expect-fp-waits 0 --expect-last-line 'PASS c0800000' --out build/rv32/f-rtl
 
 run-rv32-f-rtl-verilator: check-rv32-f-image $(RV32EMU) $(RV32_TB_VERILATOR)
-	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatcheck.bin --expect-last-line 'PASS c0800000' --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
-	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatconvert.bin --expect-last-line 'PASS 4f800003' --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
-	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatsoft.bin --expect-last-line 'PASS c0800000' --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatcheck.bin --expect-fp-waits 5081 --expect-last-line 'PASS c0800000' --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatconvert.bin --expect-fp-waits 89 --expect-last-line 'PASS 4f800003' --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatsoft.bin --expect-fp-waits 0 --expect-last-line 'PASS c0800000' --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
 
 .PHONY: test-rv32-f-tools
 test-rv32-f-tools: check-rv32-f-image $(RV32EMU) $(RV32_FP_OBJ)
