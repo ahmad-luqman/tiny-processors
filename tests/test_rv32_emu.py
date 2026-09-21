@@ -572,6 +572,24 @@ class EmulatorTest(unittest.TestCase):
         self.assertEqual((result.status, result.state.frames), (2, 1))
         self.assertIn("cannot write frame 1", result.stderr)
         self.assertIn("outputs incomplete", result.stderr)
+        # A frame file that already exists is never overwritten, whatever it is: a stale frame, or a
+        # link to another file of the run, which no path check can see.
+        with tempfile.TemporaryDirectory() as directory:
+            stale = Path(directory) / "frame-0001.ppm"
+            stale.write_text("stale")
+            result = self.run_words(words + FINISH(), extra=("--frames", directory))
+            self.assertEqual((result.status, result.state.frames), (2, 1))
+            self.assertIn("never overwritten", result.stderr)
+            self.assertEqual(stale.read_text(), "stale")
+            stale.unlink()
+            (Path(directory) / "frames").mkdir()
+            record = Path(directory) / "record"  # outside the frames directory, so the path check passes
+            (Path(directory) / "frames" / "frame-0001.ppm").symlink_to(record)
+            result = self.run_words(words + FINISH(), extra=("--frames", str(Path(directory) / "frames"), "--record", str(record)),
+                                    input_script="frame 0 down A\n")
+            self.assertEqual(result.status, 2)
+            self.assertIn("never overwritten", result.stderr)
+            self.assertEqual(record.read_text(), "frame 0 down A\n", "the recording survived")
 
     def test_instruction_limit_and_counts(self):
         result = self.run_words([JAL(0, 0)], limit=50)

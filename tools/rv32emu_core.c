@@ -214,10 +214,13 @@ void emu_rgb332(uint8_t pixel, uint8_t rgb[3])
     rgb[2] = (uint8_t)((pixel & 3u) * 255u / 3u);
 }
 
-/* Write the frame as a binary PPM so it can be looked at without the window. */
+/* Write the frame as a binary PPM so it can be looked at without the window. The file is created
+ * exclusively: a frame file that already exists, whatever it is (a stale frame, a link to one of
+ * the run's own files), is never overwritten, so the run is rejected instead. The runner deletes
+ * the previous run's frames before it starts. */
 static bool write_ppm(const machine *m, const char *path)
 {
-    FILE *out = fopen(path, "wb");
+    FILE *out = fopen(path, "wbx");
     if (!out) {
         return false;
     }
@@ -245,7 +248,8 @@ static void present(machine *m)
         char path[4096];
         int n = snprintf(path, sizeof path, "%s/frame-%04" PRIu32 ".ppm", m->frames_dir, m->frames);
         if (n < 0 || (size_t)n >= sizeof path || !write_ppm(m, path)) {
-            fprintf(stderr, "%s: cannot write frame %" PRIu32 " to %s\n", emu_prog, m->frames, m->frames_dir);
+            fprintf(stderr, "%s: cannot write frame %" PRIu32 " to %s (%s; an existing frame file is never overwritten)\n",
+                    emu_prog, m->frames, m->frames_dir, strerror(errno));
             m->output_error = true;
         }
     }
