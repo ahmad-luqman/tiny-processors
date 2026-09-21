@@ -1,0 +1,17 @@
+# A short Pong session for the replay tests (docs/rv32-window.md): the serve
+# goes right, the right paddle moves down to return it, the left player misses
+# and the right one scores, the second serve goes left and the left paddle
+# returns it, the game is paused and resumed, and Q ends the run at frame 200.
+frame 0 down SPACE
+frame 0 up SPACE
+frame 5 down DOWN
+frame 20 up DOWN
+frame 120 down SPACE
+frame 120 up SPACE
+frame 125 down W
+frame 134 up W
+frame 160 down P
+frame 160 up P
+frame 170 down P
+frame 170 up P
+frame 200 down Q

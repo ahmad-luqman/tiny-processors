@@ -28,20 +28,30 @@ HOST_CC ?= cc
 RV32_ARCH := --target=riscv32-unknown-elf -march=rv32i -mabi=ilp32 -mcmodel=medlow -mno-relax
 RV32_CFLAGS := $(RV32_ARCH) -std=c11 -ffreestanding -fno-builtin -nostdlib -O2 -g -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Wextra -Werror -Iprograms/rv32
 RV32_LDFLAGS := $(RV32_ARCH) -nostdlib -static --ld-path=$(RV32_LD) -Wl,-T,programs/rv32/link.ld
-RV32_HEADERS := programs/rv32/board.h programs/rv32/mmio.h programs/rv32/console.h programs/rv32/rt/muldiv.h
+RV32_HEADERS := programs/rv32/board.h programs/rv32/mmio.h programs/rv32/console.h programs/rv32/rt/muldiv.h programs/rv32/gfx.h programs/rv32/pong_game.h
 RV32_COMMON_OBJS := build/rv32/start.o build/rv32/console.o build/rv32/muldiv.o
 RV32_SELFCHECK_OBJS := build/rv32/selfcheck.o $(RV32_COMMON_OBJS)
 RV32_DIAG_OBJS := build/rv32/diag.o build/rv32/trap.o $(RV32_COMMON_OBJS)
-RV32_IMAGES := selfcheck diag
+RV32_PONG_OBJS := build/rv32/pong.o build/rv32/pong_game.o build/rv32/gfx.o $(RV32_COMMON_OBJS)
+RV32_IMAGES := selfcheck diag pong
 RV32_IMAGE_FILES := $(foreach image,$(RV32_IMAGES),$(foreach ext,elf lst bin readelf,build/rv32/$(image).$(ext)))
 RV32_SELFCHECK_HEX := 807d9fad
 RV32_DIAG_HEX := 8bd87e9a
 RV32_DIAG_FRAME1_HEX := ae4eb605
 RV32_DIAG_FRAME2_HEX := 2acb5d85
 RV32_DIAG_INPUT := programs/rv32/diag.input
+RV32_PONG_HEX := 8fef54bc
+RV32_PONG_INPUT := programs/rv32/pong.input
+RV32_PONG_EXPECTED := programs/rv32/pong.expected
+RV32_PONG_ARGS := --image build/rv32/pong.bin --input $(RV32_PONG_INPUT) --expect-last-line "PASS $(RV32_PONG_HEX)" --expect-checkpoints $(RV32_PONG_EXPECTED) --timeout 300
 RV32_DIAG_ARGS := --image build/rv32/diag.bin --input $(RV32_DIAG_INPUT) --compare results --expect-last-line "PASS $(RV32_DIAG_HEX)" --expect-checkpoint "frame 1 $(RV32_DIAG_FRAME1_HEX)" --expect-checkpoint "frame 2 $(RV32_DIAG_FRAME2_HEX)"
 RV32EMU := build/rv32/rv32emu
 RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
+RV32EMU_CORE := tools/rv32emu_core.c tools/rv32emu_core.h
+RV32WIN := build/rv32/rv32win
+# Recursive `=`: pkg-config runs only where the window is built, so a machine without SDL3 still runs every test.
+SDL3_CFLAGS = $(shell pkg-config --cflags sdl3 2>/dev/null)
+SDL3_LIBS = $(shell pkg-config --libs sdl3 2>/dev/null)
 RV32_RTL := rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32.v
 RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_timer.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v
 RV32_TB := tests/rv32_tb.sv
@@ -58,6 +68,8 @@ RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
 .PHONY: toolchain-rv32-emu build-rv32-emu test-rv32-emu run-rv32-emu trace-rv32-emu diff-rv32-qemu
 .PHONY: build-rv32-rtl test-rv32-rtl test-rv32-rtl-verilator run-rv32-rtl run-rv32-rtl-verilator lint-rv32 synth-rv32 waves-rv32 bench-rv32-rtl
 .PHONY: lint-rv32-soc synth-rv32-soc
+.PHONY: toolchain-rv32-win build-rv32-win test-rv32-win test-rv32-pong run-rv32-pong run-rv32-pong-emu frames-rv32-pong
+.PHONY: run-rv32-pong-rtl run-rv32-pong-rtl-verilator disasm-rv32-pong
 
 build:
 	mkdir -p build
@@ -198,6 +210,9 @@ build/rv32/selfcheck.elf: $(RV32_SELFCHECK_OBJS) programs/rv32/link.ld
 build/rv32/diag.elf: $(RV32_DIAG_OBJS) programs/rv32/link.ld
 	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(RV32_DIAG_OBJS)
 
+build/rv32/pong.elf: $(RV32_PONG_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(RV32_PONG_OBJS)
+
 build/rv32/%.lst: build/rv32/%.elf
 	$(RV32_OBJDUMP) -d -S $< > $@
 
@@ -226,6 +241,7 @@ firmware-rv32: toolchain-rv32 $(RV32_IMAGE_FILES)
 check-rv32-image: firmware-rv32
 	$(PYTHON) tools/rv32_image.py build/rv32/selfcheck.elf --listing build/rv32/selfcheck.lst --bin build/rv32/selfcheck.bin --hex build/rv32/selfcheck.hex
 	$(PYTHON) tools/rv32_image.py build/rv32/diag.elf --listing build/rv32/diag.lst --bin build/rv32/diag.bin --hex build/rv32/diag.hex --allow-privileged
+	$(PYTHON) tools/rv32_image.py build/rv32/pong.elf --listing build/rv32/pong.lst --bin build/rv32/pong.bin --hex build/rv32/pong.hex
 
 run-rv32-qemu: check-rv32-image
 	$(PYTHON) tools/rv32_run_qemu.py build/rv32/selfcheck.elf --qemu $(QEMU_RV32) --timeout 20 --transcript build/rv32/selfcheck.transcript --qemu-log build/rv32/qemu.log --expect-hex $(RV32_SELFCHECK_HEX)
@@ -236,12 +252,30 @@ test-rv32-tools:
 test-rv32-rt:
 	$(PYTHON) -m unittest discover -s tests -p 'test_rv32_rt.py' -v
 
-$(RV32EMU): tools/rv32emu.c | build/rv32
-	$(HOST_CC) $(RV32EMU_CFLAGS) -o $@ $<
+$(RV32EMU): tools/rv32emu.c $(RV32EMU_CORE) | build/rv32
+	$(HOST_CC) $(RV32EMU_CFLAGS) -o $@ tools/rv32emu.c tools/rv32emu_core.c
 
 build-rv32-emu: toolchain-rv32-emu $(RV32EMU)
 
-# The image is a prerequisite so the diagnostic test runs rather than skips.
+toolchain-rv32-win: toolchain-rv32-emu
+	@command -v pkg-config >/dev/null || { echo "missing pkg-config (brew install pkg-config)"; exit 1; }
+	@pkg-config --exists sdl3 || { echo "missing SDL3 (brew install sdl3)"; exit 1; }
+	@echo "SDL3 $$(pkg-config --modversion sdl3)"
+
+# The toolchain check is a prerequisite of the binary, so every target that needs the window says
+# what to install rather than failing on a missing header.
+$(RV32WIN): tools/rv32win.c $(RV32EMU_CORE) | build/rv32 toolchain-rv32-win
+	$(HOST_CC) $(RV32EMU_CFLAGS) $(SDL3_CFLAGS) -o $@ tools/rv32win.c tools/rv32emu_core.c $(SDL3_LIBS)
+
+build-rv32-win: toolchain-rv32-win $(RV32WIN)
+
+# The window's tests run it under SDL's dummy video driver. SDL3 is a prerequisite of test-rv32, as
+# LLVM and the simulators are: the toolchain check fails with the install hint rather than letting the
+# tests skip.
+test-rv32-win: toolchain-rv32-win check-rv32-image
+	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_win.py' -v
+
+# The images are prerequisites so the diagnostic and Pong tests run rather than skip.
 test-rv32-emu: check-rv32-image
 	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_emu.py' -v
 
@@ -311,13 +345,40 @@ run-rv32-diag-rtl: check-rv32-image $(RV32_TB_VVP) $(RV32EMU)
 run-rv32-diag-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_DIAG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/rtl-verilator
 
-test-rv32: test-rv32-tools test-rv32-rt run-rv32-qemu test-rv32-emu run-rv32-emu diff-rv32-qemu run-rv32-diag-emu test-rv32-rtl test-rv32-rtl-verilator run-rv32-rtl run-rv32-rtl-verilator run-rv32-diag-rtl run-rv32-diag-rtl-verilator lint-rv32 lint-rv32-soc synth-rv32 synth-rv32-soc
+# Pong never reads the timer, so its scripted session is compared trace for trace on the RTL, and
+# the 200 checkpoints of programs/rv32/pong.expected come from the same C run natively
+# (tools/rv32_pong_native.py --write). The window target is interactive and not part of test-rv32.
+test-rv32-pong:
+	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_pong.py' -v
+
+run-rv32-pong: check-rv32-image $(RV32WIN)
+	@echo "W/S and UP/DOWN move, SPACE serves, P pauses, R restarts; end with Q (closing the window reports halt=stopped, status 2)."
+	@echo "The session is recorded to build/rv32/pong.recorded.input; replay it with rv32emu --input or rv32win --input."
+	$(RV32WIN) --image build/rv32/pong.bin --scale 3 --record build/rv32/pong.recorded.input
+
+run-rv32-pong-emu: check-rv32-image $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_PONG_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32/emu
+
+frames-rv32-pong: check-rv32-image $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_PONG_ARGS) --backend emulator --frames build/rv32/pong-frames --emulator $(RV32EMU) --out build/rv32/emu
+	@echo "frames: build/rv32/pong-frames/frame-NNNN.ppm"
+
+run-rv32-pong-rtl: check-rv32-image $(RV32_TB_VVP) $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_PONG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
+
+run-rv32-pong-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR) $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_PONG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/rtl-verilator
+
+test-rv32: test-rv32-tools test-rv32-rt test-rv32-pong run-rv32-qemu test-rv32-emu test-rv32-win run-rv32-emu diff-rv32-qemu run-rv32-diag-emu run-rv32-pong-emu test-rv32-rtl test-rv32-rtl-verilator run-rv32-rtl run-rv32-rtl-verilator run-rv32-diag-rtl run-rv32-diag-rtl-verilator run-rv32-pong-rtl run-rv32-pong-rtl-verilator lint-rv32 lint-rv32-soc synth-rv32 synth-rv32-soc
 
 disasm-rv32: firmware-rv32
 	cat build/rv32/selfcheck.lst
 
 disasm-rv32-diag: firmware-rv32
 	cat build/rv32/diag.lst
+
+disasm-rv32-pong: firmware-rv32
+	cat build/rv32/pong.lst
 
 clean:
 	rm -rf build

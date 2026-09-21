@@ -86,7 +86,7 @@ QEMU boots the image with the bare `rv32i` CPU model; all 28 checks pass, the gu
 
 ## RV32 headless emulator
 
-[tools/rv32emu.c](tools/rv32emu.c) is our own machine: one C file that loads the flattened image, executes RV32I with the contract's trap, alignment, console, and done-register rules, and writes a retirement trace whose format the RTL testbench will reproduce. It runs the self-check to `PASS 807d9fad` in 32,610 instructions and executes exactly the PC sequence QEMU logs; 31 tests with an independent instruction encoder pin the hand-computed edges (signed boundaries, shifts by 31, `x0`, sub-word stores, misaligned and out-of-map traps, `ecall`/`mret`, double faults, every device edge). Untraced it runs about 400 M instructions/s. Read the [design, trace contract, and trace walkthrough](docs/rv32-emulator.md).
+[tools/rv32emu.c](tools/rv32emu.c) is our own machine: a C program (since M6 a core library plus a headless main) that loads the flattened image, executes RV32I with the contract's trap, alignment, console, and done-register rules, and writes a retirement trace whose format the RTL testbench will reproduce. It runs the self-check to `PASS 807d9fad` in 32,610 instructions and executes exactly the PC sequence QEMU logs; 33 tests with an independent instruction encoder pin the hand-computed edges (signed boundaries, shifts by 31, `x0`, sub-word stores, misaligned and out-of-map traps, `ecall`/`mret`, double faults, every device edge). Untraced it runs about 400 M instructions/s. Read the [design, trace contract, and trace walkthrough](docs/rv32-emulator.md).
 
 ## RV32 multicycle RTL CPU
 
@@ -107,7 +107,7 @@ The 78-instruction loop produces identical traces on both backends at every stal
 
 ## RV32 machine: bus, devices, and the diagnostic
 
-[rtl/rv32/rv32_soc.v](rtl/rv32/rv32_soc.v) wires the core to a bus decoder (one comparator per window, a one-hot read mux, fetches refused outside RAM) and to the machine's memories and devices: RAM, the console, the done register, a timer, a 16-event input queue with a held-key mask, a display controller, and a 320×240 framebuffer of 8-bit pixels. [tools/rv32emu.c](tools/rv32emu.c) models the same windows with the same fault edges, schedules key events from a script by frame, hashes the framebuffer into a checkpoint at each present, and writes frames as PPM files. A tick is a clock cycle on the RTL and an executed instruction on the emulator, so the [device diagnostic](programs/rv32/diag.c), which exercises every device and reads the timer, is compared at the results level: five identical console lines ending `PASS 8bd87e9a` and identical checkpoints on the emulator, Icarus, and Verilator, with the frame hash and the checksum derived independently in Python. Everything that never reads the timer stays trace-identical.
+[rtl/rv32/rv32_soc.v](rtl/rv32/rv32_soc.v) wires the core to a bus decoder (one comparator per window, a one-hot read mux, fetches refused outside RAM) and to the machine's memories and devices: RAM, the console, the done register, a timer, a 16-event input queue with a held-key mask, a display controller, and a 320×240 framebuffer of 8-bit pixels. [tools/rv32emu_core.c](tools/rv32emu_core.c) models the same windows with the same fault edges, schedules key events from a script by frame, hashes the framebuffer into a checkpoint at each present, and writes frames as PPM files. A tick is a clock cycle on the RTL and an executed instruction on the emulator, so the [device diagnostic](programs/rv32/diag.c), which exercises every device and reads the timer, is compared at the results level: five identical console lines ending `PASS 8bd87e9a` and identical checkpoints on the emulator, Icarus, and Verilator, with the frame hash and the checksum derived independently in Python. Everything that never reads the timer stays trace-identical.
 
 ```sh
 make run-rv32-diag-emu        # the diagnostic on the emulator: PASS, checkpoints, build/rv32/frames/*.ppm
@@ -118,6 +118,21 @@ make synth-rv32-soc           # yosys on the machine with 64-word memories: 23,6
 ```
 
 Read the [SoC record](docs/rv32-soc.md): the decoder as comparators and muxes, each device, the testbench as host, device time in practice, three waveform observations, the synthesis table, and exercises.
+
+## RV32 native window and Pong
+
+[tools/rv32win.c](tools/rv32win.c) shows the emulator's framebuffer in an SDL3 window, scaled by an integer, and turns keys into the contract's input events at each present, so a hand-played session recorded with `--record` is an input script that replays identically on the headless emulator and on the RTL (trace for trace when the guest never reads the timer, at the results level otherwise); the timer stays an instruction counter and the window paces presents to 60 a second. The emulator is now a core library ([tools/rv32emu_core.c](tools/rv32emu_core.c)) with two mains. [programs/rv32/gfx.c](programs/rv32/gfx.c) draws rectangles and digits on any byte surface and [programs/rv32/pong_game.c](programs/rv32/pong_game.c) is Pong with no device in it, so the same C is tested natively at `-O0` and `-O2` against hand-computed expectations; the 200-frame session of [pong.input](programs/rv32/pong.input) gives the same 200 checkpoints and `PASS 8fef54bc` on the native build, the emulator, Icarus (1,998,070 cycles, about 22 s), and Verilator (about 2 s), and the RTL trace equals the emulator's for all 478,797 instructions.
+
+```sh
+make build-rv32-win           # the window (brew install sdl3)
+make run-rv32-pong            # play: W/S and UP/DOWN, SPACE serves, P pauses, R restarts, Q quits; the session is recorded
+make test-rv32-pong           # 7 host tests of the rules, the drawing, and the session
+make test-rv32-win            # 5 tests of the window under SDL's dummy driver, one closing it
+make run-rv32-pong-emu        # the scripted session on the emulator against pong.expected
+make run-rv32-pong-rtl        # the same on Icarus, trace for trace (run-rv32-pong-rtl-verilator: Verilator)
+```
+
+Read the [window record](docs/rv32-window.md): the decisions, the core split, the window loop, the drawing routines, Pong's rules and dirty rectangles, a key press followed from the queue to a pixel store in the trace, the measured cycles, and exercises.
 
 ## What to read
 
@@ -131,13 +146,14 @@ Read the [SoC record](docs/rv32-soc.md): the decoder as comparators and muxes, e
 8. [CPU gate/control notes](docs/sap8-to-gates.md), then [addition](programs/sap8/add.asm) and [sum loop](programs/sap8/sum_loop.asm) assembly.
 9. [SIMD4 specification](docs/simd4.md), [RTL](rtl/simd4/simd4.v), [kernel](programs/simd4/vector_add.py), and [gate/performance walkthrough](docs/simd4-to-gates.md).
 10. [RV32 machine contract](docs/rv32.md), then [start.S](programs/rv32/start.S), [link.ld](programs/rv32/link.ld), [selfcheck.c](programs/rv32/selfcheck.c), and the [C to instructions walkthrough](docs/c-to-instructions.md).
-11. [RV32 emulator](docs/rv32-emulator.md), then [rv32emu.c](tools/rv32emu.c) and [test_rv32_emu.py](tests/test_rv32_emu.py); run `make trace-rv32-emu` and follow the walkthrough in the trace.
+11. [RV32 emulator](docs/rv32-emulator.md), then [rv32emu_core.c](tools/rv32emu_core.c) and [test_rv32_emu.py](tests/test_rv32_emu.py); run `make trace-rv32-emu` and follow the walkthrough in the trace.
 12. [RV32 RTL contract](docs/rv32-rtl.md), then [rv32.v](rtl/rv32/rv32.v) with its three submodules, [rv32_tb.sv](tests/rv32_tb.sv), and [test_rv32_rtl.py](tests/test_rv32_rtl.py); run `make waves-rv32` and follow the [gates walkthrough](docs/rv32-to-gates.md) in the waveform.
 13. [RV32 SoC record](docs/rv32-soc.md), then [rv32_bus.v](rtl/rv32/rv32_bus.v), the device modules, [diag.c](programs/rv32/diag.c), and [rv32_devices.py](tools/rv32_devices.py); run `make run-rv32-diag-emu` and look at `build/rv32/frames/frame-0002.ppm`, then `make waves-rv32` for `devices.vcd`.
+14. [RV32 window record](docs/rv32-window.md), then [rv32win.c](tools/rv32win.c), [gfx.c](programs/rv32/gfx.c), [pong_game.c](programs/rv32/pong_game.c), and [test_rv32_pong.py](tests/test_rv32_pong.py); run `make run-rv32-pong` and play, then `make run-rv32-pong-emu` and follow the walkthrough in `build/rv32/emu/pong.emu.trace`.
 
 ## Verified local tools
 
-Apple Silicon macOS, Icarus 13.0, Verilator 5.052, Yosys 0.69+post, Apple Clang 21.0.0, Homebrew LLVM 22.1.8 (`llvm@22`, keg-only), lld 23.1.1, QEMU 11.1.1, Python 3.14.2. These are the tested versions, not enforced minimums. The RV32 targets find the keg-only LLVM and lld by absolute path; nothing has to be on `PATH`.
+Apple Silicon macOS, Icarus 13.0, Verilator 5.052, Yosys 0.69+post, Apple Clang 21.0.0, Homebrew LLVM 22.1.8 (`llvm@22`, keg-only), lld 23.1.1, QEMU 11.1.1, SDL 3.4.16, Python 3.14.2. These are the tested versions, not enforced minimums. The RV32 targets find the keg-only LLVM and lld by absolute path; nothing has to be on `PATH`.
 
 ```sh
 brew install icarus-verilog verilator yosys llvm@22 lld qemu

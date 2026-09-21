@@ -9,6 +9,7 @@ state dump, the trace, the console output, and the exit status.
 
 from collections import namedtuple
 from pathlib import Path
+import re
 import resource
 import shutil
 import signal
@@ -19,8 +20,9 @@ import unittest
 
 # The encoder lives in tools/rv32_asm.py so the RTL tests assemble the same words.
 from tools.rv32_asm import *  # noqa: F401,F403
-from tools.rv32_devices import FB_SIZE, diag_checksum, event_word, frame_hash, render_diag_frame
+from tools.rv32_devices import FB_SIZE, KEYS, diag_checksum, event_word, frame_hash, render_diag_frame
 from tools.rv32_diff_qemu import compare, qemu_pcs, trace_pcs
+from tools.rv32_pong_native import EXPECTED as PONG_EXPECTED, INPUT as PONG_INPUT
 from tools.rv32_run_emu import build_emulator, halt_line
 
 
@@ -457,7 +459,7 @@ class EmulatorTest(unittest.TestCase):
         # Without the flag the same run is rejected after its halt line: the guest passed, the host did not.
         result = self.run_words(words + FINISH(), input_script=burst)
         self.assertEqual((result.status, result.state.done, result.halt["outcome"]), (2, 0x5555, "pass"))
-        self.assertIn("rv32emu: 1 scripted event(s) lost, run rejected", result.stderr)
+        self.assertIn("rv32emu: 1 input event(s) lost, run rejected", result.stderr)
         # Popping makes room; an event for a frame never presented stays with the host.
         result = self.run_pass(LI(1, INPUT) + [LW(3, 1, 0), LW(4, 1, 4)], input_script=burst + "frame 5 up 3\n",
                                allow_lost_events=True)
@@ -465,7 +467,7 @@ class EmulatorTest(unittest.TestCase):
         self.assertIn("rv32emu: 1 scripted event(s) never delivered (first: frame 5)", result.stderr)
         result = self.run_words(LI(1, INPUT) + [LW(3, 1, 0)] + FINISH(), input_script="frame 5 up 3\n")
         self.assertEqual(result.status, 2)
-        self.assertIn("rv32emu: 1 scripted event(s) lost, run rejected", result.stderr)
+        self.assertIn("rv32emu: 1 input event(s) lost, run rejected", result.stderr)
         # The ring wraps: twelve popped, ten more pushed at frame 1 past entry 15 and popped in order;
         # key 31 is the top bit of KEYS.
         script = "".join(f"frame 0 down {code}\n" for code in range(12))
@@ -476,6 +478,39 @@ class EmulatorTest(unittest.TestCase):
         self.assertEqual(pops, [f"x2={event_word(True, code):08x} mem[{INPUT:08x}]->{event_word(True, code):08x}/4"
                                 for code in list(range(12)) + list(range(22, 32))])
         self.assertEqual((result.state.x[4], result.state.x[5], result.state.events), (0, 0xFFC00FFF, 0))
+
+    def test_record_writes_every_offered_event_as_a_replayable_script(self):
+        """--record lists every event the host offered, scripted or not, at the frame it was offered,
+        before the queue decides: a replay of the record reproduces the run, drops included."""
+        script = "frame 0 down LEFT\nframe 0 up left\nframe 1 down A\nframe 2 up 8\nframe 2 down 20\n"
+        words = LI(1, INPUT) + LI(2, DISPLAY) + [LW(3, 1, 0), LW(3, 1, 0), SW(0, 2, 0), LW(3, 1, 0), SW(0, 2, 0), LW(3, 1, 0), LW(3, 1, 0)]
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / "record.txt"
+            result = self.run_pass(words, input_script=script, extra=["--record", str(record)], checkpoints=True)
+            self.assertEqual(record.read_text(), "frame 0 down LEFT\nframe 0 up LEFT\nframe 1 down A\nframe 2 up A\nframe 2 down 20\n")
+            replay = self.run_pass(words, input_script=record.read_text(), checkpoints=True)
+            self.assertEqual((replay.trace, replay.checkpoints), (result.trace, result.checkpoints))
+            # A burst the queue cannot hold is recorded whole, so the replay drops the same event.
+            burst = "".join(f"frame 0 down {code}\n" for code in range(17))
+            result = self.run_pass(LI(1, INPUT) + [LW(3, 1, 4)], input_script=burst, allow_lost_events=True,
+                                   extra=["--record", str(record)])
+            names = {code: name for name, code in KEYS.items()}
+            self.assertEqual(record.read_text(), "".join(f"frame 0 down {names.get(code, code)}\n" for code in range(17)))
+            self.assertIn("dropped frame 0 event", result.stderr)
+            replay = self.run_words(LI(1, INPUT) + [LW(3, 1, 4)] + FINISH(), input_script=record.read_text())
+            self.assertEqual((replay.status, replay.state.x[3]), (2, 16))
+            self.assertIn("1 input event(s) lost", replay.stderr)
+            # An unwritable record is refused before the run.
+            completed = subprocess.run([str(self.emulator), "--image", str(self.image_path(words)), "--record", directory],
+                                       capture_output=True, text=True)
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn(f"rv32emu: cannot write {directory}", completed.stderr)
+
+    def image_path(self, words):
+        """A flat image of `words` in the class workdir, for tests that need a stable path."""
+        path = Path(self.workdir.name) / "image.bin"
+        path.write_bytes(b"".join(word.to_bytes(4, "little") for word in list(words) + FINISH()))
+        return path
 
     def test_input_script_errors(self):
         for content in ("frame 1 down\n", "frame x down A\n", "frame 1 press A\n", "frame 2 down A\nframe 1 up A\n",
@@ -499,6 +534,26 @@ class EmulatorTest(unittest.TestCase):
         self.assertEqual((result.status, result.halt), (2, None))
         self.assertIn("cannot read input script", result.stderr)
 
+    def test_pong_image_when_built(self):
+        """The Pong session replays to the checkpoints the native build produced (pong.expected) and
+        ends with the PASS word the Makefile pins; the frame count and the halt are as scripted."""
+        image = ROOT / "build/rv32/pong.bin"
+        if not image.exists():
+            self.skipTest("build/rv32/pong.bin is not built (make check-rv32-image)")
+        expected = [line for line in PONG_EXPECTED.read_text().splitlines() if line and not line.startswith("#")]
+        pinned = re.search(r"^RV32_PONG_HEX := ([0-9a-f]{8})$", (ROOT / "Makefile").read_text(), re.M).group(1)
+        data = image.read_bytes()
+        words = [int.from_bytes(data[i:i + 4], "little") for i in range(0, len(data), 4)]
+        result = self.run_words(words, limit=10_000_000, checkpoints=True, input_script=PONG_INPUT.read_text())
+        self.assertEqual((result.status, result.halt["outcome"]), (0, "pass"), result.stderr)
+        self.assertEqual(result.checkpoints, expected)
+        self.assertEqual((result.stdout, result.state.frames, result.state.traps), (f"PASS {pinned}\n", 200, 0))
+        self.assertFalse(any(f"mem[{TIMER:08x}]" in line for line in result.trace), "Pong never reads the timer")
+        # A Q one frame later is popped one iteration later, so the guest presents once more first.
+        later = PONG_INPUT.read_text().replace("frame 200 down Q", "frame 201 down Q")
+        result = self.run_words(words, limit=10_000_000, checkpoints=True, input_script=later)
+        self.assertEqual((result.status, len(result.checkpoints)), (0, 201))
+
     def test_frames_are_written_as_ppm(self):
         """--frames DIR writes one binary PPM per present with the RGB332 mapping; an unwritable
         directory rejects the run."""
@@ -517,6 +572,24 @@ class EmulatorTest(unittest.TestCase):
         self.assertEqual((result.status, result.state.frames), (2, 1))
         self.assertIn("cannot write frame 1", result.stderr)
         self.assertIn("outputs incomplete", result.stderr)
+        # A frame file that already exists is never overwritten, whatever it is: a stale frame, or a
+        # link to another file of the run, which no path check can see.
+        with tempfile.TemporaryDirectory() as directory:
+            stale = Path(directory) / "frame-0001.ppm"
+            stale.write_text("stale")
+            result = self.run_words(words + FINISH(), extra=("--frames", directory))
+            self.assertEqual((result.status, result.state.frames), (2, 1))
+            self.assertIn("never overwritten", result.stderr)
+            self.assertEqual(stale.read_text(), "stale")
+            stale.unlink()
+            (Path(directory) / "frames").mkdir()
+            record = Path(directory) / "record"  # outside the frames directory, so the path check passes
+            (Path(directory) / "frames" / "frame-0001.ppm").symlink_to(record)
+            result = self.run_words(words + FINISH(), extra=("--frames", str(Path(directory) / "frames"), "--record", str(record)),
+                                    input_script="frame 0 down A\n")
+            self.assertEqual(result.status, 2)
+            self.assertIn("never overwritten", result.stderr)
+            self.assertEqual(record.read_text(), "frame 0 down A\n", "the recording survived")
 
     def test_instruction_limit_and_counts(self):
         result = self.run_words([JAL(0, 0)], limit=50)
@@ -597,6 +670,10 @@ class EmulatorTest(unittest.TestCase):
             image.write_bytes(b"".join(word.to_bytes(4, "little") for word in FINISH()))
             original = image.read_bytes()
             (path / "s").write_text("frame 0 down A\n")  # a script an output must not truncate
+            (path / "real").mkdir()
+            (path / "link").symlink_to(path / "real")
+            (path / "rl").symlink_to(path / "target")  # two dangling links to one missing file
+            (path / "cl").symlink_to(path / "target")
             for extra, message in [(["--trace", str(image)], "trace file"),
                                    (["--dump-state", str(image)], "state file"),
                                    (["--trace", str(path / "t"), "--dump-state", str(path / "t")], "state file"),
@@ -604,14 +681,36 @@ class EmulatorTest(unittest.TestCase):
                                    (["--checkpoints", str(image)], "checkpoints file"),
                                    (["--input", str(path / "s"), "--trace", str(path / "s")], "trace file"),
                                    (["--trace", str(path / "t"), "--checkpoints", str(path / "t")], "checkpoints file"),
-                                   (["--checkpoints", str(path / "c"), "--dump-state", str(path / "c")], "state file")]:
+                                   (["--checkpoints", str(path / "c"), "--dump-state", str(path / "c")], "state file"),
+                                   (["--record", str(image)], "record file"),
+                                   (["--input", str(path / "s"), "--record", str(path / "s")], "record file"),
+                                   (["--record", str(path / "r"), "--trace", str(path / "r")], "trace file"),
+                                   (["--record", str(path / "r"), "--checkpoints", str(path / "r")], "checkpoints file"),
+                                   (["--record", str(path / "r"), "--dump-state", str(path / "r")], "state file"),
+                                   (["--frames", str(image)], "frames directory"),
+                                   (["--input", str(path / "s"), "--frames", str(path / "s")], "frames directory"),
+                                   # Two spellings of one file that does not exist yet (pathlib would fold `./` away,
+                                   # so the strings are built by hand), and a symlinked directory.
+                                   (["--record", f"{path}/out", "--checkpoints", f"{path}/./out"], "checkpoints file"),
+                                   (["--trace", f"{path}//out", "--record", f"{path}/out"], "trace file"),
+                                   (["--record", f"{path}/link/out", "--checkpoints", f"{path}/real/out"], "checkpoints file"),
+                                   (["--input", f"{path}/./s", "--trace", str(path / "s")], "trace file"),
+                                   # Inside the frames directory a present could overwrite the file, whatever its name.
+                                   (["--frames", str(path / "real"), "--record", str(path / "real/frame-0001.ppm")], "record file"),
+                                   (["--frames", str(path / "real"), "--checkpoints", f"{path}/link/c"], "checkpoints file"),
+                                   (["--frames", str(path / "real"), "--input", str(path / "real/s")], "input script"),
+                                   # Outputs are real files: a symbolic link, dangling or not, is refused before it is followed.
+                                   (["--record", str(path / "rl"), "--checkpoints", str(path / "cl")], "record file"),
+                                   (["--trace", str(path / "rl")], "trace file"),
+                                   (["--dump-state", str(path / "rl")], "state file")]:
                 with self.subTest(extra=extra):
                     completed = subprocess.run([str(self.emulator), "--image", str(image), *extra],
                                                capture_output=True, text=True)
                     self.assertEqual(completed.returncode, 2)
                     self.assertIn(f"{message} ", completed.stderr)
-                    self.assertIn("would overwrite", completed.stderr)
+                    self.assertRegex(completed.stderr, "would overwrite|where a frame could overwrite|is a symbolic link")
                     self.assertEqual(image.read_bytes(), original, "the image is never touched")
+                    self.assertEqual(sorted(p.name for p in path.iterdir()), ["cl", "image.bin", "link", "real", "rl", "s"], "nothing was created")
 
     def test_trace_write_failure_rejects_the_run(self):
         words = [ADDI(1, 1, 1)] * 400 + FINISH()

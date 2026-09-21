@@ -2,7 +2,7 @@
 
 The frame hash, the event word, and the input-script grammar are each
 implemented three times on purpose: here for the runner and the tests, in
-tools/rv32emu.c, and in tests/rv32_tb.sv. The tests use this module as the
+tools/rv32emu_core.c, and in tests/rv32_tb.sv. The tests use this module as the
 independent reference for the other two.
 """
 

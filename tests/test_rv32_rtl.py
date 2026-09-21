@@ -11,6 +11,7 @@ program's trace, including its trap lines, must be identical (docs/rv32-rtl.md).
 
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,7 @@ import unittest
 
 from tools.rv32_asm import *  # noqa: F401,F403
 from tools.rv32_devices import FB_SIZE, diag_checksum, event_word, frame_hash, render_diag_frame
+from tools.rv32_pong_native import EXPECTED as PONG_EXPECTED, INPUT as PONG_INPUT
 from tools.rv32_image import to_hex_words
 from tools.rv32_rtl import (ROOT, Run, check_passed, compile_testbench, cycle_relation, diff_traces, has_value_changes,
                             rtl_halt_line, run_backend, run_emulator, run_rtl, simulator_command, simulator_noise, write_image)
@@ -542,6 +544,27 @@ class RtlTest(unittest.TestCase):
         self.assertNotEqual(rtl.trace, emulator.trace, "the timer makes the traces differ by design")
         self.assertEqual(sum(" trap " in line for line in rtl.trace), 4)
 
+    def test_pong_image_when_built(self):
+        """The Pong session of programs/rv32/pong.input on both backends: trace-identical (the game never
+        reads the timer), the 200 checkpoints of pong.expected, and the PASS word the Makefile pins."""
+        image = ROOT / "build/rv32/pong.bin"
+        if not image.exists():
+            self.skipTest("build/rv32/pong.bin is not built (make check-rv32-image)")
+        expected = [line for line in PONG_EXPECTED.read_text().splitlines() if line and not line.startswith("#")]
+        pinned = re.search(r"^RV32_PONG_HEX := ([0-9a-f]{8})$", (ROOT / "Makefile").read_text(), re.M).group(1)
+        data = image.read_bytes()
+        words = [int.from_bytes(data[i:i + 4], "little") for i in range(0, len(data), 4)]
+        emulator, rtl = self.run_both(words, stall=1, limit=10_000_000, max_cycles=20_000_000, checkpoints=True,
+                                      input_script=PONG_INPUT.read_text())
+        self.assertEqual(emulator.status, 0, emulator.stderr)
+        self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
+        self.assertEqual((rtl.halt["halt"], rtl.halt["done"], rtl.halt["outcome"]), ("done", 0x5555, "pass"), rtl.stderr)
+        self.assertEqual(rtl.halt["steps"], len(rtl.trace))
+        self.assertEqual((rtl.checkpoints, emulator.checkpoints), (expected, expected))
+        self.assertEqual(len(rtl.checkpoints), 200)
+        self.assertEqual((rtl.console, emulator.console), (f"PASS {pinned}\n", f"PASS {pinned}\n"))
+        self.assertEqual(cycle_relation(rtl)[1], True, "no traps, so the formula is exact; the pushes' hold cycles are stalls")
+
     def test_decode_sweep_agrees_with_the_emulator(self):
         """Every opcode x funct3 x representative funct7: the whole trace and the halt reason
         agree, whether the word executes, traps as illegal, or faults for another reason."""
@@ -811,7 +834,7 @@ class RtlTest(unittest.TestCase):
         self.assertNotEqual(emulator.status, 0)
         self.assertNotEqual(rtl.status, 0)
         self.assertEqual((emulator.halt["outcome"], rtl.halt["outcome"]), ("pass", "pass"), "the halt lines were printed first")
-        self.assertIn("rv32emu: 1 scripted event(s) lost, run rejected", emulator.stderr)
+        self.assertIn("rv32emu: 1 input event(s) lost, run rejected", emulator.stderr)
         self.assertIn("1 scripted event(s) lost, run rejected", rtl.noise, "the testbench's $fatal names the loss")
         # A long script: five thousand frames, one event each, presented and popped in a loop. Neither
         # backend has a length limit (the testbench's arrays grow), and nothing is lost.
@@ -1069,7 +1092,7 @@ class RunnerTest(unittest.TestCase):
         script.write_text("frame 5 down A\n")
         result = self.run_results(self.emulator, "--input", str(script))
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("scripted event(s) lost, run rejected", result.stderr, "the backend's own rejection")
+        self.assertIn("event(s) lost, run rejected", result.stderr, "the backend's own rejection")
         result = self.run_results(self.emulator, "--input", str(script), "--allow-lost-events")
         self.assertEqual(result.returncode, 0, result.stderr)
         # A script that names one of the run's own files would be truncated before the backends start.
@@ -1094,6 +1117,60 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("traces differ by design", result.stderr)
         result = self.run_results(self.emulator, program="loop", mode="bench", compare="trace")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+    def test_expected_checkpoints_file_timeout_and_scripted_trace_mode(self):
+        """--expect-checkpoints reads the lines from a file (comments and blanks skipped) and a wrong
+        file fails; the file may not be one the run writes; --timeout is validated and honoured; a
+        scripted-input program that never reads the timer keeps trace mode and the cycle formula,
+        with the input device's hold cycles counted as stalls."""
+        out = Path(self.workdir.name) / "out"
+        blank = f"frame 1 {frame_hash(bytes(FB_SIZE)):08x}"
+        expected = Path(self.workdir.name) / "expected.txt"
+        expected.write_text(f"# the timed program presents once\n\n  {blank}  \n")
+        result = self.run_results(self.emulator, "--expect-checkpoints", str(expected))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected.write_text(f"{blank}\nframe 2 00000000\n")
+        result = self.run_results(self.emulator, "--expect-checkpoints", str(expected))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("are not", result.stderr)
+        result = self.run_results(self.emulator, "--expect-checkpoints", str(out / "missing.txt"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not exist", result.stderr)
+        out.mkdir(exist_ok=True)
+        (out / "timed.emu.checkpoints").write_text(f"{blank}\n")
+        result = self.run_results(self.emulator, "--expect-checkpoints", str(out / "timed.emu.checkpoints"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--expect-checkpoints", result.stderr)
+        self.assertIn("names a file this run writes", result.stderr)
+        for bad in ("0", "-1", "x"):
+            with self.subTest(timeout=bad):
+                result = self.run_results(self.emulator, "--timeout", bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("--timeout", result.stderr)
+        slow = self.wrapper("slow", "sleep 2")
+        result = self.run_results(slow, "--timeout", "0.5")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not finish within 0.5 s", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        # An empty or malformed expected file is refused, not compared vacuously.
+        expected.write_text("# nothing here\n\n")
+        result = self.run_results(self.emulator, "--expect-checkpoints", str(expected))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("has no `frame N <hash>` lines", result.stderr)
+        expected.write_text(f"{blank}\nframe 2 xyz\n")
+        result = self.run_results(self.emulator, "--expect-checkpoints", str(expected))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("line 2 is not `frame N <hash>`", result.stderr)
+        result = self.run_results(self.emulator, "--expect-checkpoints", str(Path(self.workdir.name)))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("is not a file", result.stderr)
+        # Scripted input, no timer: the default trace mode, and the relation holds with the pushes.
+        script = Path(self.workdir.name) / "burst.txt"
+        script.write_text("".join(f"frame 0 down {code}\n" for code in range(16)))
+        result = self.run_results(self.emulator, "--input", str(script), program="devices", compare="trace")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("traces identical", result.stdout)
 
 
 class HelperTest(unittest.TestCase):

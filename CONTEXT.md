@@ -33,6 +33,10 @@ The point where an executed instruction commits its architectural effects, used 
 The rule that a timer tick is a clock cycle on the RTL and an executed instruction on the emulator, so only the timer's values differ between backends; programs that read it are compared at the results level (console, outcome, checkpoints, and the trap records in order), everything else trace for trace.
 _Avoid_: wall-clock time, a claim that the backends run at the same speed.
 
+**Session recording**:
+The `frame N down|up KEY` script a host writes of every event it offered to the input queue, typed or scripted, so a hand-played session replays identically on every backend (trace for trace when the guest never reads the timer, at the results level otherwise).
+_Avoid_: a video, a save file, a trace.
+
 **Frame checkpoint**:
 The `frame N <hash>` line a backend writes when the guest presents the framebuffer, and the point at which scripted input events for that frame arrive; the unit of agreement for display and input across backends.
 _Avoid_: a screenshot, a cycle count.

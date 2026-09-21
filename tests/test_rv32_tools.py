@@ -302,17 +302,41 @@ class DeviceHelperTests(unittest.TestCase):
         if (ROOT / "build/rv32/diag.lst").exists():
             self.assertEqual(check_listing((ROOT / "build/rv32/diag.lst").read_text(), allow_privileged=True), [])
 
+    def test_pong_script_expected_file_and_makefile_agree(self):
+        """The Pong session's script parses and ends with a Q press; the expected file has one
+        well-formed checkpoint line per frame up to that Q; the Makefile's replay arguments name both
+        files. The hashes themselves are checked by test_rv32_pong.py against the native build."""
+        script = (ROOT / "programs/rv32/pong.input").read_text()
+        events = parse_input_script(script)
+        self.assertEqual(events[-1], (200, EVENT_VALID | EVENT_PRESS | KEYS["Q"]))
+        self.assertLessEqual(max(sum(1 for f, _ in events if f == frame) for frame, _ in events), 2,
+                             "at most two events a frame keeps the queue far from full")
+        expected = (ROOT / "programs/rv32/pong.expected").read_text().splitlines()
+        for line in expected:
+            self.assertRegex(line, r"^frame \d+ [0-9a-f]{8}$")
+        self.assertEqual([line.split(" ")[1] for line in expected], [str(n) for n in range(1, 201)], "one line per frame, in order")
+        makefile = (ROOT / "Makefile").read_text()
+        self.assertRegex(makefile, re.compile(r"^RV32_PONG_HEX := [0-9a-f]{8}$", re.M))
+        self.assertIn("RV32_PONG_ARGS := --image build/rv32/pong.bin --input $(RV32_PONG_INPUT) "
+                      "--expect-last-line \"PASS $(RV32_PONG_HEX)\" --expect-checkpoints $(RV32_PONG_EXPECTED)", makefile)
+        self.assertIn("RV32_PONG_INPUT := programs/rv32/pong.input", makefile)
+        self.assertIn("RV32_PONG_EXPECTED := programs/rv32/pong.expected", makefile)
+
     def test_key_table_and_windows_agree_across_languages(self):
-        """The key table lives in board.h, the emulator, the testbench, and this module's KEYS; the
+        """The key table lives in board.h, the emulator, the window, the testbench, and this module's KEYS; the
         window bases in board.h, the bus, the machine's memory instances, and the assembler. None of
         the copies is parsed by the others, so this test pins them to each other."""
         header = (ROOT / "programs/rv32/board.h").read_text()
-        emulator = (ROOT / "tools/rv32emu.c").read_text()
+        emulator = (ROOT / "tools/rv32emu_core.c").read_text()
         testbench = (ROOT / "tests/rv32_tb.sv").read_text()
         expected = {name: str(code) for name, code in KEYS.items()}
         self.assertEqual(dict(re.findall(r"#define RV32_KEY_(\w+)\s+(\d+)", header)), expected, "board.h")
-        self.assertEqual(dict(re.findall(r'\{"(\w+)", (\d+)\}', emulator)), expected, "rv32emu.c")
+        self.assertEqual(dict(re.findall(r'\{"(\w+)", (\d+)\}', emulator)), expected, "rv32emu_core.c")
         self.assertEqual(dict(re.findall(r'\(u == "(\w+)"\) key_code = (\d+);', testbench)), expected, "rv32_tb.sv")
+        window = (ROOT / "tools/rv32win.c").read_text()
+        host_names = {"RETURN": "ENTER"}  # SDL names the key by its keycap
+        keymap = {host_names.get(name, name): code for name, code in re.findall(r"\{SDL_SCANCODE_(\w+), (\d+)\}", window)}
+        self.assertEqual(keymap, expected, "rv32win.c")
         self.assertRegex(header, rf"#define RV32_INPUT_QUEUE\s+{QUEUE_SIZE}\b")
         self.assertRegex(header, rf"#define RV32_EVENT_VALID\s+{EVENT_VALID:#010x}\b")
         self.assertRegex(header, rf"#define RV32_EVENT_PRESS\s+{EVENT_PRESS:#010x}\b")

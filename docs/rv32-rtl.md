@@ -44,7 +44,7 @@ The core executes all of RV32I and the M2 trap subset with the semantics of the 
 
 ### Every other encoding
 
-An encoding the emulator rejects (`mul` and every other M-extension word, `fence.i`, an unused `funct3`/`funct7`, an unknown opcode, `wfi`, `sret`, `mstatus` and every other CSR the machine lacks) traps with cause 2 and the instruction word in `mtval`, exactly the emulator's `illegal` path. The decoder's `illegal` output is written arm by arm to mirror `goto illegal` in [tools/rv32emu.c](../tools/rv32emu.c); every valid word sets exactly one class flag. The M3 `unsupported` halt no longer exists: there is no valid RV32I word the core refuses.
+An encoding the emulator rejects (`mul` and every other M-extension word, `fence.i`, an unused `funct3`/`funct7`, an unknown opcode, `wfi`, `sret`, `mstatus` and every other CSR the machine lacks) traps with cause 2 and the instruction word in `mtval`, exactly the emulator's `illegal` path. The decoder's `illegal` output is written arm by arm to mirror `goto illegal` in [tools/rv32emu_core.c](../tools/rv32emu_core.c); every valid word sets exactly one class flag. The M3 `unsupported` halt no longer exists: there is no valid RV32I word the core refuses.
 
 ## Traps
 

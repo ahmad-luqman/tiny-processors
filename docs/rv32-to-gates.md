@@ -37,7 +37,7 @@ flowchart LR
     WB --> RET["retirement port: retire and trap pulses, registered copies"]
 ```
 
-Every box that says flip-flops captures on a rising edge when the controller enables it; everything else is combinational and exists all the time. The memory itself, the console, and the done register are on the other side of the port (in the testbench until M4; since M5 in `rv32_ram` and the devices behind the bus decoder, [SoC record](rv32-soc.md)). Compare this with the emulator: `step()` in `rv32emu.c` is one function that reads, decodes, executes, and writes in program order. Here those are four or five separate edges, and the "function" is spread over hardware that is all active at once, selected by `state`.
+Every box that says flip-flops captures on a rising edge when the controller enables it; everything else is combinational and exists all the time. The memory itself, the console, and the done register are on the other side of the port (in the testbench until M4; since M5 in `rv32_ram` and the devices behind the bus decoder, [SoC record](rv32-soc.md)). Compare this with the emulator: `step()` in `rv32emu_core.c` is one function that reads, decodes, executes, and writes in program order. Here those are four or five separate edges, and the "function" is spread over hardware that is all active at once, selected by `state`.
 
 ## 2. Register writes are flip-flops, reads are muxes
 

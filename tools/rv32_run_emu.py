@@ -18,15 +18,48 @@ sys.path.insert(0, str(ROOT))
 from tools.rv32_run_qemu import classify  # noqa: E402
 
 DEFAULT_EMULATOR = "build/rv32/rv32emu"
-EMULATOR_SOURCE = ROOT / "tools" / "rv32emu.c"
+EMULATOR_SOURCES = (ROOT / "tools" / "rv32emu.c", ROOT / "tools" / "rv32emu_core.c")
 EMULATOR_CFLAGS = ("-std=c11", "-O2", "-Wall", "-Wextra", "-Werror")  # the Makefile's RV32EMU_CFLAGS
 COUNTERS = ("steps", "retired", "traps", "loaded")
 
 
 def build_emulator(output):
-    """Compile tools/rv32emu.c into `output` with the Makefile's flags; HOST_CC picks the compiler."""
+    """Compile the headless emulator (its main and the core) into `output` with the Makefile's
+    flags; HOST_CC picks the compiler."""
     compiler = os.environ.get("HOST_CC", "cc")
-    subprocess.run([compiler, *EMULATOR_CFLAGS, "-o", str(output), str(EMULATOR_SOURCE)], check=True)
+    subprocess.run([compiler, *EMULATOR_CFLAGS, "-o", str(output), *map(str, EMULATOR_SOURCES)], check=True)
+
+
+WINDOW_SOURCES = (ROOT / "tools" / "rv32win.c", ROOT / "tools" / "rv32emu_core.c")
+
+
+def sdl3_flags():
+    """(cflags, libs) from pkg-config for SDL3; RuntimeError says which of pkg-config or SDL3 is missing."""
+    try:
+        cflags = subprocess.run(["pkg-config", "--cflags", "sdl3"], capture_output=True, text=True, check=True).stdout
+        libs = subprocess.run(["pkg-config", "--libs", "sdl3"], capture_output=True, text=True, check=True).stdout
+    except FileNotFoundError:
+        raise RuntimeError("pkg-config is not installed (brew install pkg-config)") from None
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(f"pkg-config does not know sdl3 (brew install sdl3): {error.stderr.strip()}") from None
+    return cflags.split(), libs.split()
+
+
+def sdl3_missing():
+    """Why the window cannot be built, or None when it can; the tests skip with this reason."""
+    try:
+        sdl3_flags()
+    except RuntimeError as error:
+        return str(error)
+    return None
+
+
+def build_window(output):
+    """Compile the window (tools/rv32win.c and the core) into `output` as the Makefile does;
+    raises RuntimeError when pkg-config or SDL3 is missing."""
+    cflags, libs = sdl3_flags()
+    compiler = os.environ.get("HOST_CC", "cc")
+    subprocess.run([compiler, *EMULATOR_CFLAGS, *cflags, "-o", str(output), *map(str, WINDOW_SOURCES), *libs], check=True)
 
 
 def last_halt_line(stderr, prefix):
@@ -61,9 +94,10 @@ def parse_halt_line(line, decimal, hexadecimal):
     return fields
 
 
-def halt_line(stderr):
-    """Parse the emulator's final `rv32emu: halt=... ` line into a dict, or None if absent."""
-    line = last_halt_line(stderr, "rv32emu:")
+def halt_line(stderr, prefix="rv32emu:"):
+    """Parse the emulator's final `rv32emu: halt=... ` line (the window's says `rv32win:`) into a
+    dict, or None if absent."""
+    line = last_halt_line(stderr, prefix)
     return None if line is None else parse_halt_line(line, COUNTERS, ("done",))
 
 
