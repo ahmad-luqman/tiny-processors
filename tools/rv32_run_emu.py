@@ -25,12 +25,11 @@ COUNTERS = ("steps", "retired", "traps", "loaded")
 
 def floating_objects():
     """Use the same pinned host arithmetic objects as the Makefile builds."""
-    subprocess.run(["make", "-s", "build/fp32/rv32_fp.o", *[
-        "build/fp32/softfloat/" + p.stem + ".o" for p in sorted((ROOT / "third_party/softfloat").glob("*.c"))]],
-        cwd=ROOT, check=True)
-    return [str(ROOT / "build/fp32/rv32_fp.o"), *[
-        str(ROOT / "build/fp32/softfloat" / (p.stem + ".o"))
+    objects = [Path("build/fp32/rv32_fp.o"), *[
+        Path("build/fp32/softfloat") / (p.stem + ".o")
         for p in sorted((ROOT / "third_party/softfloat").glob("*.c"))]]
+    subprocess.run(["make", "-s", *map(str, objects)], cwd=ROOT, check=True)
+    return [str(ROOT / path) for path in objects]
 
 
 def build_emulator(output):

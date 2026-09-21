@@ -4,13 +4,14 @@ import os
 from pathlib import Path
 import random
 import subprocess
+import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
 from tools.rv32_rtl import check_fp_waits
 
 from tools.rv32_f_asm import arithmetic, fp, flw, fsw, fli
-from tools.rv32_asm import CSRRW, CSRRWI, FINISH, words_to_bytes
+from tools.rv32_asm import CSRRW, CSRRWI, FINISH, words_to_bytes, i_type
 from tools.rv32_image import check_image, check_listing, parse_elf, LISTING_LINE, listing_word, F_OPCODES
 from tools.rv32_run_emu import floating_objects
 
@@ -28,13 +29,22 @@ class FloatingToolsTest(unittest.TestCase):
         for word in valid:
             for byte_form in (False, True):
                 text = listing(word, byte_form=byte_form)
-                self.assertTrue(check_listing(text))
+                self.assertRegex("\n".join(check_listing(text)), "outside selected ISA")
                 self.assertEqual(check_listing(text, allow_f=True), [])
         invalid = [arithmetic(0, 5), arithmetic(3, 0) | (1 << 25), fp(1, 0, 1, 2), fp(0x70, 1, 2, 3), flw(0, 1) ^ (1 << 12)]
         for word in invalid:
-            self.assertTrue(check_listing(listing(word), allow_f=True))
-        self.assertTrue(check_listing('', allow_f=True))
+            self.assertRegex("\n".join(check_listing(listing(word), allow_f=True)), "floating instruction outside selected ISA")
+        self.assertEqual(check_listing('', allow_f=True), ['listing has no instruction lines'])
+        reserved_csr = listing(i_type(0x73, 1, 4, 0, 3), 'csr')
+        self.assertRegex(check_listing(reserved_csr, allow_f=True)[0], 'floating CSR outside selected ISA')
         self.assertTrue(check_listing('80000000: 00200073  <unknown>\n', allow_f=True))
+
+    def test_isa_flags_require_a_listing(self):
+        for option in ('--allow-f', '--allow-privileged'):
+            run = subprocess.run([sys.executable, str(ROOT/'tools/rv32_image.py'),
+                                  '/unused/image.elf', option], capture_output=True, text=True)
+            self.assertEqual(run.returncode, 2)
+            self.assertIn('--allow-f and --allow-privileged require --listing', run.stderr)
 
     def test_compiled_images_abi_and_real_instructions(self):
         expectations = {'floatcheck': ('fmul.s', 'fadd.s', 'fdiv.s', 'fsub.s', 'fmv.w.x', 'fmv.x.w'),
@@ -87,6 +97,14 @@ class FloatingToolsTest(unittest.TestCase):
             self.assertEqual(state['fcsr'], '1f')
             self.assertEqual(state['x0'], '00000000')
             for reg in range(1,31): self.assertEqual(state[f'f{reg}'], '00000000')
+
+    def test_operation_encodings_are_pinned(self):
+        # rd=f4/x4, rs1=f1/x1, rs2=f2 (or conversion selector), rs3=f3, rm=RNE.
+        expected = [0x00208253, 0x08208253, 0x10208253, 0x18208243, 0x18208247,
+                    0x1820824b, 0x1820824f, 0x18208253, 0x58008253,
+                    0xd0008253, 0xd0108253, 0xc0008253, 0xc0108253,
+                    0xa020a253, 0xa0209253, 0xa0208253, 0x28208253, 0x28209253]
+        self.assertEqual([arithmetic(op, 0) for op in range(18)], expected)
 
     def test_latency_pin_rejects_drift(self):
         check_fp_waits(SimpleNamespace(halt={'fp_waits': 34}), 34)

@@ -1,4 +1,4 @@
-/* Separate translation-unit calls expose the ILP32 float argument/result ABI. */
+/* Noinline conversion calls keep the emitted integer/float transfers inspectable. */
 #include <stdint.h>
 #include "console.h"
 volatile int32_t signed_input = -16777217;

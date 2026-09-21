@@ -99,7 +99,7 @@ def valid_f_word(word):
     op, f3, f7, rs2 = word & 127, (word >> 12) & 7, word >> 25, (word >> 20) & 31
     rm_ok = f3 <= 4 or f3 == 7
     if op in (0x07, 0x27): return f3 == 2
-    if op in (0x43, 0x47, 0x4b, 0x4f): return (word >> 25) & 3 == 0 and rm_ok
+    if op in (0x43, 0x47, 0x4b, 0x4f): return (f7 & 3) == 0 and rm_ok
     if op != 0x53: return False
     if f7 in (0x00, 0x04, 0x08, 0x0c): return rm_ok
     if f7 == 0x2c: return rs2 == 0 and rm_ok
@@ -121,7 +121,8 @@ def listing_word(encoded):
 
 def check_listing(text, allow_privileged=False, allow_f=False):
     """Return problems found in an objdump disassembly listing; `allow_privileged` admits the CSR
-    instructions and mret that a trap handler needs (docs/rv32.md, "Behavior fixed in M2")."""
+    instructions and mret that a trap handler needs; `allow_f` admits only valid RV32F
+    encodings and floating CSR accesses. Both gates require a listing to inspect."""
     problems = []
     instructions = 0
     for number, line in enumerate(text.splitlines(), 1):
@@ -273,6 +274,8 @@ def main():
                         help="admit csr* and mret in the listing (an image with a trap handler)")
     parser.add_argument("--allow-f", action="store_true", help="admit RV32F and floating CSRs, retaining ILP32")
     args = parser.parse_args()
+    if (args.allow_f or args.allow_privileged) and args.listing is None:
+        parser.error("--allow-f and --allow-privileged require --listing")
     try:
         elf = parse_elf(args.elf.read_bytes())
         listing = args.listing.read_text() if args.listing else None

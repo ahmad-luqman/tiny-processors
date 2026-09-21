@@ -4,6 +4,7 @@
 #include "softfloat.h"
 #include <stdbool.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 _Static_assert(softfloat_round_near_even == 0 && softfloat_round_minMag == 1 &&
                softfloat_round_min == 2 && softfloat_round_max == 3 &&
@@ -14,6 +15,8 @@ _Static_assert(softfloat_flag_inexact == 1 && softfloat_flag_underflow == 2 &&
 
 static bool nan32(uint32_t x) { return (x & 0x7fffffff) > 0x7f800000; }
 static bool snan32(uint32_t x) { return nan32(x) && !(x & 0x00400000); }
+// RISC-V: signaling NaNs raise NV; one NaN yields the number; opposite
+// zeros choose -0 for minimum and +0 for maximum. Two NaNs canonicalize.
 static uint32_t minmax(uint32_t a, uint32_t b, bool maximum) {
     if (snan32(a) || snan32(b)) softfloat_exceptionFlags |= softfloat_flag_invalid;
     if (nan32(a)) return nan32(b) ? 0x7fc00000 : b;
@@ -24,7 +27,10 @@ static uint32_t minmax(uint32_t a, uint32_t b, bool maximum) {
 }
 uint32_t rv32_fp(unsigned op, unsigned rm, uint32_t a, uint32_t b, uint32_t c, uint8_t *flags)
 {
-    if (rm > 4 || op > OP_MAX) abort(); /* caller must validate ISA before issue */
+    if (rm > 4 || op > OP_MAX) {
+        fprintf(stderr, "rv32_fp: invalid internal operation %u or rounding mode %u\n", op, rm);
+        abort(); /* callers validate before invoking arithmetic */
+    }
     softfloat_detectTininess = softfloat_tininess_afterRounding;
     softfloat_roundingMode = (uint_fast8_t)rm;
     softfloat_exceptionFlags = 0;
@@ -48,7 +54,7 @@ uint32_t rv32_fp(unsigned op, unsigned rm, uint32_t a, uint32_t b, uint32_t c, u
         case OP_LT: out = f32_lt(x,y); break;
         case OP_LE: out = f32_le(x,y); break;
         case OP_MIN: case OP_MAX: out = minmax(a,b,op == OP_MAX); break;
-        default: abort();
+        default: fputs("rv32_fp: missing arithmetic dispatch\n", stderr); abort();
     }
     *flags = (uint8_t)softfloat_exceptionFlags;
     return out;

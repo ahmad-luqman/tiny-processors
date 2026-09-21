@@ -58,7 +58,8 @@ The emulator uses pinned Berkeley SoftFloat as host arithmetic, with independent
 ISA decode and per-machine accrued state. It sets rounding, tininess and clears
 temporary flags for every operation. Its synchronous API is single-threaded.
 Literal expected results and F1's separate oracle protocol anchor differential
-tests; sharing SoftFloat is not an independent second arithmetic oracle.
+tests. The protocol runner and emulator share the same `rv32_fp()` adapter;
+this is one software arithmetic implementation, not two independent oracles.
 
 References: [F 2.2](https://docs.riscv.org/reference/isa/v20260120/unpriv/f-st-ext.html),
 [Zicsr 2.0](https://docs.riscv.org/reference/isa/v20260120/unpriv/zicsr.html),
@@ -94,7 +95,11 @@ make lint-rv32 lint-rv32-soc synth-rv32 synth-rv32-soc
 
 The seeded CPU corpus has 1,080 requests: all 18 standalone operation mappings,
 five modes, and 12 edge/random operand triples per combination, seed 20260922.
-Static and dynamic literal anchors run separately. The F1 suite retains its
+Static and dynamic literal anchors run separately. Known instruction encodings
+and the C/RTL operation enums are statically pinned. The 1/3 division test pins
+34 FPU issue/wait cycles, and compiled-image runners pin 5,081 / 89 / 0 waits
+for arithmetic / conversion / software, so latency drift cannot hide inside
+the accounting identity. The F1 suite retains its
 much larger arithmetic corpus; CPU tests concentrate on state and integration.
 The testbench asserts one issue per completion and one completion per arithmetic
 retirement, resetting both tokens when work is canceled. Every failing trace,
@@ -102,8 +107,9 @@ nonzero backend status, missing completion record and malformed halt record
 remains a test failure.
 
 The architectural trace is an effects interface, not a dump of all registers
-per instruction. `retire_fd_we`, `retire_fd[4:0]`, `retire_fd_value[31:0]`,
-`retire_fcsr_we`, and `retire_fcsr[7:0]` are valid when `retire` pulses. The
+per instruction. `retire_fd_we` and `retire_fcsr_we` are meaningful with
+`retire`. `retire_fd[4:0]` and `retire_fd_value[31:0]` additionally require
+`retire_fd_we`; `retire_fcsr[7:0]` additionally requires `retire_fcsr_we`. The
 SoC passes them through to the testbench. `fp_waits` in the testbench halt record
 counts cycles spent in FP_ISSUE/FP_WAIT and is omitted when zero, preserving
 integer halt records. For trap-free runs:
@@ -199,10 +205,10 @@ Payload ports have meaning only with their enables, so unrelated changes on
 
 ## Acceptance record (2026-09-22)
 
-- Nine architectural tests pass on each simulator: 45 literal anchors in both
+- Eleven architectural tests pass on each simulator: 49 literal anchors in both
   static and dynamic modes, the 1,080-request seeded corpus, all register roles,
   traps, memory faults and reset positions across short/iterative operations.
-- Five F2 tool tests pass, including explicit ISA/ILP32 checks, disassembly,
+- Eight F2 tool tests pass, including explicit ISA/ILP32 checks, disassembly,
   patched runtime inputs, complete floating state dumps and multiply glue.
 - All three compiled images pass on emulator and both RTL simulators. The
   software image independently passes QEMU RV32I. Short VCDs were inspected.

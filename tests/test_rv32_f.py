@@ -44,7 +44,12 @@ class FloatingTest(unittest.TestCase):
         self.assertTrue(cycle_relation(rtl)[1], cycle_relation(rtl))
 
     def test_literal_numeric_anchors_static_and_dynamic(self):
-        rows = [r for r in ANCHORS if r[0] <= 17 and r[1] <= 4]
+        rows = [r for r in ANCHORS if r[0] <= 17 and r[1] <= 4] + [
+            (13, 0, 0x7f800001, 0, 0, 0, 16, 0), # FEQ(sNaN,0): quiet comparison still raises NV
+            (15, 0, 0x7fc00000, 0, 0, 0, 16, 0), # FLE(qNaN,0): signaling comparison
+            (11, 0, 0x7fc00000, 0, 0, 0x7fffffff, 16, 0),
+            (12, 0, 0x7fc00000, 0, 0, 0xffffffff, 16, 0),
+        ]
         for dynamic in (False, True):
             self.check_vectors([r[:5] for r in rows], [r[5:] for r in rows], dynamic=dynamic, seed=7)
 
@@ -170,6 +175,27 @@ class FloatingTest(unittest.TestCase):
                 self.assertFalse(any(int(line.split()[2], 16) == arithmetic(op, 0) for line in rtl.trace[:start]))
                 self.assertEqual(rtl.halt['outcome'], 'pass')
 
+    def test_reset_replay_uses_new_operand_and_flags(self):
+        # RAM survives reset. First sqrt(2) is canceled; the restarted program
+        # loads the stored 4 and must retire sqrt(4)=2 with no accrued NX.
+        address = RAM + 0x10000
+        words = LI(8, address) + [flw(1, 8)] + fli(2, 0x40800000) + [fsw(2, 8),
+            arithmetic(8, 0), CSRRS(9, 1, 0)] + FINISH()
+        words += [0] * ((address-RAM)//4-len(words)) + [0x40000000]
+        _, rtl = self.run_both(words, reset_at=40)
+        arithmetic_lines = [line for line in rtl.trace if int(line.split()[2], 16) == arithmetic(8, 0)]
+        self.assertEqual(len(arithmetic_lines), 1)
+        self.assertEqual(integer_tests.effects(arithmetic_lines[0]), 'f4=40000000')
+        read_flags = [line for line in rtl.trace if int(line.split()[2], 16) == CSRRS(9, 1, 0)]
+        self.assertEqual(len(read_flags), 1)
+        self.assertEqual(integer_tests.effects(read_flags[0]), 'x9=00000000')
+        fresh_words = list(words)
+        fresh_words[-1] = 0x40800000
+        _, fresh = self.assert_same_pass(fresh_words)
+        # Setup is 7 instructions with 2 memory cycles: issue at cycle 34;
+        # reset after 40 cancels exactly 7 issue/wait cycles.
+        self.assertEqual(rtl.halt['fp_waits'] - fresh.halt['fp_waits'], 7)
+
     def test_trap_handler_preserves_float_state_and_resumes(self):
         handler_at = RAM + 0x200
         bad = arithmetic(0, 5)
@@ -181,6 +207,14 @@ class FloatingTest(unittest.TestCase):
         self.assertTrue(any(line.endswith('x9=7fc12345') for line in emu.trace))
         self.assertTrue(any(line.endswith('x10=00000008') for line in emu.trace))
         self.assertEqual(sum(' trap ' in line for line in emu.trace), 1)
+        # A second illegal F instruction before the handler retires is a double fault.
+        words = LI(5, handler_at) + [CSRRW(0, MTVEC, 5), bad]
+        words += [0] * ((handler_at-RAM)//4-len(words)) + [bad]
+        emu, rtl = self.run_both(words)
+        self.assertIsNone(diff_traces(rtl.trace, emu.trace))
+        self.assertEqual(rtl.halt['halt'], 'double-fault')
+        self.assertEqual(rtl.halt['cause'], 2)
+        self.assertTrue(rtl.trace[-1].endswith(f' trap 2 {bad:08x}'))
 
 
 if __name__ == '__main__':

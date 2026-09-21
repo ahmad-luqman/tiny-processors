@@ -34,7 +34,7 @@ enum cause {
 };
 
 /* The only CSRs that exist; every other number is an illegal instruction. */
-enum csr { CSR_MTVEC = 0x305, CSR_MEPC = 0x341, CSR_MCAUSE = 0x342, CSR_MTVAL = 0x343 };
+enum csr { CSR_FFLAGS = 0x001, CSR_FRM = 0x002, CSR_FCSR = 0x003, CSR_MTVEC = 0x305, CSR_MEPC = 0x341, CSR_MCAUSE = 0x342, CSR_MTVAL = 0x343 };
 typedef enum { ACC_OK, ACC_FAULT, ACC_MISALIGNED } mem_access; /* not `access`: unistd.h owns that name */
 
 /* Every window of the memory map is a region with a load and a store
@@ -389,9 +389,9 @@ static void trap(machine *m, uint32_t word, uint32_t cause, uint32_t tval)
 static bool csr_read(const machine *m, uint32_t number, uint32_t *value)
 {
     switch (number) {
-    case 1: *value = m->fcsr & 31u; return true;
-    case 2: *value = m->fcsr >> 5; return true;
-    case 3: *value = m->fcsr; return true;
+    case CSR_FFLAGS: *value = m->fcsr & 31u; return true;
+    case CSR_FRM: *value = m->fcsr >> 5; return true;
+    case CSR_FCSR: *value = m->fcsr; return true;
     case CSR_MTVEC: *value = m->mtvec; return true;
     case CSR_MEPC: *value = m->mepc; return true;
     case CSR_MCAUSE: *value = m->mcause; return true;
@@ -403,9 +403,9 @@ static bool csr_read(const machine *m, uint32_t number, uint32_t *value)
 static void csr_write(machine *m, uint32_t number, uint32_t value)
 {
     switch (number) {
-    case 1: m->fcsr = (m->fcsr & 0xe0u) | (value & 31u); m->wr_fcsr = true; break;
-    case 2: m->fcsr = (m->fcsr & 31u) | ((value & 7u) << 5); m->wr_fcsr = true; break;
-    case 3: m->fcsr = value & 255u; m->wr_fcsr = true; break;
+    case CSR_FFLAGS: m->fcsr = (m->fcsr & 0xe0u) | (value & 31u); m->wr_fcsr = true; break;
+    case CSR_FRM: m->fcsr = (m->fcsr & 31u) | ((value & 7u) << 5); m->wr_fcsr = true; break;
+    case CSR_FCSR: m->fcsr = value & 255u; m->wr_fcsr = true; break;
     case CSR_MTVEC: m->mtvec = value & ~3u; break; /* direct mode only (WARL) */
     case CSR_MEPC: m->mepc = value & ~3u; break;   /* IALIGN is 32 */
     case CSR_MCAUSE: m->mcause = value; break;

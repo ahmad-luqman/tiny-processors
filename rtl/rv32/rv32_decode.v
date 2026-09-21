@@ -1,11 +1,9 @@
 `timescale 1ns/1ps
 
-// Combinational instruction decoder: register fields, the sign-extended
-// immediate for each format, one flag per instruction class, and the
-// integer/memory `illegal` check (compute F encodings use rv32_fdecode).
-// The emulator traps the
-// same words. Every valid word sets exactly one class flag, or none for
-// `fence`, which retires with no effect; the core executes all of them.
+// Integer/memory instruction decode and sign-extended immediates. Legal words
+// handled here select a class, except FENCE, which retires without effects.
+// F compute words are decoded separately by rv32_fdecode; the core traps only
+// when this decoder reports illegal and that decoder reports !fp_valid.
 module rv32_decode (
     input  wire [31:0] insn,
     output wire [4:0]  rd,
@@ -75,7 +73,7 @@ module rv32_decode (
     end
 
     // What the machine rejects, opcode by opcode, mirroring the emulator's
-    // `goto illegal` paths in tools/rv32emu.c. Every path assigns `illegal`.
+    // `goto illegal` paths in tools/rv32emu_core.c. Every path assigns `illegal`.
     always @* begin
         case (opcode)
             OP_LUI, OP_AUIPC, OP_JAL: illegal = 1'b0;

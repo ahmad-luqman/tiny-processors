@@ -68,9 +68,10 @@ module rv32_tb;
             if (dut.core.fpu.resp_valid && dut.core.fpu.resp_ready) begin
                 if (!fp_inflight) $fatal(1, "FPU completion without issue");
                 fp_inflight = 0;
-                fp_completed = 1;
+                // An internal-error response traps instead of retiring.
+                fp_completed = !dut.core.fp_error;
             end
-            if (state == 3'd4 && dut.core.fp_valid && dut.core.fp_direct == 3'd0) begin
+            if (state == 3'd4 && dut.core.fp_valid && dut.core.fp_direct == dut.core.DIRECT_NONE) begin
                 if (!fp_completed) $fatal(1, "FPU retirement without completion");
                 fp_completed = 0;
             end
@@ -304,6 +305,8 @@ module rv32_tb;
         end
         #1;
         if (!reset) begin
+            if (retire && retire_rd_we && retire_fd_we)
+                $fatal(1, "Instruction wrote both integer and floating destinations");
             if (retire) begin
                 steps = steps + 1;
                 if (trace_fd != 0) begin

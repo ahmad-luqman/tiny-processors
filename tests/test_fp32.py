@@ -69,7 +69,7 @@ class Fp32ToolsTest(unittest.TestCase):
                 verify_reference_sources(directory)
 
     def test_encodings_match_documentation_rtl_and_reference(self):
-        rtl=(ROOT/'rtl/fp32/fp32.v').read_text()
+        rtl=(ROOT/'rtl/fp32/fp32.v').read_text() + (ROOT/'rtl/fp32/fp32_ops.vh').read_text()
         reference=(ROOT/'tools/fp32_ref.c').read_text()
         docs=(ROOT/'docs/fp32.md').read_text()
         doc_codes={name:int(code) for code,name in re.findall(r'^\| (\d+) \| ([A-Z0-9_]+) \|',docs,re.M)}
@@ -77,10 +77,12 @@ class Fp32ToolsTest(unittest.TestCase):
             rtl_codes={name:int(code) for name,code in re.findall(prefix+r'([A-Z0-9_]+)=\d+\x27d(\d+)',rtl)}
             self.assertEqual(rtl_codes,mapping)
             self.assertEqual({name:doc_codes.get(name) for name in mapping},mapping)
-        self.assertEqual({name:int(code) for name,code in re.findall(r'OP_([A-Z0-9_]+)=(\d+)',reference)},OPS)
+        self.assertEqual({name:int(code) for name,code in re.findall(r'OP_([A-Z0-9_]+)=(\d+)',(ROOT/'tools/rv32_fp.h').read_text())},OPS)
         self.assertEqual({name:int(code,16) for name,code in re.findall(r'FLAG_([A-Z]+)=5\x27h([0-9a-f]+)',rtl)},FLAGS)
         self.assertEqual({name:int(code,16) for code,name in re.findall(r'^\| 0x([0-9a-f]+) \| ([A-Z]+) \|',docs,re.M)},FLAGS)
         self.assertIn('NV,DZ,OF,UF,NX (bits 4 through 0)',docs)
+        self.assertIn('rv32_fp(op, rm, a, b, c, &flags)', reference)
+        self.assertIn('`include "fp32_ops.vh"', (ROOT/'rtl/rv32/rv32_fdecode.v').read_text())
         self.assertEqual(MAX_OP,max(OPS.values()))
         self.assertEqual(MAX_RM,max(ROUNDING.values()))
         self.assertIn('operation > OP_MAX || mode > RM_RMM',rtl)

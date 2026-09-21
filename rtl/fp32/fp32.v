@@ -12,24 +12,7 @@ module fp32 (
     output reg [31:0] result, output reg [4:0] flags, output reg error
 );
     `include "fp32_states.vh"
-    localparam [4:0] OP_ADD=5'd0,
-        OP_SUB=5'd1,
-        OP_MUL=5'd2,
-        OP_FMADD=5'd3,
-        OP_FMSUB=5'd4,
-        OP_FNMSUB=5'd5,
-        OP_FNMADD=5'd6,
-        OP_DIV=5'd7,
-        OP_SQRT=5'd8,
-        OP_I32_TO_F32=5'd9,
-        OP_U32_TO_F32=5'd10,
-        OP_F32_TO_I32=5'd11,
-        OP_F32_TO_U32=5'd12,
-        OP_EQ=5'd13,
-        OP_LT=5'd14,
-        OP_LE=5'd15,
-        OP_MIN=5'd16,
-        OP_MAX=5'd17;
+    `include "fp32_ops.vh"
     localparam [2:0] RM_RNE=3'd0,
         RM_RTZ=3'd1,
         RM_RDN=3'd2,

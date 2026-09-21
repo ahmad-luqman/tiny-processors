@@ -49,7 +49,9 @@ module rv32 (
                      CAUSE_LOAD_MISALIGNED = 4'd4, CAUSE_LOAD_FAULT = 4'd5,
                      CAUSE_STORE_MISALIGNED = 4'd6, CAUSE_STORE_FAULT = 4'd7,
                      CAUSE_ECALL = 4'd11;
-    localparam [11:0] CSR_MTVEC = 12'h305, CSR_MEPC = 12'h341, CSR_MCAUSE = 12'h342; // 12'h343 is mtval, the default
+    localparam [11:0] CSR_MTVEC = 12'h305, CSR_MEPC = 12'h341, CSR_MCAUSE = 12'h342,
+                      CSR_MTVAL = 12'h343, CSR_FFLAGS = 12'h001, CSR_FRM = 12'h002, CSR_FCSR = 12'h003;
+    localparam [2:0] DIRECT_NONE=3'd0, DIRECT_SIGN=3'd1, DIRECT_CLASS=3'd3;
     localparam [31:0] RESET_PC = 32'h8000_0000;
 
     // Datapath registers: one instruction's worth of state between states.
@@ -112,8 +114,8 @@ module rv32 (
         fa[31] && !f_zero_exp && !f_max_exp,
         fa[31] && f_max_exp && f_zero_frac};
     wire injected_sign = funct3 == 3'd0 ? fb[31] : funct3 == 3'd1 ? !fb[31] : fa[31] ^ fb[31];
-    wire [31:0] direct_result = fp_direct == 3'd1 ? {injected_sign, fa[30:0]} :
-                               fp_direct == 3'd3 ? {22'd0, classification} : fa;
+    wire [31:0] direct_result = fp_direct == DIRECT_SIGN ? {injected_sign, fa[30:0]} :
+                               fp_direct == DIRECT_CLASS ? {22'd0, classification} : fa;
 
 
     // Access width from funct3[1:0] (0 byte, 1 halfword, 2 word) and the lane
@@ -136,18 +138,20 @@ module rv32 (
     // the new value is written in WRITEBACK. The operand is rs1 or its
     // five-bit field (funct3[2]); csrrs/csrrc with a zero field write nothing.
     wire [11:0] csr_addr = ir[31:20];
-    wire [31:0] csr_old = csr_addr == 12'h001 ? {27'd0, fcsr[4:0]} :
-                          csr_addr == 12'h002 ? {29'd0, fcsr[7:5]} :
-                          csr_addr == 12'h003 ? {24'd0, fcsr} : (csr_addr == CSR_MTVEC) ? mtvec : (csr_addr == CSR_MEPC) ? mepc :
+    wire [31:0] csr_old = csr_addr == CSR_FFLAGS ? {27'd0, fcsr[4:0]} :
+                          csr_addr == CSR_FRM ? {29'd0, fcsr[7:5]} :
+                          csr_addr == CSR_FCSR ? {24'd0, fcsr} : (csr_addr == CSR_MTVEC) ? mtvec : (csr_addr == CSR_MEPC) ? mepc :
                           (csr_addr == CSR_MCAUSE) ? mcause : mtval;
     wire [31:0] csr_operand = funct3[2] ? {27'd0, rs1} : a;
     wire [31:0] csr_new = (funct3[1:0] == 2'd1) ? csr_operand :
                           (funct3[1:0] == 2'd2) ? (csr_old | csr_operand) : (csr_old & ~csr_operand);
     wire csr_we = is_csr && ((funct3[1:0] == 2'd1) || (rs1 != 5'd0));
 
-    wire fp_csr_write = csr_we && csr_addr >= 12'h001 && csr_addr <= 12'h003;
-    wire [7:0] fp_csr_new = csr_addr == 12'h001 ? {fcsr[7:5], csr_new[4:0]} :
-                              csr_addr == 12'h002 ? {csr_new[2:0], fcsr[4:0]} : csr_new[7:0];
+    wire fp_csr_write = csr_we && csr_addr >= CSR_FFLAGS && csr_addr <= CSR_FCSR;
+    wire [7:0] fp_csr_new = csr_addr == CSR_FFLAGS ? {fcsr[7:5], csr_new[4:0]} :
+                              csr_addr == CSR_FRM ? {csr_new[2:0], fcsr[4:0]} : csr_new[7:0];
+
+    wire [7:0] fcsr_next = fp_csr_write ? fp_csr_new : fcsr | {3'd0, fp_flags};
 
     // Register file: written in WRITEBACK, read in DECODE.
     wire [31:0] rs1_value, rs2_value;
@@ -212,7 +216,6 @@ module rv32 (
             trap_cause <= cause;
             trap_value <= value;
             if (in_trap) begin
-                fp_flags <= 5'd0;
                 state <= HALT;
                 halted <= 1'b1;
             end else begin
@@ -291,7 +294,7 @@ module rv32 (
                     else if (target_misaligned)
                         take_trap(CAUSE_TARGET_MISALIGNED, execute_out, ir_pc);
                     else if (fp_valid) begin
-                        if (fp_direct != 3'd0) begin
+                        if (fp_direct != DIRECT_NONE) begin
                             alu_out <= direct_result;
                             state <= WRITEBACK;
                         end else state <= FP_ISSUE;
@@ -303,6 +306,7 @@ module rv32 (
                 end
                 FP_ISSUE: if (fp_ready) state <= FP_WAIT;
                 FP_WAIT: if (fp_done) begin
+                    // Defensive guard: legal decode never issues an invalid op/rm.
                     if (fp_error) take_trap(CAUSE_ILLEGAL, ir, ir_pc);
                     else begin
                         alu_out <= fp_result;
@@ -325,15 +329,14 @@ module rv32 (
                     retire_fd <= rd;
                     retire_fd_value <= fp_value;
                     retire_fcsr_we <= fp_csr_write || (fp_valid && fp_flags != 5'd0);
-                    retire_fcsr <= fp_csr_write ? fp_csr_new : fcsr | {3'd0, fp_flags};
-                    if (fp_csr_write) fcsr <= fp_csr_new;
-                    else if (fp_valid) fcsr <= fcsr | {3'd0, fp_flags};
+                    retire_fcsr <= fcsr_next;
+                    if (fp_csr_write || fp_valid) fcsr <= fcsr_next;
                     if (csr_we) begin
                         case (csr_addr)
                             CSR_MTVEC: mtvec <= {csr_new[31:2], 2'b00}; // direct mode only
                             CSR_MEPC: mepc <= {csr_new[31:2], 2'b00};   // IALIGN is 32
                             CSR_MCAUSE: mcause <= csr_new;
-                            12'h343: mtval <= csr_new;
+                            CSR_MTVAL: mtval <= csr_new;
                             default: begin end // Floating CSRs were handled above.
                         endcase
                     end

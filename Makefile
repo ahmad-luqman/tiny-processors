@@ -48,8 +48,9 @@ RV32_PONG_EXPECTED := programs/rv32/pong.expected
 RV32_PONG_ARGS := --image build/rv32/pong.bin --input $(RV32_PONG_INPUT) --expect-last-line "PASS $(RV32_PONG_HEX)" --expect-checkpoints $(RV32_PONG_EXPECTED) --timeout 300
 RV32_DIAG_ARGS := --image build/rv32/diag.bin --input $(RV32_DIAG_INPUT) --compare results --expect-last-line "PASS $(RV32_DIAG_HEX)" --expect-checkpoint "frame 1 $(RV32_DIAG_FRAME1_HEX)" --expect-checkpoint "frame 2 $(RV32_DIAG_FRAME2_HEX)"
 FP32_RTL := rtl/fp32/fp32.v
-FP32_HEADERS := rtl/fp32/fp32_states.vh
-FP32_REF_OBJ := build/fp32/fp32_ref.o $(patsubst third_party/softfloat/%.c,build/fp32/softfloat/%.o,$(wildcard third_party/softfloat/*.c))
+FP32_HEADERS := rtl/fp32/fp32_states.vh rtl/fp32/fp32_ops.vh
+SOFTFLOAT_OBJ := $(patsubst third_party/softfloat/%.c,build/fp32/softfloat/%.o,$(wildcard third_party/softfloat/*.c))
+FP32_REF_OBJ := build/fp32/fp32_ref.o build/fp32/rv32_fp.o $(SOFTFLOAT_OBJ)
 FP32_REF_FLAGS := -std=c11 -O2 -Wall -Wextra -Werror -DSOFTFLOAT_FAST_INT64 -DSOFTFLOAT_ROUND_ODD -DINLINE_LEVEL=5 -Ithird_party/softfloat -Ithird_party/softfloat/include
 FP32_REF_HEADERS := $(wildcard third_party/softfloat/*.h third_party/softfloat/include/*.h)
 FP32_REF := build/fp32/reference
@@ -59,7 +60,6 @@ FP32_VERILATOR := build/verilator-fp32/fp32_sim
 FP32_RUN = $(PYTHON) tools/fp32_vectors.py
 FP32_SEED ?= 20260921
 FP32_RANDOM ?= 100
-SOFTFLOAT_OBJ := $(filter-out build/fp32/fp32_ref.o,$(FP32_REF_OBJ))
 RV32_FP_OBJ := build/fp32/rv32_fp.o $(SOFTFLOAT_OBJ)
 RV32EMU := build/rv32/rv32emu
 RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
@@ -446,7 +446,7 @@ test-rv32-capstone-sanitize: | build/rv32
 build/fp32:
 	mkdir -p $@
 
-build/fp32/fp32_ref.o: tools/fp32_ref.c $(FP32_REF_HEADERS) | build/fp32
+build/fp32/fp32_ref.o: tools/fp32_ref.c tools/rv32_fp.h $(FP32_REF_HEADERS) | build/fp32
 	$(HOST_CC) $(FP32_REF_FLAGS) -c $< -o $@
 
 # Upstream RISCV NaN helpers intentionally ignore payload parameters.
@@ -512,6 +512,9 @@ RV32_SOFT_FLAGS := $(RV32_CFLAGS) -ffp-contract=off -DSOFTFLOAT_FAST_INT64 -DINL
 # opts_GCC_h disables the host-only intrinsics header (including __int128);
 # the unchanged generic integer primitives are used on RV32I.
 RV32_SOFT_OBJ := $(patsubst third_party/softfloat/%.c,build/rv32/soft/%.o,$(wildcard third_party/softfloat/*.c))
+RV32_FLOAT_HEX := c0800000
+RV32_CONVERT_HEX := 4f800003
+RV32_F_LDFLAGS := $(filter-out -march=rv32i,$(RV32_LDFLAGS)) -march=rv32if_zicsr
 RV32_F_IMAGES := floatcheck floatconvert floatsoft
 RV32_F_FILES := $(foreach image,$(RV32_F_IMAGES),$(foreach ext,elf lst bin readelf,build/rv32/$(image).$(ext)))
 
@@ -522,10 +525,10 @@ build/rv32/f/%.o: programs/rv32/%.c $(RV32_HEADERS) | build/rv32/f
 	$(RV32_CC) $(RV32_F_CFLAGS) -c $< -o $@
 
 build/rv32/floatcheck.elf: build/rv32/f/floatcheck.o build/rv32/f/float_work.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
-	$(RV32_CC) $(filter-out -march=rv32i,$(RV32_LDFLAGS)) -march=rv32if_zicsr -o $@ $(filter %.o,$^)
+	$(RV32_CC) $(RV32_F_LDFLAGS) -o $@ $(filter %.o,$^)
 
 build/rv32/floatconvert.elf: build/rv32/f/floatconvert.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
-	$(RV32_CC) $(filter-out -march=rv32i,$(RV32_LDFLAGS)) -march=rv32if_zicsr -o $@ $(filter %.o,$^)
+	$(RV32_CC) $(RV32_F_LDFLAGS) -o $@ $(filter %.o,$^)
 
 build/rv32/soft/%.o: third_party/softfloat/%.c $(FP32_REF_HEADERS) | build/rv32/soft
 	$(RV32_CC) $(filter-out -Werror,$(RV32_SOFT_FLAGS)) -Wno-unused-parameter -c $< -o $@
@@ -547,19 +550,19 @@ check-rv32-f-image: firmware-rv32-f
 	$(PYTHON) tools/rv32_image.py build/rv32/floatsoft.elf --listing build/rv32/floatsoft.lst --bin build/rv32/floatsoft.bin --hex build/rv32/floatsoft.hex
 
 run-rv32-f-emu: check-rv32-f-image $(RV32EMU)
-	$(PYTHON) tools/rv32_run_emu.py build/rv32/floatcheck.bin --expect-hex c0800000
-	$(PYTHON) tools/rv32_run_emu.py build/rv32/floatconvert.bin --expect-hex 4f800003
-	$(PYTHON) tools/rv32_run_emu.py build/rv32/floatsoft.bin --expect-hex c0800000
+	$(PYTHON) tools/rv32_run_emu.py build/rv32/floatcheck.bin --expect-hex $(RV32_FLOAT_HEX)
+	$(PYTHON) tools/rv32_run_emu.py build/rv32/floatconvert.bin --expect-hex $(RV32_CONVERT_HEX)
+	$(PYTHON) tools/rv32_run_emu.py build/rv32/floatsoft.bin --expect-hex $(RV32_FLOAT_HEX)
 
 run-rv32-f-rtl: check-rv32-f-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatcheck.bin --expect-fp-waits 5081 --expect-last-line 'PASS c0800000' --out build/rv32/f-rtl
-	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatconvert.bin --expect-fp-waits 89 --expect-last-line 'PASS 4f800003' --out build/rv32/f-rtl
-	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatsoft.bin --expect-fp-waits 0 --expect-last-line 'PASS c0800000' --out build/rv32/f-rtl
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatcheck.bin --expect-fp-waits 5081 --expect-last-line "PASS $(RV32_FLOAT_HEX)" --out build/rv32/f-rtl
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatconvert.bin --expect-fp-waits 89 --expect-last-line "PASS $(RV32_CONVERT_HEX)" --out build/rv32/f-rtl
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatsoft.bin --expect-fp-waits 0 --expect-last-line "PASS $(RV32_FLOAT_HEX)" --out build/rv32/f-rtl
 
 run-rv32-f-rtl-verilator: check-rv32-f-image $(RV32EMU) $(RV32_TB_VERILATOR)
-	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatcheck.bin --expect-fp-waits 5081 --expect-last-line 'PASS c0800000' --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
-	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatconvert.bin --expect-fp-waits 89 --expect-last-line 'PASS 4f800003' --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
-	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatsoft.bin --expect-fp-waits 0 --expect-last-line 'PASS c0800000' --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatcheck.bin --expect-fp-waits 5081 --expect-last-line "PASS $(RV32_FLOAT_HEX)" --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatconvert.bin --expect-fp-waits 89 --expect-last-line "PASS $(RV32_CONVERT_HEX)" --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatsoft.bin --expect-fp-waits 0 --expect-last-line "PASS $(RV32_FLOAT_HEX)" --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
 
 .PHONY: test-rv32-f-tools
 test-rv32-f-tools: check-rv32-f-image $(RV32EMU) $(RV32_FP_OBJ)
@@ -574,4 +577,6 @@ waves-rv32-f: $(RV32EMU) $(RV32_TB_VVP)
 bench-rv32-f: run-rv32-f-rtl run-rv32-f-rtl-verilator
 
 run-rv32-f-soft-qemu: check-rv32-f-image
-	$(PYTHON) tools/rv32_run_qemu.py build/rv32/floatsoft.elf --qemu $(QEMU_RV32) --expect-hex c0800000 --transcript build/rv32/floatsoft.qemu.transcript --qemu-log build/rv32/floatsoft.qemu.log
+	$(PYTHON) tools/rv32_run_qemu.py build/rv32/floatsoft.elf --qemu $(QEMU_RV32) --timeout 20 --expect-hex $(RV32_FLOAT_HEX) --transcript build/rv32/floatsoft.qemu.transcript --qemu-log build/rv32/floatsoft.qemu.log
+
+test-rv32: run-rv32-f-soft-qemu

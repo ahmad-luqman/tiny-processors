@@ -21,12 +21,14 @@ def main():
         if rtl.status or not rtl.halt or rtl.halt['outcome'] != 'pass': raise RuntimeError(rtl.stderr + rtl.noise)
         if not has_value_changes(wave.read_text()): raise RuntimeError(f'empty waveform: {wave}')
         if reset_at is None:
-            if emu.status or diff_traces(rtl.trace, emu.trace): raise RuntimeError('floating waveform trace differs')
+            mismatch = diff_traces(rtl.trace, emu.trace)
+            if emu.status or mismatch: raise RuntimeError(f'floating waveform: {emu.stderr}; {mismatch}')
             if not any(line.endswith('f0=3eaaaaab fcsr=61') for line in rtl.trace): raise RuntimeError('missing rounded result and NX')
         else:
             start = [i for i,line in enumerate(rtl.trace) if line.split()[1] == '80000000'][-1]
-            if [line.split(' ',1)[1] for line in rtl.trace[start:]] != [line.split(' ',1)[1] for line in emu.trace]:
-                raise RuntimeError('reset waveform replay differs')
+            mismatch = diff_traces([line.split(' ',1)[1] for line in rtl.trace[start:]],
+                                   [line.split(' ',1)[1] for line in emu.trace])
+            if mismatch: raise RuntimeError(f'reset waveform replay: {mismatch}')
         print(f'{name}: {rtl.halt["cycles"]} cycles, {len(rtl.trace)} retirements; {wave}')
 
 

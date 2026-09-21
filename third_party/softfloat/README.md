@@ -13,5 +13,5 @@ intrinsics header and use the generic primitives, with no edits to upstream
 sources. It supplies guest compiler libcalls in `programs/rv32/rt/softfloat_abi.c`.
 No SoftFloat code is synthesized into hardware or linked into the F-enabled
 firmware images. The emulator and oracle share this arithmetic implementation;
-literal anchors independently check their adapters.
+both host entry points share the `rv32_fp()` adapter, checked against literal anchors.
 See COPYING.txt; each upstream source also retains its license notice.

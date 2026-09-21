@@ -99,7 +99,7 @@ The hardware walkthrough starts with FP32's sign, exponent, and significand. An 
 
 Acceptance includes signed zeros, subnormals, infinities, NaNs, cancellation, rounding ties, overflow/underflow, invalid operations, divide by zero, and inexact flags. Use an independent reference capable of the required rounding/flag semantics; ordinary host float arithmetic alone is insufficient as the oracle. In CPU comparisons, include floating register writes, CSR changes, and memory effects. Reset and delayed completion must not produce stale writeback.
 
-Select and verify the compiler ISA/ABI flags at F2. Either preserve the integer calling convention while enabling floating instructions or adopt a floating-point ABI consistently across all objects and runtime libraries; do not mix incompatible objects. C demos must exercise runtime inputs and disassembly must show the intended instructions, avoiding a misleading constant-folded example. Compare software and hardware floating-point execution on the same workload, reporting cycles and cell costs separately from host emulator speed.
+F2 selected and verified `-march=rv32if_zicsr -mabi=ilp32`, preserving the integer calling convention across firmware/runtime objects. Its C demos use runtime inputs and disassembly checks prove the intended instructions execute. The same workload also runs as RV32I software floating point; the [F2 record](../rv32-f.md) reports RTL cycles and cell costs separately from host emulator speed.
 
 GPU FP32/other formats and NPU integer/other formats remain independent choices. The CPU FPU may help with reference computations or scene setup, but does not automatically create floating-point GPU lanes or change the digit model's quantization contract.
 
