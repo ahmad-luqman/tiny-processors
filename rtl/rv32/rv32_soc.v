@@ -33,6 +33,11 @@ module rv32_soc #(
     output wire        retire_rd_we,
     output wire [4:0]  retire_rd,
     output wire [31:0] retire_rd_value,
+    output wire        retire_fd_we,
+    output wire [4:0]  retire_fd,
+    output wire [31:0] retire_fd_value,
+    output wire        retire_fcsr_we,
+    output wire [7:0]  retire_fcsr,
     output wire        trap,
     output wire [3:0]  trap_cause,
     output wire [31:0] trap_value,
@@ -76,6 +81,8 @@ module rv32_soc #(
         .mem_fetch(mem_fetch),
         .retire(retire), .retire_pc(retire_pc), .retire_insn(retire_insn), .retire_rd_we(retire_rd_we),
         .retire_rd(retire_rd), .retire_rd_value(retire_rd_value), .trap(trap), .trap_cause(trap_cause),
+        .retire_fd_we(retire_fd_we), .retire_fd(retire_fd), .retire_fd_value(retire_fd_value),
+        .retire_fcsr_we(retire_fcsr_we), .retire_fcsr(retire_fcsr),
         .trap_value(trap_value), .halted(halted), .state(state), .pc(pc),
         .mtvec(mtvec), .mepc(mepc), .mcause(mcause), .mtval(mtval)
     );

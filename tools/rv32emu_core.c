@@ -1,3 +1,4 @@
+#include "rv32_fp.h"
 /* rv32emu_core: the RV32 machine as a library; see rv32emu_core.h for the
  * API and docs/rv32-emulator.md for the record. Every device model here
  * mirrors a module of rtl/rv32; the two are compared trace for trace.
@@ -350,6 +351,8 @@ static void trace_effects(const machine *m)
     if (m->wr_reg > 0) {
         fprintf(m->trace, " x%d=%08" PRIx32, m->wr_reg, m->wr_value);
     }
+    if (m->wr_freg >= 0) fprintf(m->trace, " f%d=%08" PRIx32, m->wr_freg, m->f[m->wr_freg]);
+    if (m->wr_fcsr) fprintf(m->trace, " fcsr=%02x", m->fcsr);
     if (m->mem_write) {
         fprintf(m->trace, " mem[%08" PRIx32 "]<-%08" PRIx32 "/%d", m->mem_addr, m->mem_value, m->mem_width);
     }
@@ -386,6 +389,9 @@ static void trap(machine *m, uint32_t word, uint32_t cause, uint32_t tval)
 static bool csr_read(const machine *m, uint32_t number, uint32_t *value)
 {
     switch (number) {
+    case 1: *value = m->fcsr & 31u; return true;
+    case 2: *value = m->fcsr >> 5; return true;
+    case 3: *value = m->fcsr; return true;
     case CSR_MTVEC: *value = m->mtvec; return true;
     case CSR_MEPC: *value = m->mepc; return true;
     case CSR_MCAUSE: *value = m->mcause; return true;
@@ -397,6 +403,9 @@ static bool csr_read(const machine *m, uint32_t number, uint32_t *value)
 static void csr_write(machine *m, uint32_t number, uint32_t value)
 {
     switch (number) {
+    case 1: m->fcsr = (m->fcsr & 0xe0u) | (value & 31u); m->wr_fcsr = true; break;
+    case 2: m->fcsr = (m->fcsr & 31u) | ((value & 7u) << 5); m->wr_fcsr = true; break;
+    case 3: m->fcsr = value & 255u; m->wr_fcsr = true; break;
     case CSR_MTVEC: m->mtvec = value & ~3u; break; /* direct mode only (WARL) */
     case CSR_MEPC: m->mepc = value & ~3u; break;   /* IALIGN is 32 */
     case CSR_MCAUSE: m->mcause = value; break;
@@ -425,7 +434,8 @@ static int width_of(uint32_t funct3)
 static void step(machine *m)
 {
     uint32_t pc = m->pc, word, next = pc + 4;
-    m->wr_reg = -1;
+    m->wr_reg = m->wr_freg = -1;
+    m->wr_fcsr = false;
     m->mem_read = m->mem_write = false;
     if (pc & 3u) { /* unreachable through the checked paths, kept as a guard */
         trap(m, 0, CAUSE_FETCH_MISALIGNED, pc);
@@ -446,7 +456,7 @@ static void step(machine *m)
     int32_t imm_j = (int32_t)(((int32_t)(word & 0x80000000u) >> 11) | (int32_t)(word & 0xff000u)
                               | (int32_t)((word >> 9) & 0x800u) | (int32_t)((word >> 20) & 0x7feu));
     uint32_t result = 0;
-    bool writes_rd = false;
+    bool writes_rd = false, writes_fd = false;
     mem_access status;
 
     switch (opcode) {
@@ -491,8 +501,9 @@ static void step(machine *m)
         }
         break;
     }
+    case 0x07: /* FLW */
     case 0x03: { /* loads */
-        if (funct3 == 3 || funct3 > 5) {
+        if ((opcode == 0x07 && funct3 != 2) || funct3 == 3 || funct3 > 5) {
             goto illegal;
         }
         int width = width_of(funct3);
@@ -512,15 +523,18 @@ static void step(machine *m)
             value = (uint32_t)(int32_t)(int16_t)value;
         }
         result = value;
-        writes_rd = true;
+        writes_rd = opcode == 0x03;
+        writes_fd = opcode == 0x07;
         break;
     }
+    case 0x27: /* FSW */
     case 0x23: { /* stores */
-        if (funct3 > 2) {
+        if ((opcode == 0x27 && funct3 != 2) || funct3 > 2) {
             goto illegal;
         }
         int width = width_of(funct3);
         uint32_t addr = a + (uint32_t)imm_s;
+        if (opcode == 0x27) b = m->f[rs2];
         uint32_t value = width == 4 ? b : b & ((1u << (8 * width)) - 1u);
         status = store(m, addr, width, value);
         if (status != ACC_OK) {
@@ -584,6 +598,69 @@ static void step(machine *m)
             goto illegal;
         }
         break;
+    case 0x43: case 0x47: case 0x4b: case 0x4f: case 0x53: {
+        uint32_t fa = m->f[rs1], fb = m->f[rs2], fc = m->f[word >> 27];
+        unsigned op = OP_ADD, rm = 0;
+        bool arithmetic = true, rounded = false;
+        writes_fd = true;
+        if (opcode != 0x53) {
+            if (((word >> 25) & 3u) != 0) goto illegal;
+            op = OP_FMADD + ((opcode - 0x43) >> 2);
+            rounded = true;
+        } else switch (funct7) {
+        case 0x00: op = OP_ADD; rounded = true; break;
+        case 0x04: op = OP_SUB; rounded = true; break;
+        case 0x08: op = OP_MUL; rounded = true; break;
+        case 0x0c: op = OP_DIV; rounded = true; break;
+        case 0x2c:
+            if (rs2) goto illegal;
+            op = OP_SQRT; rounded = true; break;
+        case 0x60: case 0x68:
+            if (rs2 > 1) goto illegal;
+            rounded = true;
+            if (funct7 == 0x60) {
+                op = rs2 ? OP_F32_TO_U32 : OP_F32_TO_I32;
+                writes_fd = false; writes_rd = true;
+            } else { op = rs2 ? OP_U32_TO_F32 : OP_I32_TO_F32; fa = a; }
+            break;
+        case 0x50:
+            if (funct3 > 2) goto illegal;
+            op = funct3 == 2 ? OP_EQ : funct3 == 1 ? OP_LT : OP_LE;
+            writes_fd = false; writes_rd = true; break;
+        case 0x14:
+            if (funct3 > 1) goto illegal;
+            op = funct3 ? OP_MAX : OP_MIN; break;
+        case 0x10:
+            if (funct3 > 2) goto illegal;
+            arithmetic = false;
+            result = (fa & 0x7fffffffu) | ((funct3 == 0 ? fb : funct3 == 1 ? ~fb : fa ^ fb) & 0x80000000u);
+            break;
+        case 0x70: {
+            if (rs2 || funct3 > 1) goto illegal;
+            arithmetic = false; writes_fd = false; writes_rd = true;
+            result = fa;
+            if (funct3) {
+                unsigned exp = (fa >> 23) & 255u, frac = fa & 0x7fffffu, sign = fa >> 31;
+                unsigned bit = exp == 255 ? (frac ? ((frac & 0x400000u) ? 9 : 8) : (sign ? 0 : 7))
+                    : exp == 0 ? (frac ? (sign ? 2 : 5) : (sign ? 3 : 4)) : (sign ? 1 : 6);
+                result = 1u << bit;
+            }
+            break;
+        }
+        case 0x78:
+            if (rs2 || funct3) goto illegal;
+            arithmetic = false; result = a; break;
+        default: goto illegal;
+        }
+        if (rounded) { rm = funct3 == 7 ? m->fcsr >> 5 : funct3; if (rm > 4) goto illegal; }
+        if (arithmetic) {
+            uint8_t flags;
+            result = rv32_fp(op, rm, fa, fb, fc, &flags);
+            m->fcsr |= flags;
+            m->wr_fcsr = flags != 0;
+        }
+        break;
+    }
     case 0x73: { /* SYSTEM */
         if (funct3 == 0) {
             if (word == 0x00000073u) {
@@ -620,6 +697,7 @@ static void step(machine *m)
         goto illegal;
     }
 
+    if (writes_fd) { m->f[rd] = result; m->wr_freg = (int)rd; }
     if (writes_rd && rd != 0) { /* x0 stays zero: the write is discarded, not stored */
         m->x[rd] = result;
         m->wr_reg = (int)rd;
@@ -657,6 +735,8 @@ void emu_dump_state(const machine *m, FILE *out)
     for (int i = 0; i < 32; i++) {
         fprintf(out, "x%d %08" PRIx32 "\n", i, m->x[i]);
     }
+    for (int i = 0; i < 32; ++i) fprintf(out, "f%d %08" PRIx32 "\n", i, m->f[i]);
+    fprintf(out, "fcsr %02x\n", m->fcsr);
     fprintf(out, "mtvec %08" PRIx32 "\nmepc %08" PRIx32 "\nmcause %08" PRIx32 "\nmtval %08" PRIx32 "\n",
             m->mtvec, m->mepc, m->mcause, m->mtval);
     fprintf(out, "steps %" PRIu64 "\nretired %" PRIu64 "\ntraps %" PRIu64 "\nframes %" PRIu32 "\nevents %u\nhalt %s\n",

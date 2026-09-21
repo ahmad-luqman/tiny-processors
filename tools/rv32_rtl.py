@@ -24,14 +24,15 @@ from tools.rv32_image import to_hex_words  # noqa: E402
 from tools.rv32_run_emu import DEFAULT_EMULATOR, emulator_command, halt_line, last_halt_line, parse_halt_line  # noqa: E402
 
 RTL_SOURCES = [ROOT / "rtl" / "rv32" / name
-               for name in ("rv32_regfile.v", "rv32_alu.v", "rv32_decode.v", "rv32.v",
+               for name in ("rv32_fregfile.v", "rv32_fdecode.v", "rv32_regfile.v", "rv32_alu.v", "rv32_decode.v", "rv32.v",
                             "rv32_bus.v", "rv32_ram.v", "rv32_console.v", "rv32_done.v", "rv32_timer.v", "rv32_input.v", "rv32_display.v", "rv32_soc.v")]
+RTL_SOURCES.append(ROOT / "rtl/fp32/fp32.v")
 TESTBENCH = ROOT / "tests" / "rv32_tb.sv"
 DEFAULT_SIMULATOR = "build/rv32/rv32_tb.vvp"
 DEFAULT_OUT = "build/rv32/rtl"
 BENCH_SEED = 7
 COUNTERS = ("cycles", "steps", "stalls", "transfers")
-DECIMAL = COUNTERS + ("cause",)
+DECIMAL = COUNTERS + ("cause", "fp_waits")
 HEX = ("done", "tval", "pc", "word")
 # The keys each halt reason carries besides the counters and the outcome (docs/rv32-rtl.md).
 REQUIRED = {"done": ("done",), "double-fault": ("cause", "tval"), "limit": ()}
@@ -48,7 +49,7 @@ def compile_testbench(output, iverilog="iverilog", params=None):
     """Compile the testbench and the machine for Icarus into `output`; `params` overrides
     testbench parameters (`{"CONSOLE_BUSY": 2}`), the way `-G` does for a Verilator build."""
     overrides = [f"-Prv32_tb.{name}={value}" for name, value in (params or {}).items()]
-    subprocess.run([iverilog, "-g2012", "-Wall", *overrides, "-s", "rv32_tb", "-o", str(output),
+    subprocess.run([iverilog, "-g2012", "-Wall", "-I" + str(ROOT / "rtl/fp32"), *overrides, "-s", "rv32_tb", "-o", str(output),
                     str(TESTBENCH), *map(str, RTL_SOURCES)], check=True)
 
 
@@ -99,6 +100,9 @@ def rtl_halt_line(stderr):
     if reason not in REQUIRED:
         raise ValueError(f"unknown halt reason {reason!r} in {line!r}")
     expected = {"halt", "outcome", *COUNTERS, *REQUIRED[reason]}
+    if "fp_waits" in fields:
+        expected.add("fp_waits")
+        if fields["fp_waits"] < 0: raise ValueError("negative FPU wait count")
     if set(fields) != expected:
         raise ValueError(f"halt line keys {sorted(fields)} do not match {sorted(expected)} in {line!r}")
     return fields
@@ -294,9 +298,11 @@ def cycle_relation(rtl):
     memory = sum("mem[" in line for line in rtl.trace)
     traps = sum(" trap " in line for line in rtl.trace)
     halt = rtl.halt
-    expected = 4 * (steps - memory) + 5 * memory + halt["stalls"]
+    expected = 4 * (steps - memory) + 5 * memory + halt["stalls"] + halt.get("fp_waits", 0)
     text = (f"cycles {halt['cycles']} = 4 x {steps - memory} + 5 x {memory} + {halt['stalls']} stalls; "
             f"transfers {halt['transfers']} = {steps} fetches + {memory} data")
+    if halt.get("fp_waits", 0):
+        text += f"; plus {halt['fp_waits']} FPU issue/wait cycles"
     if traps:
         return f"{text} (not exact: {traps} trap lines)", None
     return text, halt["cycles"] == expected and halt["transfers"] == steps + memory

@@ -23,11 +23,21 @@ EMULATOR_CFLAGS = ("-std=c11", "-O2", "-Wall", "-Wextra", "-Werror")  # the Make
 COUNTERS = ("steps", "retired", "traps", "loaded")
 
 
+def floating_objects():
+    """Use the same pinned host arithmetic objects as the Makefile builds."""
+    subprocess.run(["make", "-s", "build/fp32/rv32_fp.o", *[
+        "build/fp32/softfloat/" + p.stem + ".o" for p in sorted((ROOT / "third_party/softfloat").glob("*.c"))]],
+        cwd=ROOT, check=True)
+    return [str(ROOT / "build/fp32/rv32_fp.o"), *[
+        str(ROOT / "build/fp32/softfloat" / (p.stem + ".o"))
+        for p in sorted((ROOT / "third_party/softfloat").glob("*.c"))]]
+
+
 def build_emulator(output):
     """Compile the headless emulator (its main and the core) into `output` with the Makefile's
     flags; HOST_CC picks the compiler."""
     compiler = os.environ.get("HOST_CC", "cc")
-    subprocess.run([compiler, *EMULATOR_CFLAGS, "-o", str(output), *map(str, EMULATOR_SOURCES)], check=True)
+    subprocess.run([compiler, *EMULATOR_CFLAGS, "-o", str(output), *map(str, EMULATOR_SOURCES), *floating_objects()], check=True)
 
 
 WINDOW_SOURCES = (ROOT / "tools" / "rv32win.c", ROOT / "tools" / "rv32emu_core.c")
@@ -59,7 +69,7 @@ def build_window(output):
     raises RuntimeError when pkg-config or SDL3 is missing."""
     cflags, libs = sdl3_flags()
     compiler = os.environ.get("HOST_CC", "cc")
-    subprocess.run([compiler, *EMULATOR_CFLAGS, *cflags, "-o", str(output), *map(str, WINDOW_SOURCES), *libs], check=True)
+    subprocess.run([compiler, *EMULATOR_CFLAGS, *cflags, "-o", str(output), *map(str, WINDOW_SOURCES), *floating_objects(), *libs], check=True)
 
 
 def last_halt_line(stderr, prefix):
