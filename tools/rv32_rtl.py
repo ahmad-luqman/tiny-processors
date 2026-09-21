@@ -220,6 +220,42 @@ def trap_records(trace):
     return [line.split(" ", 1)[1] for line in trace if " trap " in line]
 
 
+def compare_backends(rtl, emulator, compare):
+    """What must agree between two passing runs, as the first mismatch or None: the console
+    transcript and the checkpoint lines always; the whole retirement trace in trace mode; in
+    results mode (device time) the trap records, which step numbers never move."""
+    if rtl.console != emulator.console:
+        return f"console mismatch: RTL {rtl.console!r}, emulator {emulator.console!r}"
+    if rtl.checkpoints != emulator.checkpoints:
+        return f"checkpoint mismatch: RTL {rtl.checkpoints}, emulator {emulator.checkpoints}"
+    if compare == "results":
+        rtl_traps, emulator_traps = trap_records(rtl.trace), trap_records(emulator.trace)
+        if rtl_traps != emulator_traps:
+            return f"trap mismatch: RTL {rtl_traps}, emulator {emulator_traps}"
+        return None
+    difference = diff_traces(rtl.trace, emulator.trace)
+    return f"trace mismatch: {difference}" if difference else None
+
+
+def generated_paths(out, name, frames=None):
+    """Every file a run may write or truncate under `out` (and the frames directory), so an
+    input script that names one of them can be refused before anything is written."""
+    paths = {out / f"{name}.{suffix}" for suffix in ("hex", "bin", "input", "vcd", "emu.trace", "emu.checkpoints",
+                                                     "rtl.trace", "rtl.trace.console", "rtl.checkpoints")}
+    if frames is not None:
+        paths |= set(frames.glob("frame-*.ppm"))
+    return paths
+
+
+def refuse_aliased_input(script, out, name, frames=None):
+    """Exit if `script` is (by path or by inode) one of the run's own files: the trace, console, and
+    checkpoint files are truncated before a backend starts, which would destroy the script."""
+    for path in generated_paths(out, name, frames):
+        same = path.resolve() == script.resolve() or (path.exists() and script.exists() and path.samefile(script))
+        if same:
+            sys.exit(f"--input {script} names a file this run writes ({path}); keep the script outside --out")
+
+
 def cycle_relation(rtl):
     """Relate the testbench's cycle count to the trace: 4 cycles per instruction without a data
     access, 5 with one, plus the stalls. Returns (text, holds); `holds` is None when a trap line
@@ -247,7 +283,8 @@ def main():
                         help="the `frame N <hash>` lines both backends must write, exactly and in order (repeatable)")
     parser.add_argument("--allow-lost-events", action="store_true",
                         help="tell both backends to accept a run that dropped a scripted event or never delivered one")
-    parser.add_argument("--input", type=Path, help="input script delivered to both backends (docs/rv32.md, Input)")
+    parser.add_argument("--input", type=Path,
+                        help="input script delivered to both backends (docs/rv32.md, Input); not a file under --out")
     parser.add_argument("--frames", type=Path, help="directory for the emulator's frame-NNNN.ppm pictures")
     parser.add_argument("--compare", choices=("trace", "results"), default="trace",
                         help="`trace`: identical retirement traces and the cycle formula; `results`: identical "
@@ -273,15 +310,16 @@ def main():
             parser.error(f"{path} does not exist; run make build-rv32-emu / build-rv32-rtl first")
 
     out = Path(args.out)
+    name = args.image.stem if args.image is not None else args.program
+    if args.input is not None:
+        refuse_aliased_input(args.input, out, name, args.frames)
     if args.image is not None:
         if not args.image.exists():
             parser.error(f"{args.image} does not exist; run make check-rv32-image first")
-        name = args.image.stem
         out.mkdir(parents=True, exist_ok=True)
         hex_path, bin_path = out / f"{name}.hex", args.image
         hex_path.write_text("".join(f"{word}\n" for word in to_hex_words(bin_path.read_bytes())))
     else:
-        name = args.program
         hex_path, bin_path = write_image(PROGRAMS[name](), out, name)
         if args.input is None and name in PROGRAM_INPUTS:
             args.input = out / f"{name}.input"
@@ -322,11 +360,9 @@ def main():
                           checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input,
                           allow_lost_events=args.allow_lost_events)
             check_passed(rtl)
-            difference = diff_traces(rtl.trace, emulator.trace)
-            if difference:
-                sys.exit(f"stall={stall} seed={seed}: {difference}")
-            if rtl.console != emulator.console:
-                sys.exit(f"stall={stall} seed={seed}: console mismatch: RTL {rtl.console!r}, emulator {emulator.console!r}")
+            mismatch = compare_backends(rtl, emulator, args.compare)  # the same agreement as a check run
+            if mismatch:
+                sys.exit(f"stall={stall} seed={seed}: {mismatch}")
             if stall is not None and rtl.halt["stalls"] != stall * rtl.halt["transfers"]:
                 sys.exit(f"stall={stall}: {rtl.halt['stalls']} stalls for {rtl.halt['transfers']} transfers")
             label = f"seed {seed}" if seed is not None else str(stall)
@@ -350,23 +386,17 @@ def main():
     print(emulator.stderr.strip().splitlines()[-1])
     print(rtl.stderr.strip().splitlines()[-1] if rtl.stderr.strip() else "rv32_tb: no halt line")
     check_passed(rtl)
-    if rtl.console != emulator.console:
-        sys.exit(f"console mismatch: RTL {rtl.console!r}, emulator {emulator.console!r}")
-    if rtl.checkpoints != emulator.checkpoints:
-        sys.exit(f"checkpoint mismatch: RTL {rtl.checkpoints}, emulator {emulator.checkpoints}")
+    mismatch = compare_backends(rtl, emulator, args.compare)
+    if mismatch:
+        sys.exit(mismatch)
     if args.compare == "results":
-        # What the guest printed and presented must agree, and so must every fault it took: the
-        # same PC, word, cause, and value in the same order, only the step numbers differing.
-        rtl_traps, emulator_traps = trap_records(rtl.trace), trap_records(emulator.trace)
-        if rtl_traps != emulator_traps:
-            sys.exit(f"trap mismatch: RTL {rtl_traps}, emulator {emulator_traps}")
+        # What the guest printed and presented agreed, and so did every fault it took: the same PC,
+        # word, cause, and value in the same order, only the step numbers differing.
+        traps = len(trap_records(rtl.trace))
         print(f"results identical: {len(emulator.console.splitlines())} console line(s) ending {last_line!r}, "
-              f"{len(rtl.checkpoints)} checkpoint(s) {rtl.checkpoints}, {len(rtl_traps)} trap(s) alike; RTL "
+              f"{len(rtl.checkpoints)} checkpoint(s) {rtl.checkpoints}, {traps} trap(s) alike; RTL "
               f"{len(rtl.trace)} instructions in {rtl.halt['cycles']} cycles, emulator {len(emulator.trace)} instructions")
     else:
-        difference = diff_traces(rtl.trace, emulator.trace)
-        if difference:
-            sys.exit(f"trace mismatch: {difference}")
         print(f"traces identical: {len(rtl.trace)} lines; {out / f'{name}.rtl.trace'}")
         relation, holds = cycle_relation(rtl)
         print(relation)

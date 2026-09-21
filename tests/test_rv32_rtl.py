@@ -813,6 +813,14 @@ class RtlTest(unittest.TestCase):
         self.assertEqual((emulator.halt["outcome"], rtl.halt["outcome"]), ("pass", "pass"), "the halt lines were printed first")
         self.assertIn("rv32emu: 1 scripted event(s) lost, run rejected", emulator.stderr)
         self.assertIn("1 scripted event(s) lost, run rejected", rtl.noise, "the testbench's $fatal names the loss")
+        # A long script: five thousand frames, one event each, presented and popped in a loop. Neither
+        # backend has a length limit (the testbench's arrays grow), and nothing is lost.
+        script = "".join(f"frame {k} down A\n" for k in range(1, 5001))
+        words = LI(1, INPUT) + LI(2, DISPLAY) + LI(3, 5000) + [SW(0, 2, 0), LW(4, 1, 0), ADDI(3, 3, -1), BNE(3, 0, -12)] + FINISH()
+        emulator, rtl = self.assert_same_pass(words, stall=0, input_script=script)
+        pops = [effects(line) for line in rtl.trace if f"mem[{INPUT:08x}]->" in line]
+        self.assertEqual(pops, [f"x4={event_word(True, 8):08x} mem[{INPUT:08x}]->{event_word(True, 8):08x}/4"] * 5000)
+        self.assertNotIn("scripted", rtl.stderr + emulator.stderr)
         # The ring wraps: twelve events popped, then ten more pushed at frame 1 (the tail passes
         # entry 15) and popped (the head passes it too), in script order; key 31 is the top bit of KEYS.
         script = "".join(f"frame 0 down {code}\n" for code in range(12))
@@ -995,7 +1003,7 @@ class RunnerTest(unittest.TestCase):
         path.chmod(0o755)
         return path
 
-    def run_results(self, emulator, *extra, program="timed", compare="results"):
+    def run_results(self, emulator, *extra, program="timed", compare="results", mode="check"):
         out = Path(self.workdir.name) / "out"
         if program == "timed":
             # Reads the timer (so results mode applies), takes one ecall through a handler that
@@ -1008,7 +1016,8 @@ class RunnerTest(unittest.TestCase):
             image = ["--image", str(write_image(words, out, "timed")[1])]
         else:
             image = ["--program", program]
-        command = [sys.executable, "-m", "tools.rv32_rtl", *image, "--compare", compare, "--stall", "0",
+        command = [sys.executable, "-m", "tools.rv32_rtl", *image, "--compare", compare, "--mode", mode,
+                   *(["--stall", "0"] if mode == "check" else []),
                    "--emulator", str(emulator), "--simulator", str(self.simulator), "--out", str(out), *extra]
         return subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
 
@@ -1062,6 +1071,28 @@ class RunnerTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("scripted event(s) lost, run rejected", result.stderr, "the backend's own rejection")
         result = self.run_results(self.emulator, "--input", str(script), "--allow-lost-events")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # A script that names one of the run's own files would be truncated before the backends start.
+        out = Path(self.workdir.name) / "out"
+        for alias in ("timed.emu.trace", "timed.rtl.checkpoints", "timed.rtl.trace.console"):  # (the test writes timed.hex itself)
+            with self.subTest(alias=alias):
+                (out / alias).write_text("frame 0 down A\n")
+                result = self.run_results(self.emulator, "--input", str(out / alias))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("names a file this run writes", result.stderr)
+                self.assertEqual((out / alias).read_text(), "frame 0 down A\n", "nothing was written")
+        # Bench mode compares the same things as a check run, in the mode asked for: results mode
+        # skips the trace diff for the timer-reading program, and a forged checkpoint still fails it.
+        result = self.run_results(self.emulator, mode="bench")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("seed 7", result.stdout)
+        result = self.run_results(forged, mode="bench")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("checkpoint mismatch", result.stderr)
+        result = self.run_results(self.emulator, mode="bench", compare="trace")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("traces differ by design", result.stderr)
+        result = self.run_results(self.emulator, program="loop", mode="bench", compare="trace")
         self.assertEqual(result.returncode, 0, result.stderr)
 
 

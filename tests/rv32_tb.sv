@@ -28,10 +28,11 @@ module rv32_tb;
     reg [31:0] in_event = 0;
 
     // The input script (+input=FILE): `frame N down|up KEY` lines, delivered in
-    // order; an event's frame must have been reached before it is pushed.
-    localparam integer MAX_EVENTS = 4096;
-    integer event_frame [0:MAX_EVENTS-1];
-    reg [31:0] event_word [0:MAX_EVENTS-1];
+    // order; an event's frame must have been reached before it is pushed. The
+    // arrays grow as the script is read, so a script has no length limit here
+    // any more than in the emulator.
+    integer event_frame [];
+    reg [31:0] event_word [];
     integer events = 0, next_event = 0;
     integer frame_reached = 0; // the frame count the guest has observably reached
     integer dropped = 0;       // pushes the full queue refused
@@ -458,7 +459,10 @@ module rv32_tb;
                 if (code < 0) $fatal(1, "Input script %0s line %0d: unknown key %0s", path, number, token3);
                 if (frame < last_frame)
                     $fatal(1, "Input script %0s line %0d: frame %0d comes after frame %0d", path, number, frame, last_frame);
-                if (events == MAX_EVENTS) $fatal(1, "Input script %0s has more than %0d events", path, MAX_EVENTS);
+                if (events == event_frame.size()) begin
+                    event_frame = new[events == 0 ? 64 : 2 * events](event_frame);
+                    event_word = new[events == 0 ? 64 : 2 * events](event_word);
+                end
                 event_frame[events] = frame;
                 event_word[events] = 32'h8000_0000 | ((token2 == "down") ? 32'h100 : 32'h0) | {27'd0, code[4:0]};
                 events = events + 1;
