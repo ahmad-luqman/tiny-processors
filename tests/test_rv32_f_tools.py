@@ -7,8 +7,8 @@ import subprocess
 import tempfile
 import unittest
 
-from tools.rv32_f_asm import arithmetic, fp, flw, fsw
-from tools.rv32_asm import CSRRW
+from tools.rv32_f_asm import arithmetic, fp, flw, fsw, fli
+from tools.rv32_asm import CSRRW, CSRRWI, FINISH, words_to_bytes
 from tools.rv32_image import check_image, check_listing, parse_elf, LISTING_LINE, listing_word, F_OPCODES
 from tools.rv32_run_emu import floating_objects
 
@@ -70,6 +70,21 @@ class FloatingToolsTest(unittest.TestCase):
                 run = subprocess.run([str(ROOT/'build/rv32/rv32emu'), '--image', str(path)], capture_output=True, text=True)
                 self.assertEqual(run.returncode, 1, run.stderr)
                 self.assertIn('FAIL ', run.stdout)
+
+    def test_state_dump_preserves_float_bits_and_all_registers(self):
+        words = fli(0, 0x7fc12345) + fli(31, 0x80000000) + [CSRRWI(0, 3, 31)] + FINISH()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path/'image.bin').write_bytes(words_to_bytes(words))
+            run = subprocess.run([str(ROOT/'build/rv32/rv32emu'), '--image', str(path/'image.bin'),
+                                  '--dump-state', str(path/'state')], capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            state = dict(line.split() for line in (path/'state').read_text().splitlines())
+            self.assertEqual(state['f0'], '7fc12345')
+            self.assertEqual(state['f31'], '80000000')
+            self.assertEqual(state['fcsr'], '1f')
+            self.assertEqual(state['x0'], '00000000')
+            for reg in range(1,31): self.assertEqual(state[f'f{reg}'], '00000000')
 
     def test_software_multiply_helper_extremes_and_seeded(self):
         # Benchmark glue must not silently break high products or carries.

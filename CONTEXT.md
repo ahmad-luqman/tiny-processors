@@ -46,7 +46,7 @@ The combinational logic in rv32_bus.v that turns an address into one peripheral 
 _Avoid_: a cache, an interconnect with arbitration.
 
 **RV32 machine**:
-Our RISC-V computer as defined by the machine contract in docs/rv32.md: an RV32I CPU, RAM at 0x8000_0000, and memory-mapped devices, implemented by our emulator and RTL.
+Our RISC-V computer as defined by the machine contract in docs/rv32.md: an RV32IF CPU with Zicsr, RAM at 0x8000_0000, and memory-mapped devices, implemented by our emulator and RTL.
 _Avoid_: SAP8, the QEMU virt board, a Linux-capable platform.
 
 **Reference runner**:
@@ -65,7 +65,7 @@ _Avoid_: complete GPU, graphics renderer, NPU.
 A bounded working artifact with verified behavior, an explanation connecting its source to the hardware or software it represents, and exercises for understanding it.
 
 **Standalone FP32 FPU**:
-The standalone multicycle FP32 hardware verified in F1, with arithmetic, conversions, comparisons and exact exception flags. F2 will connect it to CPU instructions. See [the contract and gates](docs/fp32.md).
+The standalone multicycle FP32 hardware verified in F1, with arithmetic, conversions, comparisons and exact exception flags. F2 connects it to CPU instructions. See [the contract and gates](docs/fp32.md).
 _Avoid_: GPU floating-point lanes, NPU numeric format, software floating-point runtime.
 
 **Advanced SoC**:
@@ -73,6 +73,8 @@ The longer-term project direction of integrating general-purpose processing, gra
 _Avoid_: completed hardware, current SIMD4 implementation.
 
 **SoftFloat oracle**:
-The independent, pinned host software used to calculate expected FP32 result
-bits and exception flags in F1 tests.
-_Avoid_: our hardware FPU, guest software floating-point emulation, CPU F support.
+The pinned software used to calculate expected FP32 result bits and exception
+flags in F1 tests. F2 also uses this library for emulator arithmetic and a
+separately compiled RV32I software benchmark; those uses are not independent
+arithmetic oracles for each other.
+_Avoid_: our hardware FPU, treating the emulator and oracle as independent software arithmetic implementations.

@@ -1,6 +1,10 @@
 # RV32 emulator: design, trace contract, and walkthrough
 
-Our headless emulator for the [RV32 machine](rv32.md). It loads the same firmware image QEMU ran in M1, executes RV32I with the contract's trap, alignment, console, and done-register behavior, and records a retirement trace that the M3 RTL testbench must reproduce. Source: [tools/rv32emu_core.c](../tools/rv32emu_core.c), the machine as a C11 library with no dependencies, and [tools/rv32emu.c](../tools/rv32emu.c), the headless main around it (one file until M6 split it so the [native window](rv32-window.md) could share the core).
+Our headless emulator for the [RV32 machine](rv32.md). It loads the same firmware image QEMU ran in M1, executes RV32I with the contract's trap, alignment, console, and done-register behavior, and records a retirement trace that the M3 RTL testbench must reproduce. Source: [tools/rv32emu_core.c](../tools/rv32emu_core.c), the machine as a C11 library with vendored SoftFloat arithmetic, and [tools/rv32emu.c](../tools/rv32emu.c), the headless main around it (one file until M6 split it so the [native window](rv32-window.md) could share the core).
+
+F2 adds [complete F execution, floating state and trace effects](rv32-f.md),
+while preserving integer trace lines. Build through Make or the shared Python
+build helpers so the pinned arithmetic objects are linked.
 
 ## Implementation plan (M2)
 

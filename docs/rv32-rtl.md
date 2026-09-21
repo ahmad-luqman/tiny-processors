@@ -1,5 +1,9 @@
 # RV32 RTL CPU: full RV32I, vectored traps, and the C self-check on hardware
 
+F2 adds [the complete RV32F contract](rv32-f.md), floating retirement outputs,
+and FP_ISSUE/FP_WAIT states. The M3/M4 records below retain their historical
+coverage and measurements; the integer execution path remains unchanged.
+
 Our hardware implementation of the [RV32 machine](rv32.md): a multicycle RV32I core in [rtl/rv32/](../rtl/rv32/) that drives the contract's ready/valid memory port, executes every RV32I instruction plus the four trap CSRs and `mret`, vectors traps through `mtvec`, and retires instructions in exactly the form the [emulator's trace contract](rv32-emulator.md#retirement-trace-contract) fixed in M2. Since M5 the core is one instance inside [rv32_soc.v](../rtl/rv32/rv32_soc.v), with the RAM and the devices behind a bus decoder ([SoC record](rv32-soc.md)); the testbench in [tests/rv32_tb.sv](../tests/rv32_tb.sv) is the host: it loads the image, holds the bus to model stalls, takes the console bytes and the done word, and prints the same trace text, so `diff` compares the two backends line for line, and the M1 C self-check runs on the machine to `PASS 807d9fad` with the emulator's 32,610-line trace. The gate-level walkthrough is [rv32-to-gates.md](rv32-to-gates.md).
 
 ## Implementation plan (M3)

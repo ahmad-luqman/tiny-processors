@@ -79,7 +79,7 @@ Each row is a bounded milestone, potentially split into several verified commits
 | M6 — completed 2026-09-21 ([record](../rv32-window.md), [contract](../rv32.md#behavior-fixed-in-m6)) | Native Mac frontend, software drawing routines, and Pong. Test collision/scoring separately, replay input deterministically, and play manually. Verify a bounded RTL replay reaches expected guest state and image checkpoints. | Follow a key event to a guest register read, paddle update, and pixel store; inspect timer wrap handling. | 2–4 |
 | M7 — completed 2026-09-21 ([record](../rv32-runtime.md)) | Boot menu, reusable runtime services, and Tetris. Test rotations/collisions, line clearing, scoring, game over/restart, and repeatable random seeds. A documented command builds and launches the capstone; both games work from the menu. Preserve a short RTL acceptance replay. | Trace reset-to-menu-to-game. Explain which services qualify as our first OS/runtime and which OS features remain absent. | 2–4 |
 | F1 — completed 2026-09-21 ([record](../fp32.md)) | Standalone FP32 arithmetic unit, built in increments: add/subtract, multiply, fused multiply-add, divide/square root, and conversion/comparison support needed by F. Compare exact result bits and exception flags with an independent reference across rounding modes, ordinary/edge values, and seeded vectors. Check handshake/reset behavior, lint, synthesis, and short waves. | Trace exponent alignment, significand arithmetic, normalization, and rounding; explain why fused multiply-add has one final rounding. | 5–10 |
-| F2 — F1/M4 | Integrate the complete F instruction/state contract into CPU and emulator: floating registers, loads/stores, arithmetic, moves/classification/sign operations, comparisons/conversions, and floating-point CSRs with required Zicsr support. Compare retirement effects and run compiled C float programs. Publish instruction/rounding/exception coverage and preserve integer-only firmware regressions. | Follow C float operands through ABI, registers, FPU request/completion, result writeback, and accrued flags. | 2–4 |
+| F2 — completed 2026-09-22 ([record](../rv32-f.md)) | Integrate the complete F instruction/state contract into CPU and emulator: floating registers, loads/stores, arithmetic, moves/classification/sign operations, comparisons/conversions, and floating-point CSRs with required Zicsr support. Compare retirement effects and run compiled C float programs. Publish instruction/rounding/exception coverage and preserve integer-only firmware regressions. | Follow C float operands through ABI, registers, FPU request/completion, result writeback, and accrued flags. | 2–4 |
 | A1 — M7 | Resume parallel arithmetic: defined multiply/accumulate widths and a small matrix kernel, building on SIMD4 where appropriate. Compare extreme and ordinary cases against a software model; report transfers, cycles, and stalls. | Work one dot product by hand; predict overflow and the effect of serialized memory. | 2–4 |
 | A2 — A1/M5 | CPU-commanded accelerator integration with shared buffers, driver, completion polling, and error/reset semantics. CPU launches and checks matrix work; stalled-memory and interrupted-transfer tests pass. | Trace descriptor/register writes through bus decode to accelerator state. Explain ownership and exactly-once memory effects. | 2–4 |
 | G1 — A2 | 2D accelerator: bounded fill/blit operations followed by lines/triangles as needed. Software reference and RTL agree on clipped/edge cases and framebuffer contents. Guest demo compares CPU drawing and acceleration. | Explain pixel address generation, clipping, datapath reuse, and when memory bandwidth limits speedup. | 2–4 |
@@ -103,26 +103,21 @@ Select and verify the compiler ISA/ABI flags at F2. Either preserve the integer 
 
 GPU FP32/other formats and NPU integer/other formats remain independent choices. The CPU FPU may help with reference computations or scene setup, but does not automatically create floating-point GPU lanes or change the digit model's quantization contract.
 
-## Next implementation session: F2
+## Next implementation session: A1
 
-F1 completed on 2026-09-21. The [FP32 record](../fp32.md) fixes the standalone
-request/response contract, all five rounding modes and per-operation flags.
-Our RTL matches the pinned SoftFloat oracle on 70,407 vectors on both simulators
-and 259,407 additional Verilator stress vectors. Reset/backpressure checks,
-lint, latch-free synthesis (25,685 cells; 1,530 flip-flops) and short waves pass.
-F1 changes no CPU instructions, emulator behavior, MMIO, or guest firmware.
+F2 completed on 2026-09-22. The [F2 record](../rv32-f.md) fixes the complete
+RV32F/Zicsr state and retirement contract, ILP32 builds, exact CPU differential
+checks, reset cancellation, compiled C execution and software/hardware cycle
+comparison. Integer firmware and the first-computer capstone remain preserved.
 
 1. Inspect Git status, preserve commands, start a branch, and end with one PR.
-2. Fix the complete F architectural contract, floating-register retirement
-   effects, floating CSRs and Zicsr behavior, dynamic rounding, illegal encodings,
-   reset/trap cancellation, and compatible compiler ISA/ABI flags before integration.
-3. Integrate the standalone FPU with CPU issue/completion and writeback. Add
-   floating registers, loads/stores, moves/sign/classification and all F operations.
-4. Implement matching emulator behavior using independently verified arithmetic;
-   compare floating writes, accrued flags, CSR changes and memory effects.
-5. Run compiled float programs with runtime inputs, inspect their disassembly,
-   and preserve integer firmware and lab regressions. Publish instruction,
-   rounding and exception coverage, waves, cycles, gates and exercises.
+2. Define multiply/accumulate widths, signedness, overflow behavior and a bounded
+   matrix kernel before extending SIMD4; preserve its existing vector-add mode.
+3. Implement and verify extreme/ordinary products and accumulation against a
+   software model. Report data transfers, execution cycles and memory stalls.
+4. Run both simulators, lint and latch-free synthesis; publish short waves,
+   gate/storage costs, a worked dot product and overflow exercises.
+5. Keep CPU-commanded device integration and shared-buffer ownership for A2.
 
 ## Verification and learning discipline
 

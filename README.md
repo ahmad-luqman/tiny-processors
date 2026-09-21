@@ -1,6 +1,6 @@
 # Tiny Processors
 
-Learning Verilog by building small CPUs, parallel compute hardware, and an end-to-end computer. Our RV32I CPU and native Mac emulator run C, a small OS/runtime, Pong, and Tetris; the standalone FP32 hardware unit is verified, and CPU F-extension integration is next before programmable 3D; GPU/NPU integration also follows the playable machine. See [the roadmap](PLAN.md) and the [detailed full-stack plan](docs/planning/roadmap.md).
+Learning Verilog by building small CPUs, parallel compute hardware, and an end-to-end computer. Our RV32IF CPU and native Mac emulator run C, a small OS/runtime, Pong, and Tetris; complete CPU floating-point integration is verified; GPU/NPU integration also follows the playable machine. See [the roadmap](PLAN.md) and the [detailed full-stack plan](docs/planning/roadmap.md).
 
 ## Play the complete computer (M7)
 
@@ -30,10 +30,26 @@ make waves-fp32 bench-fp32 # Short traces and operation latency
 
 Our Verilog FPU implements add/subtract, multiply, fused multiply-add,
 divide/square root, integer conversions, comparisons and min/max, with all five
-rounding modes. SoftFloat is only an independent **host test reference**; the
-hardware does the arithmetic. See [the FP32 contract, gates and waveform
-walkthrough](docs/fp32.md). F1 is standalone: connecting it to the RV32 CPU and
-emulator, with floating registers and CSRs, is F2. Existing games remain RV32I.
+rounding modes. The hardware computes its results and flags; pinned SoftFloat
+supplies independent software arithmetic for verification and the emulator. See [the FP32 contract, gates and waveform
+walkthrough](docs/fp32.md). F1's standalone commands remain available.
+
+## CPU floating point (F2)
+
+```sh
+make test-rv32-f test-rv32-f-verilator  # Complete F state/instruction differential
+make run-rv32-f-emu                   # Compiled C arithmetic and conversions
+make bench-rv32-f                     # Hardware and RV32I software float cycles
+make waves-rv32-f                     # Issue, flags, retirement and reset
+```
+
+The CPU and emulator support all RV32F instructions, floating registers and
+CSRs, all five rounding modes and accrued exception flags. Float builds retain
+ILP32; existing games remain RV32I. The same C arithmetic workload takes 6,037
+unstalled RTL cycles with F and 80,924 with guest software floating point.
+See [the F2 contract, coverage, ABI walkthrough and gates](docs/rv32-f.md).
+`make test-rv32` includes these checks. A1 (multiply/accumulate and a matrix
+kernel) is the next roadmap milestone.
 
 ## Start here
 

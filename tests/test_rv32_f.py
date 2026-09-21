@@ -128,6 +128,8 @@ class FloatingTest(unittest.TestCase):
                          (8, 0x40000000, 0), (0, 0x3f800000, 0x00000001)):
             words = prefix + fli(1, a) + fli(2, b) + [arithmetic(op, 0)] + FINISH()
             emu, baseline = self.assert_same_pass(words)
+            self.assertTrue(emu.trace[0].endswith('x9=00000000'))
+            self.assertTrue(emu.trace[1].endswith('x10=00000000'))
             # Eight setup instructions cost 32 cycles; execute 35, issue 36.
             # Last FPU instruction retirement is before FINISH's five instructions.
             finish_cycles = len(FINISH()) * 4 + 1
