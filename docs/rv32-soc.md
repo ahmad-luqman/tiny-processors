@@ -77,7 +77,7 @@ The [contract](rv32.md#device-time) makes the timer the only device whose values
 | RTL, Icarus, unstalled | 405,735 | 4 | 1,666,436 | 449,235 | 0 |
 | RTL, Verilator, one stall per request | 405,725 | 4 | 2,115,617 | 449,223 | 449,223 |
 
-The instruction counts differ by a few hundred because the wrap wait loop (`while (ticks >= 0xFFFFFF00)`) runs a different number of iterations when a tick is a cycle, an instruction, or a stalled cycle. The five console lines, the pass word, and both checkpoint lines are identical on all three runs, and the runner refuses to diff the traces in `--compare results` mode instead of reporting a mismatch it cannot interpret. `make run-rv32-rtl` still compares the self-check trace for trace: that image never reads the timer.
+The instruction counts differ by a few hundred because the wrap wait loop (`while (ticks >= 0xFFFFFF00)`) runs a different number of iterations when a tick is a cycle, an instruction, or a stalled cycle. The five console lines, the pass word, and both checkpoint lines are identical on all three runs, and the runner refuses to diff the traces in `--compare results` mode instead of reporting a mismatch it cannot interpret; it still requires the same faults in the same order (PC, word, cause, and value; only the step numbers differ). `make run-rv32-rtl` still compares the self-check trace for trace: that image never reads the timer.
 
 ## The diagnostic
 

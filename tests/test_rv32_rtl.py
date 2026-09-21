@@ -945,9 +945,14 @@ class RunnerTest(unittest.TestCase):
     def run_results(self, emulator, *extra, program="timed"):
         out = Path(self.workdir.name) / "out"
         if program == "timed":
-            # Reads the timer (so results mode applies), presents once, prints one byte.
-            words = LI(1, TIMER) + [LW(2, 1, 0)] + LI(3, DISPLAY) + [SW(0, 3, 0)] + LI(5, CONSOLE) + LI(6, ord("A"))
-            image = ["--image", str(write_image(words + [SB(6, 5, 0)] + FINISH(), out, "timed")[1])]
+            # Reads the timer (so results mode applies), takes one ecall through a handler that
+            # returns past it, presents once, prints one byte.
+            handler_at = RAM + 0x200
+            words = LI(5, handler_at) + [CSRRW(0, MTVEC, 5)] + LI(1, TIMER) + [LW(2, 1, 0), ECALL()]
+            words += LI(3, DISPLAY) + [SW(0, 3, 0)] + LI(5, CONSOLE) + LI(6, ord("A")) + [SB(6, 5, 0)] + FINISH()
+            words += [0] * ((handler_at - RAM) // 4 - len(words))
+            words += [CSRRS(12, MEPC, 0), ADDI(12, 12, 4), CSRRW(0, MEPC, 12), MRET()]
+            image = ["--image", str(write_image(words, out, "timed")[1])]
         else:
             image = ["--program", program]
         command = [sys.executable, "-m", "tools.rv32_rtl", *image, "--compare", "results", "--stall", "0",
@@ -958,7 +963,13 @@ class RunnerTest(unittest.TestCase):
         good = self.run_results(self.emulator)
         self.assertEqual(good.returncode, 0, good.stderr)
         self.assertIn("results identical: 1 console line(s) ending 'A', 1 checkpoint(s)", good.stdout)
+        self.assertIn("1 trap(s) alike", good.stdout)
         self.assertNotIn("traces identical", good.stdout, "results mode does not diff traces")
+        # The same number of traps with a different value: a fault-handling divergence must not pass.
+        retrapped = self.wrapper("retrapped", 'for a in "$@"; do case $prev in --trace) sed -i "" "s/trap 11 00000000/trap 11 00000001/" "$a";; esac; prev=$a; done')
+        result = self.run_results(retrapped)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("trap mismatch", result.stderr)
         # A program that never reads the timer must be compared trace for trace instead.
         result = self.run_results(self.emulator, program="loop")
         self.assertNotEqual(result.returncode, 0)

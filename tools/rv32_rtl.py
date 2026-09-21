@@ -217,6 +217,12 @@ def has_value_changes(vcd):
     return bool(separator) and any(line.startswith("#") for line in changes.splitlines())
 
 
+def trap_records(trace):
+    """The trace's trap lines without their step numbers: PC, word, cause, and value, in order. Device
+    time moves the step numbers between backends; it never moves a fault or changes its cause."""
+    return [line.split(" ", 1)[1] for line in trace if " trap " in line]
+
+
 def cycle_relation(rtl):
     """Relate the testbench's cycle count to the trace: 4 cycles per instruction without a data
     access, 5 with one, plus the stalls. Returns (text, holds); `holds` is None when a trap line
@@ -344,15 +350,16 @@ def main():
     if args.compare == "results":
         # Device time: a program that reads the timer takes different paths on the two backends,
         # so the traces are not compared; what the guest printed and presented must still agree,
-        # and so must the faults it took. A program that never read the timer gets the full diff.
+        # and so must every fault it took: the same PC, word, cause, and value in the same order,
+        # only the step numbers differing. A program that never read the timer gets the full diff.
         if not any(f"mem[{TIMER:08x}]->" in line for line in emulator.trace):
             sys.exit("--compare results is for a program that reads the timer; this one never did, use --compare trace")
-        rtl_traps, emulator_traps = (sum(" trap " in line for line in run.trace) for run in (rtl, emulator))
+        rtl_traps, emulator_traps = trap_records(rtl.trace), trap_records(emulator.trace)
         if rtl_traps != emulator_traps:
-            sys.exit(f"trap count mismatch: RTL {rtl_traps}, emulator {emulator_traps}")
+            sys.exit(f"trap mismatch: RTL {rtl_traps}, emulator {emulator_traps}")
         print(f"results identical: {len(emulator.console.splitlines())} console line(s) ending {last_line!r}, "
-              f"{len(rtl.checkpoints)} checkpoint(s) {rtl.checkpoints}, {rtl_traps} trap(s); RTL {len(rtl.trace)} "
-              f"instructions in {rtl.halt['cycles']} cycles, emulator {len(emulator.trace)} instructions")
+              f"{len(rtl.checkpoints)} checkpoint(s) {rtl.checkpoints}, {len(rtl_traps)} trap(s) alike; RTL "
+              f"{len(rtl.trace)} instructions in {rtl.halt['cycles']} cycles, emulator {len(emulator.trace)} instructions")
     else:
         difference = diff_traces(rtl.trace, emulator.trace)
         if difference:
