@@ -163,7 +163,8 @@ Addresses and step numbers describe this build and can move after edits.
 ## Acceptance evidence (2026-09-21)
 
 - Native directed rules, rendering, transition and invalid-session checks pass
-  at both `-O0` and `-O2`; the 68-frame native session matches the pinned hashes.
+  at both `-O0` and `-O2`, and under AddressSanitizer/UndefinedBehaviorSanitizer;
+  the 68-frame native session matches the pinned hashes.
 - Emulator, Icarus and Verilator: `PASS ea60197e`, 68 identical checkpoints and
   2,191,706 identical retirement lines, zero traps. Icarus: 9,184,808 cycles;
   Verilator with one stall/request: 11,794,498 cycles, 2,609,690 transfers.
@@ -178,7 +179,10 @@ Addresses and step numbers describe this build and can move after edits.
 - The user confirmed playing both Pong and Tetris from the real menu. The
   first live recording (Pong) replayed all 1,200 checkpoints and `PASS ef82a348`
   exactly. The longer live session is kept locally under `build/rv32/`;
-  its replay evidence is recorded separately once the window is closed.
+  the first 36,430 recorded checkpoints also replay exactly on the current
+  firmware. That prefix replay adds Q at frame 36,432 only to an offline copy
+  to bound execution; the original recording is untouched. Its terminal
+  `PASS c245f086` belongs to that derived replay, not the still-open window.
 
 The first complete computer is achieved. F1 is next; no floating-point or
 accelerator work is included in M7.
