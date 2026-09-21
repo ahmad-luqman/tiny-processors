@@ -109,15 +109,16 @@ class WindowTest(unittest.TestCase):
             process = subprocess.Popen([str(self.window), "--image", str(image), "--fps", "60", "--input", str(script),
                                         "--record", str(record), "--checkpoints", str(checkpoints)],
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=HEADLESS)
-            time.sleep(1.0)
+            time.sleep(2.0)  # long enough that SDL's start-up on a loaded machine leaves most of it for frames
             process.send_signal(signal.SIGTERM)
             stdout, stderr = process.communicate(timeout=30)
             self.assertEqual((process.returncode, stdout), (2, ""), stderr)
             halt = halt_line(stderr, "rv32win:")
-            self.assertEqual((halt["halt"], halt["outcome"]), ("stopped", f"error=host-stopped pc={halt['outcome'].split('=')[-1]}"))
+            self.assertEqual(halt["halt"], "stopped")
+            self.assertRegex(halt["outcome"], r"^error=host-stopped pc=[0-9a-f]{8}$")
             frames = len(checkpoints.read_text().splitlines())
-            self.assertGreaterEqual(frames, 30, "about a second at 60 frames a second, paced")
-            self.assertLessEqual(frames, 120, "and not unthrottled")
+            self.assertGreaterEqual(frames, 30, "two seconds at 60 frames a second, minus start-up, is well over 30")
+            self.assertLessEqual(frames, 150, "paced: unthrottled, two seconds would be thousands of presents")
             self.assertEqual(record.read_text(), "frame 0 down A\nframe 3 up A\n")
             self.assertNotIn("event(s) lost", stderr, "a stopped run is not a passing one, so nothing is rejected")
 

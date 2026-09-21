@@ -8,7 +8,7 @@ M6 made the [RV32 machine](rv32.md) something you can play. [tools/rv32win.c](..
 2. Split the emulator into a core library and the headless main, byte-identical in behavior, with a run loop the window can pace.
 3. The window: presents into a texture, host keys queued at presents, a recording that replays.
 4. Drawing routines and Pong in freestanding C with fixed-point arithmetic, tested natively at `-O0` and `-O2`; a scripted session replayed on the emulator against pinned checkpoints.
-5. The same session on the RTL, both simulators, with cycles and wall time recorded; a hand-played session in the window.
+5. The same session on the RTL, both simulators, with cycles and wall time recorded; the session through a real window.
 6. Lint (no RTL changed, so synthesis is unchanged), this record, the roadmap.
 
 All six steps are complete; see [Milestone result](#milestone-result).
@@ -131,7 +131,7 @@ Completed on 2026-09-21 on branch `m6-rv32-window`. From a clean `build/`, `make
 - `make run-rv32-diag-emu`, `run-rv32-diag-rtl`, `run-rv32-diag-rtl-verilator`: `PASS 8bd87e9a` and the two checkpoints unchanged.
 - `make run-rv32-pong-emu`, `run-rv32-pong-rtl`, `run-rv32-pong-rtl-verilator`: `PASS 8fef54bc`, 200 identical checkpoints, 478,797 identical trace lines, the cycles in the table above.
 - `make lint-rv32`, `lint-rv32-soc` clean; no RTL file changed, so `synth-rv32` (8,175 cells) and `synth-rv32-soc` (23,664 cells) are as in M5.
-- Played by hand in the window, recorded, and the recording replayed on the emulator and the RTL to the same checkpoints.
+- The scripted session replayed through a real Cocoa window at 60 frames a second gives the same 200 checkpoints, and the diagnostic ran through the window to `PASS 8bd87e9a`. The roadmap's remaining acceptance step, a session played by hand with `make run-rv32-pong` (end it with Q) whose recording replays headless to the window's checkpoints, was not part of the automated evidence and is the first thing to do with the merged branch.
 - Counter, ALU, SAP8, and SIMD4 targets unchanged and passing.
 
 Limitations that remain: no palette; no host-time timer mode, by decision; no interrupts, so waiting is polling; the window is Mac-tested only, though nothing in it is Mac-specific; the pixel checkpoints of the session come from the same C compiled natively, while the rules are checked against hand-computed expectations. M7 adds the boot menu, the runtime services both games share, and Tetris.
