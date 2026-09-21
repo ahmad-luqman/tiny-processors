@@ -1,6 +1,6 @@
 # Tiny Processors: our computer and advanced SoC
 
-Updated 2026-09-21 after the [planning interview](docs/planning/full-stack-plan.md) and the completed M1 to M7 sessions. The machine contract, the firmware toolchain, the emulator with its native window, a full RV32I multicycle RTL CPU, the machine around it (bus decoder, timer, input queue, display and framebuffer, matched on both backends), Pong, and the boot menu/runtime/Tetris capstone exist; no accelerator for the new computer does yet.
+Updated 2026-09-21 after the [planning interview](docs/planning/full-stack-plan.md) and the completed M1 to M7 and F1 sessions. The machine contract, the firmware toolchain, the emulator with its native window, a full RV32I multicycle RTL CPU, the machine around it (bus decoder, timer, input queue, display and framebuffer, matched on both backends), Pong, the boot menu/runtime/Tetris capstone, and a standalone verified FP32 FPU exist; no accelerator for the new computer does yet.
 
 Build our own Nand2Tetris-inspired computer, preserving the completed labs. Design an RV32I CPU and matching emulator, reuse an existing C compiler, and run our own boot/menu/game runtime in a native Mac window. Pong comes first; Tetris defines the first complete computer. After Tetris, build an FP32 unit and integrate the RISC-V F extension into our CPU and emulator. GPU/NPU work also follows the playable machine: 2D acceleration, programmable 3D, and handwritten-digit recognition, integrated into an advanced SoC.
 
@@ -29,8 +29,9 @@ Read the [detailed roadmap](docs/planning/roadmap.md) for architecture proposals
 | RV32 machine with devices (M5) | Bus decoder and RTL peripherals (timer, 16-event input queue with held keys, display controller, 320×240 framebuffer, console, done) matched by emulator models with the same fault edges; the device diagnostic passes on the emulator, Icarus (1,666,436 cycles), and Verilator with identical console lines and frame checkpoints, its checksum and frame hash derived independently; 36 RTL tests per simulator, 31 emulator tests, 18 tool tests; lint and synthesis of the machine (23,664 cells with 64-word memories, no latches) pass | [SoC record](docs/rv32-soc.md), [contract](docs/rv32.md#behavior-fixed-in-m5); `make run-rv32-diag-emu`, `make run-rv32-diag-rtl`, `make lint-rv32-soc`, `make synth-rv32-soc` |
 | RV32 native window and Pong (M6) | The emulator as a core library with a headless main and an SDL3 window that shows presents and queues host keys as frame events, with a recording that replays; drawing routines and Pong in device-free C tested natively at -O0 and -O2; a 200-frame scripted session gives the same 200 checkpoints and `PASS 8fef54bc` on the native build, the emulator, Icarus (1,998,070 cycles), and Verilator, trace-identical for 478,797 instructions; 7 Pong tests, 5 window tests, 33 emulator tests, 38 RTL tests per simulator, 19 tool tests; no RTL change | [Window record](docs/rv32-window.md), [contract](docs/rv32.md#behavior-fixed-in-m6); `make run-rv32-pong`, `make run-rv32-pong-emu`, `make run-rv32-pong-rtl`, `make test-rv32-pong` |
 | First complete computer (M7) | One RV32I image boots the menu and runs Pong/Tetris; native rules and rendering tests at -O0/-O2; 68 checkpoints, `PASS ea60197e`, 2,220,509 trace-identical instructions on emulator and both RTL simulators; both games played by the user | [Runtime and Tetris](docs/rv32-runtime.md); `make run-rv32-capstone`, `make test-rv32-capstone`, `make run-rv32-capstone-rtl` |
+| Standalone FP32 hardware (F1) | All five rounding modes; 70,399 vectors on both simulators; 259,399 additional stress vectors; reset/backpressure checks; 25,346 generic cells and 1,530 flip-flops without latches | [FP32 contract and walkthrough](docs/fp32.md); `make test-fp32`, `make test-fp32-verilator`, `make waves-fp32` |
 
-These are recorded prior verification results, not newly rerun during planning. SAP8 stays frozen as the small teaching CPU. SIMD4 is a parallel compute prototype, not an integrated GPU or NPU. Its multiply/matrix extension moves after the playable computer.
+These rows record each milestone’s acceptance baseline; the F1 session also reran the preserved machine and lab regressions. SAP8 stays frozen as the small teaching CPU. SIMD4 is a parallel compute prototype, not an integrated GPU or NPU. Its multiply/matrix extension moves after the playable computer.
 
 ## Selected sequence
 
@@ -47,13 +48,14 @@ These are recorded prior verification results, not newly rerun during planning. 
 
 The recommended post-Tetris order is F1 → F2 → A1 → A2 → G1 → N1 → G2 → S1. Floating-point integration must pass before programmable 3D; N1 and G2 can be reordered once their prerequisites pass. CPU FP32 support does not select the GPU or NPU numeric format. A small programmable 3D demonstration is the selected graphics goal, not commercial graphics API compatibility. Neural inference uses a small pretrained model; training hardware is outside the initial goal.
 
-## Next milestone: F1
+## Next milestone: F2
 
-The first playable computer is complete. Next, build the standalone FP32
-arithmetic unit in verified increments, with exact result bits and exception
-flags checked against an independent reference. Select its microarchitecture
-and reference before RTL implementation; CPU F-extension integration is F2.
-See the [next-session checklist](docs/planning/roadmap.md#next-implementation-session-f1).
+F1's standalone FP32 hardware is verified against pinned Berkeley SoftFloat.
+Next, integrate the complete F instruction/state contract into the CPU and
+emulator: floating registers, CSR/Zicsr behavior, loads/stores, moves, sign and
+classification operations, arithmetic requests, flags, and safe writeback.
+Select compatible compiler ISA/ABI flags, run float programs with runtime inputs,
+and retain every integer firmware regression. See the [F2 checklist](docs/planning/roadmap.md#next-implementation-session-f2).
 
 ## Later optional tracks
 
