@@ -808,7 +808,8 @@ class RtlTest(unittest.TestCase):
             script.write_text("".join(f"frame 1 down {c}\n" for c in range(17)))
             emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace", input_script=script)
             rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", stall=0, input_script=script)
-        self.assertNotEqual((emulator.status, rtl.status), (0, 0))
+        self.assertNotEqual(emulator.status, 0)
+        self.assertNotEqual(rtl.status, 0)
         self.assertEqual((emulator.halt["outcome"], rtl.halt["outcome"]), ("pass", "pass"), "the halt lines were printed first")
         self.assertIn("rv32emu: 1 scripted event(s) lost, run rejected", emulator.stderr)
         self.assertIn("1 scripted event(s) lost, run rejected", rtl.noise, "the testbench's $fatal names the loss")
@@ -994,7 +995,7 @@ class RunnerTest(unittest.TestCase):
         path.chmod(0o755)
         return path
 
-    def run_results(self, emulator, *extra, program="timed"):
+    def run_results(self, emulator, *extra, program="timed", compare="results"):
         out = Path(self.workdir.name) / "out"
         if program == "timed":
             # Reads the timer (so results mode applies), takes one ecall through a handler that
@@ -1007,7 +1008,7 @@ class RunnerTest(unittest.TestCase):
             image = ["--image", str(write_image(words, out, "timed")[1])]
         else:
             image = ["--program", program]
-        command = [sys.executable, "-m", "tools.rv32_rtl", *image, "--compare", "results", "--stall", "0",
+        command = [sys.executable, "-m", "tools.rv32_rtl", *image, "--compare", compare, "--stall", "0",
                    "--emulator", str(emulator), "--simulator", str(self.simulator), "--out", str(out), *extra]
         return subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
 
@@ -1022,10 +1023,14 @@ class RunnerTest(unittest.TestCase):
         result = self.run_results(retrapped)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("trap mismatch", result.stderr)
-        # A program that never reads the timer must be compared trace for trace instead.
+        # A program that never reads the timer must be compared trace for trace instead, and one
+        # that reads it may not be trace-diffed: its traces differ by design (device time).
         result = self.run_results(self.emulator, program="loop")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("never did", result.stderr)
+        result = self.run_results(self.emulator, compare="trace")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("reads the timer, so its traces differ by design", result.stderr)
         # A byte more on the emulator's console: the RTL's console no longer matches.
         noisy = self.wrapper("noisy", "printf x")
         result = self.run_results(noisy)
