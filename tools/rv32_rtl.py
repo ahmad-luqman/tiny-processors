@@ -247,13 +247,20 @@ def generated_paths(out, name, frames=None):
     return paths
 
 
-def refuse_aliased_input(script, out, name, frames=None):
+def refuse_aliased_input(script, out, name, frames=None, option="--input"):
     """Exit if `script` is (by path or by inode) one of the run's own files: the trace, console, and
-    checkpoint files are truncated before a backend starts, which would destroy the script."""
+    checkpoint files are truncated before a backend starts, which would destroy the script (or make
+    an expected-checkpoints file compare the run against itself)."""
     for path in generated_paths(out, name, frames):
         same = path.resolve() == script.resolve() or (path.exists() and script.exists() and path.samefile(script))
         if same:
-            sys.exit(f"--input {script} names a file this run writes ({path}); keep the script outside --out")
+            sys.exit(f"{option} {script} names a file this run writes ({path}); keep it outside --out")
+
+
+def read_expected_checkpoints(path):
+    """The `frame N <hash>` lines of an expected-checkpoints file; blank lines and `#` comments are skipped."""
+    lines = [line.strip() for line in path.read_text().splitlines()]
+    return [line for line in lines if line and not line.startswith("#")]
 
 
 def cycle_relation(rtl):
@@ -281,6 +288,8 @@ def main():
     parser.add_argument("--expect-last-line", help="the last console line both backends must produce")
     parser.add_argument("--expect-checkpoint", action="append", default=[], metavar="LINE",
                         help="the `frame N <hash>` lines both backends must write, exactly and in order (repeatable)")
+    parser.add_argument("--expect-checkpoints", type=Path, metavar="FILE",
+                        help="a file of `frame N <hash>` lines to expect, one per line, after any --expect-checkpoint")
     parser.add_argument("--allow-lost-events", action="store_true",
                         help="tell both backends to accept a run that dropped a scripted event or never delivered one")
     parser.add_argument("--input", type=Path,
@@ -296,6 +305,7 @@ def main():
     parser.add_argument("--emulator", default=DEFAULT_EMULATOR)
     parser.add_argument("--simulator", help=f".vvp file or Verilator binary (default {DEFAULT_SIMULATOR}; unused with --backend emulator)")
     parser.add_argument("--out", default=DEFAULT_OUT, help="directory for the image, traces, and VCD")
+    parser.add_argument("--timeout", type=float, default=120.0, help="seconds each backend may run (default 120)")
     parser.add_argument("--stall", type=int, default=None, help="fixed stall cycles per request")
     parser.add_argument("--seed", type=int, default=None, help="random 0..3 stall cycles per request")
     args = parser.parse_args()
@@ -303,6 +313,8 @@ def main():
         parser.error("--stall must not be negative")
     if args.stall is not None and args.seed is not None:
         parser.error("--stall and --seed are exclusive")
+    if args.timeout <= 0:
+        parser.error("--timeout must be positive")
     if args.simulator is None and args.backend == "both":
         args.simulator = DEFAULT_SIMULATOR
     for path in (args.emulator, args.simulator):
@@ -313,6 +325,11 @@ def main():
     name = args.image.stem if args.image is not None else args.program
     if args.input is not None:
         refuse_aliased_input(args.input, out, name, args.frames)
+    if args.expect_checkpoints is not None:
+        if not args.expect_checkpoints.exists():
+            parser.error(f"{args.expect_checkpoints} does not exist")
+        refuse_aliased_input(args.expect_checkpoints, out, name, args.frames, option="--expect-checkpoints")
+        args.expect_checkpoint += read_expected_checkpoints(args.expect_checkpoints)
     if args.image is not None:
         if not args.image.exists():
             parser.error(f"{args.image} does not exist; run make check-rv32-image first")
@@ -328,7 +345,7 @@ def main():
         args.frames.mkdir(parents=True, exist_ok=True)
         for stale in args.frames.glob("frame-*.ppm"): # a previous run's frames must not survive this one
             stale.unlink()
-    emulator = run_emulator(args.emulator, bin_path, out / f"{name}.emu.trace",
+    emulator = run_emulator(args.emulator, bin_path, out / f"{name}.emu.trace", timeout=args.timeout,
                             checkpoints=out / f"{name}.emu.checkpoints", input_script=args.input, frames=args.frames,
                             allow_lost_events=args.allow_lost_events)
     check_passed(emulator, "emulator")
@@ -357,7 +374,7 @@ def main():
         seed = BENCH_SEED if args.seed is None else args.seed
         for stall, seed in [(0, None), (1, None), (2, None), (3, None), (None, seed)]:
             rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=seed,
-                          checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input,
+                          timeout=args.timeout, checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input,
                           allow_lost_events=args.allow_lost_events)
             check_passed(rtl)
             mismatch = compare_backends(rtl, emulator, args.compare)  # the same agreement as a check run
@@ -381,7 +398,7 @@ def main():
         stall = 0
     wave = out / f"{name}.vcd" if args.mode == "waves" else None
     rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=args.seed, wave=wave,
-                  checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input,
+                  timeout=args.timeout, checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input,
                   allow_lost_events=args.allow_lost_events)
     print(emulator.stderr.strip().splitlines()[-1])
     print(rtl.stderr.strip().splitlines()[-1] if rtl.stderr.strip() else "rv32_tb: no halt line")

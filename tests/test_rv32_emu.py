@@ -9,6 +9,7 @@ state dump, the trace, the console output, and the exit status.
 
 from collections import namedtuple
 from pathlib import Path
+import re
 import resource
 import shutil
 import signal
@@ -21,6 +22,7 @@ import unittest
 from tools.rv32_asm import *  # noqa: F401,F403
 from tools.rv32_devices import FB_SIZE, KEYS, diag_checksum, event_word, frame_hash, render_diag_frame
 from tools.rv32_diff_qemu import compare, qemu_pcs, trace_pcs
+from tools.rv32_pong_native import EXPECTED as PONG_EXPECTED, INPUT as PONG_INPUT
 from tools.rv32_run_emu import build_emulator, halt_line
 
 
@@ -531,6 +533,25 @@ class EmulatorTest(unittest.TestCase):
         result = self.run_words(FINISH(), extra=("--input", str(ROOT / "tools")))
         self.assertEqual((result.status, result.halt), (2, None))
         self.assertIn("cannot read input script", result.stderr)
+
+    def test_pong_image_when_built(self):
+        """The Pong session replays to the checkpoints the native build produced (pong.expected) and
+        ends with the PASS word the Makefile pins; the frame count and the halt are as scripted."""
+        image = ROOT / "build/rv32/pong.bin"
+        if not image.exists():
+            self.skipTest("build/rv32/pong.bin is not built (make check-rv32-image)")
+        expected = [line for line in PONG_EXPECTED.read_text().splitlines() if line and not line.startswith("#")]
+        pinned = re.search(r"^RV32_PONG_HEX := ([0-9a-f]{8})$", (ROOT / "Makefile").read_text(), re.M).group(1)
+        words = [int.from_bytes(image.read_bytes()[i:i + 4], "little") for i in range(0, len(image.read_bytes()), 4)]
+        result = self.run_words(words, limit=10_000_000, checkpoints=True, input_script=PONG_INPUT.read_text())
+        self.assertEqual((result.status, result.halt["outcome"]), (0, "pass"), result.stderr)
+        self.assertEqual(result.checkpoints, expected)
+        self.assertEqual((result.stdout, result.state.frames, result.state.traps), (f"PASS {pinned}\n", 200, 0))
+        self.assertFalse(any(f"mem[{TIMER:08x}]" in line for line in result.trace), "Pong never reads the timer")
+        # One frame later the quit is not seen yet, so the guest presents once more and the script's Q is lost.
+        later = PONG_INPUT.read_text().replace("frame 200 down Q", "frame 201 down Q")
+        result = self.run_words(words, limit=10_000_000, checkpoints=True, input_script=later)
+        self.assertEqual((result.status, len(result.checkpoints)), (0, 201))
 
     def test_frames_are_written_as_ppm(self):
         """--frames DIR writes one binary PPM per present with the RGB332 mapping; an unwritable

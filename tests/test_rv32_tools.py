@@ -302,6 +302,27 @@ class DeviceHelperTests(unittest.TestCase):
         if (ROOT / "build/rv32/diag.lst").exists():
             self.assertEqual(check_listing((ROOT / "build/rv32/diag.lst").read_text(), allow_privileged=True), [])
 
+    def test_pong_script_expected_file_and_makefile_agree(self):
+        """The Pong session's script parses and ends with a Q press; the expected file has one
+        well-formed checkpoint line per frame up to that Q; the Makefile's replay arguments name both
+        files. The hashes themselves are checked by test_rv32_pong.py against the native build."""
+        script = (ROOT / "programs/rv32/pong.input").read_text()
+        events = parse_input_script(script)
+        self.assertEqual(events[-1], (200, EVENT_VALID | EVENT_PRESS | KEYS["Q"]))
+        self.assertLessEqual(max(sum(1 for f, _ in events if f == frame) for frame, _ in events), 2,
+                             "at most two events a frame keeps the queue far from full")
+        expected = (ROOT / "programs/rv32/pong.expected").read_text().splitlines()
+        self.assertEqual(expected, [f"frame {n} " + line.split(" ")[2] for n, line in enumerate(expected, 1)])
+        self.assertEqual(len(expected), 200)
+        for line in expected:
+            self.assertRegex(line, r"^frame \d+ [0-9a-f]{8}$")
+        makefile = (ROOT / "Makefile").read_text()
+        self.assertRegex(makefile, re.compile(r"^RV32_PONG_HEX := [0-9a-f]{8}$", re.M))
+        self.assertIn("RV32_PONG_ARGS := --image build/rv32/pong.bin --input $(RV32_PONG_INPUT) "
+                      "--expect-last-line \"PASS $(RV32_PONG_HEX)\" --expect-checkpoints $(RV32_PONG_EXPECTED)", makefile)
+        self.assertIn("RV32_PONG_INPUT := programs/rv32/pong.input", makefile)
+        self.assertIn("RV32_PONG_EXPECTED := programs/rv32/pong.expected", makefile)
+
     def test_key_table_and_windows_agree_across_languages(self):
         """The key table lives in board.h, the emulator, the window, the testbench, and this module's KEYS; the
         window bases in board.h, the bus, the machine's memory instances, and the assembler. None of
