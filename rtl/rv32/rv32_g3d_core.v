@@ -66,11 +66,13 @@ module rv32_g3d_core (
     wire [31:0] lane_a [0:3];
     wire [31:0] lane_b [0:3];
     wire [31:0] lane_result [0:3];
-    wire [63:0] lane_unused [0:3];
+    wire [47:0] lane_unused [0:3];
     genvar n;
     generate for (n = 0; n < 4; n = n + 1) begin : lane
         wire [31:0] a = regs[{n[1:0], ra}], b = regs[{n[1:0], rb}], c = regs[{n[1:0], rc}];
-        wire [63:0] product = $signed(a) * $signed(b);
+        // Only bits 47..16 are kept, so a 48-bit product (the low bits of the exact
+        // two's-complement product) is all the multiplier needs to form.
+        wire signed [47:0] product = $signed(a) * $signed(b);
         wire [31:0] scaled = product[47:16];                 // Q16.16: floor of the product / 2^16
         wire [31:0] special = word[1:0] == 2'd0 ? {30'd0, n[1:0]} :
                               word[1:0] == 2'd1 ? {27'd0, vid_base + n[4:0]} :
@@ -183,7 +185,6 @@ module rv32_g3d_core (
                 endcase
         end
     end
-    wire unused_ok = &{1'b0, lane_unused[0][63:48], lane_unused[0][15:0], lane_unused[1][63:48],
-                       lane_unused[1][15:0], lane_unused[2][63:48], lane_unused[2][15:0],
-                       lane_unused[3][63:48], lane_unused[3][15:0], word[9:7]};
+    wire unused_ok = &{1'b0, lane_unused[0][15:0], lane_unused[1][15:0], lane_unused[2][15:0],
+                       lane_unused[3][15:0], word[9:7]};
 endmodule

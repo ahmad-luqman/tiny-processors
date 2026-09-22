@@ -69,6 +69,8 @@ struct g3d_job {
     const uint32_t (*inputs)[G3D_SLOTS];     /* vcount rows */
     const uint32_t *triangles;               /* tcount words */
     uint32_t vcount, tcount, limit;
+    /* Words a device upload must copy; a program never fetches past its END. */
+    uint32_t program_words;
 };
 /* `cycles` is the device's busy-tick count with no memory stalls, from the
  * tick schedule in docs/rv32-3d.md "Time". */
@@ -83,6 +85,8 @@ struct g3d_counts {
 uint32_t g3d_reference(uint8_t *fb, uint16_t *zbuf, const struct g3d_job *job, struct g3d_counts *counts);
 /* The fixed-function divider: truncating n/d for d > 0, saturated to int32. */
 int32_t g3d_div_sat(int64_t n, int32_t d);
+/* Q16.16 product: bits 47..16 of the exact 64-bit product (floor). */
+int32_t g3d_qmul(int32_t a, int32_t b);
 
 /* Driver (programs/rv32/g3d.c), shaped like G1's. Every call that writes the
  * device refuses without mutation while it is BUSY, because those writes would

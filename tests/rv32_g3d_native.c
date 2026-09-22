@@ -48,7 +48,7 @@ int main(int argc, char **argv)
         /* Reference. */
         memset(ref_fb,0,sizeof ref_fb);
         for (uint32_t i=0;i<76800;i++) ref_z[i]=0xffff;
-        struct g3d_job j={program,consts,(const uint32_t (*)[G3D_SLOTS])inputs,tris,vcount,tcount,limit};
+        struct g3d_job j={program,consts,(const uint32_t (*)[G3D_SLOTS])inputs,tris,vcount,tcount,limit,G3D_PROGRAM_WORDS};
         struct g3d_counts c;
         uint32_t e=zbase==ZBASE?g3d_reference(ref_fb,ref_z,&j,&c):(c.error=G3D_E_PARAM,c.fault_pc=c.instructions=c.transfers=c.divides=c.pixels=c.zfail=c.culled=0,c.cycles=1,G3D_E_PARAM);
         uint32_t ref[12]={e?G3D_FAULT:G3D_DONE,c.error,c.fault_pc,c.instructions,c.transfers,c.divides,c.pixels,c.zfail,c.culled,c.cycles,

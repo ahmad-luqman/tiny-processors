@@ -63,6 +63,21 @@ windows and matching emulator behavior. The guest checks vector addition and
 signed/unsigned matrix products, faults, relaunch and timeout recovery. CPU and
 accelerator take turns owning the buffers; reset preserves accepted stores.
 See [the A2 contract, gates, measurements and reset walkthrough](docs/rv32-simd4.md).
+## Programmable 3D (G2)
+
+```sh
+make run-rv32-capstone                 # Select 3D DEMO: SPACE cycles diffuse/toon/wobble
+make test-rv32-3d test-rv32-3d-verilator test-rv32-3d-sanitize
+make run-rv32-3d-rtl-verilator run-rv32-3d-menu-rtl-verilator
+make bench-rv32-3d waves-rv32-3d lint-rv32-3d synth-rv32-3d
+```
+
+A vertex shader runs on four SIMT lanes that share one PC, with divergent
+IF/ELSE and loops on a typed mask stack. Fixed-function hardware projects,
+culls, rasterizes with Gouraud colour and a 16-bit depth test, and dithers
+into the framebuffer. The Python oracle, the guest C reference, the emulator
+device and the RTL agree bit for bit. See [the G2 contract](docs/rv32-3d.md).
+
 ## 2D accelerator (G1)
 
 ```sh

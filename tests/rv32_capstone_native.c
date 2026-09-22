@@ -27,6 +27,22 @@ static uint32_t native_classify(const uint8_t canvas[DIGIT_PIXELS], int32_t logi
 
 void native_attach_digit(struct runtime *r) { digit_ui_attach(&r->digit, native_classify); }
 
+/* The native model renders the 3D screen with the C reference; the firmware
+ * renders on the device, and the pinned checkpoints hold them to the same pixels. */
+static uint16_t native_zbuf[320*240];
+static uint32_t native_render(void *context, const struct g3d_job *job, const struct gfx_surface *s)
+{
+    (void)context;
+    struct g3d_counts counts;
+    gfx_clear(s, G3D_DEMO_BACKGROUND);
+    for (uint32_t i = 0; i < 320*240; i++) native_zbuf[i] = 0xffff;
+    return g3d_reference(s->pixels, native_zbuf, job, &counts);
+}
+
+void native_attach_g3d(struct runtime *r) { g3d_demo_attach(&r->g3d, native_render, 0); }
+uint32_t native_g3d_shader(const struct runtime *r) { return r->g3d.shader; }
+uint32_t native_g3d_frame(const struct runtime *r) { return r->g3d.frame; }
+
 /* A classifier that fails the way a device failure would, so the status path is
  * exercised: nothing else in the suite ever returns non-zero. */
 static uint32_t failing_classify(const uint8_t canvas[DIGIT_PIXELS], int32_t logits[DIGIT_CLASSES])
@@ -438,7 +454,74 @@ int check_digit_ui(void)
     return 0;
 }
 
-/* The menu gained a fourth entry, so selection has to wrap over four. */
+/* G2: SPACE cycles the three shaders, P freezes the frame counter, R restarts,
+ * the attached renderer draws each frame, and a failing renderer is reported. */
+static uint32_t render_calls;
+static uint32_t counting_render(void *context, const struct g3d_job *job, const struct gfx_surface *s)
+{
+    (void)context;
+    render_calls++;
+    struct g3d_counts counts;
+    for (uint32_t i = 0; i < 320*240; i++) native_zbuf[i] = 0xffff;
+    gfx_clear(s, G3D_DEMO_BACKGROUND);
+    return g3d_reference(s->pixels, native_zbuf, job, &counts);
+}
+static uint32_t failing_render(void *context, const struct g3d_job *job, const struct gfx_surface *s)
+{
+    (void)context; (void)job; (void)s;
+    return G3D_E_LIMIT;
+}
+
+int check_g3d_screen(void)
+{
+    static uint8_t pixels[320*240];
+    struct gfx_surface surface = {pixels, 320, 240};
+    struct runtime r;
+    runtime_init(&r);
+    g3d_demo_attach(&r.g3d, counting_render, 0);
+    r.selected = 3;
+    runtime_event(&r, PRESS(ENTER));
+    CHECK(r.screen == RUNTIME_3D);
+    runtime_event(&r, RELEASE(ENTER));
+    runtime_frame(&r, 0);
+    runtime_draw(&r, &surface);
+    CHECK(render_calls == 1 && r.g3d.status == 0 && r.g3d.frame == 1);
+    /* The cube is drawn: most of the screen is background, but not all of it. */
+    uint32_t cube = 0;
+    for (uint32_t i = 0; i < 320*240; i++) cube += pixels[i] != G3D_DEMO_BACKGROUND;
+    CHECK(cube > 5000 && cube < 40000);
+    for (uint32_t shader = 1; shader <= G3D_SHADERS; shader++) {
+        runtime_event(&r, PRESS(SPACE));
+        CHECK(r.g3d.shader == shader % G3D_SHADERS);
+        runtime_event(&r, RELEASE(SPACE));
+    }
+    runtime_event(&r, PRESS(P));
+    runtime_event(&r, RELEASE(P));
+    runtime_frame(&r, 0);
+    runtime_frame(&r, 0);
+    CHECK(r.g3d.paused && r.g3d.frame == 1);
+    runtime_event(&r, PRESS(R));
+    CHECK(!r.g3d.paused && r.g3d.frame == 0 && r.g3d.shader == 0);
+    runtime_event(&r, RELEASE(R));
+    /* Constants: a rotation keeps the object-space light at unit length (within Q16.16 rounding). */
+    uint32_t k[G3D_CONSTS];
+    for (uint32_t frame = 0; frame < 128; frame += 9) {
+        g3d_demo_constants(frame, k);
+        int64_t len = (int64_t)(int32_t)k[16]*(int32_t)k[16] + (int64_t)(int32_t)k[17]*(int32_t)k[17] +
+                      (int64_t)(int32_t)k[18]*(int32_t)k[18];
+        CHECK(len > ((int64_t)65536*65536*99)/100 && len < ((int64_t)65536*65536*101)/100);
+        CHECK(k[15] == 196608u && k[20] == frame);
+    }
+    g3d_demo_attach(&r.g3d, failing_render, 0);
+    runtime_draw(&r, &surface);
+    CHECK(r.g3d.status == G3D_E_LIMIT);
+    uint32_t before = runtime_checksum(&r);
+    r.g3d.status = 0;
+    CHECK(runtime_checksum(&r) != before);   /* a device failure is part of the checked state */
+    return 0;
+}
+
+/* The menu has five entries since G2, so selection wraps over five with compares. */
 int check_digit_menu(void)
 {
     struct runtime r;
@@ -469,16 +552,16 @@ int check_digit_menu(void)
      * next frame has to run before another selection is accepted. */
     runtime_event(&r, RELEASE(ESCAPE));
     runtime_frame(&r, 0);
-    /* The fourth entry is still the 2D demo, which the graphics replay selects
-     * by pressing UP from the first entry. */
-    r.selected = 3;
+    /* The last entry is still the 2D demo, which the graphics replay selects by
+     * pressing UP from the first entry; G2 inserted the 3D screen before it. */
+    r.selected = 4;
     runtime_event(&r, PRESS(ENTER));
     CHECK(r.screen == RUNTIME_GPU);
 
     /* The literal count, so raising RUNTIME_ENTRIES cannot pass this check by
      * changing both sides of it. */
-    CHECK(RUNTIME_ENTRIES == 4);
-    CHECK(RUNTIME_GPU == RUNTIME_DIGIT + 1 && RUNTIME_DIGIT == RUNTIME_TETRIS + 1);
+    CHECK(RUNTIME_ENTRIES == 5);
+    CHECK(RUNTIME_GPU == RUNTIME_3D + 1 && RUNTIME_3D == RUNTIME_DIGIT + 1 && RUNTIME_DIGIT == RUNTIME_TETRIS + 1);
 
     /* Re-entering the digit screen clears the canvas but keeps the classifier. */
     struct runtime again;
@@ -513,7 +596,7 @@ int check_digit_menu(void)
 int main(void)
 {
     int (*checks[])(void)={check_shapes,check_collisions,check_clear_score,check_timing,
-                          check_random_restart,check_transitions,check_quit_batches,check_render,check_runtime_render,check_digit_ui,check_digit_menu};
+                          check_random_restart,check_transitions,check_quit_batches,check_render,check_runtime_render,check_digit_ui,check_digit_menu,check_g3d_screen};
     for (unsigned i=0; i<sizeof checks/sizeof checks[0]; i++) {
         int line=checks[i]();
         if (line) { fprintf(stderr,"native check %u failed at line %d\n",i,line); return 1; }

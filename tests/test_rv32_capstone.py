@@ -19,7 +19,7 @@ class CapstoneTests(unittest.TestCase):
 
     def test_directed_rules(self):
         for lib in self.libs:
-            for name in ("shapes", "collisions", "clear_score", "timing", "random_restart", "transitions", "quit_batches", "render", "runtime_render", "digit_ui", "digit_menu"):
+            for name in ("shapes", "collisions", "clear_score", "timing", "random_restart", "transitions", "quit_batches", "render", "runtime_render", "digit_ui", "digit_menu", "g3d_screen"):
                 with self.subTest(library=lib._name, check=name):
                     line = getattr(lib, "check_" + name)()
                     self.assertEqual(line, 0, f"C assertion failed: tests/rv32_capstone_native.c:{line}")
@@ -41,6 +41,21 @@ class CapstoneTests(unittest.TestCase):
             self.assertEqual(frames,8)
             self.assertEqual(f"{checksum:08x}",expected_hex[1])
             self.assertEqual(checkpoints,(ROOT/'programs/rv32/gfx.expected').read_text().splitlines())
+
+    def test_g3d_menu_session(self):
+        """The 3D screen through all three shaders, rendered by the C reference.
+
+        The firmware renders the same frames on the device; the shared checkpoints
+        are what hold the two to identical pixels.
+        """
+        expected_hex = re.search(r"^RV32_3D_MENU_HEX := ([0-9a-f]{8})$", (ROOT / "Makefile").read_text(), re.M)
+        self.assertIsNotNone(expected_hex)
+        script = parse_input_script((ROOT / "programs/rv32/g3d.input").read_text())
+        for lib in self.libs:
+            checkpoints, checksum, frames = run_session(lib, script)
+            self.assertEqual(frames, 21)
+            self.assertEqual(f"{checksum:08x}", expected_hex[1])
+            self.assertEqual(checkpoints, (ROOT / "programs/rv32/g3d.expected").read_text().splitlines())
 
     def test_digit_menu_session(self):
         """Two digits drawn with the keyboard and classified by the software model.

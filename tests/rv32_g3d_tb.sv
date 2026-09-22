@@ -89,9 +89,10 @@ module rv32_g3d_tb;
     reg [31:0] want [0:11];
     reg [31:0] got [0:11];
     reg [31:0] h, value;
-    string input_path;
+    string input_path, wave_path;
     initial begin
         if (!$value$plusargs("input=%s", input_path)) $fatal(1, "missing +input");
+        if ($value$plusargs("wave=%s", wave_path)) begin $dumpfile(wave_path); $dumpvars(0, rv32_g3d_tb); end
         if (!$value$plusargs("cancel=%d", use_cancel)) use_cancel = 0;
         file = $fopen(input_path, "r");
         if (file == 0) $fatal(1, "cannot open input");
@@ -165,7 +166,8 @@ module rv32_g3d_tb;
             ret = $fscanf(file, "%h", head[0]);
         end
         if (job == 0) $fatal(1, "empty corpus");
-        if (!(saw_held_read && saw_held_write)) $fatal(1, "no held read and write observed");
+        // +waves-only dumps a job without holds, so the coverage requirement does not apply.
+        if (!$test$plusargs("waves-only") && !(saw_held_read && saw_held_write)) $fatal(1, "no held read and write observed");
         if (use_cancel != 0 && !cancelled) $fatal(1, "no transfer cancelled by RESET");
         $display("PASS %0d", job);
         $finish;

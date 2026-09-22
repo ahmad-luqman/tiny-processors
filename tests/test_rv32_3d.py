@@ -26,7 +26,8 @@ U32 = C.c_uint32
 
 class Job(C.Structure):
     _fields_ = [('program', C.POINTER(U32)), ('consts', C.POINTER(U32)), ('inputs', C.POINTER(U32)),
-                ('triangles', C.POINTER(U32)), ('vcount', U32), ('tcount', U32), ('limit', U32)]
+                ('triangles', C.POINTER(U32)), ('vcount', U32), ('tcount', U32), ('limit', U32),
+                ('program_words', U32)]
 
 
 class Counts(C.Structure):
@@ -61,7 +62,7 @@ def c_render(lib, program, consts, inputs, triangles, limit=4096, fb=None, zbuf=
     words = [t if isinstance(t, int) else t[0] | t[1] << 8 | t[2] << 16 for t in triangles]
     job = Job(_array(program, M.PROGRAM_WORDS), _array(consts, M.CONSTS),
               _array([w for row in inputs for w in row]), _array(words),
-              len(inputs) if vcount is None else vcount, len(words), limit)
+              len(inputs) if vcount is None else vcount, len(words), limit, M.PROGRAM_WORDS)
     lib.g3d_reference(fb, zbuf, C.byref(job), C.byref(counts))
     return bytes(fb), list(zbuf), counts
 

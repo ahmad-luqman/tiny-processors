@@ -17,6 +17,7 @@ static int64_t smul64(int32_t a, int32_t b)
 }
 static int64_t shl64(int64_t v, unsigned s) { return (int64_t)((uint64_t)v<<s); }
 static int32_t qmul(uint32_t a, uint32_t b) { return (int32_t)(uint32_t)(uint64_t)(smul64((int32_t)a,(int32_t)b)>>16); }
+int32_t g3d_qmul(int32_t a, int32_t b) { return qmul((uint32_t)a,(uint32_t)b); }
 
 int32_t g3d_div_sat(int64_t n, int32_t d)
 {

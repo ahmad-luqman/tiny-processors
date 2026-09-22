@@ -188,8 +188,11 @@ module rv32_g3d #(
     wire signed [16:0] ex_x0 = {tx0[15], tx0}, ex_y0 = {ty0[15], ty0}, ex_x1 = {tx1[15], tx1}, ex_y1 = {ty1[15], ty1};
     wire signed [16:0] ex_x2 = {tx2[15], tx2}, ex_y2 = {ty2[15], ty2};
     wire signed [16:0] ex1_raw = ex_x1 - ex_x0, ey1_raw = ex_y1 - ex_y0, ex2_raw = ex_x2 - ex_x0, ey2_raw = ex_y2 - ex_y0;
-    wire signed [31:0] area_raw = {{15{ex1_raw[16]}}, ex1_raw} * {{15{ey2_raw[16]}}, ey2_raw} -
-                                  {{15{ey1_raw[16]}}, ey1_raw} * {{15{ex2_raw[16]}}, ex2_raw};
+    // 17 x 17-bit products: the guard band bounds every screen difference, and the
+    // difference of the two products fits 32 bits (docs/rv32-3d.md "Projection").
+    wire signed [33:0] area_p = ex1_raw * ey2_raw, area_q = ey1_raw * ex2_raw;
+    wire signed [33:0] area_full = area_p - area_q;
+    wire signed [31:0] area_raw = area_full[31:0];
     wire signed [16:0] sx0 = ex_x0, sy0 = ex_y0;
     wire signed [16:0] sx1 = swap_now ? ex_x2 : ex_x1, sy1 = swap_now ? ex_y2 : ex_y1;
     wire signed [16:0] sx2 = swap_now ? ex_x1 : ex_x2, sy2 = swap_now ? ex_y1 : ex_y2;
@@ -493,7 +496,7 @@ module rv32_g3d #(
             end
         end
     end
-    wire unused_ok = &{1'b0, addr[31:13], div_q[31], linear[31], box_l[15:9], box_r[15:9], box_t[15:9],
+    wire unused_ok = &{1'b0, addr[31:13], div_q[31], area_full[33:32], linear[31], box_l[15:9], box_r[15:9], box_t[15:9],
                        box_b[15:9], ocr[15:0], ocg[15:0], ocb[15:0], init_value[49:48], cr[4:0], cg[4:0],
                        cb[5:0], z_addr[0], tri_word[31:24]};
     function signed [31:0] edge_dx;
