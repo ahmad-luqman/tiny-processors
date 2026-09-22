@@ -34,7 +34,7 @@ RV32_SELFCHECK_OBJS := build/rv32/selfcheck.o $(RV32_COMMON_OBJS)
 RV32_DIAG_OBJS := build/rv32/diag.o build/rv32/trap.o $(RV32_COMMON_OBJS)
 RV32_PONG_OBJS := build/rv32/pong.o build/rv32/pong_game.o build/rv32/gfx.o $(RV32_COMMON_OBJS)
 RV32_CAPSTONE_OBJS := build/rv32/gpu.o build/rv32/gpu_ref.o build/rv32/gpu_demo.o  build/rv32/gfx_text.o build/rv32/capstone.o build/rv32/runtime.o build/rv32/tetris_game.o build/rv32/pong_game.o build/rv32/gfx.o $(RV32_COMMON_OBJS)
-RV32_HEADERS += programs/rv32/gpu.h programs/rv32/gpu_demo.h  programs/rv32/runtime.h programs/rv32/tetris_game.h programs/rv32/simd4.h
+RV32_HEADERS += programs/rv32/gpu.h programs/rv32/gpu_demo.h  programs/rv32/runtime.h programs/rv32/tetris_game.h programs/rv32/simd4.h programs/rv32/digit_model.h programs/rv32/digit_hw.h
 RV32_IMAGES := selfcheck diag pong capstone
 RV32_IMAGE_FILES := $(foreach image,$(RV32_IMAGES),$(foreach ext,elf lst bin readelf,build/rv32/$(image).$(ext)))
 RV32_SELFCHECK_HEX := 807d9fad
@@ -673,12 +673,50 @@ test-rv32-gfx-sanitize: test-rv32-gfx | build
 	build/gfx/sanitize build/gfx/commands.txt
 test-rv32: test-rv32-gfx-sanitize
 
-# N1: the vendored digit test set, the integer model, and its standard-library oracle.
-# tools/digit_train.py retrains the model; it needs numpy and the network and is
+# N1: quantized digit inference. The model, its oracle and the vendored test set
+# are checked in Python; the same arithmetic then runs as guest C on the CPU and
+# on the SIMD4 accelerator, which must agree bit for bit.
+# tools/digit_train.py retrains the model. It needs numpy and the network and is
 # deliberately not a prerequisite of anything here.
-.PHONY: test-rv32-digit-model accuracy-rv32-digit
-test-rv32-digit-model:
-	$(PYTHON) -m unittest discover -s tests -p 'test_rv32_digit*.py' -v
+.PHONY: test-rv32-digit test-rv32-digit-verilator accuracy-rv32-digit check-rv32-digit-image
+.PHONY: run-rv32-digit-emu run-rv32-digit-rtl run-rv32-digit-rtl-verilator
+RV32_DIGIT_MAX_CYCLES := 400000000
+# No --compare-stores: the diagnostic checks the engine's cycle relation, so it
+# stores the CYCLES and STALLS counters, and those are device time. A K=49 launch
+# costs 1,008 cycles on the emulator and 1,808 on RTL with two wait cycles per
+# transfer, so an ordered-store comparison would fail on a correct run. Console,
+# checkpoints and trap records still have to match, and the deterministic counters
+# (transfers, instructions, launches) are asserted inside the guest on every backend.
+RV32_DIGIT_ARGS = --image build/rv32/digitcheck.bin --compare results \
+                  --expect-last-line "PASS N1" --emulator $(RV32EMU) --timeout 900
+build/rv32/digit_kernels.h: tools/rv32_digit_kernels.py programs/simd4/dense4.py tools/simd4_model.py | build/rv32
+	$(PYTHON) -m tools.rv32_digit_kernels $@
+build/rv32/digit_weights.h: tools/rv32_digit_model.py programs/rv32/digit_model.json tools/digit_ref.py | build/rv32
+	$(PYTHON) -m tools.rv32_digit_model weights $@
+build/rv32/digit_check.h: tools/rv32_digit_model.py programs/rv32/digit_model.json tools/digit_ref.py $(RV32_MNIST) | build/rv32
+	$(PYTHON) -m tools.rv32_digit_model check $@
+RV32_DIGIT_GENERATED := build/rv32/digit_kernels.h build/rv32/digit_weights.h build/rv32/digit_check.h
+RV32_MNIST := third_party/mnist/t10k-images-idx3-ubyte.gz third_party/mnist/t10k-labels-idx1-ubyte.gz
+build/rv32/digit_model.o: programs/rv32/digit_model.c build/rv32/digit_weights.h $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
+build/rv32/digit_hw.o: programs/rv32/digit_hw.c build/rv32/digit_weights.h build/rv32/digit_kernels.h $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
+build/rv32/digitcheck.o: programs/rv32/digitcheck.c $(RV32_DIGIT_GENERATED) $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
+build/rv32/digitcheck.elf: build/rv32/digitcheck.o build/rv32/digit_model.o build/rv32/digit_hw.o build/rv32/simd4.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(filter %.o,$^)
+check-rv32-digit-image: build/rv32/digitcheck.bin build/rv32/digitcheck.lst
+	$(PYTHON) tools/rv32_image.py build/rv32/digitcheck.elf --listing build/rv32/digitcheck.lst --bin build/rv32/digitcheck.bin --hex build/rv32/digitcheck.hex
+test-rv32-digit: $(RV32_DIGIT_GENERATED)
+	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_digit*.py' -v
+test-rv32-digit-verilator: $(RV32_DIGIT_GENERATED)
+	HOST_CC=$(HOST_CC) N1_SIM=verilator $(PYTHON) -m unittest discover -s tests -p 'test_rv32_digit*.py' -v
 accuracy-rv32-digit:
 	$(PYTHON) -m tools.digit_ref --count 10000
-test-rv32: test-rv32-digit-model accuracy-rv32-digit
+run-rv32-digit-emu: check-rv32-digit-image $(RV32EMU)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_ARGS) --backend emulator --out build/digit/emu
+run-rv32-digit-rtl: check-rv32-digit-image $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_ARGS) --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/digit/icarus
+run-rv32-digit-rtl-verilator: check-rv32-digit-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_ARGS) --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --stall 1 --simd-stall 2 --out build/digit/verilator
+test-rv32: test-rv32-digit accuracy-rv32-digit run-rv32-digit-emu run-rv32-digit-rtl-verilator

@@ -1,12 +1,18 @@
 """N1: dataset provenance, the preprocessing contract, and the integer model oracle."""
 import hashlib
 import json
+import random
 from pathlib import Path
 import struct
 import tempfile
 import unittest
 
+from programs.simd4 import dense4
 from tools import digit_data, digit_ref
+from tools.rv32_digit_kernels import LAYER1_DEPTH, LAYER2_DEPTH, kernels
+from tools.rv32_digit_model import launch_order_weights
+from tools.rv32_digit_native import Model, build
+from tools.simd4_model import execute, signed
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -262,6 +268,215 @@ class ModelTest(unittest.TestCase):
         correct = sum(p == label for p, label in zip(pinned, labels))
         self.assertEqual(correct / len(labels), self.model['metadata']['int_test_accuracy'])
         self.assertGreaterEqual(correct / len(labels), 0.95)
+
+
+class KernelTest(unittest.TestCase):
+    """The dense kernel's shape, its guards, and its arithmetic on the engine."""
+
+    def test_counts_follow_the_documented_formulas(self):
+        for depth in (1, 7, 32, 49):
+            instructions, transfers = dense4.expected_counts(depth)
+            self.assertEqual(instructions, 6 * depth + 10)      # HLT included
+            self.assertEqual(transfers, 8 * depth + 8)
+            self.assertEqual(dense4.base_cycles(depth), 20 * depth + 28)
+            self.assertEqual(len(dense4.program(depth)), dense4.PROGRAM_WORDS)
+
+    def test_guards_refuse_shapes_that_would_not_fit(self):
+        with self.assertRaisesRegex(ValueError, 'data slots'):
+            dense4.program(50)                       # 5*50+8 = 258 slots
+        for bad in (0, -1):
+            with self.assertRaisesRegex(ValueError, 'positive integer'):
+                dense4.program(bad)
+        with self.assertRaisesRegex(ValueError, 'program memory'):
+            dense4.program(8, 241)                   # 241+16 > 256
+        dense4.program(49)                           # the exact ceiling is allowed
+        dense4.program(8, 240)
+
+    def test_the_loop_target_moves_with_the_base(self):
+        """A packed kernel branches to its own body, not the first kernel's."""
+        for base in (0, 16, 100):
+            words = dense4.program(32, base)
+            target = words[dense4.SETUP_WORDS + dense4.BODY_WORDS - 1] & 0xffff
+            self.assertEqual(target, base + dense4.SETUP_WORDS)
+
+    def test_bank_packs_both_kernels_with_distinct_entries(self):
+        image, entries = kernels()
+        self.assertEqual(entries, {'layer1': 0, 'layer2': dense4.PROGRAM_WORDS})
+        self.assertEqual(len(image), 256)
+        self.assertTrue(all(word == 0 for word in image[2 * dense4.PROGRAM_WORDS:]))
+
+    def test_engine_reproduces_the_dot_products_including_sign_extremes(self):
+        for depth, base in ((LAYER1_DEPTH, 0), (LAYER2_DEPTH, dense4.PROGRAM_WORDS)):
+            program = [0] * 256
+            for offset, word in enumerate(dense4.program(depth, base)):
+                program[base + offset] = word
+            rng = random.Random(4096 + depth)
+            for trial in range(60):
+                if trial == 0:
+                    x, weights = [255] * depth, [[127] * depth] * dense4.LANES
+                elif trial == 1:
+                    x, weights = [255] * depth, [[-127 & 0xffff] * depth] * dense4.LANES
+                elif trial == 2:
+                    x, weights = [0] * depth, [[0] * depth] * dense4.LANES
+                else:
+                    x = [rng.randrange(256) for _ in range(depth)]
+                    weights = [[rng.randrange(-127, 128) & 0xffff for _ in range(depth)]
+                               for _ in range(dense4.LANES)]
+                run = execute(program, dense4.memory(x, weights, depth), entry=base)
+                self.assertFalse(run.fault)
+                self.assertEqual(dense4.results(run.memory, depth), dense4.reference(x, weights, depth))
+                instructions, transfers = dense4.expected_counts(depth)
+                self.assertEqual(len(run.retirements), instructions)
+                self.assertEqual(len(run.transfers), transfers)
+
+    def test_a_whole_inference_on_the_engine_matches_the_oracle(self):
+        """Every launch the guest driver makes, run through the interpreter."""
+        model = digit_ref.load_model()
+        image, entries = kernels()
+        first, second = launch_order_weights(model)
+        hidden_count = model['architecture']['hidden']
+        images, _ = digit_data.load_test_set()
+        for index in (0, 1, 7):
+            x = digit_data.prepare(images[index])
+            accumulators = [0] * hidden_count
+            launches = 0
+            for chunk in range(len(x) // LAYER1_DEPTH):
+                piece = list(x[chunk * LAYER1_DEPTH:(chunk + 1) * LAYER1_DEPTH])
+                for group in range(hidden_count // dense4.LANES):
+                    block = first[chunk * (hidden_count // dense4.LANES) + group]
+                    weights = [[value & 0xffff for value in
+                                block[lane * LAYER1_DEPTH:(lane + 1) * LAYER1_DEPTH]]
+                               for lane in range(dense4.LANES)]
+                    run = execute(image, dense4.memory(piece, weights, LAYER1_DEPTH),
+                                  entry=entries['layer1'])
+                    self.assertFalse(run.fault)
+                    for lane, value in enumerate(dense4.results(run.memory, LAYER1_DEPTH)):
+                        neuron = group * dense4.LANES + lane
+                        accumulators[neuron] = (accumulators[neuron] + value) % 2 ** 32
+                    launches += 1
+            shift, cap = model['shift'], model['hidden_max']
+            roundterm = (1 << (shift - 1)) if shift else 0
+            hidden = []
+            for neuron in range(hidden_count):
+                total = signed((accumulators[neuron] + model['b1'][neuron] + roundterm) % 2 ** 32, 32)
+                hidden.append(0 if total < 0 else min(total >> shift, cap))
+            self.assertEqual(hidden, digit_ref.hidden_layer(x, model))
+            logits = []
+            for launch, block in enumerate(second):
+                weights = [[value & 0xffff for value in
+                            block[lane * hidden_count:(lane + 1) * hidden_count]]
+                           for lane in range(dense4.LANES)]
+                run = execute(image, dense4.memory(hidden, weights, LAYER2_DEPTH),
+                              entry=entries['layer2'])
+                self.assertFalse(run.fault)
+                for lane, value in enumerate(dense4.results(run.memory, LAYER2_DEPTH)):
+                    class_index = launch * dense4.LANES + lane
+                    if class_index < model['architecture']['classes']:
+                        logits.append(signed(value, 32) + model['b2'][class_index])
+                launches += 1
+            self.assertEqual(logits, digit_ref.infer(x, model))
+            self.assertEqual(launches, 35)
+
+    def test_launch_order_weights_reindex_the_matrices(self):
+        model = digit_ref.load_model()
+        first, second = launch_order_weights(model)
+        groups = model['architecture']['hidden'] // dense4.LANES
+        self.assertEqual(len(first), 32)
+        self.assertEqual(len(second), 3)
+        for chunk in range(4):
+            for group in range(groups):
+                block = first[chunk * groups + group]
+                for lane in range(dense4.LANES):
+                    row = model['w1'][group * dense4.LANES + lane]
+                    self.assertEqual(block[lane * LAYER1_DEPTH:(lane + 1) * LAYER1_DEPTH],
+                                     row[chunk * LAYER1_DEPTH:(chunk + 1) * LAYER1_DEPTH])
+        # The two padding classes are zero, so their lanes contribute nothing.
+        self.assertEqual(second[2][2 * LAYER2_DEPTH:], [0] * (2 * LAYER2_DEPTH))
+
+
+class NativeModelTest(unittest.TestCase):
+    """The guest C, compiled for the host, against the standard-library oracle."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.builds = {level: Model(build(level)) for level in ('O0', 'O2')}
+        cls.model = digit_ref.load_model()
+        cls.images, cls.labels = digit_data.load_test_set()
+
+    def each(self, check):
+        for level, model in self.builds.items():
+            with self.subTest(level=level):
+                check(model)
+
+    def test_constants_agree_with_the_python_side(self):
+        def check(guest):
+            self.assertEqual(guest.inputs, digit_data.INPUTS)
+            self.assertEqual(guest.pixels, digit_data.PIXELS)
+            self.assertEqual(guest.classes, self.model['architecture']['classes'])
+            self.assertEqual(guest.hidden_size, self.model['architecture']['hidden'])
+            self.assertEqual(guest.library.digit_native_shift(), self.model['shift'])
+            self.assertEqual(guest.library.digit_native_hidden_max(), self.model['hidden_max'])
+        self.each(check)
+
+    def test_preprocessing_is_byte_identical(self):
+        """The 196 inputs themselves, not just the logits they lead to."""
+        canvases = [bytes(digit_data.PIXELS), bytes([255] * digit_data.PIXELS)]
+        for position in ((0, 0), (27, 27), (0, 27), (13, 13), (5, 20)):
+            canvases.append(canvas({position: 255}))
+        canvases.append(canvas({(5, 1): 255, (5, 2): 200, (5, 3): 150, (6, 2): 100}))
+        canvases.append(canvas({(0, 0): 3, (27, 27): 1}))       # ink at both corners
+        canvases += [self.images[index] for index in range(200)]
+
+        def check(guest):
+            for index, image in enumerate(canvases):
+                self.assertEqual(guest.prepare(image), digit_data.prepare(image), index)
+        self.each(check)
+
+    def test_hidden_and_logits_are_exact(self):
+        prepared = [digit_data.prepare(image) for image in self.images[:200]]
+
+        def check(guest):
+            for index, x in enumerate(prepared):
+                self.assertEqual(guest.hidden(x), digit_ref.hidden_layer(x, self.model), index)
+                self.assertEqual(guest.infer(x), digit_ref.infer(x, self.model), index)
+        self.each(check)
+
+    def test_synthetic_and_saturating_inputs_are_exact(self):
+        inputs = [bytes(digit_data.INPUTS), bytes([255] * digit_data.INPUTS),
+                  bytes((255 if i % 2 else 0) for i in range(digit_data.INPUTS))]
+        for weights in self.model['w1']:
+            inputs.append(bytes(255 if value > 0 else 0 for value in weights))
+
+        def check(guest):
+            for x in inputs:
+                self.assertEqual(guest.infer(x), digit_ref.infer(x, self.model))
+                self.assertEqual(guest.hidden(x), digit_ref.hidden_layer(x, self.model))
+        self.each(check)
+
+    def test_argmax_matches_including_signed_overflow_cases(self):
+        """The margin is unsigned because these differences overflow int32."""
+        cases = [[5, 9, 9, 1, 0, 0, 0, 0, 0, 0], [3] * 10, [-10, -4, -7] + [0] * 7,
+                 [0] * 9 + [1], [2147483647] + [-2147483648] * 9,
+                 [-2147483648] * 9 + [2147483647]]
+        rng = random.Random(11)
+        cases += [[rng.randrange(-2 ** 31, 2 ** 31) for _ in range(10)] for _ in range(300)]
+
+        def check(guest):
+            for logits in cases:
+                best, margin = guest.argmax(logits)
+                want_best, want_margin = digit_ref.argmax(logits)
+                self.assertEqual(best, want_best, logits[:4])
+                self.assertEqual(margin, want_margin % 2 ** 32, logits[:4])
+        self.each(check)
+
+    def test_classification_agrees_with_the_pinned_predictions(self):
+        pinned = [int(value) for value in digit_ref.PREDICTIONS.read_text().split()]
+
+        def check(guest):
+            for index in range(200):
+                logits = guest.infer(guest.prepare(self.images[index]))
+                self.assertEqual(guest.argmax(logits)[0], pinned[index], index)
+        self.each(check)
 
 
 if __name__ == '__main__':

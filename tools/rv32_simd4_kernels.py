@@ -1,7 +1,7 @@
 """Reproducible guest kernel header built from the standalone A1 builders."""
 from programs.simd4.vector_add import program as vector
 from programs.simd4.matrix_mac import program as matrix
-from tools.simd4_model import MAC, MACU
+from tools.simd4_model import MAC, MACU, image
 
 
 def kernels():
@@ -11,6 +11,23 @@ def kernels():
         raise ValueError(f"expected four unrolled MAC words in 4x4 kernel, found {mac_count}")
     unsigned = [(w & 0xffffff) | (MACU << 24) if w >> 24 == MAC else w for w in signed]
     return {'vector': vector(), 'matrix': signed, 'unsigned_matrix': unsigned}
+
+
+def corpus_kernels():
+    """The A2 kernels plus the N1 dense kernels, for the replay corpus only.
+
+    These are not emitted into the guest header: `simdcheck.c` does not launch
+    them, and an unused `static const` array there would fail the -Werror build.
+    The corpus exercises them on the C device model and the RTL fixtures for free.
+    """
+    from programs.simd4.dense4 import program as dense4
+    images = dict(kernels())
+    # The corpus launches every image from entry 0, so both are built at base 0.
+    # Packing a kernel at a nonzero base moves its LOOP target, which the N1
+    # tests cover directly with the real two-kernel bank.
+    images['dense4_49'] = image(dense4(49, 0))
+    images['dense4_32'] = image(dense4(32, 0))
+    return images
 
 
 def header():
