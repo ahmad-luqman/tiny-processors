@@ -11,8 +11,12 @@ import ctypes
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools.rv32_digit_model import ensure_headers  # noqa: E402
+
 SOURCES = (ROOT / 'programs/rv32/digit_model.c',)
 GENERATED = ROOT / 'build/rv32'
 HOST_DIR = ROOT / 'build/rv32/host'
@@ -20,6 +24,7 @@ HOST_DIR = ROOT / 'build/rv32/host'
 
 def build(optimization):
     """Compile the model into a shared library at the requested optimization level."""
+    ensure_headers(GENERATED)
     HOST_DIR.mkdir(parents=True, exist_ok=True)
     library = HOST_DIR / f'librv32digit-{optimization}.dylib'
     command = [os.environ.get('HOST_CC', 'cc'), '-shared', '-fPIC', f'-{optimization}',

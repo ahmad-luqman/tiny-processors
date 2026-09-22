@@ -5,6 +5,10 @@
  * selection below are the CPU's job on either path, so a hardware result and a
  * software result can only differ in the dot products themselves.
  *
+ * This header carries only the model's dimensions. The weights are a separate
+ * generated header included by the two .c files that multiply with them, so the
+ * runtime does not drag six kilobytes of constants through every include.
+ *
  * The arithmetic is deliberately written in unsigned types. Accumulators wrap
  * modulo 2^32 exactly as the engine's do, shifts are never applied to a negative
  * value, and the one place a signed result is needed converts explicitly. The
@@ -13,7 +17,7 @@
 #ifndef RV32_DIGIT_MODEL_H
 #define RV32_DIGIT_MODEL_H
 #include <stdint.h>
-#include "digit_weights.h"
+#include "digit_shape.h"
 
 /* Centre the ink by its bounding box, then average each 2x2 block: 784 -> 196.
  * A blank canvas produces 196 zeros. This is the only preprocessing there is;

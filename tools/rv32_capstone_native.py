@@ -11,12 +11,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.rv32_pong_native import Surface, make_surface, run_script  # noqa: E402
 from tools.rv32_devices import parse_input_script  # noqa: E402
+from tools.rv32_digit_model import ensure_headers  # noqa: E402
 
 INPUT = ROOT / "programs/rv32/capstone.input"
 EXPECTED = ROOT / "programs/rv32/capstone.expected"
 
 
 def build(optimization="O2"):
+    # digit_ui.c and digit_model.c are compiled here too, and they include the
+    # generated headers, so a fresh checkout has to produce them first.
+    ensure_headers(ROOT / "build/rv32")
     output = ROOT / f"build/rv32/host/librv32capstone-{optimization}.dylib"
     output.parent.mkdir(parents=True, exist_ok=True)
     sources = [ROOT / f"programs/rv32/{name}.c" for name in ("gpu_demo", "gpu_ref", "runtime", "tetris_game", "pong_game", "gfx", "gfx_text", "digit_ui", "digit_model")]

@@ -9,6 +9,7 @@
 #include "console.h"
 #include "mmio.h"
 #include "board.h"
+#include "digit_weights.h"   /* the launch counts and the layer-2 block this checks */
 #include "digit_check.h"
 #include "digit_kernels.h"
 

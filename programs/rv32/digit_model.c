@@ -1,4 +1,5 @@
 #include "digit_model.h"
+#include "digit_weights.h"
 
 /* Centring runs on the canvas before pooling because a digit drawn with the
  * arrow keys sits wherever the cursor happened to be, while the training images

@@ -1,4 +1,5 @@
 #include "digit_hw.h"
+#include "digit_weights.h"
 #include "simd4.h"
 #include "digit_kernels.h"
 
