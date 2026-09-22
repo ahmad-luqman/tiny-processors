@@ -665,8 +665,8 @@ bench-rv32-gfx: build/rv32/gfxbench.bin build/rv32/gfxbench_cpu.bin $(RV32EMU) $
 waves-rv32-gfx: test-rv32-gfx
 	$(PYTHON) tools/rv32_gfx_waves.py
 .PHONY: test-rv32-gfx-sanitize
-test-rv32-gfx-sanitize: | build
+test-rv32-gfx-sanitize: test-rv32-gfx | build
 	mkdir -p build/gfx
 	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -DG1_NATIVE_MAIN tests/rv32_gpu_native.c tools/rv32_gpu.c programs/rv32/gpu_ref.c programs/rv32/gfx.c -o build/gfx/sanitize
-	build/gfx/sanitize
+	build/gfx/sanitize build/gfx/commands.txt
 test-rv32: test-rv32-gfx-sanitize

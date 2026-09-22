@@ -188,5 +188,5 @@ The diagnostic passes on emulator, Icarus (17,348,537 clocks) and stalled
 Verilator. The menu replay matches all eight checkpoints on the native reference,
 emulator, actual SDL window, and independently stalled Verilator (38,267,966
 clocks, 6,402,860 CPU instructions). Native menu tests run at -O0/-O2; sanitizers
-cover reference anchors and the incremental device. Counts describe this revision
+cover reference anchors plus all 169 device/reference corpus jobs. Counts describe this revision
 and workload, not architectural guarantees.
