@@ -58,8 +58,8 @@ The project's SAP-inspired teaching CPU and its instruction set.
 _Avoid_: Hack computer, RISC-V CPU.
 
 **SIMD4**:
-The project's teaching compute engine, whose lanes execute a shared instruction stream on separate data.
-_Avoid_: complete GPU, graphics renderer, NPU.
+The project's teaching compute engine, whose lanes execute a shared instruction stream on separate data; since A1 each lane also owns a 32-bit accumulator for 16×16 multiply-accumulate. See [the contract](docs/simd4.md).
+_Avoid_: complete GPU, graphics renderer, NPU, a device on the RV32 bus (that is A2).
 
 **Learning milestone**:
 A bounded working artifact with verified behavior, an explanation connecting its source to the hardware or software it represents, and exercises for understanding it.

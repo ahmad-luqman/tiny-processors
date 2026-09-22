@@ -1,6 +1,6 @@
 # One instruction, four data paths
 
-Read the [SIMD4 contract](simd4.md) with [simd4.v](../rtl/simd4/simd4.v) and the [vector kernel](../programs/simd4/vector_add.py). This milestone changes how much data one instruction handles, while keeping a single instruction stream.
+Read the [SIMD4 contract](simd4.md) with [simd4.v](../rtl/simd4/simd4.v), the [vector kernel](../programs/simd4/vector_add.py) and the [matrix kernel](../programs/simd4/matrix_mac.py). This milestone changes how much data one instruction handles, while keeping a single instruction stream. Sections 1 to 6 are the vector-add milestone; sections 7 to 11 add the A1 multiply/accumulate datapath, the matrix kernel and the refreshed synthesis.
 
 ## 1. Duplicate the datapath, share the controller
 
@@ -9,10 +9,10 @@ SAP8 had one accumulator and one instruction stream. SIMD4 has four register ban
 ```mermaid
 flowchart TB
     PC["Shared PC + instruction register"] --> CTRL["Shared decode / state / loop counter"]
-    CTRL --> L0["Lane 0: four 16-bit registers + arithmetic"]
-    CTRL --> L1["Lane 1: four 16-bit registers + arithmetic"]
-    CTRL --> L2["Lane 2: four 16-bit registers + arithmetic"]
-    CTRL --> L3["Lane 3: four 16-bit registers + arithmetic"]
+    CTRL --> L0["Lane 0: four 16-bit registers + arithmetic (+ 32-bit acc since A1)"]
+    CTRL --> L1["Lane 1: four 16-bit registers + arithmetic (+ 32-bit acc since A1)"]
+    CTRL --> L2["Lane 2: four 16-bit registers + arithmetic (+ 32-bit acc since A1)"]
+    CTRL --> L3["Lane 3: four 16-bit registers + arithmetic (+ 32-bit acc since A1)"]
     L0 --> MUX["Select one lane's address and store data"]
     L1 --> MUX
     L2 --> MUX
@@ -35,7 +35,7 @@ The Verilog `generate for` creates repeated hardware during elaboration. It does
 
 | RTL construct | Circuit interpretation |
 | --- | --- |
-| `reg [15:0] r [0:3]` inside each generated lane | Four 16-bit state registers per lane: 256 lane-state bits in the four-lane design |
+| `reg [15:0] r [0:3]` inside each generated lane | Four 16-bit state registers per lane: 256 register bits in the four-lane design, plus 128 accumulator bits since A1 (section 7) |
 | `r[ra]`, `r[rb]` | Muxes select source registers from a bank |
 | `r[rd] <= ...` in a clocked process | Destination decoding enables the selected register at the edge |
 | `r[ra] + r[rb]` / `r[ra] + immediate` | Per-lane addition and selection logic; the low 16 bits are captured |
@@ -78,7 +78,7 @@ The responder controls `mem_ready`. It may hold it low for many clocks. The engi
 
 Memory effects are visible per accepted transfer. If reset occurs after lane 0's store but before lane 1's, lane 0's write remains. Reset suppresses the pending request and clears internal state at the reset edge. It does not undo external effects. The cancellation tests check both partial loads and partial stores, then reload the test inputs and launch again.
 
-## 5. Read the two waveforms
+## 5. Read the two vector waveforms
 
 Run `make waves-simd4`. Open `build/simd4/icarus/vector-wave.vcd` and `stalled-wave.vcd` in Surfer. Verilator emits equivalent files under `build/simd4/verilator/`. Both examples add eight elements with four lanes; only memory readiness changes.
 
@@ -101,7 +101,7 @@ Transfer lines in the `.log` files use the actual accepting edge. Retirement lin
 
 The stalled trace repeats 0, 1, 2, 3 extra waits across successive transfers. The first LOAD accepts at 105, 125, 155, and 195 ns. At 115 ns, lane 1 is waiting: inspect the stable address and register state, and watch `stalls` increment. ADD consequently commits at 335 ns. Both runs produce identical results: the no-wait run uses 54 cycles and 0 stalls; the varying-wait run uses 90 cycles and 36 stalls. Each transfers 24 words and retires 15 instructions.
 
-The generated Icarus and Verilator waveforms agree on 41 inspected signals, including all 16 lane registers: 116 common snapshots after launch for the no-wait run and 188 for the stalled run. All four first-group ADD results were also checked at their capture edge.
+The generated Icarus and Verilator waveforms agree on 41 inspected signals, including all 16 lane registers: 116 common snapshots after launch for the no-wait run and 188 for the stalled run (the vector milestone comparison; the accumulators came later). All four first-group ADD results were also checked at their capture edge.
 
 ## 6. Explain the speedup with measured cycles
 
@@ -123,14 +123,85 @@ cycles = 2 × (3 + 6N/L) + 3N + stalls
 
 For four lanes and 32 elements, that is `2 × 51 + 96 = 198`. Four lanes reduce the number of instructions, while the one-word memory port still handles all 96 transfers. This is why adding compute lanes alone does not produce a fourfold speedup. These are simulated cycle ratios for the same kernel; they do not include changes in physical maximum frequency or area.
 
-## 7. Synthesis and exercises
+## 7. Multiply and accumulate as gates
 
-The verified Yosys 0.69+post four-lane netlist has **3,051 generic primitive cells**, including **501 mapped flip-flop cells** and **610 mux cells**, with **no latches**. The remainder is combinational logic. These counts include debug/retirement state and four 32-bit performance counters. Optimization can merge or simplify source-level storage; a source register declaration is not a final physical cell count. Program/data memories are outside the synthesized core.
+A1 adds one 32-bit accumulator and one multiplier to every lane. The controller, the memory port and the loop counter are untouched: the five new opcodes commit on the same EXECUTE edge as ADD.
 
-The extra area comes from lane register banks, arithmetic, register selection, shared-port selection, and control/measurement logic. There are no caches, warp scheduler, multiply units, graphics functions, or FPGA timing results in this milestone.
+| RTL construct | Circuit interpretation |
+| --- | --- |
+| `reg [31:0] acc` inside each generated lane | One 32-bit state register per lane: 128 more flip-flops in the four-lane design |
+| `{sign_extend & r[ra][15], r[ra]}` | A 17th operand bit that is the sign for MAC and zero for MUL/MACU: an AND gate per operand, not a second multiplier |
+| `multiplicand * multiplier` in a 32-bit signed context | One 17×17 signed multiplier per lane; synthesis expands it to partial-product AND rows and adder trees, and it dominates the roughly 2,500 cells A1 adds per lane |
+| `acc <= acc + product` | A 32-bit adder feeding the accumulator; the carry out of bit 31 is dropped, which is where the wrap comes from |
+| `MUL: r[rd] <= product[15:0]` | The same multiplier's low half; the upper half is left unconnected for MUL |
+| `accumulator_read` (a `for` over 16 output bits) | A barrel shifter: each result bit is a mux over the accumulator bits, with the sign bit for positions above 31 |
+| `accumulator_state` | Wiring for observation and the differential comparison; no additional storage |
+
+Why one multiplier serves signed and unsigned products: the low 16 bits of `a × b` are the same whether the operands are read as signed or unsigned, because the difference between a signed and an unsigned reading of a 16-bit operand is a multiple of 2^16. The upper bits differ, and that is exactly what the 17th bit fixes. `ffff × ffff` is (−1)(−1) = 1 with the sign bits set and 65535² = `fffe0001` with them clear; both readings end in `0001`.
+
+Truncation has no flag. `RDA rd, 0` keeps bits 15:0 of the accumulator, `RDA rd, 16` keeps bits 31:16, and `RDA rd, 31` copies the sign into every bit. Dropped high bits are simply gone. A saturating read-back would need a comparator and a mux per lane; A1 records that as the N1 decision instead of building it.
+
+## 8. A dot product by hand, then past 2^31
+
+Take row 0 of A as (32767, −32768, −1, 1) and column 0 of B as (1, 32767, −32768, −1), the corner operands the model test uses. Four MACs accumulate:
+
+| Step | Product | Accumulator (signed) | Accumulator (hex) |
+| --- | ---: | ---: | --- |
+| `7fff × 0001` | 32,767 | 32,767 | `00007fff` |
+| `8000 × 7fff` | −1,073,709,056 | −1,073,676,289 | `c000ffff` |
+| `ffff × 8000` | 32,768 | −1,073,643,521 | `c0017fff` |
+| `0001 × ffff` | −1 | −1,073,643,522 | `c0017ffe` |
+
+`RDA rd, 0` stores `7ffe`, `RDA rd, 16` stores `c001`. Neither is the dot product; both are windows onto it. A 16-bit result register cannot hold a 32-bit sum, so the kernel's `shift` argument chooses which window C receives, and the caller has to know the scale of the data.
+
+Overflow is one more MAC away. Three `7fff × 7fff` products are 3 × 1,073,676,289 = 3,221,028,867, which is larger than 2^31 − 1. The accumulator holds `bffd0003`, and read as signed that is −1,073,938,429: a positive dot product has become negative without any indication. The same three products through MACU give the same bits, because `7fff` is non-negative either way. Three MACU of `ffff × ffff` (3 × 4,294,836,225 = 12,884,508,675) exceed 2^32 and wrap to `fffa0003`; the same three through MAC are 3 × 1 = `00000003`. `make waves-simd4` records all of these in `overflow-wave.vcd`.
+
+## 9. The matrix kernel: fewer instructions, the same transfers
+
+The [matrix kernel](../programs/simd4/matrix_mac.py) computes `C = (A × B) >>> shift` for square N×N matrices. Lane j of column group g owns column `c = g × LANES + j`. For every row i it clears the accumulator, loads A[i][k] and B[k][c] for each k, accumulates, reads the window back and stores C[i][c]. The k loop is unrolled and each column group is a separate straight-line region with its own SETLOOP over rows: a single shared loop counter cannot nest, so the builder spends program words instead of controller state (8×8 needs two or four lanes to fit in 256 words).
+
+For N×N on L lanes the kernel retires `(N/L) × (4 + N(3N + 6)) + 1` instructions and performs `N²(2N + 1)` transfers; for N=4:
+
+| Extra wait edges per transfer | 1 lane | 2 lanes | 4 lanes | 1-lane / 4-lane speedup |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 754 cycles | 450 cycles | 298 cycles | 2.53× |
+| 1 | 898 cycles | 594 cycles | 442 cycles | 2.03× |
+| 3 | 1,186 cycles | 882 cycles | 730 cycles | 1.62× |
+
+Instructions fall from 305 to 153 to 77, but every lane count transfers **144 words** through the single port. The A operand is the reason: A[i][k] is the same word for every lane, yet each lane issues its own LOAD, so four lanes read it four times through the serialized port. Of the 144 four-lane transfers, 48 are copies of a word another lane just loaded. The vector kernel had no shared operand and showed the same effect for a different reason: the port's transfer count does not shrink with lanes. This is the "effect of serialized memory" the roadmap asks A1 to show. A broadcast load (one transfer that fills every lane) would remove the duplicates and is left as an exercise, not built.
+
+## 10. Read the matrix and overflow waveforms
+
+`make waves-simd4` adds `matrix-wave.vcd` (4×4 on four lanes, no waits) and `overflow-wave.vcd` (the extreme-product image on four lanes). Add the section 5 signals plus each lane's `acc` and the `accumulator_state` bus. Icarus and Verilator produce identical retirement and transfer lines for both runs (221 and 352 lines: 77 + 144 and 212 + 140).
+
+| Matrix trace | Observation |
+| --- | --- |
+| 165, 175, 185, 195 ns | The first LOAD accepts A[0][0] = `0008` for lanes 0 to 3 from the **same address** `00`: four transfers, one word |
+| 225 to 255 ns | The second LOAD fetches B[0][0..3] from `40`, `41`, `42`, `43`: `0006`, `0001`, `0009`, `fffd` |
+| 276 ns | The first MAC captures 8×6, 8×1, 8×9 and 8×(−3): `00000030`, `00000008`, `00000048`, `ffffffe8` in one edge |
+| 696 ns | The fourth MAC finishes row 0: `0000002d`, `0000001a`, `0000005a`, `ffffffd0` |
+| 716 ns | RDA copies the low halves into r2 while the accumulators keep their 32 bits |
+| 765 to 795 ns | The four C[0][c] stores land at `80` to `83`, lane order again |
+| 885 to 915 ns | Row 1 begins by loading A[1][0] = `fffa` four times |
+
+| Overflow trace | Observation |
+| --- | --- |
+| 2376 ns | CLRA zeroes all four accumulators |
+| 2396, 2416, 2436 ns | Three MACs of `7fff × 7fff`: `3fff0001`, `7ffe0002`, `bffd0003`; the third crosses 2^31 and bit 31 rises |
+| 2456, 2476 ns | `RDA r0, 0` stores `0003`, `RDA r1, 16` stores `bffd`: two windows, no flag |
+| 2716 to 2756 ns | The same three products through MACU give the same bits, since `7fff` has no sign |
+
+## 11. Synthesis and exercises
+
+The verified Yosys 0.69+post four-lane netlist has **13,038 generic primitive cells**, including **629 mapped flip-flop cells** and **1,097 mux cells**, with **no latches** (3,051, 501 and 610 before A1). The remainder is combinational logic, most of it the four multipliers and accumulator adders. These counts include debug/retirement state and four 32-bit performance counters. Optimization can merge or simplify source-level storage; a source register declaration is not a final physical cell count. Program/data memories are outside the synthesized core.
+
+The extra area comes from lane register banks, arithmetic, register selection, shared-port selection, and control/measurement logic. There are no caches, warp scheduler, graphics functions, or FPGA timing results in this milestone.
 
 1. Predict cycles for 16 elements on two lanes with one wait per transfer. Generate the kernel with `program(lanes=2, length=16)` and compare your calculation with the runner.
 2. In the waveform, find ADD's single capture edge and STORE's four accepting edges. Explain why the registers update together but the memory words do not.
 3. Change one input pair to `ffff` and `0002`. Predict the 16-bit result, then check the direct Python calculation and RTL agree.
 4. Sketch what a four-word memory port would need to accept all four lane addresses together. Consider what happens if two lanes target the same address before proposing a speedup.
-5. Specify the result width and truncation rule for a future multiply operation before adding it. A small matrix kernel is the next compute extension.
+5. Work row 1 of the model test's A (`7fff, 8000, ffff, 0001`) against column 1 of its rotated B (the same four words) by hand: 32767² + 32768² + 1 + 1 = `7fff0003`; one more `7fff × 7fff` would cross 2^31. Predict both RDA windows (`0003`, `7fff`), then check them with `matrix_reference(a, b, 4, shift)[5]` on the test's A and B. Then do C[0][0] of the runner's corner matrices, where four `7fff × 7fff` products give `fffc0004`.
+6. Predict the matrix cycle count for 8×8 on two lanes at zero waits from the formulas in section 9, then compare with `matrix-8-lanes-2-wait-3-shift-0` in the results JSON after subtracting its stalls.
+7. Specify a broadcast load, `LOADB rd, ra, offset`, that performs one transfer and writes every lane. Count the transfers it saves for 4×4 on four lanes, then decide what the port should do if lanes disagree about `ra`.
+8. Add a saturating read-back on paper: which comparator, which mux, and which accumulator bits decide the clamp? Keep it for N1.

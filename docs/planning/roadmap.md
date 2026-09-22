@@ -80,7 +80,7 @@ Each row is a bounded milestone, potentially split into several verified commits
 | M7 — completed 2026-09-21 ([record](../rv32-runtime.md)) | Boot menu, reusable runtime services, and Tetris. Test rotations/collisions, line clearing, scoring, game over/restart, and repeatable random seeds. A documented command builds and launches the capstone; both games work from the menu. Preserve a short RTL acceptance replay. | Trace reset-to-menu-to-game. Explain which services qualify as our first OS/runtime and which OS features remain absent. | 2–4 |
 | F1 — completed 2026-09-21 ([record](../fp32.md)) | Standalone FP32 arithmetic unit, built in increments: add/subtract, multiply, fused multiply-add, divide/square root, and conversion/comparison support needed by F. Compare exact result bits and exception flags with an independent reference across rounding modes, ordinary/edge values, and seeded vectors. Check handshake/reset behavior, lint, synthesis, and short waves. | Trace exponent alignment, significand arithmetic, normalization, and rounding; explain why fused multiply-add has one final rounding. | 5–10 |
 | F2 — completed 2026-09-22 ([record](../rv32-f.md)) | Integrate the complete F instruction/state contract into CPU and emulator: floating registers, loads/stores, arithmetic, moves/classification/sign operations, comparisons/conversions, and floating-point CSRs with required Zicsr support. Compare retirement effects and run compiled C float programs. Publish instruction/rounding/exception coverage and preserve integer-only firmware regressions. | Follow C float operands through ABI, registers, FPU request/completion, result writeback, and accrued flags. | 2–4 |
-| A1 — M7 | Resume parallel arithmetic: defined multiply/accumulate widths and a small matrix kernel, building on SIMD4 where appropriate. Compare extreme and ordinary cases against a software model; report transfers, cycles, and stalls. | Work one dot product by hand; predict overflow and the effect of serialized memory. | 2–4 |
+| A1 — completed 2026-09-22 ([record](../simd4.md#a1-acceptance-record-2026-09-22), [walkthrough](../simd4-to-gates.md)) | Resume parallel arithmetic: defined multiply/accumulate widths and a small matrix kernel, building on SIMD4 where appropriate. Compare extreme and ordinary cases against a software model; report transfers, cycles, and stalls. | Work one dot product by hand; predict overflow and the effect of serialized memory. | 2–4 |
 | A2 — A1/M5 | CPU-commanded accelerator integration with shared buffers, driver, completion polling, and error/reset semantics. CPU launches and checks matrix work; stalled-memory and interrupted-transfer tests pass. | Trace descriptor/register writes through bus decode to accelerator state. Explain ownership and exactly-once memory effects. | 2–4 |
 | G1 — A2 | 2D accelerator: bounded fill/blit operations followed by lines/triangles as needed. Software reference and RTL agree on clipped/edge cases and framebuffer contents. Guest demo compares CPU drawing and acceleration. | Explain pixel address generation, clipping, datapath reuse, and when memory bandwidth limits speedup. | 2–4 |
 | N1 — A2 | Choose a small pretrained digit model and numeric contract. Software inference first, then accelerator kernels and driver. Match integer reference outputs, report dataset accuracy and effects of quantization, and infer a guest-drawn digit in the native UI. | Trace one input through multiply/accumulate, bias, activation, scaling, and output selection. Separate numerical correctness from model accuracy. | 3–6 |
@@ -103,21 +103,28 @@ F2 selected and verified `-march=rv32if_zicsr -mabi=ilp32`, preserving the integ
 
 GPU FP32/other formats and NPU integer/other formats remain independent choices. The CPU FPU may help with reference computations or scene setup, but does not automatically create floating-point GPU lanes or change the digit model's quantization contract.
 
-## Next implementation session: A1
+## Next implementation session: A2
 
-F2 completed on 2026-09-22. The [F2 record](../rv32-f.md) fixes the complete
-RV32F/Zicsr state and retirement contract, ILP32 builds, exact CPU differential
-checks, reset cancellation, compiled C execution and software/hardware cycle
-comparison. Integer firmware and the first-computer capstone remain preserved.
+A1 completed on 2026-09-22. The [A1 record](../simd4.md#a1-acceptance-record-2026-09-22)
+fixes SIMD4's multiply/accumulate contract (16×16→32 signed/unsigned products,
+a per-lane 32-bit wrapping accumulator, truncating read-back, opcodes `0e`–`ff`
+fault), verifies it against hand-computed extremes on both simulators, and
+measures a 4×4 matrix kernel whose 144 transfers do not fall with lane count.
+The vector-add kernel, its measurements and every lab command are preserved.
 
 1. Inspect Git status, preserve commands, start a branch, and end with one PR.
-2. Define multiply/accumulate widths, signedness, overflow behavior and a bounded
-   matrix kernel before extending SIMD4; preserve its existing vector-add mode.
-3. Implement and verify extreme/ordinary products and accumulation against a
-   software model. Report data transfers, execution cycles and memory stalls.
-4. Run both simulators, lint and latch-free synthesis; publish short waves,
-   gate/storage costs, a worked dot product and overflow exercises.
-5. Keep CPU-commanded device integration and shared-buffer ownership for A2.
+2. Define the device contract before RTL: launch/status/fault registers, where
+   the engine's program and data words live (a window of RV32 RAM or private
+   memories loaded through the bus), CPU/device buffer ownership while busy,
+   and exactly-once memory effects under stalls and reset.
+3. Attach the engine behind `rtl/rv32/rv32_bus.v` and the emulator's region
+   table with the same fault edges; keep the standalone SIMD4 harness passing.
+4. Write the guest driver (load kernel and operands, launch, poll, read C) and
+   a firmware image that runs the vector and matrix kernels and checks them
+   against CPU arithmetic; compare emulator and RTL at the results level.
+5. Test stalled memory, reset during a transfer, a fault mid-kernel, and a
+   relaunch; report device cycles separately from CPU instructions.
+6. Keep 2D drawing (G1) and the digit model (N1) out of A2.
 
 ## Verification and learning discipline
 
@@ -141,7 +148,7 @@ Complete milestones autonomously, then explain what changed, why it works, how i
 | Exact Tetris rules and controls | Decided in M7: [runtime contract](../rv32-runtime.md) | 10×20, seven-bag seed 1, clockwise rotations without kicks, 30-frame gravity, soft/hard drop, pause/restart, menu return |
 | FPU microarchitecture and independent reference | Decided in F1 ([record](../fp32.md)) | Multicycle hardware with exact 576-bit accumulation, iterative divide/square root, shared rounding; pinned SoftFloat RISCV oracle, exact bits/flags |
 | Floating-point compiler flags, ABI, and CSR contract | F2, before linking float firmware | Explicit compatible objects/libraries; retain integer firmware regression |
-| Matrix/NPU precision, saturation, rounding, accumulator width | A1/N1 before arithmetic RTL | Integer arithmetic with explicit bounds and independently checked conversion |
+| Matrix/NPU precision, saturation, rounding, accumulator width | Widths decided in A1 ([record](../simd4.md#a1-acceptance-record-2026-09-22)): 16×16→32 products, 32-bit wrapping accumulator, truncating shifted read-back; saturation and rounding decided in N1 | Integer arithmetic with explicit bounds and independently checked conversion |
 | Pretrained model/dataset, weight license, accuracy target | N1 before implementing kernels | Small classifier whose operations fit the planned engine; lock a test set and accuracy target before acceptance testing |
 | GPU programmable stage/ISA, clipping and depth rules | G2 after software rendering reference | Limited stage with a visible effect; precision selected by image comparisons |
 | Interrupts, DMA, concurrent accelerators, caching | A2 onward, only when polling/ownership or bandwidth limits justify complexity | Polling, simple transfers, no caches/coherence initially |
