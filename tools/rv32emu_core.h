@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "rv32_simd4.h"
+#include "rv32_gpu.h"
 
 /* Machine contract constants; keep in step with programs/rv32/board.h. */
 #define RAM_BASE 0x80000000u
@@ -63,6 +64,7 @@ typedef struct {
 
 typedef struct {
     simd_device simd;
+    gpu_device gpu;
     uint32_t x[32], f[32];
     uint8_t fcsr;
     uint32_t pc;
