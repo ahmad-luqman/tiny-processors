@@ -226,6 +226,7 @@ def run_shader(program, consts, inputs, vcount, limit):
         _batches(program, consts, inputs, vcount, limit, outputs, state)
     except Fault as fault:
         fault.instructions = state['executed']
+        fault.outputs = outputs
         raise
     return outputs, state['executed']
 
@@ -383,41 +384,68 @@ def triangle_setup(v0, v1, v2):
     return v0, v1, v2, area, grads
 
 
-def render(program, consts, inputs, vcount, triangles, limit=4096, fb=None, zbuf=None):
+DIVIDE_TICKS = 32
+
+
+def valid_zbase(zbase):
+    return zbase % 4 == 0 and RAM_BASE <= zbase and zbase - RAM_BASE + Z_BYTES <= RAM_SIZE
+
+
+def render(program, consts, inputs, vcount, triangles, limit=4096, fb=None, zbuf=None, zbase=0x80040000):
     """The whole START job. `triangles` is a list of (i0, i1, i2).
 
-    Returns a dict with fb (bytearray 76800), zbuf (list of 16-bit), counters,
-    and 'fault' (None or Fault). On a fault fb/zbuf are untouched: every
-    documented fault precedes the first memory transfer.
+    Returns a dict with fb (bytearray 76800), zbuf (list of 16-bit), the
+    device counters, and 'fault' (None or Fault). On a fault fb/zbuf are
+    untouched: every documented fault precedes the first memory transfer.
+
+    'cycles' is the device's busy-tick count with no memory stalls, following
+    the tick schedule in docs/rv32-3d.md "Time": the emulator and the RTL
+    must reproduce it (plus STALLS on the RTL).
     """
     fb = bytearray(WIDTH * HEIGHT) if fb is None else bytearray(fb)
     zbuf = [Z_MAX] * (WIDTH * HEIGHT) if zbuf is None else list(zbuf)
-    result = dict(fb=fb, zbuf=zbuf, fault=None, instructions=0, divides=0,
-                  pixels=0, zfail=0, culled=0, transfers=0)
-    if not (1 <= vcount <= VMAX and 0 <= len(triangles) <= TMAX and 1 <= limit <= 0xffff):
-        result['fault'] = Fault(E_PARAM)
-        return result
-    if any(i >= vcount for tri in triangles for i in tri):
-        result['fault'] = Fault(E_INDEX)
-        return result
+    r = dict(fb=fb, zbuf=zbuf, fault=None, instructions=0, divides=0, pixels=0, zfail=0, culled=0,
+             transfers=0, cycles=1)                          # the validate tick
+    if not (1 <= vcount <= VMAX and 0 <= len(triangles) <= TMAX and 1 <= limit <= 0xffff and valid_zbase(zbase)):
+        r['fault'] = Fault(E_PARAM)
+        return r
+    for t, tri in enumerate(triangles):
+        r['cycles'] += 1                                     # one index tick per triangle
+        if any(i >= vcount for i in tri):
+            r['fault'] = Fault(E_INDEX)
+            return r
+    batches = (vcount + LANES - 1) // LANES
     try:
-        outputs, result['instructions'] = run_shader(program, consts, inputs, vcount, limit)
+        outputs, r['instructions'] = run_shader(program, consts, inputs, vcount, limit)
+        done = batches
     except Fault as fault:
-        result['fault'] = fault
-        result['instructions'] = fault.instructions
-        return result
+        r['fault'] = fault
+        r['instructions'] = fault.instructions
+        outputs, done = fault.outputs, fault.batch
+        # Batches before the faulting one were shaded and projected; the faulting
+        # batch spent its setup tick, and a refused fetch spends one more tick.
+        r['cycles'] += 1 + (fault.reason in (E_LIMIT, E_PC, E_ILLEGAL))
     verts = []
-    for out in outputs:
-        v = project(out)
-        result['divides'] += 3 if v else 0
-        verts.append(v)
+    for v in range(min(vcount, done * LANES)):
+        verts.append(project(outputs[v]))
+        r['divides'] += 3 if verts[-1] else 0
+    r['cycles'] += done + r['instructions'] + len(verts)     # batch setup, instructions, vertex checks
+    if r['fault']:
+        r['cycles'] += DIVIDE_TICKS * r['divides']
+        return r
+    scanned = 0
     for tri in triangles:
+        r['cycles'] += 1                                     # fetch
         vs = [verts[i] for i in tri]
-        setup = None if None in vs else triangle_setup(*vs)
-        if setup is None:
-            result['culled'] += 1
+        if None in vs:
+            r['culled'] += 1
             continue
-        result['divides'] += 8
+        r['cycles'] += 1                                     # area and scan box
+        setup = triangle_setup(*vs)
+        if setup is None:
+            r['culled'] += 1
+            continue
+        r['divides'] += 8
         v0, v1, v2, _, grads = setup
         left = max(0, min(v[0] for v in (v0, v1, v2)) // SUB)
         right = min(WIDTH - 1, max(v[0] for v in (v0, v1, v2)) // SUB)
@@ -426,6 +454,7 @@ def render(program, consts, inputs, vcount, triangles, limit=4096, fb=None, zbuf
         for y in range(top, bottom + 1):
             py = y * SUB + SUB // 2
             for x in range(left, right + 1):
+                scanned += 1
                 px = x * SUB + SUB // 2
                 if not (covers(v0, v1, px, py) and covers(v1, v2, px, py) and covers(v2, v0, px, py)):
                     continue
@@ -434,15 +463,21 @@ def render(program, consts, inputs, vcount, triangles, limit=4096, fb=None, zbuf
                     value = v0[k] + ((gx * (px - v0[0]) + gy * (py - v0[1])) >> 16)
                     attrs.append(max(0, min(hi, value)))
                 i = y * WIDTH + x
-                result['transfers'] += 1
+                r['transfers'] += 1
                 if attrs[0] < zbuf[i]:
                     zbuf[i] = attrs[0]
                     fb[i] = dither(x, y, *attrs[1:])
-                    result['pixels'] += 1
-                    result['transfers'] += 2
+                    r['pixels'] += 1
+                    r['transfers'] += 2
                 else:
-                    result['zfail'] += 1
-    return result
+                    r['zfail'] += 1
+    r['cycles'] += DIVIDE_TICKS * r['divides'] + scanned + r['transfers'] + 1   # finish tick
+    return r
+
+
+def clear_cycles():
+    """CLEAR_Z: validate, one word write per tick, finish."""
+    return 1 + Z_BYTES // 4 + 1
 
 
 # ------------------------------------------------- float reference

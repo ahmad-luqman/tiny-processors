@@ -70,13 +70,43 @@ struct g3d_job {
     const uint32_t *triangles;               /* tcount words */
     uint32_t vcount, tcount, limit;
 };
+/* `cycles` is the device's busy-tick count with no memory stalls, from the
+ * tick schedule in docs/rv32-3d.md "Time". */
 struct g3d_counts {
-    uint32_t error, fault_pc, instructions, transfers, divides, pixels, zfail, culled;
+    uint32_t error, fault_pc, instructions, transfers, divides, pixels, zfail, culled, cycles;
 };
+#define G3D_DIVIDE_TICKS 32u
+#define G3D_CLEAR_CYCLES (1u+320u*240u*2u/4u+1u)
 /* Software reference over a caller-owned 320x240 framebuffer and Z buffer.
  * Returns the ERROR value (0 on success); every fault precedes the first
  * framebuffer or Z access, so a fault leaves both untouched. */
 uint32_t g3d_reference(uint8_t *fb, uint16_t *zbuf, const struct g3d_job *job, struct g3d_counts *counts);
 /* The fixed-function divider: truncating n/d for d > 0, saturated to int32. */
 int32_t g3d_div_sat(int64_t n, int32_t d);
+
+/* Driver (programs/rv32/g3d.c), shaped like G1's. Every call that writes the
+ * device refuses without mutation while it is BUSY, because those writes would
+ * fault. `g3d_wait` returns the final status (IDLE, DONE or FAULT) or the
+ * driver-only G3D_TIMEOUT; its budget counts status polls, not device ticks.
+ * Every wait ends with a snapshot in g3d_last_result(), taken before a timeout's
+ * RESET, so the counters of a lost job survive. The snapshot reads registers
+ * one at a time and is atomic only once the device has stopped. */
+#define G3D_TIMEOUT 8u
+struct g3d_result {
+    uint32_t status, error, fault_pc, cycles, stalls, instructions, transfers, divides, pixels, zfail, culled;
+};
+/* Copy `count` words into a window (G3D_CONST, G3D_PROGRAM, G3D_VERTEX or
+ * G3D_TRIANGLE plus a word offset); 0 while BUSY. */
+int g3d_load(uint32_t offset, const uint32_t *words, uint32_t count);
+int g3d_submit(uint32_t command, uint32_t vcount, uint32_t tcount, uint32_t zbase, uint32_t limit);
+uint32_t g3d_wait(uint32_t budget);
+const struct g3d_result *g3d_last_result(void);
+/* Submit, wait, and print the snapshot on anything but DONE. */
+int g3d_run(uint32_t command, uint32_t vcount, uint32_t tcount, uint32_t zbase, uint32_t limit, uint32_t budget);
+/* Legal while BUSY; clears parameters, outcome and counters, keeps the windows
+ * and every memory write already accepted. */
+void g3d_reset(void);
+/* The display checkpoint hash (docs/rv32.md "Display") over `count` words:
+ * h = ((h << 5) + h) ^ word from 5381. It needs no multiply. */
+uint32_t g3d_hash(const volatile uint32_t *words, uint32_t count, uint32_t h);
 #endif

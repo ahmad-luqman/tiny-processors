@@ -30,7 +30,7 @@ class Job(C.Structure):
 
 
 class Counts(C.Structure):
-    _fields_ = [(n, U32) for n in 'error fault_pc instructions transfers divides pixels zfail culled'.split()]
+    _fields_ = [(n, U32) for n in 'error fault_pc instructions transfers divides pixels zfail culled cycles'.split()]
 
 
 def build_reference(extra=()):
@@ -85,7 +85,7 @@ class Reference(unittest.TestCase):
         self.assertEqual(c.error, fault.reason if fault else 0)
         if fault and fault.reason not in (M.E_PARAM, M.E_INDEX):
             self.assertEqual(c.fault_pc, fault.pc | fault.batch << 8)
-        for name in ('instructions', 'transfers', 'divides', 'pixels', 'zfail', 'culled'):
+        for name in ('instructions', 'transfers', 'divides', 'pixels', 'zfail', 'culled', 'cycles'):
             self.assertEqual(getattr(c, name), py[name], name)
         self.assertEqual(fb, bytes(py['fb']))
         self.assertEqual(zbuf, py['zbuf'])
@@ -111,6 +111,15 @@ class Contract(Reference):
         errors = re.search(r'enum \{ (G3D_E_NONE.*?) \};', text, re.S)[1]
         self.assertEqual([n.strip() for n in errors.split(',')],
                          ['G3D_E_' + n for n in 'NONE PARAM INTERNAL ILLEGAL OVERFLOW MISMATCH LIMIT PC INDEX'.split()])
+
+    def test_register_constants_agree_across_languages(self):
+        from tools import rv32_asm as asm
+        names = [n for n in dir(asm) if n.startswith('G3D_')]
+        self.assertEqual(len(names), 29)
+        for name in names:
+            self.assertEqual(getattr(asm, name), getattr(M, name), name)
+        emulator = (ROOT / 'tools/rv32emu_core.c').read_text()
+        self.assertIn('{"g3d", G3D_BASE, G3D_SIZE, g3d_mmio_load, g3d_mmio_store}', emulator)
 
     def test_divider_matches_truncating_saturating_division(self):
         rng = random.Random(3)

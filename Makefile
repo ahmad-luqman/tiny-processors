@@ -48,6 +48,10 @@ RV32_DIGIT_KERNEL_DEPS := tools/rv32_digit_kernels.py programs/simd4/dense4.py t
 RV32_DIGIT_MODEL_DEPS := tools/rv32_digit_model.py tools/digit_ref.py tools/digit_data.py \
                          programs/rv32/digit_model.json $(RV32_DIGIT_KERNEL_DEPS)
 RV32_DIGIT_GENERATED := build/rv32/digit_kernels.h build/rv32/digit_shape.h build/rv32/digit_weights.h build/rv32/digit_weights.c build/rv32/digit_check.h
+# G2's headers come from the Python oracle, so they depend on every module the
+# generator imports: a change to the model or the shaders must regenerate them.
+RV32_G3D_DEPS := tools/rv32_g3d_header.py tools/rv32_g3d_model.py tools/rv32_g3d_scene.py
+RV32_G3D_GENERATED := build/rv32/g3d_shaders.h build/rv32/g3d_scenes.h
 
 RV32_IMAGES := selfcheck diag pong capstone
 RV32_IMAGE_FILES := $(foreach image,$(RV32_IMAGES),$(foreach ext,elf lst bin readelf,build/rv32/$(image).$(ext)))
@@ -77,7 +81,7 @@ FP32_RANDOM ?= 100
 RV32_FP_OBJ := build/fp32/rv32_fp.o $(SOFTFLOAT_OBJ)
 RV32EMU := build/rv32/rv32emu
 RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
-RV32EMU_CORE := tools/rv32_gpu.c tools/rv32_gpu.h programs/rv32/gpu.h  tools/rv32emu_core.c tools/rv32emu_core.h tools/rv32_fp.h tools/rv32_simd4.c tools/rv32_simd4.h
+RV32EMU_CORE := tools/rv32_gpu.c tools/rv32_gpu.h programs/rv32/gpu.h tools/rv32_g3d.c tools/rv32_g3d.h programs/rv32/g3d.h  tools/rv32emu_core.c tools/rv32emu_core.h tools/rv32_fp.h tools/rv32_simd4.c tools/rv32_simd4.h
 RV32WIN := build/rv32/rv32win
 # Recursive `=`: pkg-config runs only where the window is built, so a machine without SDL3 still runs every test.
 SDL3_CFLAGS = $(shell pkg-config --cflags sdl3 2>/dev/null)
@@ -288,7 +292,7 @@ test-rv32-rt:
 	$(PYTHON) -m unittest discover -s tests -p 'test_rv32_rt.py' -v
 
 $(RV32EMU): tools/rv32emu.c $(RV32EMU_CORE) $(RV32_FP_OBJ) | build/rv32
-	$(HOST_CC) $(RV32EMU_CFLAGS) -o $@ tools/rv32emu.c tools/rv32emu_core.c tools/rv32_simd4.c tools/rv32_gpu.c $(RV32_FP_OBJ)
+	$(HOST_CC) $(RV32EMU_CFLAGS) -o $@ tools/rv32emu.c tools/rv32emu_core.c tools/rv32_simd4.c tools/rv32_gpu.c tools/rv32_g3d.c $(RV32_FP_OBJ)
 
 build-rv32-emu: toolchain-rv32-emu $(RV32EMU)
 
@@ -300,7 +304,7 @@ toolchain-rv32-win: toolchain-rv32-emu
 # The toolchain check is a prerequisite of the binary, so every target that needs the window says
 # what to install rather than failing on a missing header.
 $(RV32WIN): tools/rv32win.c $(RV32EMU_CORE) $(RV32_FP_OBJ) | build/rv32 toolchain-rv32-win
-	$(HOST_CC) $(RV32EMU_CFLAGS) $(SDL3_CFLAGS) -o $@ tools/rv32win.c tools/rv32emu_core.c tools/rv32_simd4.c tools/rv32_gpu.c $(RV32_FP_OBJ) $(SDL3_LIBS)
+	$(HOST_CC) $(RV32EMU_CFLAGS) $(SDL3_CFLAGS) -o $@ tools/rv32win.c tools/rv32emu_core.c tools/rv32_simd4.c tools/rv32_gpu.c tools/rv32_g3d.c $(RV32_FP_OBJ) $(SDL3_LIBS)
 
 build-rv32-win: toolchain-rv32-win $(RV32WIN)
 
@@ -798,9 +802,29 @@ waves-rv32-digit: build/rv32/digitbench_hw_1.bin $(RV32EMU) $(RV32_TB_VVP)
 	  --expect-last-line "bench 00000ecf" --emulator $(RV32EMU) --timeout 900 \
 	  --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VVP) --mode waves --out build/digit/waves
 
-# G2: programmable 3D. The Python oracle and the guest C reference are compared
-# bit for bit; the emulator device and the RTL join the comparison later.
-.PHONY: test-rv32-3d
-test-rv32-3d: | build
+# G2: programmable 3D. The Python oracle, the guest C reference, the emulator
+# device and the RTL are compared bit for bit; g3dcheck checks the device from
+# the guest against counters and image hashes the oracle generated.
+.PHONY: test-rv32-3d check-rv32-3d-image run-rv32-3d-emu
+RV32_G3D_ARGS = --image build/rv32/g3dcheck.bin --compare results --expect-last-line "PASS G2" --emulator $(RV32EMU) --timeout 900
+# One generator run writes both headers; each rule reruns it so either can be rebuilt alone.
+$(RV32_G3D_GENERATED): $(RV32_G3D_DEPS) | build/rv32
+	$(PYTHON) tools/rv32_g3d_header.py --out build/rv32
+build/rv32/g3dcheck.o: programs/rv32/g3dcheck.c $(RV32_G3D_GENERATED) $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
+build/rv32/g3dcheck.elf: build/rv32/g3dcheck.o build/rv32/g3d.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(filter %.o,$^)
+check-rv32-3d-image: build/rv32/g3dcheck.bin build/rv32/g3dcheck.lst
+	$(PYTHON) tools/rv32_image.py build/rv32/g3dcheck.elf --listing build/rv32/g3dcheck.lst --bin build/rv32/g3dcheck.bin --hex build/rv32/g3dcheck.hex
+test-rv32-3d: $(RV32EMU) | build
 	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_3d*.py' -v
-test-rv32: test-rv32-3d
+run-rv32-3d-emu: check-rv32-3d-image $(RV32EMU)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_G3D_ARGS) --backend emulator --out build/g3d/emu
+test-rv32: test-rv32-3d run-rv32-3d-emu
+.PHONY: test-rv32-3d-sanitize
+test-rv32-3d-sanitize: $(RV32_G3D_DEPS) tools/rv32_g3d_corpus.py | build
+	mkdir -p build/g3d
+	$(PYTHON) tools/rv32_g3d_corpus.py > build/g3d/corpus.txt
+	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -DG3D_NATIVE_MAIN -Iprograms/rv32 tests/rv32_g3d_native.c tools/rv32_g3d.c programs/rv32/g3d_ref.c -o build/g3d/sanitize
+	build/g3d/sanitize build/g3d/corpus.txt
+test-rv32: test-rv32-3d-sanitize

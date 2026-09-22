@@ -165,6 +165,7 @@ static void draw(uint8_t *fb, uint16_t *zbuf, const struct vert *p0, const struc
                  const struct vert *p2, struct g3d_counts *c)
 {
     const int32_t *v0=p0->a, *v1=p1->a, *v2=p2->a;
+    c->cycles++;   /* area and scan box */
     int32_t area=(v1[0]-v0[0])*(v2[1]-v0[1])-(v1[1]-v0[1])*(v2[0]-v0[0]);
     if (area>=0) { c->culled++; return; }
     { const int32_t *t=v1; v1=v2; v2=t; area=-area; }
@@ -193,6 +194,7 @@ static void draw(uint8_t *fb, uint16_t *zbuf, const struct vert *p0, const struc
     if (bottom>HEIGHT-1) bottom=HEIGHT-1;
     for (int32_t y=top;y<=bottom;y++) for (int32_t x=left;x<=right;x++) {
         int32_t px=x*G3D_SUB+G3D_SUB/2, py=y*G3D_SUB+G3D_SUB/2;
+        c->cycles++;   /* one test tick per scanned pixel */
         if (!covers(v0,v1,px,py) || !covers(v1,v2,px,py) || !covers(v2,v0,px,py)) continue;
         int32_t at[4];
         for (int k=0;k<4;k++) {
@@ -219,20 +221,32 @@ uint32_t g3d_reference(uint8_t *fb, uint16_t *zbuf, const struct g3d_job *job, s
     static struct vert verts[G3D_VMAX];
     c->error=c->fault_pc=c->instructions=c->transfers=0;
     c->divides=c->pixels=c->zfail=c->culled=0;
+    c->cycles=1;   /* validate */
     if (job->vcount<1 || job->vcount>G3D_VMAX || job->tcount>G3D_TMAX || job->limit<1 || job->limit>0xffffu)
         return c->error=G3D_E_PARAM;
-    for (uint32_t t=0;t<job->tcount;t++)
+    for (uint32_t t=0;t<job->tcount;t++) {
+        c->cycles++;   /* one index tick per triangle */
         for (uint32_t k=0;k<3;k++) if ((job->triangles[t]>>(8*k)&0xffu)>=job->vcount) return c->error=G3D_E_INDEX;
+    }
     uint32_t e=run_shader(job,out,c);
-    if (e) return c->error=e;
+    /* Each batch is projected as soon as it ends, so a fault in batch b
+     * follows the projection of every vertex before 4b. */
+    uint32_t done=e?(c->fault_pc>>8)*G3D_LANES:job->vcount;
+    if (done>job->vcount) done=job->vcount;
+    uint32_t batches=(done+G3D_LANES-1)/G3D_LANES;
+    c->cycles+=batches+c->instructions+done;
+    if (e) c->cycles+=1u+(e==G3D_E_LIMIT || e==G3D_E_PC || e==G3D_E_ILLEGAL);
+    for (uint32_t v=0;v<done;v++) project(out[v],&verts[v],c);
+    if (e) { c->cycles+=G3D_DIVIDE_TICKS*c->divides; return c->error=e; }
     c->fault_pc=0;
-    for (uint32_t v=0;v<job->vcount;v++) project(out[v],&verts[v],c);
     for (uint32_t t=0;t<job->tcount;t++) {
         const struct vert *p[3];
         int ok=1;
+        c->cycles++;   /* fetch */
         for (uint32_t k=0;k<3;k++) { p[k]=&verts[job->triangles[t]>>(8*k)&0xffu]; ok&=p[k]->valid; }
         if (!ok) { c->culled++; continue; }
         draw(fb,zbuf,p[0],p[1],p[2],c);
     }
+    c->cycles+=G3D_DIVIDE_TICKS*c->divides+c->transfers+1u;   /* finish */
     return G3D_E_NONE;
 }

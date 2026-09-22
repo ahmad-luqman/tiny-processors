@@ -78,6 +78,7 @@ static mem_access ram_load(machine *m, uint32_t offset, int width, uint32_t *val
 static mem_access ram_store(machine *m, uint32_t offset, int width, uint32_t value)
 {
     if(gpu_source_locked(&m->gpu,RAM_BASE+offset,width)) return ACC_FAULT;
+    if(g3d_z_locked(&m->g3d,RAM_BASE+offset,width)) return ACC_FAULT;
     bytes_write(m->ram + offset, width, value);
     return ACC_OK;
 }
@@ -187,16 +188,19 @@ static mem_access input_load(machine *m, uint32_t offset, int width, uint32_t *v
     }
 }
 
+/* Either graphics engine owns the framebuffer while it runs. */
+static bool engine_busy(const machine *m) { return gpu_busy(&m->gpu) || g3d_busy(&m->g3d); }
+
 static mem_access fb_load(machine *m, uint32_t offset, int width, uint32_t *value)
 {
-    if(gpu_busy(&m->gpu)) return ACC_FAULT;
+    if(engine_busy(m)) return ACC_FAULT;
     *value = bytes_read(m->fb + offset, width);
     return ACC_OK;
 }
 
 static mem_access fb_store(machine *m, uint32_t offset, int width, uint32_t value)
 {
-    if(gpu_busy(&m->gpu)) return ACC_FAULT;
+    if(engine_busy(m)) return ACC_FAULT;
     bytes_write(m->fb + offset, width, value);
     return ACC_OK;
 }
@@ -281,7 +285,7 @@ static mem_access display_store(machine *m, uint32_t offset, int width, uint32_t
 {
     (void)value; /* any word presents */
     if (width == 4 && offset == DISPLAY_PRESENT) {
-        if(gpu_busy(&m->gpu)) return ACC_FAULT;
+        if(engine_busy(m)) return ACC_FAULT;
         present(m);
         return ACC_OK;
     }
@@ -313,9 +317,18 @@ static mem_access simd_data_store(machine *m, uint32_t offset, int width, uint32
 static mem_access gpu_load(machine *m,uint32_t off,int width,uint32_t *v)
 {return gpu_access(&m->gpu,off,width,false,v)?ACC_OK:ACC_FAULT;}
 static mem_access gpu_store(machine *m,uint32_t off,int width,uint32_t v)
-{return gpu_access(&m->gpu,off,width,true,&v)?ACC_OK:ACC_FAULT;}
+{
+    /* G1 and G2 share the engine memory port: a START while G2 runs faults. */
+    if(off==GPU_COMMAND && v==GPU_START && g3d_busy(&m->g3d)) return ACC_FAULT;
+    return gpu_access(&m->gpu,off,width,true,&v)?ACC_OK:ACC_FAULT;
+}
+static mem_access g3d_mmio_load(machine *m,uint32_t off,int width,uint32_t *v)
+{return g3d_access(&m->g3d,off,width,false,v,gpu_busy(&m->gpu))?ACC_OK:ACC_FAULT;}
+static mem_access g3d_mmio_store(machine *m,uint32_t off,int width,uint32_t v)
+{return g3d_access(&m->g3d,off,width,true,&v,gpu_busy(&m->gpu))?ACC_OK:ACC_FAULT;}
 static const region REGIONS[] = {
     {"gpu", GPU_BASE, 128, gpu_load, gpu_store},
+    {"g3d", G3D_BASE, G3D_SIZE, g3d_mmio_load, g3d_mmio_store},
     {"done", DONE_ADDR, 4, NULL, done_store},
     {"console", CONSOLE_BASE, 8, console_load, console_store},
     {"timer", TIMER_BASE, 16, timer_load, timer_store},
@@ -401,6 +414,7 @@ static void trap(machine *m, uint32_t word, uint32_t cause, uint32_t tval)
 {
     simd_tick(&m->simd, false);
     gpu_tick(&m->gpu,m->ram,RAM_SIZE,m->fb,false);
+    g3d_tick(&m->g3d,m->ram,RAM_SIZE,m->fb,false);
     m->steps++;
     if (m->trace) {
         fprintf(m->trace, "%" PRIu64 " %08" PRIx32 " %08" PRIx32 " trap %" PRIu32 " %08" PRIx32 "\n",
@@ -739,6 +753,7 @@ static void step(machine *m)
     }
     simd_tick(&m->simd, false);
     gpu_tick(&m->gpu,m->ram,RAM_SIZE,m->fb,false);
+    g3d_tick(&m->g3d,m->ram,RAM_SIZE,m->fb,false);
     m->steps++;
     m->retired++;
     m->in_trap = false;
@@ -1041,6 +1056,7 @@ void emu_init(machine *m)
     memset(m, 0, sizeof *m);
     simd_reset(&m->simd);
     gpu_device_reset(&m->gpu);
+    g3d_device_reset(&m->g3d);
     m->limit = 100000000ull;
 }
 
