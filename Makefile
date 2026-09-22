@@ -814,7 +814,8 @@ RV32_G3D_ARGS = --image build/rv32/g3dcheck.bin --compare results --expect-last-
 # generator runs could otherwise race on the same files.
 build/rv32/g3d_scenes.h: $(RV32_G3D_DEPS) | build/rv32
 	$(PYTHON) tools/rv32_g3d_header.py --out build/rv32
-build/rv32/g3d_shaders.h: build/rv32/g3d_scenes.h ;
+build/rv32/g3d_shaders.h: build/rv32/g3d_scenes.h
+	@test -f $@ || $(PYTHON) tools/rv32_g3d_header.py --out build/rv32
 build/rv32/g3dcheck.o: programs/rv32/g3dcheck.c $(RV32_G3D_GENERATED) $(RV32_HEADERS) | build/rv32
 	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
 build/rv32/g3dcheck.elf: build/rv32/g3dcheck.o build/rv32/g3d.o $(RV32_COMMON_OBJS) programs/rv32/link.ld

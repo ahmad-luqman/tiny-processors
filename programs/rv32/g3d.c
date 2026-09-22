@@ -37,7 +37,9 @@ static uint32_t window_end(uint32_t offset)
 
 int g3d_load(uint32_t offset, const uint32_t *words, uint32_t count)
 {
-    if (reg(G3D_STATUS)==G3D_BUSY || count>(window_end(offset)-offset)/4u) return 0;
+    /* Outside every window window_end is 0: refuse before the subtraction can wrap. */
+    uint32_t end=window_end(offset);
+    if (reg(G3D_STATUS)==G3D_BUSY || !end || (offset&3u) || count>(end-offset)/4u) return 0;
     for (uint32_t i=0;i<count;i++) mmio_write32(G3D_BASE+offset+4*i,words[i]);
     return 1;
 }
