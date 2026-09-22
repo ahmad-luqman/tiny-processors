@@ -59,6 +59,8 @@ same-edge engine acceptance. DONE follows the last accepted write, never merely
 its issue. Parameter reads are allowed while busy. The emulator advances one
 engine tick per executed instruction, including traps; RTL advances per clock.
 Polling and counters therefore require results comparison, not retirement equality.
+The emulator reports zero STALLS: only the RTL models RAM arbitration and injected
+memory waits. The standalone native device bridge accepts holds for protocol tests.
 
 The driver returns failure for BUSY submission, command fault, or timeout. Timeout
 resets the engine; zero budget resets immediately. Guest software must not treat

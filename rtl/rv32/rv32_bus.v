@@ -71,6 +71,7 @@ module rv32_bus #(
     input wire simd_ready, simd_error,
     input wire [31:0] simd_rdata
 );
+    localparam [31:0] GPU_BASE = 32'h2000_7000;
     localparam [31:0] SIMD4_BASE = 32'h2000_4000;
     localparam [31:0] SIMD4_PROGRAM = 32'h2000_5000;
     localparam [31:0] SIMD4_DATA = 32'h2000_6000;
@@ -103,7 +104,7 @@ module rv32_bus #(
     wire simd_sel = !mem_fetch && (((mem_addr & 32'hffff_ffe0) == SIMD4_BASE) ||
                       ((mem_addr & 32'hffff_fc00) == SIMD4_PROGRAM) ||
                       ((mem_addr & 32'hffff_fc00) == SIMD4_DATA));
-    wire gpu_sel = !mem_fetch && mem_addr[31:7]==25'h04000e0;
+    wire gpu_sel = !mem_fetch && mem_addr[31:7]==GPU_BASE[31:7];
     wire none_sel = !(ram_sel || console_sel || done_sel || timer_sel || input_sel || display_sel || fb_sel || simd_sel || gpu_sel);
 
     assign gpu_valid = req && gpu_sel;
