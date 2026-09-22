@@ -1,6 +1,10 @@
 # RV32 emulator: design, trace contract, and walkthrough
 
-Our headless emulator for the [RV32 machine](rv32.md). It loads the same firmware image QEMU ran in M1, executes RV32I with the contract's trap, alignment, console, and done-register behavior, and records a retirement trace that the M3 RTL testbench must reproduce. Source: [tools/rv32emu_core.c](../tools/rv32emu_core.c), the machine as a C11 library with no dependencies, and [tools/rv32emu.c](../tools/rv32emu.c), the headless main around it (one file until M6 split it so the [native window](rv32-window.md) could share the core).
+Our headless emulator for the [RV32 machine](rv32.md). It loads the same firmware image QEMU ran in M1, executes RV32IF/Zicsr with the contract's trap, alignment, console, and done-register behavior, and records a retirement trace that the M3 RTL testbench must reproduce. Source: [tools/rv32emu_core.c](../tools/rv32emu_core.c), the machine as a C11 library with vendored SoftFloat arithmetic, and [tools/rv32emu.c](../tools/rv32emu.c), the headless main around it (one file until M6 split it so the [native window](rv32-window.md) could share the core).
+
+F2 adds [complete F execution, floating state and trace effects](rv32-f.md),
+while preserving integer trace lines. Build through Make or the shared Python
+build helpers so the pinned arithmetic objects are linked.
 
 ## Implementation plan (M2)
 
@@ -78,7 +82,7 @@ build/rv32/rv32emu --image FILE [--base ADDR] [--pc ADDR] [--trace FILE] [--dump
 
 - stdout carries guest console bytes only, exactly like QEMU, so [rv32_run_emu.py](../tools/rv32_run_emu.py) checks the run with the same `classify` function as the QEMU driver.
 - stderr ends with one line `rv32emu: halt=<done|double-fault|limit|stopped> steps=N (`stopped` is the window's only) retired=N traps=N loaded=N [done=WORD] <outcome>`. The outcome is `pass`, `fail=<code>`, or `error=<reason>`. `steps` counts executed instructions including trapped ones; `retired` excludes them. Nothing here is a cycle count.
-- `--dump-state` writes the final PC, all registers, the four CSRs, the counters, the frame count, the number of queued events, and the halt reason, one `name value` pair per line. The halt line itself did not change in M5.
+- `--dump-state` writes the final PC, all integer/floating registers, the four trap CSRs and fcsr, the counters, the frame count, the number of queued events, and the halt reason, one `name value` pair per line. The halt line itself did not change in M5.
 - `--checkpoints`, `--frames`, and `--input` (M5) are described under the machine model; a malformed script line, an unopenable or unreadable script (a directory opens but does not read), or an unwritable frame file is an emulator error (exit 2), and the checkpoints path may not name the image, the input script, the trace, or the state file. A scripted event the full queue dropped or the guest never reached is reported after the halt line and turns a pass into an emulator error, unless `--allow-lost-events` says it was expected; a guest that failed keeps its own code. An empty image, or one that cannot be read, is refused before the run rather than executed as an illegal instruction at the reset PC.
 - `--max-instructions` (default 100,000,000) turns a runaway loop into a `limit` halt.
 - `--record FILE` (M6) writes every event offered to the input queue, scripted or typed in the window, as a `frame N down|up KEY` line before the queue decides, so the file is a script that replays the run, drops included. The `stopped` halt (`error=host-stopped`, exit 2) is the window's: the headless emulator never produces it.
@@ -90,11 +94,12 @@ build/rv32/rv32emu --image FILE [--base ADDR] [--pc ADDR] [--trace FILE] [--dump
 `--trace FILE` writes one line per executed instruction. M3's RTL testbench emits the same text so `diff` compares the two backends; the format is therefore fixed here.
 
 ```
-<step> <pc> <word>[ x<n>=<value>][ mem[<addr>]<-<value>/<width>][ mem[<addr>]-><value>/<width>]
+<step> <pc> <word>[ x<n>=<value>][ f<n>=<value>][ fcsr=<flags-and-mode>][ mem[<addr>]<-<value>/<width>][ mem[<addr>]-><value>/<width>]
 <step> <pc> <word> trap <mcause> <mtval>
 ```
 
 - `step` is decimal and starts at 1; `pc`, `word`, addresses, and values are eight lowercase hex digits.
+- `f<n>=` appears for any floating register write, including f0. `fcsr=` is two lowercase hex digits: it appears for a floating CSR write (even unchanged) or arithmetic raising nonzero flags (even already accrued). Fields are ordered integer write, floating write, fcsr, memory.
 - `x<n>=` appears only when a register other than `x0` was written.
 - A store records the effective address, the value actually written narrowed to the access width, and the width in bytes: `sb` of `0x1234ffab` shows `<-000000ab/1`. A load records the raw bytes read before sign extension; the extended value is in the register field. The RTL's word-wide bus with byte strobes carries the same information, so its testbench can print this line from the strobe and the data lanes.
 - A trap line replaces the effects: nothing was written. For a fetch fault the word is `00000000` because no instruction was read.

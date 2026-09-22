@@ -1,5 +1,9 @@
 # RV32 RTL CPU: full RV32I, vectored traps, and the C self-check on hardware
 
+F2 adds [the complete RV32F contract](rv32-f.md), floating retirement outputs,
+and FP_ISSUE/FP_WAIT states. The M3/M4 records below retain their historical
+coverage and measurements; the integer execution path remains unchanged.
+
 Our hardware implementation of the [RV32 machine](rv32.md): a multicycle RV32I core in [rtl/rv32/](../rtl/rv32/) that drives the contract's ready/valid memory port, executes every RV32I instruction plus the four trap CSRs and `mret`, vectors traps through `mtvec`, and retires instructions in exactly the form the [emulator's trace contract](rv32-emulator.md#retirement-trace-contract) fixed in M2. Since M5 the core is one instance inside [rv32_soc.v](../rtl/rv32/rv32_soc.v), with the RAM and the devices behind a bus decoder ([SoC record](rv32-soc.md)); the testbench in [tests/rv32_tb.sv](../tests/rv32_tb.sv) is the host: it loads the image, holds the bus to model stalls, takes the console bytes and the done word, and prints the same trace text, so `diff` compares the two backends line for line, and the M1 C self-check runs on the machine to `PASS 807d9fad` with the emulator's 32,610-line trace. The gate-level walkthrough is [rv32-to-gates.md](rv32-to-gates.md).
 
 ## Implementation plan (M3)
@@ -88,15 +92,17 @@ A write takes effect exactly once, at acceptance, on the strobed lanes. The core
 
 ## Controller
 
-Five states in a 3-bit register plus a terminal `HALT`. One instruction visits four or five of them:
+Eight states fit the 3-bit register. Integer instructions visit four or five; F arithmetic additionally visits `FP_ISSUE` and `FP_WAIT`:
 
 | State | On this rising edge | Port | Next |
 | --- | --- | --- | --- |
 | `FETCH` | Wait for `mem_ready`; capture `mem_rdata` into `ir` and the PC into `ir_pc`. `mem_error` → trap 1. | `mem_valid=1, mem_addr=pc, mem_strb=1111, mem_fetch=1` | `DECODE` |
-| `DECODE` | Read `rs1`/`rs2` from the register file into `a`/`b`; the immediate and control fields are combinational from `ir`. `illegal` → trap 2; `ecall`/`ebreak` → trap 11/3. | idle | `EXECUTE` |
-| `EXECUTE` | The ALU computes `a op b` or `a op imm` (results, effective addresses, the `jalr` target) and, for a branch, compares `a` with `b`; a separate adder forms `pc + imm` for `auipc`, `jal`, and branch targets; a CSR instruction reads the old value. Capture the result into `alu_out` and the branch decision into `taken`. A misaligned load/store address → trap 4/6; a misaligned taken target → trap 0. | idle | `MEM` for loads and stores, else `WRITEBACK` |
+| `DECODE` | Read `rs1`/`rs2` from the register file into `a`/`b`; the immediate and control fields are combinational from `ir`. `illegal && !fp_valid` → trap 2; `ecall`/`ebreak` → trap 11/3. | idle | `EXECUTE` |
+| `EXECUTE` | The ALU computes `a op b` or `a op imm` (results, effective addresses, the `jalr` target) and, for a branch, compares `a` with `b`; a separate adder forms `pc + imm` for `auipc`, `jal`, and branch targets; a CSR instruction reads the old value. Capture the result into `alu_out` and the branch decision into `taken`. A misaligned load/store address → trap 4/6; a misaligned taken target → trap 0. | idle | `MEM` for loads/stores, `FP_ISSUE` for F arithmetic, else `WRITEBACK` |
 | `MEM` | Wait for `mem_ready`; capture `mem_rdata` into `mdr`. `mem_error` → trap 5/7. | `mem_valid=1, mem_addr=alu_out, mem_strb` from the width and `alu_out[1:0]`, `mem_we/mem_wdata` for stores | `WRITEBACK` |
-| `WRITEBACK` | Write `rd` (unless `x0`) and, for a CSR instruction, the CSR; update the PC (`pc+4`, the branch/jump target, or `mepc` for `mret`); clear `in_trap`; pulse `retire` for one cycle. | idle | `FETCH` |
+| `FP_ISSUE` | Hold operands/op/resolved rm until FPU request acceptance. | memory idle | `FP_WAIT` |
+| `FP_WAIT` | Wait for FPU response, capture result and flags. | memory idle | `WRITEBACK` |
+| `WRITEBACK` | Write integer `rd` (unless `x0`) or floating `rd` (including `f0`), commit accrued flags or the explicit CSR write; update the PC (`pc+4`, the branch/jump target, or `mepc` for `mret`); clear `in_trap`; pulse `retire` for one cycle. | idle | `FETCH` |
 | `HALT` | Hold everything. Only `reset` leaves. | idle | `HALT` |
 
 A trap leaves for `FETCH` (or `HALT`, on a double fault) from the state that detected it, before any register, CSR, PC, or memory write of that instruction. A store's write happens at acceptance in `MEM`, which is before the instruction retires in `WRITEBACK`; if the slave accepted the store without `error` it cannot trap afterwards, so the exactly-once write and the retirement always agree.
@@ -109,7 +115,9 @@ An RVFI-style sideband for the testbench, separate from the memory port:
 | --- | --- |
 | `retire` | High for the one cycle after the `WRITEBACK` edge. |
 | `retire_pc`, `retire_insn` | The PC and word of the instruction in flight, valid on `retire` and on `trap`. |
-| `retire_rd_we`, `retire_rd`, `retire_rd_value` | The register written, if any. `retire_rd_we` is low for `x0`, stores, branches, `fence`, and `mret`. |
+| `retire_rd_we`, `retire_rd`, `retire_rd_value` | The integer register written, if any; destination/value are valid only with `retire && retire_rd_we`. `retire_rd_we` is low for `x0`, stores, branches, `fence`, and `mret`. |
+| `retire_fd_we`, `retire_fd[4:0]`, `retire_fd_value[31:0]` | Floating destination/value, valid only with `retire && retire_fd_we`. f0 is writable. |
+| `retire_fcsr_we`, `retire_fcsr[7:0]` | Post-write floating CSR state, valid only with `retire && retire_fcsr_we`. |
 | `trap`, `trap_cause[3:0]`, `trap_value[31:0]` | High for the one cycle after the edge that took a trap, with its `mcause` and `mtval`. |
 | `halted` | The core is in `HALT`: a double fault. |
 | `state[2:0]`, `pc[31:0]`, `mtvec`, `mepc`, `mcause`, `mtval` | For waveforms. |
@@ -118,13 +126,14 @@ Memory effects are not duplicated here. The testbench observes the machine's mem
 
 ## Counters
 
-The testbench keeps three counters and prints them in its halt line; the walkthrough relates them to the instruction count:
+The testbench keeps the following timing counters and prints them in its halt line; the walkthrough relates them to the instruction count:
 
 - `cycles`: rising edges from the first edge with `reset` low through the edge on which the last instruction retires or the core halts, inclusive.
 - `transfers`: accepted port transactions, fetches included. A retired instruction costs one fetch, plus one data transaction for a load or store. A trapped instruction costs its fetch, plus the refused data transaction for a load or store fault.
 - `stalls`: rising edges on which `mem_valid` was high and `mem_ready` low.
+- `fp_waits`: cycles in `FP_ISSUE`/`FP_WAIT`; omitted from the halt record when zero. Workload-specific `--expect-fp-waits` pins latency independently of the accounting identity.
 
-With a fixed stall of `N` cycles per request and no traps, `cycles = 4 × (retired non-memory instructions) + 5 × (retired memory instructions) + N × transfers`; `tools/rv32_rtl.py` prints this relation for every run, fails the run when it does not hold, and the tests assert it for the loop and the self-check. A trap costs the cycles up to the state that raised it, stalls included: one edge for a fetch fault (the refused fetch), two for an illegal word, `ecall`, or `ebreak` (fetch, `DECODE`), three for a misaligned address or target (through `EXECUTE`), four for a refused load or store (through the `MEM` edge that returned `error`). A run with trap lines is reported without the equality, and the runner refuses it unless `--allow-traps` says traps are expected.
+With a fixed stall of `N` cycles per request and no traps, `cycles = 4 × (retired non-memory instructions) + 5 × (retired memory instructions) + N × transfers + fp_waits`; `tools/rv32_rtl.py` prints this relation for every run, fails the run when it does not hold, and the tests assert it for the loop and the self-check. A trap costs the cycles up to the state that raised it, stalls included: one edge for a fetch fault (the refused fetch), two for an illegal word, `ecall`, or `ebreak` (fetch, `DECODE`), three for a misaligned address or target (through `EXECUTE`), four for a refused load or store (through the `MEM` edge that returned `error`). A run with trap lines is reported without the equality, and the runner refuses it unless `--allow-traps` says traps are expected.
 
 ## Testbench: the host of the machine
 
@@ -136,7 +145,7 @@ With a fixed stall of `N` cycles per request and no traps, `cycles = 4 × (retir
 - **Outputs**: the testbench stops the clock instead of calling `$finish`, because Verilator prints a `$finish` banner on stdout, and the runner passes `+verilator+quiet` to a Verilator build. `+trace=FILE` receives the retirement trace. `+console=FILE` sends the guest's console bytes to a file instead of stdout; the runner always passes it, so a simulator's stdout is then its own messages only. `+wave=FILE` dumps a VCD of the whole machine (the core's signals are under `rv32_tb.dut.core`). `+max-cycles=N` (default 10,000,000; the diagnostic needs about two million) turns a runaway into `halt=limit`. The last stderr line is authoritative:
 
 ```
-rv32_tb: halt=<done|double-fault|limit> cycles=N steps=N stalls=N transfers=N [done=WORD] [cause=C tval=V] <pass|fail=<code>|error=<reason>>
+rv32_tb: halt=<done|double-fault|limit> cycles=N steps=N stalls=N transfers=N [fp_waits=N] [done=WORD] [cause=C tval=V] <pass|fail=<code>|error=<reason>>
 ```
 
 `steps` is the number of trace lines written, so it counts trap lines as the emulator's `steps` does; `cause` and `tval` on a double fault are the trap that could not be delivered, and the first trap is in the core's CSRs. Guest outcomes stop the clock after this line. `$fatal` is reserved for harness violations: a request on the bus during reset, a request changing while stalled, a plusarg that is not a decimal (`+stall=abc`, `+max-cycles=0`, `+stall` together with `+stall-seed`), an unwritable `+wave`, `+trace`, or `+checkpoints` path, a missing image or one with a token that is not an eight-digit hex word, an input script line that is not `frame N down|up KEY` with frames in order, a script that cannot be read, a scripted event that was dropped or never delivered on a run that passed (reported after the halt line, unless `+allow-lost-events`), two data transactions with no retirement or trap between them, or a trap after a write the machine accepted without `error` (the instruction would have had an effect). Both simulators print those diagnostics on stdout, where a guest could print anything, so the runner sends the console to a file with `+console` and treats any stdout output as a failed run, whatever the exit status; the one line it ignores is Icarus's `VCD info:` notice, which no guest can produce on that channel.

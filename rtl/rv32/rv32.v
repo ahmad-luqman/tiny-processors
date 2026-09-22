@@ -1,8 +1,8 @@
 `timescale 1ns/1ps
 
-// Multicycle RV32I core: FETCH, DECODE, EXECUTE, MEM, WRITEBACK, one
-// ready/valid memory port with byte strobes in both directions, the four
-// trap CSRs, and retirement in the last state. A trap vectors to mtvec; a
+// Multicycle RV32IF core: the integer path plus FP_ISSUE/FP_WAIT. One
+// ready/valid memory port, four trap CSRs, floating CSRs, and atomic
+// register/flag retirement in WRITEBACK. See docs/rv32-f.md. A trap vectors to mtvec; a
 // second trap before the handler retires an instruction halts the core
 // (the emulator's double-fault rule). The contract is docs/rv32-rtl.md;
 // the datapath and controller are explained in docs/rv32-to-gates.md.
@@ -26,6 +26,11 @@ module rv32 (
     output reg         retire_rd_we,
     output reg  [4:0]  retire_rd,
     output reg  [31:0] retire_rd_value,
+    output reg         retire_fd_we,
+    output reg [4:0]   retire_fd,
+    output reg [31:0]  retire_fd_value,
+    output reg         retire_fcsr_we,
+    output reg [7:0]   retire_fcsr,
     output reg         trap,
     output reg  [3:0]  trap_cause,
     output reg  [31:0] trap_value,
@@ -38,17 +43,22 @@ module rv32 (
     output reg  [31:0] mtval
 );
     localparam [2:0] FETCH = 3'd0, DECODE = 3'd1, EXECUTE = 3'd2,
-                     MEM = 3'd3, WRITEBACK = 3'd4, HALT = 3'd5;
+                     MEM = 3'd3, WRITEBACK = 3'd4, HALT = 3'd5, FP_ISSUE = 3'd6, FP_WAIT = 3'd7;
     localparam [3:0] CAUSE_TARGET_MISALIGNED = 4'd0, CAUSE_FETCH_FAULT = 4'd1,
                      CAUSE_ILLEGAL = 4'd2, CAUSE_BREAKPOINT = 4'd3,
                      CAUSE_LOAD_MISALIGNED = 4'd4, CAUSE_LOAD_FAULT = 4'd5,
                      CAUSE_STORE_MISALIGNED = 4'd6, CAUSE_STORE_FAULT = 4'd7,
                      CAUSE_ECALL = 4'd11;
-    localparam [11:0] CSR_MTVEC = 12'h305, CSR_MEPC = 12'h341, CSR_MCAUSE = 12'h342; // 12'h343 is mtval, the default
+    localparam [11:0] CSR_MTVEC = 12'h305, CSR_MEPC = 12'h341, CSR_MCAUSE = 12'h342,
+                      CSR_MTVAL = 12'h343, CSR_FFLAGS = 12'h001, CSR_FRM = 12'h002, CSR_FCSR = 12'h003;
+    localparam [2:0] DIRECT_NONE=3'd0, DIRECT_SIGN=3'd1, DIRECT_CLASS=3'd3;
     localparam [31:0] RESET_PC = 32'h8000_0000;
 
     // Datapath registers: one instruction's worth of state between states.
     reg [31:0] ir, ir_pc, a, b, alu_out, mdr;
+    reg [7:0] fcsr;
+    reg [31:0] fa, fb, fc;
+    reg [4:0] fp_flags;
     reg taken;
     reg in_trap; // a trap was taken and its handler has not retired an instruction yet
 
@@ -65,6 +75,48 @@ module rv32 (
         .alu_alt(alu_alt), .is_load(is_load), .is_store(is_store), .is_branch(is_branch),
         .is_jal(is_jal), .is_jalr(is_jalr), .is_csr(is_csr), .is_mret(is_mret),
         .is_ecall(is_ecall), .is_ebreak(is_ebreak), .writes_rd(writes_rd), .illegal(illegal));
+
+    wire fp_valid, fp_to_integer, fp_from_integer;
+    wire [4:0] fp_op;
+    wire [2:0] fp_rm, fp_direct;
+    wire fp_load = is_load && ir[6:0] == 7'h07;
+    wire fp_store = is_store && ir[6:0] == 7'h27;
+    wire fp_write = fp_load || (fp_valid && !fp_to_integer);
+    wire [31:0] f1, f2, f3;
+    wire [31:0] fp_value = fp_load ? mdr : alu_out;
+    rv32_fdecode fdecode (.insn(ir), .frm(fcsr[7:5]), .valid(fp_valid),
+        .op(fp_op), .rm(fp_rm), .to_integer(fp_to_integer),
+        .from_integer(fp_from_integer), .direct(fp_direct));
+    rv32_fregfile fregfile (.clk(clk), .reset(reset),
+        .we(state == WRITEBACK && fp_write), .waddr(rd), .wdata(fp_value),
+        .raddr1(rs1), .raddr2(rs2), .raddr3(ir[31:27]), .rdata1(f1), .rdata2(f2), .rdata3(f3));
+    wire fp_ready, fp_done, fp_error;
+    wire [31:0] fp_result;
+    wire [4:0] fp_result_flags;
+    fp32 fpu (.clk(clk), .reset(reset), .req_valid(!reset && state == FP_ISSUE),
+        .req_ready(fp_ready), .op(fp_op), .rm(fp_rm), .a(fa), .b(fb), .c(fc),
+        .resp_valid(fp_done), .resp_ready(!reset && state == FP_WAIT),
+        .result(fp_result), .flags(fp_result_flags), .error(fp_error));
+
+    // Classification uses exponent/fraction detectors, never arithmetic.
+    wire f_zero_exp = fa[30:23] == 8'd0;
+    wire f_max_exp = fa[30:23] == 8'hff;
+    wire f_zero_frac = fa[22:0] == 23'd0;
+    wire [9:0] classification = {
+        f_max_exp && !f_zero_frac && fa[22],
+        f_max_exp && !f_zero_frac && !fa[22],
+        !fa[31] && f_max_exp && f_zero_frac,
+        !fa[31] && !f_zero_exp && !f_max_exp,
+        !fa[31] && f_zero_exp && !f_zero_frac,
+        !fa[31] && f_zero_exp && f_zero_frac,
+        fa[31] && f_zero_exp && f_zero_frac,
+        fa[31] && f_zero_exp && !f_zero_frac,
+        fa[31] && !f_zero_exp && !f_max_exp,
+        fa[31] && f_max_exp && f_zero_frac};
+    wire injected_sign = funct3 == 3'd0 ? fb[31] : funct3 == 3'd1 ? !fb[31] : fa[31] ^ fb[31];
+    wire [31:0] direct_result = fp_direct == DIRECT_SIGN ? {injected_sign, fa[30:0]} :
+                               fp_direct == DIRECT_CLASS ? {22'd0, classification} : fa;
+
 
     // Access width from funct3[1:0] (0 byte, 1 halfword, 2 word) and the lane
     // the effective address selects; shared by loads and stores.
@@ -86,16 +138,24 @@ module rv32 (
     // the new value is written in WRITEBACK. The operand is rs1 or its
     // five-bit field (funct3[2]); csrrs/csrrc with a zero field write nothing.
     wire [11:0] csr_addr = ir[31:20];
-    wire [31:0] csr_old = (csr_addr == CSR_MTVEC) ? mtvec : (csr_addr == CSR_MEPC) ? mepc :
+    wire [31:0] csr_old = csr_addr == CSR_FFLAGS ? {27'd0, fcsr[4:0]} :
+                          csr_addr == CSR_FRM ? {29'd0, fcsr[7:5]} :
+                          csr_addr == CSR_FCSR ? {24'd0, fcsr} : (csr_addr == CSR_MTVEC) ? mtvec : (csr_addr == CSR_MEPC) ? mepc :
                           (csr_addr == CSR_MCAUSE) ? mcause : mtval;
     wire [31:0] csr_operand = funct3[2] ? {27'd0, rs1} : a;
     wire [31:0] csr_new = (funct3[1:0] == 2'd1) ? csr_operand :
                           (funct3[1:0] == 2'd2) ? (csr_old | csr_operand) : (csr_old & ~csr_operand);
     wire csr_we = is_csr && ((funct3[1:0] == 2'd1) || (rs1 != 5'd0));
 
+    wire fp_csr_write = csr_we && csr_addr >= CSR_FFLAGS && csr_addr <= CSR_FCSR;
+    wire [7:0] fp_csr_new = csr_addr == CSR_FFLAGS ? {fcsr[7:5], csr_new[4:0]} :
+                              csr_addr == CSR_FRM ? {csr_new[2:0], fcsr[4:0]} : csr_new[7:0];
+
+    wire [7:0] fcsr_next = fp_csr_write ? fp_csr_new : fcsr | {3'd0, fp_flags};
+
     // Register file: written in WRITEBACK, read in DECODE.
     wire [31:0] rs1_value, rs2_value;
-    wire rd_written = writes_rd && (rd != 5'd0); // one x0 test for the write and the trace
+    wire rd_written = (writes_rd || (fp_valid && fp_to_integer)) && (rd != 5'd0); // one x0 test for the write and the trace
     wire rf_we = (state == WRITEBACK) && rd_written;
     wire [31:0] rd_value = is_load ? load_value : (is_jal || is_jalr) ? ir_pc + 32'd4 : alu_out;
 
@@ -180,6 +240,9 @@ module rv32 (
             alu_out <= 32'd0;
             mdr <= 32'd0;
             taken <= 1'b0;
+            fcsr <= 8'd0; fa <= 32'd0; fb <= 32'd0; fc <= 32'd0; fp_flags <= 5'd0;
+            retire_fd_we <= 1'b0; retire_fd <= 5'd0; retire_fd_value <= 32'd0;
+            retire_fcsr_we <= 1'b0; retire_fcsr <= 8'd0;
             in_trap <= 1'b0;
             mtvec <= 32'd0;
             mepc <= 32'd0;
@@ -211,8 +274,10 @@ module rv32 (
                 end
                 DECODE: begin
                     a <= rs1_value;
-                    b <= rs2_value;
-                    if (illegal)
+                    b <= fp_store ? f2 : rs2_value;
+                    fa <= fp_from_integer ? rs1_value : f1;
+                    fb <= f2; fc <= f3; fp_flags <= 5'd0;
+                    if (illegal && !fp_valid)
                         take_trap(CAUSE_ILLEGAL, ir, ir_pc);
                     else if (is_ecall)
                         take_trap(CAUSE_ECALL, 32'd0, ir_pc);
@@ -228,10 +293,26 @@ module rv32 (
                         take_trap(is_load ? CAUSE_LOAD_MISALIGNED : CAUSE_STORE_MISALIGNED, alu_result, ir_pc);
                     else if (target_misaligned)
                         take_trap(CAUSE_TARGET_MISALIGNED, execute_out, ir_pc);
+                    else if (fp_valid) begin
+                        if (fp_direct != DIRECT_NONE) begin
+                            alu_out <= direct_result;
+                            state <= WRITEBACK;
+                        end else state <= FP_ISSUE;
+                    end
                     else if (is_load || is_store)
                         state <= MEM;
                     else
                         state <= WRITEBACK;
+                end
+                FP_ISSUE: if (fp_ready) state <= FP_WAIT;
+                FP_WAIT: if (fp_done) begin
+                    // Defensive guard: legal decode never issues an invalid op/rm.
+                    if (fp_error) take_trap(CAUSE_ILLEGAL, ir, ir_pc);
+                    else begin
+                        alu_out <= fp_result;
+                        fp_flags <= fp_result_flags;
+                        state <= WRITEBACK;
+                    end
                 end
                 MEM: if (mem_ready) begin
                     mdr <= mem_rdata;
@@ -244,12 +325,19 @@ module rv32 (
                     // The register file samples rf_we/rd_value on this same edge;
                     // a CSR write lands here too, so the instruction's effects commit together.
                     pc <= is_mret ? mepc : (is_jal || is_jalr || taken) ? alu_out : ir_pc + 32'd4;
+                    retire_fd_we <= fp_write;
+                    retire_fd <= rd;
+                    retire_fd_value <= fp_value;
+                    retire_fcsr_we <= fp_csr_write || (fp_valid && fp_flags != 5'd0);
+                    retire_fcsr <= fcsr_next;
+                    if (fp_csr_write || fp_valid) fcsr <= fcsr_next;
                     if (csr_we) begin
                         case (csr_addr)
                             CSR_MTVEC: mtvec <= {csr_new[31:2], 2'b00}; // direct mode only
                             CSR_MEPC: mepc <= {csr_new[31:2], 2'b00};   // IALIGN is 32
                             CSR_MCAUSE: mcause <= csr_new;
-                            default: mtval <= csr_new; // CSR_MTVAL: the decoder admits no other number
+                            CSR_MTVAL: mtval <= csr_new;
+                            default: begin end // Floating CSRs were handled above.
                         endcase
                     end
                     in_trap <= 1'b0;

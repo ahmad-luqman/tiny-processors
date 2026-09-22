@@ -47,14 +47,28 @@ RV32_PONG_INPUT := programs/rv32/pong.input
 RV32_PONG_EXPECTED := programs/rv32/pong.expected
 RV32_PONG_ARGS := --image build/rv32/pong.bin --input $(RV32_PONG_INPUT) --expect-last-line "PASS $(RV32_PONG_HEX)" --expect-checkpoints $(RV32_PONG_EXPECTED) --timeout 300
 RV32_DIAG_ARGS := --image build/rv32/diag.bin --input $(RV32_DIAG_INPUT) --compare results --expect-last-line "PASS $(RV32_DIAG_HEX)" --expect-checkpoint "frame 1 $(RV32_DIAG_FRAME1_HEX)" --expect-checkpoint "frame 2 $(RV32_DIAG_FRAME2_HEX)"
+FP32_RTL := rtl/fp32/fp32.v
+FP32_HEADERS := rtl/fp32/fp32_states.vh rtl/fp32/fp32_ops.vh
+SOFTFLOAT_OBJ := $(patsubst third_party/softfloat/%.c,build/fp32/softfloat/%.o,$(wildcard third_party/softfloat/*.c))
+FP32_REF_OBJ := build/fp32/fp32_ref.o build/fp32/rv32_fp.o $(SOFTFLOAT_OBJ)
+FP32_REF_FLAGS := -std=c11 -O2 -Wall -Wextra -Werror -DSOFTFLOAT_FAST_INT64 -DSOFTFLOAT_ROUND_ODD -DINLINE_LEVEL=5 -Ithird_party/softfloat -Ithird_party/softfloat/include
+FP32_REF_HEADERS := $(wildcard third_party/softfloat/*.h third_party/softfloat/include/*.h)
+FP32_REF := build/fp32/reference
+FP32_TB := tests/fp32_tb.sv
+FP32_PROTOCOL_TB := tests/fp32_protocol_tb.sv
+FP32_VERILATOR := build/verilator-fp32/fp32_sim
+FP32_RUN = $(PYTHON) tools/fp32_vectors.py
+FP32_SEED ?= 20260921
+FP32_RANDOM ?= 100
+RV32_FP_OBJ := build/fp32/rv32_fp.o $(SOFTFLOAT_OBJ)
 RV32EMU := build/rv32/rv32emu
 RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
-RV32EMU_CORE := tools/rv32emu_core.c tools/rv32emu_core.h
+RV32EMU_CORE := tools/rv32emu_core.c tools/rv32emu_core.h tools/rv32_fp.h
 RV32WIN := build/rv32/rv32win
 # Recursive `=`: pkg-config runs only where the window is built, so a machine without SDL3 still runs every test.
 SDL3_CFLAGS = $(shell pkg-config --cflags sdl3 2>/dev/null)
 SDL3_LIBS = $(shell pkg-config --libs sdl3 2>/dev/null)
-RV32_RTL := rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32.v
+RV32_RTL := rtl/rv32/rv32_fregfile.v rtl/rv32/rv32_fdecode.v $(FP32_RTL) rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32.v
 RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_timer.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v
 RV32_TB := tests/rv32_tb.sv
 RV32_TB_VVP := build/rv32/rv32_tb.vvp
@@ -259,8 +273,8 @@ test-rv32-tools:
 test-rv32-rt:
 	$(PYTHON) -m unittest discover -s tests -p 'test_rv32_rt.py' -v
 
-$(RV32EMU): tools/rv32emu.c $(RV32EMU_CORE) | build/rv32
-	$(HOST_CC) $(RV32EMU_CFLAGS) -o $@ tools/rv32emu.c tools/rv32emu_core.c
+$(RV32EMU): tools/rv32emu.c $(RV32EMU_CORE) $(RV32_FP_OBJ) | build/rv32
+	$(HOST_CC) $(RV32EMU_CFLAGS) -o $@ tools/rv32emu.c tools/rv32emu_core.c $(RV32_FP_OBJ)
 
 build-rv32-emu: toolchain-rv32-emu $(RV32EMU)
 
@@ -271,8 +285,8 @@ toolchain-rv32-win: toolchain-rv32-emu
 
 # The toolchain check is a prerequisite of the binary, so every target that needs the window says
 # what to install rather than failing on a missing header.
-$(RV32WIN): tools/rv32win.c $(RV32EMU_CORE) | build/rv32 toolchain-rv32-win
-	$(HOST_CC) $(RV32EMU_CFLAGS) $(SDL3_CFLAGS) -o $@ tools/rv32win.c tools/rv32emu_core.c $(SDL3_LIBS)
+$(RV32WIN): tools/rv32win.c $(RV32EMU_CORE) $(RV32_FP_OBJ) | build/rv32 toolchain-rv32-win
+	$(HOST_CC) $(RV32EMU_CFLAGS) $(SDL3_CFLAGS) -o $@ tools/rv32win.c tools/rv32emu_core.c $(RV32_FP_OBJ) $(SDL3_LIBS)
 
 build-rv32-win: toolchain-rv32-win $(RV32WIN)
 
@@ -296,11 +310,11 @@ trace-rv32-emu: run-rv32-emu
 diff-rv32-qemu: run-rv32-emu
 	$(PYTHON) tools/rv32_diff_qemu.py build/rv32/selfcheck.elf build/rv32/selfcheck.trace --qemu $(QEMU_RV32) --log build/rv32/qemu-exec.log
 
-$(RV32_TB_VVP): $(RV32_SOC_RTL) $(RV32_TB) | build/rv32
-	iverilog -g2012 -Wall -s rv32_tb -o $@ $(RV32_TB) $(RV32_SOC_RTL)
+$(RV32_TB_VVP): $(RV32_SOC_RTL) $(FP32_HEADERS) $(RV32_TB) | build/rv32
+	iverilog -Irtl/fp32 -g2012 -Wall -s rv32_tb -o $@ $(RV32_TB) $(RV32_SOC_RTL)
 
-$(RV32_TB_VERILATOR): $(RV32_SOC_RTL) $(RV32_TB) | build
-	verilator --binary --timing --trace --top-module rv32_tb --Mdir build/verilator-rv32 -o rv32_sim $(RV32_TB) $(RV32_SOC_RTL)
+$(RV32_TB_VERILATOR): $(RV32_SOC_RTL) $(FP32_HEADERS) $(RV32_TB) | build
+	verilator -Irtl/fp32 --binary --timing --trace --top-module rv32_tb --Mdir build/verilator-rv32 -o rv32_sim $(RV32_TB) $(RV32_SOC_RTL)
 
 build-rv32-rtl: $(RV32_TB_VVP)
 
@@ -311,18 +325,18 @@ test-rv32-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR)
 	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_rtl.py' -v
 
 lint-rv32:
-	verilator --lint-only --Wall --language 1364-2005 --top-module rv32 $(RV32_RTL)
+	verilator -Irtl/fp32 --lint-only --Wall --language 1364-2005 --top-module rv32 $(RV32_RTL)
 
 synth-rv32: | build
-	yosys -Q -T -l build/rv32-synth.log -p 'read_verilog $(RV32_RTL); synth -top rv32; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32.json'
+	yosys -Q -T -l build/rv32-synth.log -p 'read_verilog -Irtl/fp32 $(RV32_RTL); synth -top rv32; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32.json'
 
 lint-rv32-soc:
-	verilator --lint-only --Wall --language 1364-2005 --top-module rv32_soc $(RV32_SOC_RTL)
+	verilator -Irtl/fp32 --lint-only --Wall --language 1364-2005 --top-module rv32_soc $(RV32_SOC_RTL)
 
 # The memories are shrunk to 64 words so the count measures the decoder and
 # the devices; the core's own count is synth-rv32's.
 synth-rv32-soc: | build
-	yosys -Q -T -l build/rv32-soc-synth.log -p 'read_verilog $(RV32_SOC_RTL); chparam -set RAM_WORDS 64 -set FB_WORDS 64 rv32_soc; synth -top rv32_soc; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32-soc.json'
+	yosys -Q -T -l build/rv32-soc-synth.log -p 'read_verilog -Irtl/fp32 $(RV32_SOC_RTL); chparam -set RAM_WORDS 64 -set FB_WORDS 64 rv32_soc; synth -top rv32_soc; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32-soc.json'
 
 waves-rv32: $(RV32_TB_VVP) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl --mode waves --program loop --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
@@ -426,25 +440,13 @@ test-rv32-capstone-sanitize: | build/rv32
 	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fno-builtin -fsanitize=address,undefined -fno-omit-frame-pointer -DRV32_NATIVE_MAIN -Iprograms/rv32 tests/rv32_capstone_native.c programs/rv32/runtime.c programs/rv32/tetris_game.c programs/rv32/pong_game.c programs/rv32/gfx.c programs/rv32/gfx_text.c -o build/rv32/host/capstone-sanitize
 	build/rv32/host/capstone-sanitize
 
-# F1: standalone floating-point hardware. SoftFloat is a host test oracle only.
-FP32_RTL := rtl/fp32/fp32.v
-FP32_HEADERS := rtl/fp32/fp32_states.vh
-FP32_REF_OBJ := build/fp32/fp32_ref.o $(patsubst third_party/softfloat/%.c,build/fp32/softfloat/%.o,$(wildcard third_party/softfloat/*.c))
-FP32_REF_FLAGS := -std=c11 -O2 -Wall -Wextra -Werror -DSOFTFLOAT_FAST_INT64 -DSOFTFLOAT_ROUND_ODD -DINLINE_LEVEL=5 -Ithird_party/softfloat -Ithird_party/softfloat/include
-FP32_REF_HEADERS := $(wildcard third_party/softfloat/*.h third_party/softfloat/include/*.h)
-FP32_REF := build/fp32/reference
-FP32_TB := tests/fp32_tb.sv
-FP32_PROTOCOL_TB := tests/fp32_protocol_tb.sv
-FP32_VERILATOR := build/verilator-fp32/fp32_sim
-FP32_RUN = $(PYTHON) tools/fp32_vectors.py
-FP32_SEED ?= 20260921
-FP32_RANDOM ?= 100
+# F1: standalone floating-point hardware with the pinned host oracle.
 .PHONY: test-fp32-tools-verilator test-fp32 test-fp32-verilator test-fp32-tools lint-fp32 synth-fp32 waves-fp32 bench-fp32
 
 build/fp32:
 	mkdir -p $@
 
-build/fp32/fp32_ref.o: tools/fp32_ref.c $(FP32_REF_HEADERS) | build/fp32
+build/fp32/fp32_ref.o: tools/fp32_ref.c tools/rv32_fp.h $(FP32_REF_HEADERS) | build/fp32
 	$(HOST_CC) $(FP32_REF_FLAGS) -c $< -o $@
 
 # Upstream RISCV NaN helpers intentionally ignore payload parameters.
@@ -493,3 +495,88 @@ waves-fp32: $(FP32_REF) build/fp32/fp32.vvp build/fp32/protocol.vvp
 
 bench-fp32: $(FP32_REF) $(FP32_VERILATOR)
 	$(FP32_RUN) --simulator $(FP32_VERILATOR) --anchors-only --stats --work build/fp32/bench
+
+build/fp32/rv32_fp.o: tools/rv32_fp.c tools/rv32_fp.h $(FP32_REF_HEADERS) | build/fp32
+	$(HOST_CC) $(FP32_REF_FLAGS) -c $< -o $@
+
+.PHONY: test-rv32-f test-rv32-f-verilator
+test-rv32-f: $(RV32EMU) $(RV32_TB_VVP) $(FP32_REF)
+	RV32_RTL_SIM=$(RV32_TB_VVP) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_f.py' -v
+
+test-rv32-f-verilator: $(RV32EMU) $(RV32_TB_VERILATOR) $(FP32_REF)
+	RV32_RTL_SIM=$(RV32_TB_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_f.py' -v
+
+# F2 float firmware keeps ILP32; every object in these directories has explicit ISA flags.
+RV32_F_CFLAGS := $(filter-out -march=rv32i,$(RV32_CFLAGS)) -march=rv32if_zicsr -ffp-contract=off
+RV32_SOFT_FLAGS := $(RV32_CFLAGS) -ffp-contract=off -DSOFTFLOAT_FAST_INT64 -DINLINE_LEVEL=5 -Dopts_GCC_h -Ithird_party/softfloat -Ithird_party/softfloat/include
+# opts_GCC_h disables the host-only intrinsics header (including __int128);
+# the unchanged generic integer primitives are used on RV32I.
+RV32_SOFT_OBJ := $(patsubst third_party/softfloat/%.c,build/rv32/soft/%.o,$(wildcard third_party/softfloat/*.c))
+RV32_FLOAT_HEX := c0800000
+RV32_CONVERT_HEX := 4f800003
+RV32_F_LDFLAGS := $(filter-out -march=rv32i,$(RV32_LDFLAGS)) -march=rv32if_zicsr
+RV32_F_IMAGES := floatcheck floatconvert floatsoft
+RV32_F_FILES := $(foreach image,$(RV32_F_IMAGES),$(foreach ext,elf lst bin readelf,build/rv32/$(image).$(ext)))
+
+build/rv32/f build/rv32/soft:
+	mkdir -p $@
+
+build/rv32/f/%.o: programs/rv32/%.c $(RV32_HEADERS) | build/rv32/f
+	$(RV32_CC) $(RV32_F_CFLAGS) -c $< -o $@
+
+build/rv32/floatcheck.elf: build/rv32/f/floatcheck.o build/rv32/f/float_work.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_F_LDFLAGS) -o $@ $(filter %.o,$^)
+
+build/rv32/floatconvert.elf: build/rv32/f/floatconvert.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_F_LDFLAGS) -o $@ $(filter %.o,$^)
+
+build/rv32/soft/%.o: third_party/softfloat/%.c $(FP32_REF_HEADERS) | build/rv32/soft
+	$(RV32_CC) $(filter-out -Werror,$(RV32_SOFT_FLAGS)) -Wno-unused-parameter -c $< -o $@
+
+build/rv32/soft/softfloat_abi.o: programs/rv32/rt/softfloat_abi.c $(FP32_REF_HEADERS) | build/rv32/soft
+	$(RV32_CC) $(RV32_SOFT_FLAGS) -c $< -o $@
+
+build/rv32/soft/float_work.o: programs/rv32/float_work.c | build/rv32/soft
+	$(RV32_CC) $(RV32_CFLAGS) -ffp-contract=off -c $< -o $@
+
+build/rv32/floatsoft.elf: build/rv32/floatcheck.o build/rv32/soft/float_work.o build/rv32/soft/softfloat_abi.o $(RV32_SOFT_OBJ) $(RV32_COMMON_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -o $@ $(filter %.o,$^)
+
+.PHONY: firmware-rv32-f check-rv32-f-image run-rv32-f-emu run-rv32-f-rtl run-rv32-f-rtl-verilator
+firmware-rv32-f: $(RV32_F_FILES)
+check-rv32-f-image: firmware-rv32-f
+	$(PYTHON) tools/rv32_image.py build/rv32/floatcheck.elf --listing build/rv32/floatcheck.lst --bin build/rv32/floatcheck.bin --hex build/rv32/floatcheck.hex --allow-f
+	$(PYTHON) tools/rv32_image.py build/rv32/floatconvert.elf --listing build/rv32/floatconvert.lst --bin build/rv32/floatconvert.bin --hex build/rv32/floatconvert.hex --allow-f
+	$(PYTHON) tools/rv32_image.py build/rv32/floatsoft.elf --listing build/rv32/floatsoft.lst --bin build/rv32/floatsoft.bin --hex build/rv32/floatsoft.hex
+
+run-rv32-f-emu: check-rv32-f-image $(RV32EMU)
+	$(PYTHON) tools/rv32_run_emu.py build/rv32/floatcheck.bin --expect-hex $(RV32_FLOAT_HEX)
+	$(PYTHON) tools/rv32_run_emu.py build/rv32/floatconvert.bin --expect-hex $(RV32_CONVERT_HEX)
+	$(PYTHON) tools/rv32_run_emu.py build/rv32/floatsoft.bin --expect-hex $(RV32_FLOAT_HEX)
+
+run-rv32-f-rtl: check-rv32-f-image $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatcheck.bin --expect-fp-waits 5081 --expect-last-line "PASS $(RV32_FLOAT_HEX)" --out build/rv32/f-rtl
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatconvert.bin --expect-fp-waits 89 --expect-last-line "PASS $(RV32_CONVERT_HEX)" --out build/rv32/f-rtl
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatsoft.bin --expect-fp-waits 0 --expect-last-line "PASS $(RV32_FLOAT_HEX)" --out build/rv32/f-rtl
+
+run-rv32-f-rtl-verilator: check-rv32-f-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatcheck.bin --expect-fp-waits 5081 --expect-last-line "PASS $(RV32_FLOAT_HEX)" --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatconvert.bin --expect-fp-waits 89 --expect-last-line "PASS $(RV32_CONVERT_HEX)" --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatsoft.bin --expect-fp-waits 0 --expect-last-line "PASS $(RV32_FLOAT_HEX)" --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
+
+.PHONY: test-rv32-f-tools
+test-rv32-f-tools: check-rv32-f-image $(RV32EMU) $(RV32_FP_OBJ)
+	$(PYTHON) -m unittest discover -s tests -p 'test_rv32_f_tools.py' -v
+
+test-rv32: test-rv32-f test-rv32-f-verilator test-rv32-f-tools run-rv32-f-emu run-rv32-f-rtl run-rv32-f-rtl-verilator
+
+.PHONY: waves-rv32-f bench-rv32-f run-rv32-f-soft-qemu
+waves-rv32-f: $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) tools/rv32_f_waves.py
+
+bench-rv32-f: run-rv32-f-rtl run-rv32-f-rtl-verilator
+
+run-rv32-f-soft-qemu: check-rv32-f-image
+	$(PYTHON) tools/rv32_run_qemu.py build/rv32/floatsoft.elf --qemu $(QEMU_RV32) --timeout 20 --expect-hex $(RV32_FLOAT_HEX) --transcript build/rv32/floatsoft.qemu.transcript --qemu-log build/rv32/floatsoft.qemu.log
+
+test-rv32: run-rv32-f-soft-qemu

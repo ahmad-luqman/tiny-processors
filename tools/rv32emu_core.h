@@ -7,7 +7,7 @@
  * emu_run_until reports, and host keys enter through emu_queue_event at the
  * same point scripted events do.
  *
- * Build: cc -std=c11 -O2 -Wall -Wextra -Werror -o rv32emu rv32emu.c rv32emu_core.c
+ * Build: make build-rv32-emu (links the pinned host SoftFloat objects)
  */
 #ifndef RV32EMU_CORE_H
 #define RV32EMU_CORE_H
@@ -61,7 +61,8 @@ typedef struct {
 #define EXIT_EMULATOR_ERROR 2
 
 typedef struct {
-    uint32_t x[32];
+    uint32_t x[32], f[32];
+    uint8_t fcsr;
     uint32_t pc;
     uint32_t mtvec, mepc, mcause, mtval;
     uint8_t *ram;
@@ -89,7 +90,8 @@ typedef struct {
     size_t dropped;         /* events the full queue refused; a passing run is rejected unless allowed */
     FILE *record;           /* every event offered to the queue as a script line, or NULL */
     /* Effects of the current step, for the trace line. */
-    int wr_reg;
+    int wr_reg, wr_freg;
+    bool wr_fcsr;
     uint32_t wr_value;
     bool mem_read, mem_write;
     uint32_t mem_addr, mem_value;

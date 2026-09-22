@@ -1,10 +1,9 @@
 `timescale 1ns/1ps
 
-// Combinational instruction decoder: register fields, the sign-extended
-// immediate for each format, one flag per instruction class, and the
-// `illegal` check that follows the machine contract (the emulator traps the
-// same words). Every valid word sets exactly one class flag, or none for
-// `fence`, which retires with no effect; the core executes all of them.
+// Integer/memory instruction decode and sign-extended immediates. Legal words
+// handled here select a class, except FENCE, which retires without effects.
+// F compute words are decoded separately by rv32_fdecode; the core traps only
+// when this decoder reports illegal and that decoder reports !fp_valid.
 module rv32_decode (
     input  wire [31:0] insn,
     output wire [4:0]  rd,
@@ -42,8 +41,8 @@ module rv32_decode (
     assign rs2 = insn[24:20];
     assign funct3 = insn[14:12];
 
-    // The four existing CSRs; any other number is illegal on the machine.
-    wire csr_exists = (csr == 12'h305) || (csr == 12'h341) || (csr == 12'h342) || (csr == 12'h343);
+    // Four trap CSRs and the three floating aliases; other numbers are illegal.
+    wire csr_exists = (csr == 12'h001) || (csr == 12'h002) || (csr == 12'h003) || (csr == 12'h305) || (csr == 12'h341) || (csr == 12'h342) || (csr == 12'h343);
     assign is_mret = (insn == 32'h30200073);
 
     assign is_lui = (opcode == OP_LUI);
@@ -51,15 +50,15 @@ module rv32_decode (
     assign is_alu_imm = (opcode == OP_IMM) && !illegal;
     assign is_alu_reg = (opcode == OP_REG) && !illegal;
     assign alu_alt = funct7[5] && (is_alu_reg || (is_alu_imm && funct3 == 3'd5));
-    assign is_load = (opcode == OP_LOAD) && !illegal;
-    assign is_store = (opcode == OP_STORE) && !illegal;
+    assign is_load = (opcode == OP_LOAD || opcode == 7'h07) && !illegal;
+    assign is_store = (opcode == OP_STORE || opcode == 7'h27) && !illegal;
     assign is_branch = (opcode == OP_BRANCH) && !illegal;
     assign is_jal = (opcode == OP_JAL);
     assign is_jalr = (opcode == OP_JALR) && !illegal;
     assign is_csr = (opcode == OP_SYSTEM) && (funct3 != 3'd0) && !illegal;
     assign is_ecall = (insn == 32'h00000073);
     assign is_ebreak = (insn == 32'h00100073);
-    assign writes_rd = is_lui || is_auipc || is_alu_imm || is_alu_reg || is_load || is_jal || is_jalr || is_csr;
+    assign writes_rd = is_lui || is_auipc || is_alu_imm || is_alu_reg || (is_load && opcode == OP_LOAD) || is_jal || is_jalr || is_csr;
 
     // Immediates: each format places the sign bit at insn[31], so every
     // extension replicates that one bit (RV32I chapter 2.3).
@@ -68,18 +67,19 @@ module rv32_decode (
             OP_LUI, OP_AUIPC: imm = {insn[31:12], 12'd0};
             OP_JAL: imm = {{12{insn[31]}}, insn[19:12], insn[20], insn[30:21], 1'b0};
             OP_BRANCH: imm = {{20{insn[31]}}, insn[7], insn[30:25], insn[11:8], 1'b0};
-            OP_STORE: imm = {{21{insn[31]}}, insn[30:25], insn[11:7]};
+            OP_STORE, 7'h27: imm = {{21{insn[31]}}, insn[30:25], insn[11:7]};
             default: imm = {{21{insn[31]}}, insn[30:20]}; // I-type: loads, OP-IMM, jalr, system
         endcase
     end
 
     // What the machine rejects, opcode by opcode, mirroring the emulator's
-    // `goto illegal` paths in tools/rv32emu.c. Every path assigns `illegal`.
+    // `goto illegal` paths in tools/rv32emu_core.c. Every path assigns `illegal`.
     always @* begin
         case (opcode)
             OP_LUI, OP_AUIPC, OP_JAL: illegal = 1'b0;
             OP_JALR: illegal = (funct3 != 3'd0);
             OP_BRANCH: illegal = (funct3 == 3'd2) || (funct3 == 3'd3);
+            7'h07, 7'h27: illegal = funct3 != 3'd2;
             OP_LOAD: illegal = (funct3 == 3'd3) || (funct3 > 3'd5);
             OP_STORE: illegal = (funct3 > 3'd2);
             OP_IMM: illegal = (funct3 == 3'd1 && funct7 != 7'd0) ||                    // slli with bits above the shift amount set

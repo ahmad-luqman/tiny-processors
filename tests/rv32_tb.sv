@@ -19,7 +19,10 @@ module rv32_tb;
     wire [31:0] mem_addr, mem_wdata, mem_rdata, retire_pc, retire_insn, retire_rd_value, trap_value, pc;
     wire [31:0] mtvec, mepc, mcause, mtval;
     wire [3:0] mem_strb, trap_cause;
-    wire [4:0] retire_rd;
+    wire [4:0] retire_rd, retire_fd;
+    wire retire_fd_we, retire_fcsr_we;
+    wire [31:0] retire_fd_value;
+    wire [7:0] retire_fcsr;
     wire [2:0] state;
     wire console_valid, done_valid, display_present, in_full;
     wire [7:0] console_byte;
@@ -49,6 +52,32 @@ module rv32_tb;
     reg stalled_request = 0;
     wire [69:0] request = {mem_fetch, mem_we, mem_strb, mem_addr, mem_wdata};
     reg [69:0] held_request;    // the request as it was on the first stalled edge
+    integer fp_waits = 0;
+    reg fp_inflight = 0, fp_completed = 0;
+    // Integration protocol: each arithmetic retirement consumes one completion.
+    // Reset cancels both tokens, even if a response was accepted before writeback.
+    always @(posedge clk) begin
+        if (reset) begin
+            fp_inflight = 0;
+            fp_completed = 0;
+        end else begin
+            if (dut.core.fpu.req_valid && dut.core.fpu.req_ready) begin
+                if (fp_inflight || fp_completed) $fatal(1, "Duplicate FPU issue");
+                fp_inflight = 1;
+            end
+            if (dut.core.fpu.resp_valid && dut.core.fpu.resp_ready) begin
+                if (!fp_inflight) $fatal(1, "FPU completion without issue");
+                fp_inflight = 0;
+                // An internal-error response traps instead of retiring.
+                fp_completed = !dut.core.fp_error;
+            end
+            if (state == 3'd4 && dut.core.fp_valid && dut.core.fp_direct == dut.core.DIRECT_NONE) begin
+                if (!fp_completed) $fatal(1, "FPU retirement without completion");
+                fp_completed = 0;
+            end
+        end
+    end
+
     integer cycles = 0, steps = 0, stalls = 0, transfers = 0;
     integer max_cycles = 10000000; // +max-cycles=N; the diagnostic needs ~2M, stalled M7 requests 20M
     integer reset_at = 0;       // +reset-at=N: assert reset again after counted cycle N
@@ -164,6 +193,7 @@ module rv32_tb;
                 $fatal(1, "+reset-at=%0d was never reached: the run ended at cycle %0d", reset_at, cycles);
             $fwrite(STDERR, "rv32_tb: halt=%0s cycles=%0d steps=%0d stalls=%0d transfers=%0d",
                     halt_name, cycles, steps, stalls, transfers);
+            if (fp_waits != 0) $fwrite(STDERR, " fp_waits=%0d", fp_waits);
             if (halt_name == "done") begin
                 $fwrite(STDERR, " done=%h", done_word);
                 if (done_word == 32'h5555)
@@ -221,6 +251,7 @@ module rv32_tb;
             $fatal(1, "Request on the bus during reset");
         if (!reset) begin
             cycles = cycles + 1;
+            if (state == 3'd6 || state == 3'd7) fp_waits = fp_waits + 1;
             // The contract: nothing about a request changes while it waits,
             // including on the edge that finally accepts it.
             if (stalled_request && (mem_valid !== 1'b1 || request !== held_request))
@@ -274,11 +305,15 @@ module rv32_tb;
         end
         #1;
         if (!reset) begin
+            if (retire && retire_rd_we && retire_fd_we)
+                $fatal(1, "Instruction wrote both integer and floating destinations");
             if (retire) begin
                 steps = steps + 1;
                 if (trace_fd != 0) begin
                     $fwrite(trace_fd, "%0d %h %h", steps, retire_pc, retire_insn);
                     if (retire_rd_we) $fwrite(trace_fd, " x%0d=%h", retire_rd, retire_rd_value);
+                    if (retire_fd_we) $fwrite(trace_fd, " f%0d=%h", retire_fd, retire_fd_value);
+                    if (retire_fcsr_we) $fwrite(trace_fd, " fcsr=%h", retire_fcsr);
                     if (pending && pending_write)
                         $fwrite(trace_fd, " mem[%h]<-%h/%0d", pending_addr, pending_value, pending_width);
                     if (pending && !pending_write)
