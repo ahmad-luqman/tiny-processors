@@ -19,6 +19,11 @@ def signed(value, bits=16):
     return value - (1 << bits) if value & (1 << (bits - 1)) else value
 
 
+def state_bits(lanes):
+    """Width of one packed snapshot: four 16-bit registers and one 32-bit accumulator per lane, PC, loop."""
+    return lanes * 96 + 24
+
+
 def snapshot(registers, accumulators, pc, loop):
     """Pack lane registers, accumulators, PC and loop count the way the RTL exposes them."""
     lanes = len(registers)
@@ -45,7 +50,7 @@ class Execution:
     @property
     def state_bits(self):
         """Width of one packed snapshot: registers, accumulators, PC and loop count."""
-        return self.lanes * 96 + 24
+        return state_bits(self.lanes)
 
     @property
     def record_bits(self):
@@ -108,8 +113,8 @@ def execute(program, initial_memory, lanes=4, entry=0, limit=4096):
                 elif op == RDA:
                     row[rd] = (signed(accumulators[lane], 32) >> (immediate & 31)) % 65536
         state = snapshot(registers, accumulators, pc, loop)
-        retirements.append(state | (instruction << (lanes * 96 + 24)) |
-                           (address << (lanes * 96 + 56)))
+        # A retirement record is the snapshot with the instruction word and its address above it.
+        retirements.append(state | (instruction << state_bits(lanes)) | (address << (state_bits(lanes) + 32)))
         if op == HLT:
             return Execution(lanes, memory, retirements, transfers, state, attempt, False)
     raise ValueError("reference program exceeded instruction limit")

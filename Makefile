@@ -182,7 +182,7 @@ build/verilator-simd4-%/simd4_sim: $(SIMD4_RTL) $(SIMD4_TB) | build
 	verilator --binary --timing --trace --top-module simd4_tb -GLANES=$* --Mdir build/verilator-simd4-$* -o simd4_sim $(SIMD4_TB) $(SIMD4_RTL)
 
 test-simd4-model:
-	$(PYTHON) -m unittest discover -s tests -p 'test_simd4_model.py' -v
+	$(PYTHON) -m unittest discover -s tests -p 'test_simd4_*.py' -v
 
 test-simd4: $(SIMD4_ICARUS) test-simd4-model
 	$(PYTHON) -m tools.simd4_run --simulator icarus

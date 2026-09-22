@@ -101,7 +101,7 @@ Transfer lines in the `.log` files use the actual accepting edge. Retirement lin
 
 The stalled trace repeats 0, 1, 2, 3 extra waits across successive transfers. The first LOAD accepts at 105, 125, 155, and 195 ns. At 115 ns, lane 1 is waiting: inspect the stable address and register state, and watch `stalls` increment. ADD consequently commits at 335 ns. Both runs produce identical results: the no-wait run uses 54 cycles and 0 stalls; the varying-wait run uses 90 cycles and 36 stalls. Each transfers 24 words and retires 15 instructions.
 
-The generated Icarus and Verilator waveforms agree on 41 inspected signals, including all 16 lane registers: 116 common snapshots after launch for the no-wait run and 188 for the stalled run. All four first-group ADD results were also checked at their capture edge.
+The generated Icarus and Verilator waveforms agree on 41 inspected signals, including all 16 lane registers: 116 common snapshots after launch for the no-wait run and 188 for the stalled run (the vector milestone comparison; the accumulators came later). All four first-group ADD results were also checked at their capture edge.
 
 ## 6. Explain the speedup with measured cycles
 
@@ -172,7 +172,7 @@ Instructions fall from 305 to 153 to 77, but every lane count transfers **144 wo
 
 ## 10. Read the matrix and overflow waveforms
 
-`make waves-simd4` adds `matrix-wave.vcd` (4×4 on four lanes, no waits) and `overflow-wave.vcd` (the extreme-product image on four lanes). Add the section 5 signals plus each lane's `acc` and the `accumulator_state` bus. Icarus and Verilator produce identical retirement and transfer lines for both runs (221 and 339 lines: 77 + 144 and 199 + 140).
+`make waves-simd4` adds `matrix-wave.vcd` (4×4 on four lanes, no waits) and `overflow-wave.vcd` (the extreme-product image on four lanes). Add the section 5 signals plus each lane's `acc` and the `accumulator_state` bus. Icarus and Verilator produce identical retirement and transfer lines for both runs (221 and 352 lines: 77 + 144 and 212 + 140).
 
 | Matrix trace | Observation |
 | --- | --- |
@@ -201,7 +201,7 @@ The extra area comes from lane register banks, arithmetic, register selection, s
 2. In the waveform, find ADD's single capture edge and STORE's four accepting edges. Explain why the registers update together but the memory words do not.
 3. Change one input pair to `ffff` and `0002`. Predict the 16-bit result, then check the direct Python calculation and RTL agree.
 4. Sketch what a four-word memory port would need to accept all four lane addresses together. Consider what happens if two lanes target the same address before proposing a speedup.
-5. Work row 1 of the model test's A (`7fff, 8000, ffff, 0001`) against column 1 of its rotated B (the same four words) by hand: 32767² + 32768² + 1 + 1 = `7fff0003`, one product short of 2^31. Predict both RDA windows (`0003`, `7fff`) before running `test_simd4_model.py`, then do C[0][0] of the runner's corner matrices, where four `7fff × 7fff` products give `fffc0004`.
+5. Work row 1 of the model test's A (`7fff, 8000, ffff, 0001`) against column 1 of its rotated B (the same four words) by hand: 32767² + 32768² + 1 + 1 = `7fff0003`; one more `7fff × 7fff` would cross 2^31. Predict both RDA windows (`0003`, `7fff`), then check them with `matrix_reference(a, b, 4, shift)[5]` on the test's A and B. Then do C[0][0] of the runner's corner matrices, where four `7fff × 7fff` products give `fffc0004`.
 6. Predict the matrix cycle count for 8×8 on two lanes at zero waits from the formulas in section 9, then compare with `matrix-8-lanes-2-wait-3-shift-0` in the results JSON after subtracting its stalls.
 7. Specify a broadcast load, `LOADB rd, ra, offset`, that performs one transfer and writes every lane. Count the transfers it saves for 4×4 on four lanes, then decide what the port should do if lanes disagree about `ra`.
 8. Add a saturating read-back on paper: which comparator, which mux, and which accumulator bits decide the clamp? Keep it for N1.

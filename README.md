@@ -105,7 +105,7 @@ Start with the [ISA and memory contract](docs/sap8.md), then follow the [registe
 [SIMD4](docs/simd4.md) has four 16-bit lanes, four registers and a 32-bit accumulator per lane, a shared PC/decoder, and uniform loops. Its vector-add and matrix multiply-accumulate kernels match a Python reference at every instruction and memory transfer. One ready/valid memory port serves lanes in order and supports stalls. Launch/done, faults, and reset cancellation are tested.
 
 ```sh
-make test-simd4            # Python checks and 388 Icarus cases across 1/2/4 lanes
+make test-simd4            # Python checks and 395 Icarus cases across 1/2/4 lanes
 make test-simd4-verilator  # Same cases in Verilator, plus short waveforms
 make lint-simd4            # Strict RTL lint for all lane configurations
 make synth-simd4           # Four-lane generic synthesis and latch check
@@ -113,7 +113,7 @@ make bench-simd4           # Compare vector and matrix cycle counts by lane coun
 make waves-simd4           # Tests, vector/stalled/matrix/overflow traces, and the Surfer link
 ```
 
-Both simulators pass 388 cases with 411 completed launches and agree on the benchmarks. For 32 elements, one lane takes 486 cycles and four lanes take 198 cycles with no memory waits: **2.45× speedup**. All still need 96 transfers through the single port. The 4×4 matrix kernel takes 754 cycles on one lane and 298 on four (**2.53×**) and always 144 transfers, because every lane loads its own copy of the shared A operand. Read the [gate and performance walkthrough](docs/simd4-to-gates.md) to connect lane duplication, stalls, multipliers, overflow, and measured speedup.
+Both simulators pass 395 cases with 423 completed launches and agree on the benchmarks. For 32 elements, one lane takes 486 cycles and four lanes take 198 cycles with no memory waits: **2.45× speedup**. All still need 96 transfers through the single port. The 4×4 matrix kernel takes 754 cycles on one lane and 298 on four (**2.53×**) and always 144 transfers, because every lane loads its own copy of the shared A operand. Read the [gate and performance walkthrough](docs/simd4-to-gates.md) to connect lane duplication, stalls, multipliers, overflow, and measured speedup.
 
 The [vector kernel](programs/simd4/vector_add.py), the [matrix kernel](programs/simd4/matrix_mac.py), interpreter, and runner use Python's standard library. Generated reports and traces are under `build/simd4/icarus/` and `build/simd4/verilator/`. Every lane is active, so vector length and matrix size must be divisible by lane count. MUL keeps the low 16 bits of a product; MAC/MACU add the signed/unsigned 32-bit product into the accumulator modulo 2^32; RDA reads a 16-bit window back with truncation and no saturation. Divergent branches, a broadcast load, and saturation are not implemented. A1 is complete; A2 attaches the engine to the RV32 bus.
 

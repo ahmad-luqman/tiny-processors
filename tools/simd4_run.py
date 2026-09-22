@@ -7,24 +7,38 @@ import random
 import re
 import subprocess
 
-from programs.simd4.matrix_mac import expected_counts, program as matrix_program, reference as matrix_reference, word_count
+from programs.simd4.matrix_mac import (A_BASE, B_BASE, C_BASE, expected_counts, program as matrix_program,
+                                       reference as matrix_reference, word_count)
 from programs.simd4.vector_add import program as vector_program
 from tools.simd4_model import (ADD, ADDI, CLRA, HLT, LANE, LAST_OPCODE, LDI, LOAD, LOOP, MAC, MACU, MUL, RDA,
                                SETLOOP, STORE, execute, image, word)
 
 
 RESULT = re.compile(r"RESULT lanes=(\d+) wait=(\d+) cycles=(\d+) stalls=(\d+) transfers=(\d+) instructions=(\d+) fault=(\d+)")
-# Icarus reports a fixture row with more hex digits than the array width as a WARNING and
-# keeps the low bits; Verilator says nothing. Neither changes the exit status.
-SIMULATOR_WARNING = re.compile(r"^(WARNING|%Warning)", re.MULTILINE)
+# Neither simulator fails a run for a fixture row wider than its array: Icarus prints a
+# column-0 WARNING and keeps the low bits, Verilator prints nothing. Icarus also exits 0
+# after $error. So any simulator complaint fails the case, and no $display in the
+# testbench may begin with one of these words.
+SIMULATOR_COMPLAINT = re.compile(r"^(?:\[[^\]]*\] )?(?:WARNING|ERROR|VCD warning|%Warning|%Error)\b", re.MULTILINE)
+SIMULATOR_TIMEOUT = 20
 CORNERS = (0x7fff, 0x8000, 0xffff, 0x0001)  # 32767, -32768, -1, 1
+UNUSED_FIELD_BITS = 0x30000                  # instruction bits [17:16], which every opcode ignores
 
 
-def write_hex(path, values, width):
+def write_hex(path, values, bits):
+    """Write one row per value at the width of the testbench array that will $readmemh it."""
+    digits = (bits + 3) // 4
     for value in values:
-        if not 0 <= value < 16 ** width:
-            raise ValueError(f"{path.name}: {value:#x} does not fit {width} hex digits")
-    path.write_text("".join(f"{value:0{width}x}\n" for value in values))
+        if not 0 <= value < 1 << bits:
+            raise ValueError(f"{path.name}: {value:#x} does not fit {bits} bits")
+    path.write_text("".join(f"{value:0{digits}x}\n" for value in values))
+
+
+def failure_reasons(returncode, log):
+    """Why a simulator run is rejected: a nonzero exit, a missing PASS line, or a complaint."""
+    return [reason for reason, hit in ((f"exit status {returncode}", returncode),
+                                       ("no PASS line", "PASS: SIMD4" not in log),
+                                       ("simulator warning or error", SIMULATOR_COMPLAINT.search(log))) if hit]
 
 
 def vector_memory(length):
@@ -38,34 +52,34 @@ def vector_memory(length):
 
 
 def matrix_memory(n, extreme=False):
-    """Row-major A at 0x00 and B at 0x40.
+    """Row-major A at A_BASE and B at B_BASE for the matrix kernel.
 
-    The ordinary variant uses small signed values so the waveform products stay readable.
-    The extreme variant rotates the corner values 32767, -32768, -1 and 1 through every row
-    of A and every column of B, then fills row 0 of A and column 0 of B with 32767 so that
-    C[0][0] accumulates n * 32767^2, which passes 2^31 for n = 4 and wraps past 2^32 for n = 8.
+    The ordinary variant uses small nonzero signed values so the waveform products stay
+    readable and every partial sum is live. The extreme variant rotates the corner values
+    32767, -32768, -1 and 1 through the rows of A and the columns of B (a 2x2 row holds two
+    of them), then fills row 0 of A and column 0 of B with 32767 so that C[0][0] accumulates
+    n * 32767^2, which passes 2^31 for n = 4 and wraps past 2^32 for n = 8.
     """
     rng = random.Random(0x3A7 + n)
     memory = [rng.randrange(65536) for _ in range(256)]
     if extreme:
-        memory[:n * n] = [CORNERS[(i + i // n) % 4] for i in range(n * n)]
-        memory[64:64 + n * n] = [CORNERS[(3 * i + i // n) % 4] for i in range(n * n)]
-        memory[:n] = [0x7fff] * n
-        for k in range(n):
-            memory[64 + k * n] = 0x7fff
+        memory[A_BASE:A_BASE + n * n] = [0x7fff if i < n else CORNERS[(i + i // n) % 4] for i in range(n * n)]
+        memory[B_BASE:B_BASE + n * n] = [0x7fff if i % n == 0 else CORNERS[(3 * i + i // n) % 4] for i in range(n * n)]
     else:
-        memory[:n * n] = [rng.randrange(-9, 10) % 65536 for _ in range(n * n)]
-        memory[64:64 + n * n] = [rng.randrange(-9, 10) % 65536 for _ in range(n * n)]
+        small = [v for v in range(-9, 10) if v]
+        memory[A_BASE:A_BASE + n * n] = [rng.choice(small) % 65536 for _ in range(n * n)]
+        memory[B_BASE:B_BASE + n * n] = [rng.choice(small) % 65536 for _ in range(n * n)]
     return memory
 
 
 def extreme_products():
     """The hand-computed operand pairs from the model tests, back to back in one launch.
 
-    Each group clears, accumulates a pair once or three times with MAC then MACU, reads
-    both halves back, multiplies the read-back halves into r3, and stores the two halves
-    at the same addresses in every lane. A tail exercises RDA shifts 1, 31, 33 (mod 32)
-    and 4, the MAC r0, r0 alias, and the fields CLRA and RDA must ignore.
+    Each group clears, accumulates a pair once, three or five times with MAC then MACU,
+    reads both halves back, multiplies the read-back halves into r3, and stores the two
+    halves at the same addresses in every lane. The tails exercise RDA shifts 1, 31, 33
+    (mod 32) and 4, the MAC r0, r0 alias, the fields CLRA, RDA, MAC and MACU must ignore,
+    instruction bits [17:16], and lane-distinct MUL/MACU operands.
     """
     words = [word(LANE, rd=3), word(LDI, rd=2, imm=0x00c0)]  # r3 = lane until the first MUL, r2 = store base
     for a, b, times in ((0xffff, 0xffff, 1), (0x8000, 0x8000, 1), (0x8000, 0x7fff, 1), (0xffff, 0x0001, 1),
@@ -76,37 +90,56 @@ def extreme_products():
             words += [word(RDA, rd=0), word(RDA, rd=1, imm=16), word(MUL, rd=3, ra=0, rb=1)]
             words += [word(STORE, rd=0, ra=2), word(STORE, rd=1, ra=2, imm=1), word(ADDI, rd=2, ra=2, imm=2)]
     # acc = 3 * 32767^2 = bffd0003: windows past bit 31 (shift 31; 33 wraps to 1), then MAC r0, r0
-    # squares the read-back and RDA 4 stores the result.
+    # squares the read-back and RDA 4 reads it back for the store.
     words += [word(LDI, rd=0, imm=0x7fff), word(LDI, rd=1, imm=0x7fff), word(CLRA)] + [word(MAC, ra=0, rb=1)] * 3
     words += [word(RDA, rd=0, imm=1), word(RDA, rd=1, imm=31), word(RDA, rd=3, imm=33), word(MAC, ra=0, rb=0),
               word(RDA, rd=0, imm=4), word(STORE, rd=0, ra=2), word(STORE, rd=1, ra=2, imm=1),
               word(STORE, rd=3, ra=2, imm=2)]
-    # CLRA ignores every field; RDA ignores ra/rb; MUL may write an operand register.
-    words += [word(MAC, ra=1, rb=1), word(CLRA, rd=3, ra=1, rb=2, imm=0xffff), word(MAC, ra=0, rb=1),
-              word(RDA, rd=2, ra=3, rb=1, imm=16), word(MUL, rd=0, ra=0, rb=1), word(MUL, rd=1, ra=0, rb=1),
-              word(HLT)]
+    # Ignored fields, on a live accumulator so the read-back values are nonzero: RDA ignores
+    # ra/rb (reads fffc), CLRA ignores every field, MAC/MACU ignore rd, MUL may write an operand.
+    words += [word(MAC, ra=1, rb=1), word(RDA, rd=2, ra=3, rb=1, imm=16), word(CLRA, rd=3, ra=1, rb=2, imm=0xffff),
+              word(MAC, rd=2, ra=0, rb=1), word(MACU, rd=1, ra=0, rb=1), word(RDA, rd=2, imm=2),
+              word(MUL, rd=0, ra=0, rb=1), word(MUL, rd=1, ra=0, rb=1)]
+    # Instruction bits [17:16] set on every accumulator opcode: word() cannot emit them.
+    words += [w | UNUSED_FIELD_BITS for w in (word(MAC, ra=0, rb=1), word(MACU, ra=1, rb=1), word(RDA, rd=3, imm=8),
+                                              word(MUL, rd=2, ra=0, rb=1), word(CLRA))]
+    # Lane-distinct operands through MUL, MACU and a MACU self-alias; MAC/MACU with rd set.
+    # r3 = lane * 0x101, so lane 3 accumulates 0x303 * 0x101 + 0x303^2 = 000c180c.
+    words += [word(LANE, rd=3), word(LDI, rd=1, imm=0x0101), word(MUL, rd=3, ra=3, rb=1),
+              word(MAC, rd=3, ra=3, rb=1), word(MACU, rd=1, ra=3, rb=3), word(RDA, rd=3), word(HLT)]
     return image(words)
 
 
 def rda_sweep():
-    """Read a negative, then a positive, accumulator back through every shift, plus out-of-range immediates."""
+    """Read a negative accumulator (via MAC, then the same bits via MACU) and a positive one back
+    through every shift, plus out-of-range immediates."""
     shifts = list(range(32)) + [32, 47, 0x7fff, 0xffff]
-    words = [word(LDI, rd=0, imm=0x7fff), word(LDI, rd=1, imm=0x7fff)] + [word(MAC, ra=0, rb=1)] * 3  # bffd0003
-    words += [word(RDA, rd=2 + (i & 1), imm=shift) for i, shift in enumerate(shifts)]
-    words += [word(CLRA)] + [word(MACU, ra=0, rb=1)] * 3                                               # same bits
-    words += [word(RDA, rd=2 + (i & 1), imm=shift) for i, shift in enumerate(shifts)]
-    words += [word(CLRA), word(MAC, ra=0, rb=1)]                                                        # 3fff0001
-    words += [word(RDA, rd=2 + (i & 1), imm=shift) for i, shift in enumerate(shifts)] + [word(HLT)]
-    return image(words)
+    words = [word(LDI, rd=0, imm=0x7fff), word(LDI, rd=1, imm=0x7fff)]
+    for accumulate in ([word(MAC, ra=0, rb=1)] * 3,                  # bffd0003, reads as negative
+                       [word(CLRA)] + [word(MACU, ra=0, rb=1)] * 3,   # the same bits through the unsigned path
+                       [word(CLRA), word(MAC, ra=0, rb=1)]):          # 3fff0001, positive
+        # Alternating rd shows the previous read-back surviving in the other register.
+        words += accumulate + [word(RDA, rd=2 + (i & 1), imm=shift) for i, shift in enumerate(shifts)]
+    return image(words + [word(HLT)])
 
 
 def fault_after_mac(bad):
-    """acc = 0xabcd * 3 and r0 = 3 before the faulting word: the fault must leave both alone."""
-    return image([word(LDI, rd=2, imm=0xabcd), word(LDI, rd=0, imm=3), word(MAC, ra=2, rb=0), bad])
+    """acc = sext(0xabcd) * 3 = ffff0367 and r0 = 3 in every lane before a word that must fault."""
+    code = image([word(LDI, rd=2, imm=0xabcd), word(LDI, rd=0, imm=3), word(MAC, ra=2, rb=0), bad])
+    if not execute(code, [0] * 256).fault:
+        raise ValueError(f"word {bad:#010x} does not fault")
+    return code
+
+
+def overflow_then_read():
+    """Three MACs of 7fff^2 and their read-back, for resets taken while a MAC or an RDA is executing."""
+    return image([word(LDI, rd=0, imm=0x7fff), word(LDI, rd=1, imm=0x7fff)] + [word(MAC, ra=0, rb=1)] * 3 +
+                 [word(RDA, rd=2), word(RDA, rd=3, imm=16), word(STORE, rd=2, ra=1), word(HLT)])
 
 
 EXTREMES = extreme_products()
 RDA_SWEEP = rda_sweep()
+OVERFLOW = overflow_then_read()
 
 
 class Runner:
@@ -116,38 +149,50 @@ class Runner:
         self.root.mkdir(parents=True, exist_ok=True)
         self.results = []
 
-    def run(self, name, code, memory, lanes=4, wait=0, entry=0, abort_after=None, relaunch=False, wave=False,
-            expect_nonzero_acc=False):
+    def binary(self, lanes):
+        return (["vvp", f"build/simd4-{lanes}.vvp"] if self.simulator == "icarus"
+                else [f"build/verilator-simd4-{lanes}/simd4_sim"])
+
+    def run(self, name, code, memory, lanes=4, wait=0, entry=0, abort_after=None, abort_at_retire=None,
+            relaunch=False, wave=False, expect_nonzero_acc=False, binary_lanes=None):
+        if expect_nonzero_acc and abort_after is None and abort_at_retire is None:
+            raise ValueError(f"{name}: expect_nonzero_acc needs an abort point")
         reference = execute(code, memory, lanes, entry)
         prefix = self.root / name
-        write_hex(Path(f"{prefix}.program.hex"), code, 8)
-        write_hex(Path(f"{prefix}.memory.hex"), memory, 4)
-        write_hex(Path(f"{prefix}.expected-memory.hex"), reference.memory, 4)
-        write_hex(Path(f"{prefix}.retire.hex"), reference.retirements, reference.record_bits // 4)
-        write_hex(Path(f"{prefix}.transfers.hex"), reference.transfers, 7)
-        write_hex(Path(f"{prefix}.final.hex"), [reference.final_state], reference.state_bits // 4)
+        write_hex(Path(f"{prefix}.program.hex"), code, 32)
+        write_hex(Path(f"{prefix}.memory.hex"), memory, 16)
+        write_hex(Path(f"{prefix}.expected-memory.hex"), reference.memory, 16)
+        write_hex(Path(f"{prefix}.retire.hex"), reference.retirements, reference.record_bits)
+        write_hex(Path(f"{prefix}.transfers.hex"), reference.transfers, 25)
+        write_hex(Path(f"{prefix}.final.hex"), [reference.final_state], reference.state_bits)
+        # Row order matches the META_* localparams in tests/simd4_tb.sv.
         write_hex(Path(f"{prefix}.meta.hex"), [len(reference.retirements), len(reference.transfers),
-                  reference.base_cycles, int(reference.fault), entry, reference.state_bits], 8)
-        command = (["vvp", f"build/simd4-{lanes}.vvp"] if self.simulator == "icarus"
-                   else [f"build/verilator-simd4-{lanes}/simd4_sim"])
-        command += [f"+case={prefix}", f"+wait={wait}"]
+                  reference.base_cycles, int(reference.fault), entry, reference.state_bits,
+                  reference.record_bits], 32)
+        command = self.binary(binary_lanes or lanes) + [f"+case={prefix}", f"+wait={wait}"]
         if abort_after is not None:
             command.append(f"+abort-after={abort_after}")
+        if abort_at_retire is not None:
+            command.append(f"+abort-at-retire={abort_at_retire}")
         if relaunch:
             command.append("+relaunch")
         if expect_nonzero_acc:
             command.append("+expect-nonzero-acc")
         if wave:
             command += [f"+wave={prefix}.vcd", "+trace"]
+        log_path = Path(f"{prefix}.log")
         try:
-            process = subprocess.run(command, capture_output=True, text=True, timeout=20)
+            process = subprocess.run(command, capture_output=True, text=True, timeout=SIMULATOR_TIMEOUT)
         except subprocess.TimeoutExpired as timeout:
-            Path(f"{prefix}.log").write_text((timeout.stdout or "") + (timeout.stderr or ""))
-            raise
+            # The captured streams are bytes here even under text mode.
+            log = "".join((stream or b"").decode(errors="replace") for stream in (timeout.stdout, timeout.stderr))
+            log_path.write_text(log)
+            raise RuntimeError(f"{name} timed out after {SIMULATOR_TIMEOUT} s ({self.simulator}):\n{log}") from timeout
         log = process.stdout + process.stderr
-        Path(f"{prefix}.log").write_text(log)
-        if process.returncode or "PASS: SIMD4" not in log or SIMULATOR_WARNING.search(log):
-            raise RuntimeError(f"{name} failed ({self.simulator}):\n{log}")
+        log_path.write_text(log)
+        reasons = failure_reasons(process.returncode, log)
+        if reasons:
+            raise RuntimeError(f"{name} failed ({self.simulator}): {', '.join(reasons)}\n{log}")
         matches = RESULT.findall(log)
         if len(matches) != (2 if relaunch else 1):
             raise RuntimeError(f"{name}: missing completion report")
@@ -160,9 +205,20 @@ class Runner:
             if tuple(map(int, match)) != expected:
                 raise RuntimeError(f"{name}: measured counters {match} != independently expected {expected}")
         result = dict(zip(("lanes", "wait", "cycles", "stalls", "transfers", "instructions", "fault"), expected))
-        result.update(name=name, launches=len(matches), abort_after=abort_after)
+        result.update(name=name, launches=len(matches), abort_after=abort_after, abort_at_retire=abort_at_retire)
         self.results.append(result)
         return result
+
+    def expect_rejection(self, name, pattern, **kwargs):
+        """A run the testbench must refuse, with `pattern` in its log; the suite's negative control."""
+        try:
+            self.run(name, **kwargs)
+        except RuntimeError as error:
+            if not re.search(pattern, str(error)):
+                raise RuntimeError(f"{name}: rejected for another reason:\n{error}") from error
+        else:
+            raise RuntimeError(f"{name}: the testbench accepted a fixture it must reject")
+        self.results.append(dict(name=name, launches=0, rejected=pattern))
 
     def vector(self, lanes, length, wait=0, name=None, **kwargs):
         code, memory = vector_program(lanes, length), vector_memory(length)
@@ -170,8 +226,11 @@ class Runner:
         expected = memory.copy()
         expected[128:128 + length] = [(memory[i] + memory[64 + i]) % 65536 for i in range(length)]
         run = execute(code, memory, lanes)
-        if run.fault or run.memory != expected:
-            raise RuntimeError("Vector interpreter faulted or disagrees with direct Python array addition")
+        if run.fault:
+            raise RuntimeError(f"vector kernel lanes={lanes} length={length}: reference faulted")
+        if run.memory != expected:
+            raise RuntimeError(f"vector kernel lanes={lanes} length={length}: interpreter disagrees with "
+                               f"direct Python addition at word {next(i for i in range(256) if run.memory[i] != expected[i])}")
         return self.run(name or f"vector-{length}-lanes-{lanes}-wait-{wait}", code, memory,
                         lanes, wait, **kwargs)
 
@@ -179,12 +238,18 @@ class Runner:
         code, memory = matrix_program(lanes, n, shift), matrix_memory(n, extreme)
         # A direct Python matrix product checks the interpreter and the kernel shape too.
         expected = memory.copy()
-        expected[128:128 + n * n] = matrix_reference(memory[:n * n], memory[64:64 + n * n], n, shift)
+        expected[C_BASE:C_BASE + n * n] = matrix_reference(memory[A_BASE:A_BASE + n * n],
+                                                           memory[B_BASE:B_BASE + n * n], n, shift)
         run = execute(code, memory, lanes)
-        if run.fault or run.memory != expected:
-            raise RuntimeError("Matrix interpreter faulted or disagrees with direct Python matrix product")
+        label = f"matrix kernel lanes={lanes} n={n} shift={shift} extreme={extreme}"
+        if run.fault:
+            raise RuntimeError(f"{label}: reference faulted")
+        if run.memory != expected:
+            raise RuntimeError(f"{label}: interpreter disagrees with direct Python product at word "
+                               f"{next(i for i in range(256) if run.memory[i] != expected[i])}")
         if (len(run.retirements), len(run.transfers)) != expected_counts(lanes, n):
-            raise RuntimeError("Matrix kernel retired a different instruction/transfer count than predicted")
+            raise RuntimeError(f"{label}: retired {len(run.retirements)} instructions and {len(run.transfers)} "
+                               f"transfers, predicted {expected_counts(lanes, n)}")
         variant = "-extreme" if extreme else ""
         return self.run(name or f"matrix-{n}-lanes-{lanes}-wait-{wait}-shift-{shift}{variant}", code, memory,
                         lanes, wait, **kwargs)
@@ -248,22 +313,35 @@ class Runner:
                     self.matrix(lanes, n, 1, extreme=True)
                     self.matrix(lanes, n, 0, shift=16, extreme=True)
             self.matrix(lanes, 4, 0, shift=31, extreme=True)
-            # Reset inside row 0 of column group 0: after both k=0 operand loads, the first MAC and
-            # one lane of the k=1 A load (2*lanes+1 transfers), while the next lane's request is pending.
-            self.matrix(lanes, 4, 3, name=f"matrix-reset-{lanes}", abort_after=2 * lanes + 1, relaunch=True,
-                        expect_nonzero_acc=True)
+            # Reset inside row 0 of column group 0 of the corner matrices: after both k=0 operand
+            # loads, the first MAC and one transfer into the k=1 A load (2*lanes+1 transfers), while
+            # the next request (the following lane, or the B load on one lane) is pending.
+            self.matrix(lanes, 4, 3, extreme=True, name=f"matrix-reset-{lanes}", abort_after=2 * lanes + 1,
+                        relaunch=True, expect_nonzero_acc=True)
             # Reset while the accumulators hold the first MACU result (fffe0001) and its store is
             # pending; the relaunch must start from zero.
             self.run(f"reset-mac-{lanes}", EXTREMES, memory, lanes, 3, abort_after=2 * lanes, relaunch=True,
                      expect_nonzero_acc=True)
-            for opcode in (LAST_OPCODE + 1, 0x1a, 0x8d, 0xff):
-                self.run(f"illegal-{opcode:02x}-lanes-{lanes}", fault_after_mac(word(opcode, rd=1, ra=2, imm=0x44)),
-                         [0x5a5a] * 256, lanes)
+            # Reset while the second MAC (after three retirements) or the first RDA (after five) is
+            # in EXECUTE with acc = 3fff0001 / bffd0003: the pending write must not land.
+            for retired, phase in ((3, "mac"), (5, "rda")):
+                self.run(f"reset-in-{phase}-{lanes}", OVERFLOW, memory, lanes, abort_at_retire=retired,
+                         relaunch=True, expect_nonzero_acc=True)
+            if lanes != 4:
+                # The full sweep below runs at four lanes; repeat a sample on one and two lanes.
+                for tag, bad in (("0e", word(LAST_OPCODE + 1, rd=1, ra=2, imm=0x44)), ("1a", word(0x1a, rd=1, ra=2, imm=0x44)),
+                                 ("8d", word(0x8d, rd=1, ra=2, imm=0x44)), ("ff", word(0xff, rd=1, ra=2, imm=0x44)),
+                                 ("setloop-0", word(SETLOOP)), ("loop-0", word(LOOP))):
+                    self.run(f"fault-{tag}-lanes-{lanes}", fault_after_mac(bad), [0x5a5a] * 256, lanes)
         for opcode in range(LAST_OPCODE + 1, 256):
             self.run(f"illegal-{opcode:02x}", fault_after_mac(word(opcode, rd=1, ra=2, imm=0x44)), [0x5a5a] * 256)
         self.run("zero-loop-count", image([word(LANE, rd=2), word(STORE, rd=2, imm=33), word(LDI, rd=0, imm=3),
-                                           word(MAC, ra=2, rb=0), word(SETLOOP)]), [0] * 256, wait=3, relaunch=True)
+                                           word(LDI, rd=1, imm=0xabcd), word(MAC, ra=1, rb=0), word(SETLOOP)]),
+                 [0] * 256, wait=3, relaunch=True)
         self.run("loop-without-count", fault_after_mac(word(LOOP)), [0] * 256, relaunch=True)
+        # A two-lane fixture through the four-lane binary must be refused by the width handshake.
+        self.expect_rejection("width-mismatch", "Fixture snapshot width", code=OVERFLOW, memory=[0] * 256,
+                              lanes=2, binary_lanes=4)
 
 
 def main():

@@ -23,7 +23,10 @@ module simd4_tb;
     reg [TRACE_BITS-1:0] expected_retirements [0:4095];
     reg [24:0] expected_transfers [0:4095];
     reg [STATE_BITS-1:0] expected_final [0:0];
-    reg [31:0] metadata [0:5]; // retirements, transfers, base cycles, fault, entry, snapshot width
+    // Fixture metadata rows, in the order tools/simd4_run.py writes them.
+    localparam integer META_RETIREMENTS = 0, META_TRANSFERS = 1, META_BASE_CYCLES = 2, META_FAULT = 3,
+                       META_ENTRY = 4, META_STATE_BITS = 5, META_TRACE_BITS = 6, META_ROWS = 7;
+    reg [31:0] metadata [0:META_ROWS-1];
     wire [31:0] program_data = program_memory[program_address];
     wire [15:0] mem_read_data = memory[mem_address];
     integer observed_cycles = 0;
@@ -33,6 +36,7 @@ module simd4_tb;
     integer request_age = 0;
     integer wait_mode = 0;
     integer abort_after = -1;
+    integer abort_at_retire = -1;
     integer launches = 1;
     integer i, run_number, timeout_cycles;
     reg checking = 0;
@@ -88,7 +92,7 @@ module simd4_tb;
                 $fatal(1, "Request or architectural state changed while stalled");
             if (mem_valid) begin
                 if (mem_ready) begin
-                    if (observed_transfers >= int'(metadata[1]) ||
+                    if (observed_transfers >= int'(metadata[META_TRANSFERS]) ||
                         {mem_write, mem_address, mem_write ? mem_write_data : mem_read_data} !==
                         expected_transfers[observed_transfers])
                         $fatal(1, "Transfer %0d differs from Python: write=%b address=%h data=%h",
@@ -118,7 +122,7 @@ module simd4_tb;
         #1;
         if (checking && !reset) begin
             if (retired) begin
-                if (observed_retirements >= int'(metadata[0]) ||
+                if (observed_retirements >= int'(metadata[META_RETIREMENTS]) ||
                     {retire_pc, retire_instruction, loop_count, pc, accumulator_state, register_state} !==
                     expected_retirements[observed_retirements])
                     $fatal(1, "Retirement %0d differs from Python: pc=%h instruction=%h acc=%h regs=%h",
@@ -147,7 +151,7 @@ module simd4_tb;
     task launch;
         begin
             @(negedge clk);
-            entry_pc = metadata[4][7:0];
+            entry_pc = metadata[META_ENTRY][7:0];
             start = 1;
             @(posedge clk); #2;
             if (busy !== 1 || done !== 0 || fault !== 0 || register_state !== 0 || accumulator_state !== 0 ||
@@ -165,17 +169,17 @@ module simd4_tb;
                 @(posedge clk); #2;
                 timeout_cycles = timeout_cycles + 1;
             end
-            if (done !== 1 || busy !== 0 || fault !== metadata[3][0] ||
+            if (done !== 1 || busy !== 0 || fault !== metadata[META_FAULT][0] ||
                 {loop_count, pc, accumulator_state, register_state} !== expected_final[0] ||
-                instructions !== metadata[0] || memory_transfers !== metadata[1] ||
-                cycles !== metadata[2] + stalls)
+                instructions !== metadata[META_RETIREMENTS] || memory_transfers !== metadata[META_TRANSFERS] ||
+                cycles !== metadata[META_BASE_CYCLES] + stalls)
                 $fatal(1, "Final state/count mismatch or timeout");
             for (i = 0; i < 256; i = i + 1)
                 if (memory[i] !== expected_memory[i])
                     $fatal(1, "Final memory[%0d]: expected %h, got %h", i, expected_memory[i], memory[i]);
             repeat (3) begin
                 @(posedge clk); #2;
-                if (busy !== 0 || done !== 1 || fault !== metadata[3][0] ||
+                if (busy !== 0 || done !== 1 || fault !== metadata[META_FAULT][0] ||
                     mem_valid !== 0 || retired !== 0 ||
                     {loop_count, pc, accumulator_state, register_state} !== expected_final[0])
                     $fatal(1, "Completed state did not hold");
@@ -190,6 +194,7 @@ module simd4_tb;
         if (!$value$plusargs("case=%s", case_path)) $fatal(1, "Missing +case fixture prefix");
         if ($value$plusargs("wait=%d", wait_mode)) begin end
         if ($value$plusargs("abort-after=%d", abort_after)) begin end
+        if ($value$plusargs("abort-at-retire=%d", abort_at_retire)) begin end
         if ($test$plusargs("relaunch")) launches = 2;
         require_file({case_path, ".meta.hex"});
         require_file({case_path, ".program.hex"});
@@ -197,22 +202,29 @@ module simd4_tb;
         require_file({case_path, ".expected-memory.hex"});
         require_file({case_path, ".final.hex"});
         $readmemh({case_path, ".meta.hex"}, metadata);
-        if (metadata[0] > 4096 || metadata[1] > 4096 || metadata[3] > 1 || metadata[4] > 255)
+        // Icarus leaves missing rows X, and X compares false under two-state operators, so
+        // the guards below use four-state comparisons after an explicit unknown check.
+        for (i = 0; i < META_ROWS; i = i + 1)
+            if ($isunknown(metadata[i])) $fatal(1, "Fixture metadata row %0d is missing", i);
+        if (metadata[META_RETIREMENTS] > 4096 || metadata[META_TRANSFERS] > 4096 ||
+            metadata[META_FAULT] > 1 || metadata[META_ENTRY] > 255)
             $fatal(1, "Invalid fixture metadata");
         // A fixture packed for another snapshot layout would otherwise be truncated or
-        // zero-filled by $readmemh without any diagnostic on Verilator.
-        if (metadata[5] != STATE_BITS)
-            $fatal(1, "Fixture snapshot width %0d differs from STATE_BITS %0d", metadata[5], STATE_BITS);
+        // zero-filled by $readmemh with a warning on Icarus and no diagnostic on Verilator.
+        if (metadata[META_STATE_BITS] !== STATE_BITS)
+            $fatal(1, "Fixture snapshot width %0d differs from STATE_BITS %0d", metadata[META_STATE_BITS], STATE_BITS);
+        if (metadata[META_TRACE_BITS] !== TRACE_BITS)
+            $fatal(1, "Fixture record width %0d differs from TRACE_BITS %0d", metadata[META_TRACE_BITS], TRACE_BITS);
         $readmemh({case_path, ".program.hex"}, program_memory);
         $readmemh({case_path, ".expected-memory.hex"}, expected_memory);
         $readmemh({case_path, ".final.hex"}, expected_final);
-        if (metadata[0] > 0) begin
+        if (metadata[META_RETIREMENTS] > 0) begin
             require_file({case_path, ".retire.hex"});
-            $readmemh({case_path, ".retire.hex"}, expected_retirements, 0, metadata[0] - 1);
+            $readmemh({case_path, ".retire.hex"}, expected_retirements, 0, metadata[META_RETIREMENTS] - 1);
         end
-        if (metadata[1] > 0) begin
+        if (metadata[META_TRANSFERS] > 0) begin
             require_file({case_path, ".transfers.hex"});
-            $readmemh({case_path, ".transfers.hex"}, expected_transfers, 0, metadata[1] - 1);
+            $readmemh({case_path, ".transfers.hex"}, expected_transfers, 0, metadata[META_TRANSFERS] - 1);
         end
         if ($value$plusargs("wave=%s", wave_path)) begin
             $dumpfile(wave_path);
@@ -225,21 +237,27 @@ module simd4_tb;
         @(negedge clk); reset = 0;
         checking = 1;
 
-        if (abort_after >= 0) begin
+        if (abort_after >= 0 || abort_at_retire >= 0) begin
             $readmemh({case_path, ".memory.hex"}, memory);
             launch;
             timeout_cycles = 0;
-            while (!(mem_valid && observed_transfers >= abort_after) && timeout_cycles < 10000) begin
+            // abort-after stops on a pending memory request; abort-at-retire stops while the
+            // instruction after the N-th retirement sits in EXECUTE, so reset cancels its write.
+            while (!((abort_after >= 0 && mem_valid && observed_transfers >= abort_after) ||
+                     (abort_at_retire >= 0 && observed_retirements >= abort_at_retire && state == 2'd2)) &&
+                   timeout_cycles < 10000) begin
                 @(posedge clk); #2;
                 timeout_cycles = timeout_cycles + 1;
             end
             if (timeout_cycles == 10000) $fatal(1, "Abort point was never reached");
             for (i = 0; i < 256; i = i + 1) saved_memory[i] = memory[i];
             pre_reset_lane_state = {accumulator_state, register_state};
-            // The accumulator cases must reach their reset with live accumulators, or
-            // the clear below would only show that zero resets to zero.
-            if ($test$plusargs("expect-nonzero-acc") && accumulator_state == 0)
-                $fatal(1, "Abort point reached with every accumulator still zero");
+            // The accumulator cases must reach their reset with a live accumulator in every
+            // lane, or the clear below would only show that zero resets to zero.
+            if ($test$plusargs("expect-nonzero-acc"))
+                for (i = 0; i < LANES; i = i + 1)
+                    if (accumulator_state[i*32 +: 32] == 0)
+                        $fatal(1, "Abort point reached with lane %0d's accumulator still zero", i);
             @(negedge clk); reset = 1;
             #1;
             if (mem_valid !== 0 || {accumulator_state, register_state} !== pre_reset_lane_state)
@@ -252,6 +270,7 @@ module simd4_tb;
                 if (memory[i] !== saved_memory[i]) $fatal(1, "Reset changed completed memory effects");
             @(negedge clk); reset = 0;
             abort_after = -1;
+            abort_at_retire = -1;
         end
 
         for (run_number = 0; run_number < launches; run_number = run_number + 1) begin

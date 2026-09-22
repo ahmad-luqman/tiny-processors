@@ -16,11 +16,17 @@ from tools.simd4_model import (ADD, ADDI, CLRA, HLT, LANE, LDI, LOAD, LOOP, MAC,
                                image, signed, word)
 
 A_BASE, B_BASE, C_BASE = 0x00, 0x40, 0x80
+SETUP_WORDS = 4                       # LANE, ADDI, LDI, SETLOOP before each column group's row loop
+
+
+def row_words(n):
+    """One row body: CLRA, then n unrolled LOAD/LOAD/MAC triples, then RDA, ADD, STORE, ADDI, LOOP."""
+    return 1 + 3 * n + 5
 
 
 def word_count(lanes, n):
-    """Program words the builder emits: per column group 4 setup words plus 3n+6 per unrolled row, then HLT."""
-    return (n // lanes) * (4 + 3 * n + 6) + 1
+    """Program words the builder emits: per column group the setup words plus one row body, then HLT."""
+    return (n // lanes) * (SETUP_WORDS + row_words(n)) + 1
 
 
 def program(lanes=4, n=4, shift=0):
@@ -62,8 +68,8 @@ def reference(a, b, n, shift=0):
     for i in range(n):
         for c in range(n):
             acc = sum(signed(a[i * n + k]) * signed(b[k * n + c]) for k in range(n))
-            # Wrap to the 32-bit accumulator before the arithmetic shift: an 8x8 sum of
-            # corner products can pass 2^31, and shifts of 16 or more reach the sign bit.
+            # Reduce modulo 2^32 first: signed() expects a 32-bit pattern, and a negative sum or
+            # an 8x8 corner sum past 2^32 would otherwise shift wrongly for shifts above 16.
             out.append((signed(acc % 2**32, 32) >> shift) % 65536)
     return out
 
@@ -71,8 +77,8 @@ def reference(a, b, n, shift=0):
 def expected_counts(lanes, n):
     """Retired instructions and transfers predicted from the kernel shape, checked by the runner."""
     groups = n // lanes
-    # Per group: 4 setup words, then per row CLRA + 3n load/load/MAC + RDA/ADD/STORE/ADDI/LOOP; plus HLT.
-    instructions = groups * (4 + n * (3 * n + 6)) + 1
+    # Per group: the setup words retire once and the row body retires once per row; plus HLT.
+    instructions = groups * (SETUP_WORDS + n * row_words(n)) + 1
     # Per output cell: n A loads + n B loads + 1 store, and every lane transfers each of its own.
     transfers = n * n * (2 * n + 1)
     return instructions, transfers
