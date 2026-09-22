@@ -13,6 +13,7 @@ static int hardware_emit(void *context,const struct gpu_command *c,const uint8_t
 }
 static void draw_demo(void)
 {
+    app.dirty=0; /* Match runtime_draw after either rendering path. */
     if(!app.demo.accelerated){gpu_demo_draw(&app.demo,&screen);return;}
     (void)gpu_scene(app.demo.frame,gpu_software_emit,gpu_expected);
     if(!gpu_scene(app.demo.frame,hardware_emit,0))rv32_exit(80);

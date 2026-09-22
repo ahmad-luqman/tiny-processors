@@ -31,10 +31,11 @@ class GraphicsSoC(unittest.TestCase):
         words += [SB(4,3,-1),LW(5,3,1)]+LI(6,source+76800)+[SB(4,6,0)]
         words += LI(4,2)+[SW(4,1,0),LW(5,1,4),SW(4,2,0),SB(4,3,0)]+FINISH()
         words += [0]*(256-len(words))+[CSRRS(6,0x341,0),ADDI(6,6,4),CSRRW(0,0x341,6),MRET()]
-        for run in self.run_pair(words,'ownership',seed=19,gpu_seed=31):
-            traps=[l.split()[-2:] for l in run.trace if ' trap ' in l]
-            self.assertEqual(traps,[[str(c),f'{a:08x}'] for c,a in [(5,0x30000000),(7,0x30000000),(7,0x20002000),(7,BASE+64),(7,BASE),(7,source),(7,source+767)]])
-            self.assertTrue(any('mem[20007004]->00000000/4' in l for l in run.trace))
+        for suffix,timing in [('random',dict(seed=19,gpu_seed=31)),('fixed',dict(stall=1,gpu_stall=2))]:
+            for run in self.run_pair(words,'ownership-'+suffix,**timing):
+                traps=[l.split()[-2:] for l in run.trace if ' trap ' in l]
+                self.assertEqual(traps,[[str(c),f'{a:08x}'] for c,a in [(5,0x30000000),(7,0x30000000),(7,0x20002000),(7,BASE+64),(7,BASE),(7,source),(7,source+767)]])
+                self.assertTrue(any('mem[20007004]->00000000/4' in l for l in run.trace))
     def test_trap_tick_and_empty_done(self):
         words=self.parameters([1]+[0]*15)+LI(4,RAM+1024)+[CSRRW(0,0x305,4)]
         words+=LI(4,1)+[SW(4,1,0),ECALL()]+FINISH()

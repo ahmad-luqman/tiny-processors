@@ -362,7 +362,7 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertIn(f"32'h{EVENT_VALID:08x} | ((token2 == \"down\") ? 32'h{EVENT_PRESS:x} : 32'h0)".replace("8000_0000", "80000000"),
                       testbench.replace("8000_0000", "80000000"))
         bases = {"RAM": RAM, "CONSOLE": CONSOLE, "DONE": DONE, "TIMER": TIMER, "INPUT": INPUT, "DISPLAY": DISPLAY, "FB": FB,
-                 "SIMD4": 0x20004000, "SIMD4_PROGRAM": 0x20005000, "SIMD4_DATA": 0x20006000}
+                 "SIMD4": 0x20004000, "SIMD4_PROGRAM": 0x20005000, "SIMD4_DATA": 0x20006000, "GPU": 0x20007000}
         header_bases = {name: int(value, 16) for name, value in re.findall(r"#define RV32_(\w+)_BASE\s+0x([0-9a-fA-F]+)", header)}
         self.assertEqual(header_bases, {name: bases[name] for name in header_bases}, "board.h")
         self.assertEqual(set(header_bases) >= {"TIMER", "INPUT", "DISPLAY", "FB"}, True)
@@ -370,6 +370,7 @@ class DeviceHelperTests(unittest.TestCase):
         bus_bases = {name.replace("_BASE", "").replace("_ADDR", ""): int(value.replace("_", ""), 16)
                      for name, value in re.findall(r"localparam \[31:0\] (\w+) = 32'h([0-9a-fA-F_]+);", bus)}
         self.assertEqual(bus_bases, bases, "rv32_bus.v")
+        self.assertRegex((ROOT/"programs/rv32/gpu.h").read_text(), r"#define GPU_BASE 0x20007000u\b")
         wrapper = (ROOT / "rtl/rv32/rv32_simd4.v").read_text()
         simd_header = (ROOT / "tools/rv32_simd4.h").read_text()
         for name, value in (("BASE", 0x20004000), ("PROGRAM", 0x20005000), ("DATA", 0x20006000)):

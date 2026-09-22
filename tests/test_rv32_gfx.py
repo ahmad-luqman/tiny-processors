@@ -111,6 +111,12 @@ class Graphics(unittest.TestCase):
         # Invalid geometry/source and reset through setup, scan, held read/write, advance.
         for p in [command(9),command(x0=1024,w=1,h=1),command(2,w=2,h=2,src=0xfffffff0,stride=32,sw=32,sh=2),command(color=256),command(w=2049),command(h=2049),command(2,w=1,h=1,src=0x8003ffff,stride=2,sw=2,sh=1),command(2,w=1,h=1,src=0x30000001,stride=320,sw=320,sh=240),command(2,sw=0,sh=1),command(2,sw=1,sh=0),command(2,sw=2,sh=2,stride=1),command(3,x1=1024),command(4,y2=-1025)]:
             rec=self.run_command(p);self.assertEqual(rec[1:3],[4,1]);records.append(rec);rows.append((0,-1,p))
+        valid_blit=command(2,w=2,h=2,src=0x80000000,stride=16,sw=16,sh=16)
+        for field,value in [(11,15),(12,0),(13,0),(14,1024),(15,-1025)]:
+            p=valid_blit.copy();p[field]=value
+            rec=self.run_command(p);self.assertEqual(rec[1:3],[4,1]);records.append(rec);rows.append((0,-1,p))
+        p=command(2,w=2,h=2,src=0x30000000,stride=320,sw=319,sh=240)
+        rec=self.run_command(p);self.assertEqual(rec[1:3],[4,1]);records.append(rec);rows.append((0,-1,p))
         for mode in (1,3):
             for tick in range(12):
                 p=command(2,x0=10,y0=10,w=10,h=10,src=0x80000000+tick*17,stride=16,sw=16,sh=16)
@@ -154,5 +160,11 @@ class Graphics(unittest.TestCase):
         for addr,width,want in [(0x80001000,4,1),(0x80001000,1,0),(0x800010c0,1,1),(0x800010c1,1,0)]:
             self.assertEqual(self.lib.native_gpu_lock(addr,width),want)
         self.access(0,2);self.assertEqual(self.access(4),0);self.assertEqual(self.access(64),0)
+        for p in (command(2,w=1,h=1,src=0x80001000,stride=16,sw=16,sh=0),
+                  command(2,w=1,h=1,src=0xfffffff0,stride=16,sw=16,sh=2)):
+            self.submit(p)
+            self.assertEqual(self.lib.native_gpu_lock(p[10],1),0)
+            self.lib.native_gpu_tick(0)
+            self.assertEqual(self.access(4),4)
 
 if __name__=='__main__':unittest.main()

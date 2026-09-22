@@ -32,6 +32,7 @@ bool gpu_source_locked(const gpu_device *g,uint32_t addr,int width)
     const uint32_t *p=g->p;
     uint64_t end=(uint64_t)p[GP_SRC]+(uint64_t)(p[GP_SH]?p[GP_SH]-1:0)*p[GP_STRIDE]+p[GP_SW];
     return (g->status&GPU_BUSY) && p[GP_OP]==GPU_BLIT && p[GP_SRC]>=0x80000000u &&
+           p[GP_SH]!=0 && end<=UINT32_MAX &&
            (uint64_t)addr+width>p[GP_SRC] && addr<end;
 }
 static int32_t edge(int32_t ax,int32_t ay,int32_t bx,int32_t by,int32_t x,int32_t y)

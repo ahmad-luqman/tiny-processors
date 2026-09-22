@@ -61,6 +61,11 @@ engine tick per executed instruction, including traps; RTL advances per clock.
 Polling and counters therefore require results comparison, not retirement equality.
 The emulator reports zero STALLS: only the RTL models RAM arbitration and injected
 memory waits. The standalone native device bridge accepts holds for protocol tests.
+Ownership checks use the BUSY value at the access, including SETUP. Immediately
+following START with a forbidden access can therefore trap on one backend and
+succeed on another for a very short, empty or invalid job. Portable guest code
+polls until not BUSY before touching protected memory; cross-backend trap-order
+comparisons deliberately keep tested jobs busy long enough on both backends.
 
 The driver returns failure for BUSY submission, command fault, or timeout. Timeout
 resets the engine; zero budget resets immediately. Guest software must not treat
@@ -175,7 +180,7 @@ fill costs `1 + 5*pixels`, while triangle scan cycles include uncovered centers.
 
 ## Acceptance evidence
 
-The directed/seeded byte-port corpus contains 169 commands, invalid descriptors,
+The directed/seeded byte-port corpus contains 175 commands, invalid descriptors,
 and software/external resets. Both simulators agree with the incremental C device
 on framebuffer hashes and every counter. Valid commands also compare complete
 C framebuffer bytes with an independent Python oracle and guest reference;
@@ -186,7 +191,16 @@ faults, and a trap that must advance the device.
 
 The diagnostic passes on emulator, Icarus (17,348,537 clocks) and stalled
 Verilator. The menu replay matches all eight checkpoints on the native reference,
-emulator, actual SDL window, and independently stalled Verilator (38,267,966
-clocks, 6,402,860 CPU instructions). Native menu tests run at -O0/-O2; sanitizers
-cover reference anchors plus all 169 device/reference corpus jobs. Counts describe this revision
+emulator, actual SDL window, and independently stalled Verilator (38,268,002
+clocks, 6,402,870 CPU instructions). Native menu tests run at -O0/-O2; sanitizers
+cover reference anchors plus all 175 device/reference corpus jobs. Counts describe this revision
 and workload, not architectural guarantees.
+
+The full `make test-rv32` aggregate passed before review follow-ups, including
+RV32I/F, QEMU, device/window, A2 and game regressions. The original game replay
+retains `PASS ea60197e` and 68 checkpoints; nine menu checkpoints intentionally
+change for the third entry, while the game state checksum is unchanged. It now
+executes 2,356,076 instructions because code layout and startup storage changed.
+The aggregate runs the G1 menu replay on Verilator and the complete pixel
+diagnostic on both simulators; the optional Icarus menu target is available
+separately. Counter, ALU, SAP8, standalone SIMD4 and FP32 checks also pass.

@@ -625,8 +625,8 @@ test-rv32: test-rv32-simd4 test-rv32-simd4-verilator run-rv32-simd4-emu run-rv32
 
 # G1: integer rasterizer, RAM/framebuffer blits, and menu integration.
 .PHONY: test-rv32-gfx test-rv32-gfx-verilator check-rv32-gfx-image run-rv32-gfx-emu run-rv32-gfx-rtl run-rv32-gfx-rtl-verilator run-rv32-gfx-menu-emu run-rv32-gfx-menu-rtl run-rv32-gfx-menu-rtl-verilator lint-rv32-gfx synth-rv32-gfx
-RV32_GFX_ARGS = --image build/rv32/gfxcheck.bin --compare results --expect-last-line "PASS G1" --emulator $(RV32EMU) --max-cycles 150000000 --timeout 600
-RV32_GFX_MENU_ARGS = --image build/rv32/capstone.bin --input programs/rv32/gfx.input --expect-checkpoints programs/rv32/gfx.expected --expect-last-line "PASS 78d4a476" --compare results --emulator $(RV32EMU) --max-cycles 150000000 --timeout 600
+RV32_GFX_ARGS = --image build/rv32/gfxcheck.bin --compare results --expect-last-line "PASS G1" --emulator $(RV32EMU) --timeout 600
+RV32_GFX_MENU_ARGS = --image build/rv32/capstone.bin --input programs/rv32/gfx.input --expect-checkpoints programs/rv32/gfx.expected --expect-last-line "PASS 78d4a476" --compare results --emulator $(RV32EMU) --timeout 600
 build/rv32/gfxcheck.elf: build/rv32/gfxcheck.o build/rv32/gpu.o build/rv32/gpu_ref.o build/rv32/gfx.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
 	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(filter %.o,$^)
 check-rv32-gfx-image: build/rv32/gfxcheck.bin build/rv32/gfxcheck.lst
@@ -636,17 +636,17 @@ test-rv32-gfx: $(RV32EMU) $(RV32_TB_VVP)
 test-rv32-gfx-verilator: $(RV32EMU) $(RV32_TB_VERILATOR)
 	HOST_CC=$(HOST_CC) G1_SIM=verilator $(PYTHON) -m unittest discover -s tests -p 'test_rv32_gfx*.py' -v
 run-rv32-gfx-emu: check-rv32-gfx-image $(RV32EMU)
-	$(PYTHON) tools/rv32_rtl.py $(filter-out --max-cycles 150000000,$(RV32_GFX_ARGS)) --backend emulator --out build/gfx/emu
+	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_ARGS) --backend emulator --out build/gfx/emu
 run-rv32-gfx-rtl: check-rv32-gfx-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_ARGS) --simulator $(RV32_TB_VVP) --out build/gfx/icarus
+	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_ARGS) --max-cycles 150000000 --simulator $(RV32_TB_VVP) --out build/gfx/icarus
 run-rv32-gfx-rtl-verilator: check-rv32-gfx-image $(RV32EMU) $(RV32_TB_VERILATOR)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_ARGS) --simulator $(RV32_TB_VERILATOR) --stall 1 --gpu-stall 2 --out build/gfx/verilator
+	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_ARGS) --max-cycles 150000000 --simulator $(RV32_TB_VERILATOR) --stall 1 --gpu-stall 2 --out build/gfx/verilator
 run-rv32-gfx-menu-emu: check-rv32-image $(RV32EMU)
-	$(PYTHON) tools/rv32_rtl.py $(filter-out --max-cycles 150000000,$(RV32_GFX_MENU_ARGS)) --backend emulator --out build/gfx/menu-emu
+	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_MENU_ARGS) --backend emulator --out build/gfx/menu-emu
 run-rv32-gfx-menu-rtl: check-rv32-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_MENU_ARGS) --simulator $(RV32_TB_VVP) --out build/gfx/menu-icarus
+	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_MENU_ARGS) --max-cycles 150000000 --simulator $(RV32_TB_VVP) --out build/gfx/menu-icarus
 run-rv32-gfx-menu-rtl-verilator: check-rv32-image $(RV32EMU) $(RV32_TB_VERILATOR)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_MENU_ARGS) --simulator $(RV32_TB_VERILATOR) --seed 17 --gpu-seed 31 --out build/gfx/menu-verilator
+	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_MENU_ARGS) --max-cycles 150000000 --simulator $(RV32_TB_VERILATOR) --seed 17 --gpu-seed 31 --out build/gfx/menu-verilator
 lint-rv32-gfx:
 	verilator --lint-only --Wall --language 1364-2005 --top-module rv32_gpu rtl/rv32/rv32_gpu.v
 synth-rv32-gfx: | build
