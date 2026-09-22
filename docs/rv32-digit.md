@@ -212,6 +212,7 @@ every backend. Cycles and stalls are never printed, drawn or checksummed.
 
 ```sh
 make test-rv32-digit                  # model, kernels, engine and native C against the oracle
+make test-rv32-digit-verilator        # the same, plus the RTL that actually runs N1
 make accuracy-rv32-digit              # 96.16% on the 10,000 vendored images
 make run-rv32-digit-emu               # the diagnostic: PASS N1
 make run-rv32-digit-rtl               # the same on Icarus
@@ -228,6 +229,19 @@ comparison covers the arithmetic rather than two readings of one computation. It
 then recovers from an illegal-opcode fault and from a poll-budget timeout,
 confirms that every buffer access is refused while the engine is busy, and ends
 with `PASS N1`. All eight canvases are classified correctly.
+
+The Python suite drives no simulator: the dense kernels reach RTL through the A2
+replay corpus, which checks them against the instruction-level interpreter on the
+C device model and the testbench fixtures. `test-rv32-digit-verilator` therefore
+runs that corpus and the stalled Verilator diagnostic rather than repeating the
+Python suite under an environment variable nothing reads.
+
+The generated headers are split in two. `digit_shape.h` holds the dimensions the
+public headers need for their signatures; `digit_weights.h` holds the arrays and
+is included only by the three files that multiply with them. Their make rules
+depend on every module the generators import, because the weight layout follows
+the kernel depth and the lane count: changing `dense4.py` has to rebuild the
+weights and not merely the program bank.
 
 ## Measured costs
 
