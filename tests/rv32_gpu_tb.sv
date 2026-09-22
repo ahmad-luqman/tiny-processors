@@ -50,7 +50,7 @@ module rv32_gpu_tb;
         repeat(2)@(negedge clk);reset=0;
         ret=$fscanf(file,"%d %d",mode,abort_tick);
         while(ret==2)begin
-            if(mode<0 || mode>1 || abort_tick < -1 || abort_tick>4000000)$fatal(1,"bad mode/reset tick");
+            if(mode<0 || mode>3 || abort_tick < -1 || abort_tick>4000000)$fatal(1,"bad mode/reset tick");
             for(n=0;n<16;n=n+1)begin
                 ret=$fscanf(file,"%s",token);if(ret!=1)$fatal(1,"short command");
                 if(!valid_hex(token))$fatal(1,"invalid parameter token");
@@ -60,10 +60,10 @@ module rv32_gpu_tb;
             // START accepting edge is followed by SETUP as tick one.
             access_write(0,1);ticks=0;
             while(busy)begin
-                memory_ready=!(mode!=0 && (ticks%7)<2);
-                if(abort_tick>=0 && ticks==abort_tick)begin valid=1;we=1;addr=0;wdata=2;end
+                memory_ready=!((mode&1)!=0 && (ticks%7)<2);
+                if(abort_tick>=0 && ticks==abort_tick)begin if((mode&2)!=0)reset=1;else begin valid=1;we=1;addr=0;wdata=2;end end
                 @(negedge clk);ticks=ticks+1;
-                valid=0;we=0;
+                valid=0;we=0;reset=0;
                 if(ticks>4000000)$fatal(1,"timeout");
             end
             hash=32'h811c9dc5;

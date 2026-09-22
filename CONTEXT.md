@@ -30,7 +30,7 @@ _Avoid_: guest renderer, guest operating system.
 The point where an executed instruction commits its architectural effects, used to compare CPU behavior across implementations.
 
 **Device time**:
-A device tick is a clock cycle on RTL and an executed instruction (retired or trapped) on the emulator. Timer reads and A2 accelerator completion/status/counters can differ between backends. Programs using those interfaces are compared at the results level (console, outcome, checkpoints and ordered trap records); programs using neither retain trace comparison. Deterministic diagnostics can additionally opt into ordered-store comparison.
+A device tick is a clock cycle on RTL and an executed instruction (retired or trapped) on the emulator. Timer reads and A2/G1 accelerator completion/status/counters can differ between backends. Programs using those interfaces are compared at the results level (console, outcome, checkpoints and ordered trap records); programs using neither retain trace comparison. Deterministic diagnostics can additionally opt into ordered-store comparison.
 _Avoid_: wall-clock time, a claim that the backends run at the same speed.
 
 **Session recording**:
@@ -79,3 +79,9 @@ flags in F1 tests. F2 also uses this library for emulator arithmetic and a
 separately compiled RV32I software benchmark; those uses are not independent
 arithmetic oracles for each other.
 _Avoid_: our hardware FPU, treating the emulator and oracle as independent software arithmetic implementations.
+
+**2D accelerator**:
+The G1 integer rasterizer commanded by guest C: bounded fills, opaque RAM/framebuffer
+blits, Bresenham lines and top-left-rule triangles. It owns the framebuffer while
+busy and arbitrates RAM-source reads with the CPU. See [the contract](docs/rv32-gfx.md).
+_Avoid_: programmable GPU, texture sampler, 3D renderer, coherent DMA subsystem.

@@ -73,8 +73,10 @@ class Graphics(unittest.TestCase):
     def run_command(self,p,mode=0,abort=-1):
         self.submit(p);ticks=0
         while self.access(4)==1:
-            if ticks==abort:self.access(0,2)
-            self.lib.native_gpu_tick(mode!=0 and ticks%7<2);ticks+=1
+            if ticks==abort:
+                if mode&2:self.lib.native_gpu_reset()
+                else:self.access(0,2)
+            self.lib.native_gpu_tick(mode&1 and ticks%7<2);ticks+=1
             self.assertLess(ticks,4000000)
         return [fnv(C.string_at(self.lib.native_gpu_fb(),76800))]+[self.access(o) for o in (4,8,12,16,20,24)]
     def test_pixels_and_rtl(self):
@@ -86,10 +88,16 @@ class Graphics(unittest.TestCase):
         for dx,dy in [(1,0),(-1,0),(0,1),(0,-1),(1,1),(-1,-1),(0,0),(-20,-20)]:
             cmds.append(command(2,x0=10+dx,y0=10+dy,w=30,h=20,src=0x30000000,stride=320,sw=320,sh=240,sx=10,sy=10))
         cmds += [command(2,x0=-4,y0=4,w=20,h=20,src=0x80000003,stride=19,sw=17,sh=15,sx=-2,sy=-1)]
+        cmds += [command(x0=x,y0=y,w=2,h=2) for x,y in [(-1,-1),(319,-1),(-1,239),(319,239)]]
+        cmds += [command(3,x0=-1024,y0=-1024,x1=1023,y1=1023),command(3,x0=-1024,y0=1023,x1=1023,y1=-1024),
+                 command(2,x0=319,y0=239,w=1,h=1,src=0x8003ffff,stride=1,sw=1,sh=1)]
         rng=random.Random(20260922)
         for _ in range(60):
             op=rng.choice([1,3,4]);kw={k:rng.randrange(-20,80) for k in ('x0','y0','x1','y1','x2','y2')}
             cmds.append(command(op,**kw,w=rng.randrange(50),h=rng.randrange(50),color=rng.randrange(256)))
+        for _ in range(24):
+            cmds.append(command(2,x0=rng.choice([-8,0,310]),y0=rng.choice([-6,0,230]),w=20,h=20,
+                src=0x80000003,stride=19,sw=17,sh=15,sx=rng.randrange(-5,20),sy=rng.randrange(-5,20)))
         records=[];rows=[]
         for n,p in enumerate(cmds):
             before=bytes(expected);oracle(expected,p)
@@ -101,11 +109,12 @@ class Graphics(unittest.TestCase):
             self.assertEqual(C.string_at(self.lib.native_gpu_fb(),76800),bytes(expected),('device',n,p))
             self.assertEqual(rec[1:3],[2,0]);records.append(rec);rows.append((n%2,-1,p))
         # Invalid geometry/source and reset through setup, scan, held read/write, advance.
-        for p in [command(9),command(x0=1024,w=1,h=1),command(2,w=2,h=2,src=0xfffffff0,stride=32,sw=32,sh=2),command(color=256)]:
+        for p in [command(9),command(x0=1024,w=1,h=1),command(2,w=2,h=2,src=0xfffffff0,stride=32,sw=32,sh=2),command(color=256),command(w=2049),command(h=2049),command(2,w=1,h=1,src=0x8003ffff,stride=2,sw=2,sh=1),command(2,w=1,h=1,src=0x30000001,stride=320,sw=320,sh=240),command(2,sw=0,sh=1),command(2,sw=1,sh=0),command(2,sw=2,sh=2,stride=1),command(3,x1=1024),command(4,y2=-1025)]:
             rec=self.run_command(p);self.assertEqual(rec[1:3],[4,1]);records.append(rec);rows.append((0,-1,p))
-        for tick in range(12):
-            p=command(2,x0=10,y0=10,w=10,h=10,src=0x80000000,stride=16,sw=16,sh=16)
-            rec=self.run_command(p,1,tick);self.assertEqual(rec[1:],[0]*6);records.append(rec);rows.append((1,tick,p))
+        for mode in (1,3):
+            for tick in range(12):
+                p=command(2,x0=10,y0=10,w=10,h=10,src=0x80000000+tick*17,stride=16,sw=16,sh=16)
+                rec=self.run_command(p,mode,tick);self.assertEqual(rec[1:],[0]*6);records.append(rec);rows.append((mode,tick,p))
         p=command(w=3,h=2);records.append(self.run_command(p));rows.append((0,-1,p))
         fixture=BUILD/'commands.txt';fixture.write_text(''.join(f'{m} {a} '+ ' '.join(f'{v&0xffffffff:08x}' for v in p)+'\n' for m,a,p in rows))
         sim=os.environ.get('G1_SIM','icarus')
@@ -131,6 +140,8 @@ class Graphics(unittest.TestCase):
             self.assertNotEqual(rejected.returncode,0)
             self.assertNotIn('PASS ',rejected.stdout)
 
+    def test_literal_triangle_partition(self):
+        self.assertEqual(self.lib.native_gpu_anchor(),0)
     def test_mmio_ownership(self):
         self.lib.native_gpu_init()
         for off in (0,28,32,60,128):self.access(off,ok=False)

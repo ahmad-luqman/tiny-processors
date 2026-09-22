@@ -63,7 +63,19 @@ windows and matching emulator behavior. The guest checks vector addition and
 signed/unsigned matrix products, faults, relaunch and timeout recovery. CPU and
 accelerator take turns owning the buffers; reset preserves accepted stores.
 See [the A2 contract, gates, measurements and reset walkthrough](docs/rv32-simd4.md).
-G1 (2D acceleration) is next.
+## 2D accelerator (G1)
+
+```sh
+make run-rv32-capstone                 # Select 2D DEMO: SPACE switches CPU/GPU
+make test-rv32-gfx test-rv32-gfx-verilator
+make run-rv32-gfx-menu-rtl-verilator    # Bounded scripted menu replay
+make bench-rv32-gfx waves-rv32-gfx
+```
+
+Fill, RAM/framebuffer blits, lines and filled triangles run on a dedicated integer
+engine. Guest software checks accelerated pixels against its reference; ownership,
+clipping, overlap, stalls and reset are verified. See [the G1 contract, measurements
+and gates walkthrough](docs/rv32-gfx.md). N1 digit inference follows G1.
 
 ## Start here
 

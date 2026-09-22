@@ -27,6 +27,10 @@ flowchart LR
     BUS -->|display_valid| DISP["rv32_display 0x2000_2000"]
     BUS -->|fb_valid| FB["rv32_ram 76,800 B at 0x3000_0000"]
     BUS -->|simd_valid| SIMD["rv32_simd4: registers + program/data memories"]
+    BUS -->|gpu_valid| GPU["rv32_gpu: integer rasterizer"]
+    GPU -->|"arbitrated reads"| RAM
+    GPU -->|"exclusive ownership"| FB
+    GPU_HOLD["testbench gpu_memory_hold"] --> GPU
     SIMD_HOLD["testbench simd_memory_hold"] --> SIMD
     CON -->|"console_valid, byte"| HOST["host: testbench or native window"]
     DONE -->|"done_valid, word"| HOST
@@ -40,6 +44,7 @@ Every slave has a common bus port: `clk`, `reset`, `valid`, `addr`, `we`, `strb`
 
 [rv32_bus.v](../rtl/rv32/rv32_bus.v) has no registers. One comparator per window turns the address into a select: the RAM and framebuffer windows are a subtraction and a compare against the size (`addr - base < bytes`), the 16-byte device windows compare the top 28 bits (`addr[31:4] == base[31:4]`), the console compares the top 29 bits, and the done register compares the whole address. The windows are disjoint, so at most one select is set, and `none_sel` is the NOR of all of them. The decoder applies the following rules:
 
+- G1 adds a 128-byte register select (`addr[31:7]`), framebuffer ownership and RAM arbitration; see [the G1 record](rv32-gfx.md).
 - A2 adds a 32-byte register select (`addr & 0xffffffe0`) and two 1 KiB memory selects (`addr & 0xfffffc00`), all gated against instruction fetches.
 - A request reaches a slave only as `<slave>_valid = req & <slave>_sel`, where `req = mem_valid & ~mem_hold`. While the host holds the bus no slave sees the request and `mem_ready` stays low: that is how the testbench models a slow memory, and it is why the stall counts did not change.
 - Only RAM is fetchable. Every device select is gated with `~mem_fetch`, so a jump into a device window is answered like an unmapped address: `ready` and `error` in the same cycle, cause 1. The `mem_fetch` sideband became part of the contract in M5 for this reason.
@@ -178,3 +183,13 @@ them to the engine while busy; CPU buffer accesses then fault. The required
 tie it low when no delay is wanted. The testbench stall generator is optional.
 The M5 measurements above remain historical; A2 records current synthesis and
 its asynchronous result comparisons separately.
+
+## G1 memory path
+
+`gpu_memory_hold` is a required SoC input, tied low when waits are not needed.
+The graphics byte port reaches the existing RAM/framebuffer instances through
+muxes. The RAM arbiter holds a stalled grant, alternates competing requests after
+acceptance, and checks protected source writes byte by byte. The framebuffer mux
+selects graphics exclusively while BUSY; CPU framebuffer/PRESENT requests then
+return access faults. The [G1 record](rv32-gfx.md) documents reset priority,
+complete pixel checks and the new synthesis baseline.
