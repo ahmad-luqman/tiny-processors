@@ -33,7 +33,7 @@ script into an ignored directory and is not committed.
 | --- | --- |
 | Integer accuracy, 10,000 vendored test images | 96.16% |
 | Float accuracy, same images | 96.10% |
-| Quantization cost | −0.06 percentage points, so quantization is not what limits this model |
+| Effect of quantization | the integer model scores 0.06 points **higher** than the float one, so quantization is not what limits this model; at this size the difference is noise, not an improvement to claim |
 | Hidden shift `s1` | 11, calibrated on a 5,000-image holdout of the training set |
 
 The committed test set tunes nothing: the shift and every other calibration use a
