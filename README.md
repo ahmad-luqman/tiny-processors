@@ -102,20 +102,20 @@ Start with the [ISA and memory contract](docs/sap8.md), then follow the [registe
 
 ## Four-lane parallel compute
 
-[SIMD4](docs/simd4.md) has four 16-bit lanes, four registers per lane, a shared PC/decoder, and uniform loops. Its vector-add kernel matches a Python reference at every instruction and memory transfer. One ready/valid memory port serves lanes in order and supports stalls. Launch/done, faults, and reset cancellation are tested.
+[SIMD4](docs/simd4.md) has four 16-bit lanes, four registers and a 32-bit accumulator per lane, a shared PC/decoder, and uniform loops. Its vector-add and matrix multiply-accumulate kernels match a Python reference at every instruction and memory transfer. One ready/valid memory port serves lanes in order and supports stalls. Launch/done, faults, and reset cancellation are tested.
 
 ```sh
-make test-simd4            # Python checks and 312 Icarus cases across 1/2/4 lanes
+make test-simd4            # Python checks and 369 Icarus cases across 1/2/4 lanes
 make test-simd4-verilator  # Same cases in Verilator, plus short waveforms
 make lint-simd4            # Strict RTL lint for all lane configurations
 make synth-simd4           # Four-lane generic synthesis and latch check
-make bench-simd4           # Compare cycle counts at fixed vector length
-make waves-simd4           # Tests, no-wait/stalled traces, and the Surfer link
+make bench-simd4           # Compare vector and matrix cycle counts by lane count and waits
+make waves-simd4           # Tests, vector/stalled/matrix/overflow traces, and the Surfer link
 ```
 
-Both simulators pass 312 cases with 329 completed launches and agree on the benchmarks. For 32 elements, one lane takes 486 cycles and four lanes take 198 cycles with no memory waits: **2.45× speedup**. All still need 96 transfers through the single port. Read the [gate and performance walkthrough](docs/simd4-to-gates.md) to connect lane duplication, stalls, and measured speedup.
+Both simulators pass 369 cases with 392 completed launches and agree on the benchmarks. For 32 elements, one lane takes 486 cycles and four lanes take 198 cycles with no memory waits: **2.45× speedup**. All still need 96 transfers through the single port. The 4×4 matrix kernel takes 754 cycles on one lane and 298 on four (**2.53×**) and always 144 transfers, because every lane loads its own copy of the shared A operand. Read the [gate and performance walkthrough](docs/simd4-to-gates.md) to connect lane duplication, stalls, multipliers, overflow, and measured speedup.
 
-The [kernel builder](programs/simd4/vector_add.py), interpreter, and runner use Python's standard library. Generated reports and traces are under `build/simd4/icarus/` and `build/simd4/verilator/`. Every lane is active, so vector length must be divisible by lane count; divergent branches and multiply instructions are not implemented. The vector-add MVP is complete; multiplication and a matrix kernel are deferred until after the first playable computer.
+The [vector kernel](programs/simd4/vector_add.py), the [matrix kernel](programs/simd4/matrix_mac.py), interpreter, and runner use Python's standard library. Generated reports and traces are under `build/simd4/icarus/` and `build/simd4/verilator/`. Every lane is active, so vector length and matrix size must be divisible by lane count. MUL keeps the low 16 bits of a product; MAC/MACU add the signed/unsigned 32-bit product into the accumulator modulo 2^32; RDA reads a 16-bit window back with truncation and no saturation. Divergent branches, a broadcast load, and saturation are not implemented. A1 is complete; A2 attaches the engine to the RV32 bus.
 
 ## RV32I firmware on a reference runner
 
@@ -193,7 +193,7 @@ Read the [window record](docs/rv32-window.md): the decisions, the core split, th
 6. [How ALU RTL becomes gates](docs/alu-to-gates.md): combinational logic, carry versus overflow, annotated waveform observations, and exercises.
 7. [SAP8 specification and commands](docs/sap8.md), [CPU RTL](rtl/sap8/sap8.v), and [self-checking testbench](tests/sap8_tb.sv).
 8. [CPU gate/control notes](docs/sap8-to-gates.md), then [addition](programs/sap8/add.asm) and [sum loop](programs/sap8/sum_loop.asm) assembly.
-9. [SIMD4 specification](docs/simd4.md), [RTL](rtl/simd4/simd4.v), [kernel](programs/simd4/vector_add.py), and [gate/performance walkthrough](docs/simd4-to-gates.md).
+9. [SIMD4 specification](docs/simd4.md), [RTL](rtl/simd4/simd4.v), [vector kernel](programs/simd4/vector_add.py), [matrix kernel](programs/simd4/matrix_mac.py), and [gate/performance walkthrough](docs/simd4-to-gates.md).
 10. [RV32 machine contract](docs/rv32.md), then [start.S](programs/rv32/start.S), [link.ld](programs/rv32/link.ld), [selfcheck.c](programs/rv32/selfcheck.c), and the [C to instructions walkthrough](docs/c-to-instructions.md).
 11. [RV32 emulator](docs/rv32-emulator.md), then [rv32emu_core.c](tools/rv32emu_core.c) and [test_rv32_emu.py](tests/test_rv32_emu.py); run `make trace-rv32-emu` and follow the walkthrough in the trace.
 12. [RV32 RTL contract](docs/rv32-rtl.md), then [rv32.v](rtl/rv32/rv32.v) with its three submodules, [rv32_tb.sv](tests/rv32_tb.sv), and [test_rv32_rtl.py](tests/test_rv32_rtl.py); run `make waves-rv32` and follow the [gates walkthrough](docs/rv32-to-gates.md) in the waveform.
