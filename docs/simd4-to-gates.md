@@ -139,7 +139,7 @@ A1 adds one 32-bit accumulator and one multiplier to every lane. The controller,
 
 Why one multiplier serves signed and unsigned products: the low 16 bits of `a × b` are the same whether the operands are read as signed or unsigned, because the difference between a signed and an unsigned reading of a 16-bit operand is a multiple of 2^16. The upper bits differ, and that is exactly what the 17th bit fixes. `ffff × ffff` is (−1)(−1) = 1 with the sign bits set and 65535² = `fffe0001` with them clear; both readings end in `0001`.
 
-Truncation has no flag. `RDA rd, 0` keeps bits 15:0 of the accumulator, `RDA rd, 16` keeps bits 31:16, and `RDA rd, 31` copies the sign into every bit. Dropped high bits are simply gone. A saturating read-back would need a comparator and a mux per lane; A1 records that as the N1 decision instead of building it.
+Truncation has no flag. `RDA rd, 0` keeps bits 15:0 of the accumulator, `RDA rd, 16` keeps bits 31:16, and `RDA rd, 31` copies the sign into every bit. Dropped high bits are simply gone. A saturating read-back would need a comparator and a mux per lane. A1 recorded it as the N1 decision; N1 chose to saturate on the CPU after an exact two-half read-back, so this stays an exercise rather than hardware. See [the digit record](rv32-digit.md).
 
 ## 8. A dot product by hand, then past 2^31
 
@@ -204,4 +204,4 @@ The extra area comes from lane register banks, arithmetic, register selection, s
 5. Work row 1 of the model test's A (`7fff, 8000, ffff, 0001`) against column 1 of its rotated B (the same four words) by hand: 32767² + 32768² + 1 + 1 = `7fff0003`; one more `7fff × 7fff` would cross 2^31. Predict both RDA windows (`0003`, `7fff`), then check them with `matrix_reference(a, b, 4, shift)[5]` on the test's A and B. Then do C[0][0] of the runner's corner matrices, where four `7fff × 7fff` products give `fffc0004`.
 6. Predict the matrix cycle count for 8×8 on two lanes at zero waits from the formulas in section 9, then compare with `matrix-8-lanes-2-wait-3-shift-0` in the results JSON after subtracting its stalls.
 7. Specify a broadcast load, `LOADB rd, ra, offset`, that performs one transfer and writes every lane. Count the transfers it saves for 4×4 on four lanes, then decide what the port should do if lanes disagree about `ra`.
-8. Add a saturating read-back on paper: which comparator, which mux, and which accumulator bits decide the clamp? Keep it for N1.
+8. Add a saturating read-back on paper: which comparator, which mux, and which accumulator bits decide the clamp? N1 did this on the CPU instead, so compare your gates against what `digit_requantize` costs in instructions.

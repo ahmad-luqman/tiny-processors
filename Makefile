@@ -33,8 +33,22 @@ RV32_COMMON_OBJS := build/rv32/start.o build/rv32/console.o build/rv32/muldiv.o
 RV32_SELFCHECK_OBJS := build/rv32/selfcheck.o $(RV32_COMMON_OBJS)
 RV32_DIAG_OBJS := build/rv32/diag.o build/rv32/trap.o $(RV32_COMMON_OBJS)
 RV32_PONG_OBJS := build/rv32/pong.o build/rv32/pong_game.o build/rv32/gfx.o $(RV32_COMMON_OBJS)
-RV32_CAPSTONE_OBJS := build/rv32/gpu.o build/rv32/gpu_ref.o build/rv32/gpu_demo.o  build/rv32/gfx_text.o build/rv32/capstone.o build/rv32/runtime.o build/rv32/tetris_game.o build/rv32/pong_game.o build/rv32/gfx.o $(RV32_COMMON_OBJS)
-RV32_HEADERS += programs/rv32/gpu.h programs/rv32/gpu_demo.h  programs/rv32/runtime.h programs/rv32/tetris_game.h programs/rv32/simd4.h
+RV32_CAPSTONE_OBJS := build/rv32/gpu.o build/rv32/gpu_ref.o build/rv32/gpu_demo.o  build/rv32/gfx_text.o build/rv32/capstone.o build/rv32/runtime.o build/rv32/tetris_game.o build/rv32/pong_game.o build/rv32/gfx.o build/rv32/digit_ui.o build/rv32/digit_model.o build/rv32/digit_hw.o build/rv32/digit_weights.o build/rv32/simd4.o $(RV32_COMMON_OBJS)
+RV32_HEADERS += programs/rv32/gpu.h programs/rv32/gpu_demo.h  programs/rv32/runtime.h programs/rv32/tetris_game.h programs/rv32/simd4.h programs/rv32/digit_model.h programs/rv32/digit_hw.h programs/rv32/digit_ui.h
+
+# N1's generated headers. Defined here, above every rule that names them: make
+# expands a prerequisite when it reads the rule, so a variable defined further
+# down the file expands to nothing and silently drops the dependency.
+# Every module a generator imports is a prerequisite: the weight layout depends on
+# the kernel depth and the lane count, so changing dense4.py or rv32_digit_kernels.py
+# has to rebuild the weights and not just the program bank. These must be defined
+# before the rules that reference them, or they expand to nothing.
+RV32_MNIST := third_party/mnist/t10k-images-idx3-ubyte.gz third_party/mnist/t10k-labels-idx1-ubyte.gz
+RV32_DIGIT_KERNEL_DEPS := tools/rv32_digit_kernels.py programs/simd4/dense4.py tools/simd4_model.py
+RV32_DIGIT_MODEL_DEPS := tools/rv32_digit_model.py tools/digit_ref.py tools/digit_data.py \
+                         programs/rv32/digit_model.json $(RV32_DIGIT_KERNEL_DEPS)
+RV32_DIGIT_GENERATED := build/rv32/digit_kernels.h build/rv32/digit_shape.h build/rv32/digit_weights.h build/rv32/digit_weights.c build/rv32/digit_check.h
+
 RV32_IMAGES := selfcheck diag pong capstone
 RV32_IMAGE_FILES := $(foreach image,$(RV32_IMAGES),$(foreach ext,elf lst bin readelf,build/rv32/$(image).$(ext)))
 RV32_SELFCHECK_HEX := 807d9fad
@@ -409,7 +423,9 @@ RV32_CAPSTONE_HEX := ea60197e
 RV32_CAPSTONE_ARGS := --image build/rv32/capstone.bin --input programs/rv32/capstone.input --expect-last-line "PASS $(RV32_CAPSTONE_HEX)" --expect-checkpoints programs/rv32/capstone.expected --timeout 300
 .PHONY: test-rv32-capstone run-rv32-capstone run-rv32-capstone-emu run-rv32-capstone-rtl run-rv32-capstone-rtl-verilator frames-rv32-capstone disasm-rv32-capstone
 
-test-rv32-capstone:
+# The native model now compiles digit_ui.c and digit_model.c too, which include
+# the generated headers.
+test-rv32-capstone: $(RV32_DIGIT_GENERATED)
 	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_capstone.py' -v
 
 run-rv32-capstone: check-rv32-image $(RV32WIN)
@@ -435,9 +451,9 @@ test-rv32: test-rv32-capstone run-rv32-capstone-emu run-rv32-capstone-rtl run-rv
 
 # Compile the same directed C checks as a standalone sanitized executable.
 .PHONY: test-rv32-capstone-sanitize
-test-rv32-capstone-sanitize: | build/rv32
+test-rv32-capstone-sanitize: build/rv32/digit_shape.h build/rv32/digit_weights.h | build/rv32
 	mkdir -p build/rv32/host
-	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fno-builtin -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -DRV32_NATIVE_MAIN -Iprograms/rv32 tests/rv32_capstone_native.c programs/rv32/gpu_demo.c programs/rv32/gpu_ref.c programs/rv32/runtime.c programs/rv32/tetris_game.c programs/rv32/pong_game.c programs/rv32/gfx.c programs/rv32/gfx_text.c -o build/rv32/host/capstone-sanitize
+	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fno-builtin -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -DRV32_NATIVE_MAIN -Iprograms/rv32 -Ibuild/rv32 tests/rv32_capstone_native.c programs/rv32/gpu_demo.c programs/rv32/gpu_ref.c programs/rv32/runtime.c programs/rv32/tetris_game.c programs/rv32/pong_game.c programs/rv32/gfx.c programs/rv32/gfx_text.c programs/rv32/digit_ui.c programs/rv32/digit_model.c build/rv32/digit_weights.c -o build/rv32/host/capstone-sanitize
 	build/rv32/host/capstone-sanitize
 
 # F1: standalone floating-point hardware with the pinned host oracle.
@@ -626,7 +642,7 @@ test-rv32: test-rv32-simd4 test-rv32-simd4-verilator run-rv32-simd4-emu run-rv32
 # G1: integer rasterizer, RAM/framebuffer blits, and menu integration.
 .PHONY: test-rv32-gfx test-rv32-gfx-verilator check-rv32-gfx-image run-rv32-gfx-emu run-rv32-gfx-rtl run-rv32-gfx-rtl-verilator run-rv32-gfx-menu-emu run-rv32-gfx-menu-rtl run-rv32-gfx-menu-rtl-verilator lint-rv32-gfx synth-rv32-gfx
 RV32_GFX_MAX_CYCLES := 150000000
-RV32_GFX_MENU_HEX := 78d4a476
+RV32_GFX_MENU_HEX := c883a14f
 RV32_GFX_ARGS = --image build/rv32/gfxcheck.bin --compare results --expect-last-line "PASS G1" --emulator $(RV32EMU) --timeout 600
 RV32_GFX_MENU_ARGS = --image build/rv32/capstone.bin --input programs/rv32/gfx.input --expect-checkpoints programs/rv32/gfx.expected --expect-last-line "PASS $(RV32_GFX_MENU_HEX)" --compare results --emulator $(RV32EMU) --timeout 600
 build/rv32/gfxcheck.elf: build/rv32/gfxcheck.o build/rv32/gpu.o build/rv32/gpu_ref.o build/rv32/gfx.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
@@ -672,3 +688,112 @@ test-rv32-gfx-sanitize: test-rv32-gfx | build
 	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -DG1_NATIVE_MAIN tests/rv32_gpu_native.c tools/rv32_gpu.c programs/rv32/gpu_ref.c programs/rv32/gfx.c -o build/gfx/sanitize
 	build/gfx/sanitize build/gfx/commands.txt
 test-rv32: test-rv32-gfx-sanitize
+# The capstone sanitizer covers the runtime, the digit UI and the digit model
+# under ASan and UBSan. It was defined but never reached by the aggregate.
+test-rv32: test-rv32-capstone-sanitize
+
+# N1: quantized digit inference. The model, its oracle and the vendored test set
+# are checked in Python; the same arithmetic then runs as guest C on the CPU and
+# on the SIMD4 accelerator, which must agree bit for bit.
+# tools/digit_train.py retrains the model. It needs numpy and the network and is
+# deliberately not a prerequisite of anything here.
+.PHONY: test-rv32-digit accuracy-rv32-digit check-rv32-digit-image
+.PHONY: run-rv32-digit-emu run-rv32-digit-rtl run-rv32-digit-rtl-verilator
+# The longest N1 run is the 199-frame menu replay at 20.3 M cycles on Verilator
+# with stalls; this ceiling is roughly four times that, matching G1's margin.
+RV32_DIGIT_MAX_CYCLES := 80000000
+# No --compare-stores: the diagnostic checks the engine's cycle relation, so it
+# stores the CYCLES and STALLS counters, and those are device time. A K=49 launch
+# costs 1,008 cycles on the emulator and 1,808 on RTL with two wait cycles per
+# transfer, so an ordered-store comparison would fail on a correct run. Console,
+# checkpoints and trap records still have to match, and the deterministic counters
+# (transfers, instructions, launches) are asserted inside the guest on every backend.
+RV32_DIGIT_ARGS = --image build/rv32/digitcheck.bin --compare results \
+                  --expect-last-line "PASS N1" --emulator $(RV32EMU) --timeout 900
+build/rv32/digit_kernels.h: $(RV32_DIGIT_KERNEL_DEPS) | build/rv32
+	$(PYTHON) -m tools.rv32_digit_kernels $@
+build/rv32/digit_shape.h: $(RV32_DIGIT_MODEL_DEPS) | build/rv32
+	$(PYTHON) -m tools.rv32_digit_model shape $@
+build/rv32/digit_weights.h: build/rv32/digit_shape.h $(RV32_DIGIT_MODEL_DEPS) | build/rv32
+	$(PYTHON) -m tools.rv32_digit_model weights $@
+# The tables are defined once here. As `static const` in the header they cost a
+# private copy in every translation unit that included it.
+build/rv32/digit_weights.c: build/rv32/digit_weights.h $(RV32_DIGIT_MODEL_DEPS) | build/rv32
+	$(PYTHON) -m tools.rv32_digit_model weights-source $@
+build/rv32/digit_weights.o: build/rv32/digit_weights.c build/rv32/digit_weights.h | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
+build/rv32/digit_check.h: $(RV32_DIGIT_MODEL_DEPS) $(RV32_MNIST) | build/rv32
+	$(PYTHON) -m tools.rv32_digit_model check $@
+# Every object that reaches digit_model.h needs the generated shape header; only
+# the files that actually multiply also need the weights.
+build/rv32/digit_ui.o: programs/rv32/digit_ui.c build/rv32/digit_shape.h $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
+build/rv32/runtime.o: programs/rv32/runtime.c build/rv32/digit_shape.h $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
+build/rv32/capstone.o: programs/rv32/capstone.c $(RV32_DIGIT_GENERATED) $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
+build/rv32/digit_model.o: programs/rv32/digit_model.c build/rv32/digit_weights.h $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
+build/rv32/digit_hw.o: programs/rv32/digit_hw.c build/rv32/digit_weights.h build/rv32/digit_kernels.h $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
+build/rv32/digitcheck.o: programs/rv32/digitcheck.c $(RV32_DIGIT_GENERATED) $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
+build/rv32/digitcheck.elf: build/rv32/digitcheck.o build/rv32/digit_model.o build/rv32/digit_hw.o build/rv32/digit_weights.o build/rv32/simd4.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(filter %.o,$^)
+check-rv32-digit-image: build/rv32/digitcheck.bin build/rv32/digitcheck.lst
+	$(PYTHON) tools/rv32_image.py build/rv32/digitcheck.elf --listing build/rv32/digitcheck.lst --bin build/rv32/digitcheck.bin --hex build/rv32/digitcheck.hex
+test-rv32-digit: $(RV32_DIGIT_GENERATED)
+	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_digit*.py' -v
+# The RTL half of N1. Nothing in the Python suite drives a simulator, so a target
+# that only reran it would pass with Verilator missing or the RTL broken. The dense
+# kernels replay through the A2 fixtures, and the diagnostic runs on the stalled
+# Verilator machine.
+.PHONY: test-rv32-digit-verilator
+test-rv32-digit-verilator: test-rv32-digit test-rv32-simd4-verilator run-rv32-digit-rtl-verilator
+accuracy-rv32-digit:
+	$(PYTHON) -m tools.digit_ref --count 10000
+run-rv32-digit-emu: check-rv32-digit-image $(RV32EMU)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_ARGS) --backend emulator --out build/digit/emu
+run-rv32-digit-rtl: check-rv32-digit-image $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_ARGS) --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/digit/icarus
+run-rv32-digit-rtl-verilator: check-rv32-digit-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_ARGS) --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --stall 1 --simd-stall 2 --out build/digit/verilator
+
+# The menu session: the guest draws two digits with the keyboard and classifies
+# them. Results mode, because the classification touches accelerator registers.
+# The Icarus variant is available separately, as the G1 menu replay is.
+.PHONY: run-rv32-digit-menu-emu run-rv32-digit-menu-rtl run-rv32-digit-menu-rtl-verilator
+RV32_DIGIT_MENU_HEX := badb5523
+RV32_DIGIT_MENU_ARGS = --image build/rv32/capstone.bin --input programs/rv32/digit.input \
+                       --expect-checkpoints programs/rv32/digit.expected \
+                       --expect-last-line "PASS $(RV32_DIGIT_MENU_HEX)" --compare results \
+                       --emulator $(RV32EMU) --timeout 900
+run-rv32-digit-menu-emu: check-rv32-image $(RV32EMU)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_MENU_ARGS) --backend emulator --out build/digit/menu-emu
+run-rv32-digit-menu-rtl: check-rv32-image $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_MENU_ARGS) --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/digit/menu-icarus
+run-rv32-digit-menu-rtl-verilator: check-rv32-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_MENU_ARGS) --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --stall 1 --simd-stall 2 --out build/digit/menu-verilator
+test-rv32: test-rv32-digit accuracy-rv32-digit run-rv32-digit-emu run-rv32-digit-rtl-verilator
+test-rv32: run-rv32-digit-menu-emu run-rv32-digit-menu-rtl-verilator
+
+.PHONY: bench-rv32-digit waves-rv32-digit
+# Two workload sizes per variant: subtracting them cancels startup and the bank load.
+build/rv32/digitbench_cpu_%.o: programs/rv32/digitbench.c $(RV32_DIGIT_GENERATED) $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -DDIGIT_BENCH_CPU -DDIGIT_BENCH_COUNT=$*u -c $< -o $@
+build/rv32/digitbench_hw_%.o: programs/rv32/digitbench.c $(RV32_DIGIT_GENERATED) $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -DDIGIT_BENCH_COUNT=$*u -c $< -o $@
+build/rv32/digitbench_%.elf: build/rv32/digitbench_%.o build/rv32/digit_model.o build/rv32/digit_hw.o build/rv32/digit_weights.o build/rv32/simd4.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -o $@ $(filter %.o,$^)
+RV32_DIGIT_BENCH_BINS := $(foreach v,cpu hw,$(foreach n,1 5,build/rv32/digitbench_$(v)_$(n).bin))
+bench-rv32-digit: $(RV32_DIGIT_BENCH_BINS) $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) tools/rv32_digit_bench.py --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR)
+# The single-inference bench image, not the diagnostic: dumping all eight
+# classifications and both recovery paths produced a five-gigabyte VCD, and one
+# inference already contains every launch edge worth looking at.
+# The expected line is the bench sink for the committed model: 1 + the predicted
+# class + its margin for canvas 0. Retraining changes it.
+waves-rv32-digit: build/rv32/digitbench_hw_1.bin $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/digitbench_hw_1.bin --compare results \
+	  --expect-last-line "bench 00000ecf" --emulator $(RV32EMU) --timeout 900 \
+	  --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VVP) --mode waves --out build/digit/waves

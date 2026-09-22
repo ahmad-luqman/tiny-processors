@@ -75,7 +75,24 @@ make bench-rv32-gfx waves-rv32-gfx
 Fill, RAM/framebuffer blits, lines and filled triangles run on a dedicated integer
 engine. Guest software checks accelerated pixels against its reference; ownership,
 clipping, overlap, stalls and reset are verified. See [the G1 contract, measurements
-and gates walkthrough](docs/rv32-gfx.md). N1 digit inference follows G1.
+and gates walkthrough](docs/rv32-gfx.md).
+
+## Digit inference (N1)
+
+```sh
+make run-rv32-capstone                 # Select DIGIT: arrows move, SPACE draws, ENTER reads
+make test-rv32-digit                   # Model, kernels, engine and guest C against the oracle
+make accuracy-rv32-digit               # 96.16% on the vendored 10,000-image test set
+make run-rv32-digit-emu                # The diagnostic: PASS N1
+make bench-rv32-digit waves-rv32-digit
+```
+
+A 196-32-10 integer classifier reads a digit drawn with the keyboard. The SIMD4
+engine performs the multiply-accumulate work in 35 launches, and the CPU adds the
+bias, rounds, saturates and picks the answer, which is how N1 settles the
+saturation and rounding question A1 deferred without changing any RTL. The guest
+runs both paths and stops if they disagree. See [the N1 numeric contract, kernel
+layout, waves and measured costs](docs/rv32-digit.md).
 
 ## Start here
 
@@ -141,7 +158,7 @@ make waves-simd4           # Tests, vector/stalled/matrix/overflow traces, and t
 
 Both simulators pass 395 cases with 423 completed launches and agree on the benchmarks. For 32 elements, one lane takes 486 cycles and four lanes take 198 cycles with no memory waits: **2.45× speedup**. All still need 96 transfers through the single port. The 4×4 matrix kernel takes 754 cycles on one lane and 298 on four (**2.53×**) and always 144 transfers, because every lane loads its own copy of the shared A operand. Read the [gate and performance walkthrough](docs/simd4-to-gates.md) to connect lane duplication, stalls, multipliers, overflow, and measured speedup.
 
-The [vector kernel](programs/simd4/vector_add.py), the [matrix kernel](programs/simd4/matrix_mac.py), interpreter, and runner use Python's standard library. Generated reports and traces are under `build/simd4/icarus/` and `build/simd4/verilator/`. Every lane is active, so vector length and matrix size must be divisible by lane count. MUL keeps the low 16 bits of a product; MAC/MACU add the signed/unsigned 32-bit product into the accumulator modulo 2^32; RDA reads a 16-bit window back with truncation and no saturation. Divergent branches, a broadcast load, and saturation are not implemented. A1 and A2 are complete; the [A2 peripheral](docs/rv32-simd4.md) attaches this unchanged core to the RV32 bus.
+The [vector kernel](programs/simd4/vector_add.py), the [matrix kernel](programs/simd4/matrix_mac.py), interpreter, and runner use Python's standard library. Generated reports and traces are under `build/simd4/icarus/` and `build/simd4/verilator/`. Every lane is active, so vector length and matrix size must be divisible by lane count. MUL keeps the low 16 bits of a product; MAC/MACU add the signed/unsigned 32-bit product into the accumulator modulo 2^32; RDA reads a 16-bit window back with truncation and no saturation. Divergent branches and a broadcast load are not implemented, and neither is saturation in hardware: [N1](docs/rv32-digit.md) settled that question by reading the exact 32-bit accumulator back in two halves and saturating on the CPU. A1, A2 and N1 are complete; the [A2 peripheral](docs/rv32-simd4.md) attaches this unchanged core to the RV32 bus.
 
 ## RV32I firmware on a reference runner
 
@@ -228,7 +245,12 @@ Read the [window record](docs/rv32-window.md): the decisions, the core split, th
 
 ## Verified local tools
 
-Apple Silicon macOS, Icarus 13.0, Verilator 5.052, Yosys 0.69+post, Apple Clang 21.0.0, Homebrew LLVM 22.1.8 (`llvm@22`, keg-only), lld 23.1.1, QEMU 11.1.1, SDL 3.4.16, Python 3.14.2. These are the tested versions, not enforced minimums. The RV32 targets find the keg-only LLVM and lld by absolute path; nothing has to be on `PATH`.
+Apple Silicon macOS, Icarus 13.0, Verilator 5.052, Yosys 0.69+post, Apple Clang 21.0.0, Homebrew LLVM 22.1.8 (`llvm@22`, keg-only), lld 23.1.1, QEMU 11.1.1, SDL 3.4.16, Python 3.14.2. These are the tested versions, not enforced minimums.
+
+Every build target and every test uses only Python's standard library and works
+offline. The single exception is `tools/digit_train.py`, which retrains the N1
+model: it needs numpy and downloads the MNIST training set, and nothing depends on
+it, because the model it produces is committed. The RV32 targets find the keg-only LLVM and lld by absolute path; nothing has to be on `PATH`.
 
 ```sh
 brew install icarus-verilog verilator yosys llvm@22 lld qemu

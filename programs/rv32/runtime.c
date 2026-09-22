@@ -6,6 +6,7 @@ static uint32_t game_checksum(const struct runtime *r)
     if (r->screen == RUNTIME_PONG) return pong_checksum(&r->pong);
     if (r->screen == RUNTIME_TETRIS) return tetris_checksum(&r->tetris);
     if (r->screen == RUNTIME_GPU) return (r->demo.frame*16777619u)^r->demo.accelerated^(r->demo.paused<<8);
+    if (r->screen == RUNTIME_DIGIT) return digit_ui_checksum(&r->digit);
     return 0;
 }
 
@@ -17,6 +18,10 @@ static void change_screen(struct runtime *r, uint32_t screen)
     r->transition = r->dirty = 1;
     r->over_frames = 0;
     if (screen == RUNTIME_GPU) gpu_demo_init(&r->demo);
+    /* Entering the digit screen always starts from a blank canvas; it is
+     * deliberately not preserved across a visit to the menu. Clear rather than
+     * init, so the classifier the host attached at boot stays attached. */
+    if (screen == RUNTIME_DIGIT) digit_ui_clear(&r->digit);
     if (screen == RUNTIME_PONG) pong_init(&r->pong);
     if (screen == RUNTIME_TETRIS) tetris_init(&r->tetris, 1);
 }
@@ -24,6 +29,7 @@ static void change_screen(struct runtime *r, uint32_t screen)
 void runtime_init(struct runtime *r)
 {
     gpu_demo_init(&r->demo);
+    digit_ui_init(&r->digit);
     pong_init(&r->pong);
     tetris_init(&r->tetris, 1);
     r->screen = RUNTIME_MENU;
@@ -43,7 +49,10 @@ void runtime_event(struct runtime *r, uint32_t event)
     if (code == RV32_KEY_ESCAPE && r->screen != RUNTIME_MENU) {
         change_screen(r, RUNTIME_MENU);
     } else if (r->screen == RUNTIME_MENU) {
-        if (code == RV32_KEY_UP || code == RV32_KEY_DOWN) { r->selected = code==RV32_KEY_DOWN ? (r->selected+1)%3 : (r->selected+2)%3; r->dirty = 1; }
+        /* Four entries, so the wrap is a mask; UP is -1 modulo four, which is +3.
+         * With three entries it was +2, and leaving that would send UP from the
+         * first entry to the third instead of the last. */
+        if (code == RV32_KEY_UP || code == RV32_KEY_DOWN) { r->selected = (code==RV32_KEY_DOWN ? r->selected+1 : r->selected+RUNTIME_ENTRIES-1) & (RUNTIME_ENTRIES-1); r->dirty = 1; }
         else if (code == RV32_KEY_ENTER) change_screen(r, RUNTIME_PONG+r->selected);
     } else {
         if (code == RV32_KEY_R) {
@@ -56,7 +65,8 @@ void runtime_event(struct runtime *r, uint32_t event)
             if (code == RV32_KEY_P) r->pong.needs_full_redraw = 1;
         }
         else if(r->screen==RUNTIME_TETRIS) tetris_event(&r->tetris, event);
-        else gpu_demo_event(&r->demo,code);
+        else if(r->screen==RUNTIME_DIGIT) digit_ui_event(&r->digit,code);
+        else if(r->screen==RUNTIME_GPU) gpu_demo_event(&r->demo,code);
     }
 }
 
@@ -76,6 +86,7 @@ void runtime_frame(struct runtime *r, uint32_t keys)
         over = r->tetris.phase == TETRIS_OVER;
     }
     if(r->screen==RUNTIME_GPU && !r->demo.paused)r->demo.frame++;
+    if(r->screen==RUNTIME_DIGIT) digit_ui_frame(&r->digit, keys);
     if (over) {
         if (++r->over_frames > 180) {
             change_screen(r, RUNTIME_MENU);
@@ -97,17 +108,25 @@ void runtime_draw(struct runtime *r, const struct gfx_surface *s)
                           "PAUSED - P RESUME", 2, 0xff);
         }
     } else if (r->screen == RUNTIME_TETRIS) tetris_draw(&r->tetris, s);
+    else if(r->screen==RUNTIME_DIGIT)digit_ui_draw(&r->digit,s);
     else if(r->screen==RUNTIME_GPU)gpu_demo_draw(&r->demo,s);
     else if (r->dirty) {
         gfx_clear(s, 0);
         gfx_draw_text(s, 40, 26, "TINY COMPUTER", 4, 0x1f);
-        gfx_draw_text(s, 100, 75, "PONG", 3, 0xff);
-        gfx_draw_text(s, 100, 110, "TETRIS", 3, 0xff);
-        gfx_draw_text(s, 100, 145, "2D DEMO", 3, 0xff);
-        gfx_draw_text(s, 70, 75+(int32_t)r->selected*35, ">", 3, 0xfc);
-        gfx_draw_text(s, 36, 190, "UP DOWN SELECT ENTER PLAY", 2, 0xff);
-        gfx_draw_text(s, 36, 213, "Q QUIT", 2, 0x92);
-        gfx_draw_text(s, 36, 170, r->selected==2 ? "SPACE CPU GPU P PAUSE R RESTART" : r->selected ? "LEFT RIGHT MOVE UP ROTATE SPACE DROP" : "W S AND UP DOWN MOVE SPACE SERVE", 1, 0x92);
+        /* Four entries need tighter spacing than three: 30 pixels apart from y=70
+         * keeps the last one clear of the help line. Every menu frame hash changes
+         * with this layout. The state checksum does not change for a session whose
+         * final selection is unchanged, which is why the capstone replay kept its
+         * PASS word; the graphics replay wraps upward from entry 0 and so now ends
+         * on selection 3 instead of 2, and its word did change. */
+        gfx_draw_text(s, 100, 70, "PONG", 3, 0xff);
+        gfx_draw_text(s, 100, 100, "TETRIS", 3, 0xff);
+        gfx_draw_text(s, 100, 130, "DIGIT", 3, 0xff);
+        gfx_draw_text(s, 100, 160, "2D DEMO", 3, 0xff);
+        gfx_draw_text(s, 70, 70+(int32_t)r->selected*30, ">", 3, 0xfc);
+        gfx_draw_text(s, 36, 196, "UP DOWN SELECT ENTER PLAY", 2, 0xff);
+        gfx_draw_text(s, 36, 218, "Q QUIT", 2, 0x92);
+        gfx_draw_text(s, 36, 180, r->selected==3 ? "SPACE CPU GPU P PAUSE R RESTART" : r->selected==2 ? "ARROWS MOVE SPACE DRAW ENTER READ" : r->selected ? "LEFT RIGHT MOVE UP ROTATE SPACE DROP" : "W S AND UP DOWN MOVE SPACE SERVE", 1, 0x92);
     }
     r->dirty = 0;
 }

@@ -83,7 +83,7 @@ Each row is a bounded milestone, potentially split into several verified commits
 | A1 — completed 2026-09-22 ([record](../simd4.md#a1-acceptance-record-2026-09-22), [walkthrough](../simd4-to-gates.md)) | Resume parallel arithmetic: defined multiply/accumulate widths and a small matrix kernel, building on SIMD4 where appropriate. Compare extreme and ordinary cases against a software model; report transfers, cycles, and stalls. | Work one dot product by hand; predict overflow and the effect of serialized memory. | 2–4 |
 | A2 — completed 2026-09-22 ([record](../rv32-simd4.md)) | CPU-commanded accelerator integration with shared buffers, driver, completion polling, and error/reset semantics. CPU launches and checks matrix work; stalled-memory and interrupted-transfer tests pass. | Trace register writes through bus decode to accelerator state. Explain ownership and exactly-once memory effects. | 2–4 |
 | G1 — completed 2026-09-22 ([record](../rv32-gfx.md)) | 2D accelerator: bounded fill/blit, line and triangle operations. Software reference and RTL agree on clipped/edge cases and framebuffer contents. Guest demo compares CPU drawing and acceleration. | Explain pixel address generation, clipping, datapath reuse, and when memory bandwidth limits speedup. | 2–4 |
-| N1 — A2 | Choose a small pretrained digit model and numeric contract. Software inference first, then accelerator kernels and driver. Match integer reference outputs, report dataset accuracy and effects of quantization, and infer a guest-drawn digit in the native UI. | Trace one input through multiply/accumulate, bias, activation, scaling, and output selection. Separate numerical correctness from model accuracy. | 3–6 |
+| N1 — completed 2026-09-22 ([record](../rv32-digit.md)) | Chose a 196-32-10 int8 digit model trained once off-line, a vendored test set with recorded provenance, and one preprocessing contract shared by training and both runtime paths. Software inference and measured accuracy came first, then dense SIMD4 kernels, block driver writers and fault/timeout recovery, all matching a standard-library integer oracle exactly. Reports 96.16% integer against 96.10% float, and classifies a keyboard-drawn digit from the boot menu. Saturation and rounding became CPU operations after an exact two-half accumulator read-back, so no RTL changed. | Trace one input through multiply/accumulate, bias, activation, scaling, and output selection. Separate numerical correctness from model accuracy. | 3–6 |
 | G2 — G1/F2 | Software-reference 3D transform/rasterization, then a limited programmable stage and hardware pipeline rendering a rotating shaded object. Define stage ISA and precision before RTL. Test clipping/depth/interpolation and compare images with documented tolerances. | Follow a vertex to a covered pixel and explain which work is programmable versus fixed-function. | 4–8 |
 | S1 — G2/N1 | Integrated advanced SoC demonstration: one guest menu drives 2D, programmable 3D, and digit inference on the same machine. End-to-end regressions cover commands, memory, reset, faults, and deterministic output checkpoints. Document cell counts and measured traffic/cycles separately from emulator wall time. | Explain the complete path from C driver to bus transaction to gates and back to a visible result. | 2–4 |
 
@@ -103,18 +103,20 @@ F2 selected and verified `-march=rv32if_zicsr -mabi=ilp32`, preserving the integ
 
 GPU FP32/other formats and NPU integer/other formats remain independent choices. The CPU FPU may help with reference computations or scene setup, but does not automatically create floating-point GPU lanes or change the digit model's quantization contract.
 
-## Next implementation session: N1
+## Next implementation session: G2
 
-G1 completed integer 2D drawing, including RAM/framebuffer copies, clipped lines
-and triangles, ownership/arbitration/reset verification, a matched emulator, and a
-CPU/accelerator comparison in the existing boot menu. See the [G1 record](../rv32-gfx.md).
+N1 completed digit inference: a vendored test set with recorded provenance, an
+integer classifier trained once off-line, one preprocessing contract shared by
+training and both runtime paths, dense SIMD4 kernels with CPU-side requantization,
+reset and fault recovery, and a boot-menu screen where a keyboard-drawn digit is
+classified by the guest. No RTL changed. See the [N1 record](../rv32-digit.md).
 
 1. Inspect Git status and merged work, preserve existing commands, start a branch, and end with one reviewed PR.
-2. Choose a small pretrained digit model and compatible dataset with recorded licenses and provenance.
-3. Fix integer widths, bias, activation, quantization/rounding and overflow behavior; establish software inference and measured accuracy before hardware.
-4. Implement and verify accelerator kernels, data movement, driver and reset/fault recovery against integer reference results.
-5. Add guest digit drawing and inference to the native UI. Host input/presentation must not replace guest classification.
-6. Preserve graphics, SIMD4, games, CPU/F and lab regressions; leave programmable 3D for G2.
+2. Build a software 3D reference first: transform, clip, rasterize and interpolate, with the precision of each stage written down before any RTL.
+3. Define one programmable stage and its ISA, with a visible effect, rather than several stages or GPU-style scheduling.
+4. Test clipping, depth and interpolation, and compare rendered images against the reference with documented tolerances.
+5. Render a rotating shaded object end to end, and report cell counts and measured traffic separately from emulator wall time.
+6. Preserve inference, graphics, SIMD4, games, CPU/F and lab regressions; unified integration stays S1.
 
 ## Verification and learning discipline
 
@@ -138,8 +140,8 @@ Complete milestones autonomously, then explain what changed, why it works, how i
 | Exact Tetris rules and controls | Decided in M7: [runtime contract](../rv32-runtime.md) | 10×20, seven-bag seed 1, clockwise rotations without kicks, 30-frame gravity, soft/hard drop, pause/restart, menu return |
 | FPU microarchitecture and independent reference | Decided in F1 ([record](../fp32.md)) | Multicycle hardware with exact 576-bit accumulation, iterative divide/square root, shared rounding; pinned SoftFloat RISCV oracle, exact bits/flags |
 | Floating-point compiler flags, ABI, and CSR contract | F2, before linking float firmware | Explicit compatible objects/libraries; retain integer firmware regression |
-| Matrix/NPU precision, saturation, rounding, accumulator width | Widths decided in A1 ([record](../simd4.md#a1-acceptance-record-2026-09-22)): 16×16→32 products, 32-bit wrapping accumulator, truncating shifted read-back; saturation and rounding decided in N1 | Integer arithmetic with explicit bounds and independently checked conversion |
-| Pretrained model/dataset, weight license, accuracy target | N1 before implementing kernels | Small classifier whose operations fit the planned engine; lock a test set and accuracy target before acceptance testing |
+| Matrix/NPU precision, saturation, rounding, accumulator width | Widths decided in A1 ([record](../simd4.md#a1-acceptance-record-2026-09-22)): 16×16→32 products, 32-bit wrapping accumulator, truncating shifted read-back; saturation and rounding decided in N1: both are CPU operations after the exact 32-bit accumulator is read back through two RDA reads, so the engine is unchanged and the exporter proves no launch can wrap | Integer arithmetic with explicit bounds and independently checked conversion |
+| Pretrained model/dataset, weight license, accuracy target | Decided in N1 ([record](../rv32-digit.md)): a 196-32-10 int8 classifier trained once off-line, the MNIST test set vendored with a SHA-256 manifest and a provenance note recording that the source states no license, and a 95% target locked before testing, met at 96.16% and asserted in `tests/test_rv32_digit.py` | Small classifier whose operations fit the planned engine; lock a test set and accuracy target before acceptance testing |
 | GPU programmable stage/ISA, clipping and depth rules | G2 after software rendering reference | Limited stage with a visible effect; precision selected by image comparisons |
 | Interrupts, DMA, concurrent accelerators, caching | A2 onward, only when polling/ownership or bandwidth limits justify complexity | Polling, simple transfers, no caches/coherence initially |
 | Shell, files, multiple programs, protection | After M7 as a separate OS expansion track | One feature at a time; Linux is a separate platform project if later desired |

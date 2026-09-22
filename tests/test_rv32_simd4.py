@@ -11,7 +11,7 @@ from unittest.mock import patch
 import unittest
 
 from tools import simd4_model as model
-from tools.rv32_simd4_kernels import kernels
+from tools.rv32_simd4_kernels import corpus_kernels, kernels
 from tools.rv32_rtl import (run_rtl, run_emulator, check_passed, compare_backends,
                             uses_accelerator, write_image, diff_traces, Run)
 from tools.rv32_asm import LI, LW, LH, LB, SW, SH, SB, JALR, FINISH, CSRRS, CSRRW, ADDI, MRET, RAM, ECALL
@@ -198,7 +198,7 @@ class SimdIntegration(unittest.TestCase):
 
     def test_kernels_and_independent_oracle(self):
         rng = random.Random(20260922)
-        images = list(kernels().items())
+        images = list(corpus_kernels().items())
         # Exercise every arithmetic opcode and all illegal instruction bytes,
         # with nonzero accumulators before each fault.
         prefix = [model.word(model.LDI, rd=0, imm=0xffff), model.word(model.LDI, rd=1, imm=0x8000),
