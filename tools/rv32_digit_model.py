@@ -153,27 +153,26 @@ def check_header(count=CHECK_IMAGES, model=None):
 
 
 def ensure_headers(directory=None):
-    """Write the generated headers if they are missing, and return the directory.
+    """Regenerate the headers whose content is out of date, and return the directory.
 
-    The make rules below regenerate these whenever a generator or the model
-    changes. This is for the other entry point: a test run directly with
-    `python3 -m unittest`, on a fresh checkout, compiles the guest C for the host
-    and needs the headers to exist. It writes only what is absent, so it never
-    races a build that is regenerating them.
+    The make rules are the primary path. This covers the other entry point: a test
+    run directly with `python3 -m unittest` has no make step, so on a fresh
+    checkout the headers would not exist and on a changed model they would be
+    stale. Comparing content rather than timestamps means a run that changes
+    nothing rewrites nothing, so this neither churns timestamps nor fights a build
+    that is regenerating the same bytes.
     """
     from pathlib import Path as _Path
+    from tools.rv32_digit_kernels import header as kernel_header
     directory = _Path(directory or ROOT / 'build/rv32')
     directory.mkdir(parents=True, exist_ok=True)
     for name, produce in (('digit_shape.h', shape_header),
                           ('digit_weights.h', weights_header),
-                          ('digit_check.h', check_header)):
-        target = directory / name
-        if not target.exists():
-            target.write_text(produce())
-    kernels = directory / 'digit_kernels.h'
-    if not kernels.exists():
-        from tools.rv32_digit_kernels import header as kernel_header
-        kernels.write_text(kernel_header())
+                          ('digit_check.h', check_header),
+                          ('digit_kernels.h', kernel_header)):
+        target, wanted = directory / name, produce()
+        if not target.exists() or target.read_text() != wanted:
+            target.write_text(wanted)
     return directory
 
 

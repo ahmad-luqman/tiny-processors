@@ -35,6 +35,20 @@ RV32_DIAG_OBJS := build/rv32/diag.o build/rv32/trap.o $(RV32_COMMON_OBJS)
 RV32_PONG_OBJS := build/rv32/pong.o build/rv32/pong_game.o build/rv32/gfx.o $(RV32_COMMON_OBJS)
 RV32_CAPSTONE_OBJS := build/rv32/gpu.o build/rv32/gpu_ref.o build/rv32/gpu_demo.o  build/rv32/gfx_text.o build/rv32/capstone.o build/rv32/runtime.o build/rv32/tetris_game.o build/rv32/pong_game.o build/rv32/gfx.o build/rv32/digit_ui.o build/rv32/digit_model.o build/rv32/digit_hw.o build/rv32/simd4.o $(RV32_COMMON_OBJS)
 RV32_HEADERS += programs/rv32/gpu.h programs/rv32/gpu_demo.h  programs/rv32/runtime.h programs/rv32/tetris_game.h programs/rv32/simd4.h programs/rv32/digit_model.h programs/rv32/digit_hw.h programs/rv32/digit_ui.h
+
+# N1's generated headers. Defined here, above every rule that names them: make
+# expands a prerequisite when it reads the rule, so a variable defined further
+# down the file expands to nothing and silently drops the dependency.
+# Every module a generator imports is a prerequisite: the weight layout depends on
+# the kernel depth and the lane count, so changing dense4.py or rv32_digit_kernels.py
+# has to rebuild the weights and not just the program bank. These must be defined
+# before the rules that reference them, or they expand to nothing.
+RV32_MNIST := third_party/mnist/t10k-images-idx3-ubyte.gz third_party/mnist/t10k-labels-idx1-ubyte.gz
+RV32_DIGIT_KERNEL_DEPS := tools/rv32_digit_kernels.py programs/simd4/dense4.py tools/simd4_model.py
+RV32_DIGIT_MODEL_DEPS := tools/rv32_digit_model.py tools/digit_ref.py tools/digit_data.py \
+                         programs/rv32/digit_model.json $(RV32_DIGIT_KERNEL_DEPS)
+RV32_DIGIT_GENERATED := build/rv32/digit_kernels.h build/rv32/digit_shape.h build/rv32/digit_weights.h build/rv32/digit_check.h
+
 RV32_IMAGES := selfcheck diag pong capstone
 RV32_IMAGE_FILES := $(foreach image,$(RV32_IMAGES),$(foreach ext,elf lst bin readelf,build/rv32/$(image).$(ext)))
 RV32_SELFCHECK_HEX := 807d9fad
@@ -693,14 +707,6 @@ RV32_DIGIT_MAX_CYCLES := 80000000
 # (transfers, instructions, launches) are asserted inside the guest on every backend.
 RV32_DIGIT_ARGS = --image build/rv32/digitcheck.bin --compare results \
                   --expect-last-line "PASS N1" --emulator $(RV32EMU) --timeout 900
-# Every module a generator imports is a prerequisite: the weight layout depends on
-# the kernel depth and the lane count, so changing dense4.py or rv32_digit_kernels.py
-# has to rebuild the weights and not just the program bank. These must be defined
-# before the rules that reference them, or they expand to nothing.
-RV32_MNIST := third_party/mnist/t10k-images-idx3-ubyte.gz third_party/mnist/t10k-labels-idx1-ubyte.gz
-RV32_DIGIT_KERNEL_DEPS := tools/rv32_digit_kernels.py programs/simd4/dense4.py tools/simd4_model.py
-RV32_DIGIT_MODEL_DEPS := tools/rv32_digit_model.py tools/digit_ref.py tools/digit_data.py \
-                         programs/rv32/digit_model.json $(RV32_DIGIT_KERNEL_DEPS)
 build/rv32/digit_kernels.h: $(RV32_DIGIT_KERNEL_DEPS) | build/rv32
 	$(PYTHON) -m tools.rv32_digit_kernels $@
 build/rv32/digit_shape.h: $(RV32_DIGIT_MODEL_DEPS) | build/rv32
@@ -709,7 +715,6 @@ build/rv32/digit_weights.h: build/rv32/digit_shape.h $(RV32_DIGIT_MODEL_DEPS) | 
 	$(PYTHON) -m tools.rv32_digit_model weights $@
 build/rv32/digit_check.h: $(RV32_DIGIT_MODEL_DEPS) $(RV32_MNIST) | build/rv32
 	$(PYTHON) -m tools.rv32_digit_model check $@
-RV32_DIGIT_GENERATED := build/rv32/digit_kernels.h build/rv32/digit_shape.h build/rv32/digit_weights.h build/rv32/digit_check.h
 # Every object that reaches digit_model.h needs the generated weights header.
 build/rv32/digit_ui.o: programs/rv32/digit_ui.c build/rv32/digit_shape.h $(RV32_HEADERS) | build/rv32
 	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@

@@ -243,6 +243,15 @@ depend on every module the generators import, because the weight layout follows
 the kernel depth and the lane count: changing `dense4.py` has to rebuild the
 weights and not merely the program bank.
 
+Two build hazards are worth naming, because both silently produced stale results
+before they were caught. Make expands a prerequisite when it *reads* the rule, so
+a variable defined further down the file expands to nothing and drops the
+dependency without a word; the generated-header lists are therefore defined near
+the top, above every rule that names them. And the Python fallback that lets a
+test run without make compares header *content* rather than checking existence,
+because a header that exists but is stale is the case that passes a test suite
+against weights the model no longer has.
+
 ## Measured costs
 
 One inference, by the two paths, with the fixed startup subtracted by building
