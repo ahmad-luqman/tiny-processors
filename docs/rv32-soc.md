@@ -163,3 +163,12 @@ Completed on 2026-09-21 on branch `m5-rv32-devices`. From a clean `build/`, `mak
 - Counter, ALU, SAP8, and SIMD4 targets unchanged and passing.
 
 Limitations that remained after M5: no palette and no host-time timer mode; no interrupts, so waiting is polling; the input script was the only keyboard; the RTL's memories are flip-flops in synthesis, not macros. M6 (completed 2026-09-21, [record](rv32-window.md)) built the native window on the emulator's framebuffer and input queue, software drawing, and Pong, replayed a 200-frame session on both simulators trace for trace against 200 checkpoints, and decided to keep RGB332 and to pace play by presents rather than add a host-time timer; no RTL file changed, so the numbers above stand.
+
+## A2 accelerator attachment
+
+The bus now also selects [SIMD4 registers and private memories](rv32-simd4.md).
+The wrapper owns the memories while idle on behalf of CPU accesses and gives
+them to the engine while busy; CPU buffer accesses then fault. The optional
+`simd_memory_hold` SoC input delays engine transfers independently of `mem_hold`.
+The M5 measurements above remain historical; A2 records current synthesis and
+its asynchronous result comparisons separately.

@@ -58,3 +58,111 @@ Completion polling produces different CPU traces across backends. Result-level
 comparison requires observed timer reads or accelerator register accesses;
 console, completion and ordered trap records must still match. Existing
 trace-identical firmware keeps strict retirement comparisons.
+
+## Run and inspect
+
+```sh
+make test-rv32-simd4                  # C model + Icarus protocol and CPU integration
+make test-rv32-simd4-verilator        # Same suite on Verilator
+make run-rv32-simd4-emu               # Same linked guest image
+make run-rv32-simd4-rtl
+make run-rv32-simd4-rtl-verilator
+make lint-rv32-soc synth-rv32-soc
+make waves-rv32-simd4
+```
+
+The diagnostic ends with `vector OK`, `matrix signed/unsigned OK`, `recovery OK`
+and `PASS A2`. It checks all 32 vector outputs, all 16 outputs of each matrix,
+the known `fffc` high half of the overflowing first dot product, transfer and
+instruction counts, a faulting launch, relaunch without reset, rejected driver
+calls while busy, and a nonzero polling timeout followed by recovery. Matrix
+reference products use guest RV32I arithmetic with unsigned accumulation to
+avoid C signed-overflow undefined behavior. The upper 16 bits are checked
+without implementation-defined signed shifts.
+
+`tools/rv32_simd4_kernels.py` produces a build-only header using the existing A1
+builders, including a MACU variant of the signed matrix kernel. The emulator's
+C implementation is independent of the Python interpreter. For 248 images
+(three guest kernels, 242 illegal bytes, two invalid loops and an arithmetic
+sequence), tests compare C retirements, ordered transfers, final buffers and
+counters against that interpreter. The resulting fixtures replay every device
+edge in RTL, checking MMIO responses, all lane registers/accumulators, PC/loop,
+status/counters and held requests. Every final data slot is also read back.
+Fixtures and logs are under `build/rv32/simd4-tests/{icarus,verilator}/`.
+
+Ten test methods per simulator additionally cover CPU decode/access faults,
+all forbidden register directions and subword widths, boundary slots/gaps,
+entry 255 and PC wrap, rejected launch while busy, the HLT ownership boundary,
+software/global reset, partial loads/stores, reset before a live RDA, fault after
+stores, relaunch, malformed-fixture rejection, and invalid runner options.
+A six-trap CPU program proves busy-access faults go through the real SoC and
+matching emulator traps, with work still running. Main diagnostic runs use
+unstalled memory, three CPU wait cycles plus two engine wait cycles, and
+independent random stall seeds. The runner refuses trace comparison for
+observed accelerator-register accesses; result comparison still checks each
+backend passed and compares console, checkpoints and ordered trap records.
+
+## From a CPU store to gates
+
+1. The guest stores kernel words at PROGRAM and operands at DATA while idle.
+   Bus comparators select this peripheral, and word-width/permission logic
+   either asserts error or enables exactly one write edge.
+2. The ENTRY register is eight flip-flops. An accepted START is a combinational
+   pulse into the engine on that edge, not a command bit left set in storage.
+   The engine captures entry, clears its lane state, and becomes busy.
+3. Busy selects the engine's program/data addresses before the memory arrays.
+   There is one read port per array and one write port per array. CPU accesses
+   are refused while busy, so no arbiter or second port is necessary. The data
+   write mux selects a CPU word's low half or the current lane's store value.
+4. Engine memory requests hold address, direction, lane and data through wait
+   cycles. Only the accepting edge enables the memory write or fills a lane.
+   Software RESET gates off the accepting edge just like global reset.
+5. HLT makes the engine idle with sticky DONE. The CPU observes completion,
+   then loads result slots. An engine fault follows the same ownership return
+   with FAULT set; it never rolls back earlier stores.
+
+Synthesis uses the repository's 64-word RAM/framebuffer configuration but full
+256-word accelerator memories. The final SoC has **111,855 generic cells and
+21,840 flip-flops**, with no latches. The wrapper plus SIMD4 accounts for
+53,723 cells and 12,925 flip-flops: 12,288 memory bits, eight ENTRY bits and the
+629-flop engine. These are generic flattened-memory costs, not FPGA block-RAM
+utilization or a clock-frequency prediction. Sharing ports reduced the initial
+139,026-cell SoC by 27,171 cells while preserving the full protocol suite.
+
+## Measured device work
+
+| Job | Instructions | Transfers | Zero-wait ticks | Two waits per transfer |
+| --- | ---: | ---: | ---: | ---: |
+| 32-element vector add | 51 | 96 | 198 | 390 |
+| 4×4 signed matrix, shift 16 | 77 | 144 | 298 | 586 |
+| 4×4 unsigned matrix, shift 16 | 77 | 144 | 298 | 586 |
+
+For successful jobs, `cycles = 2 × instructions + transfers + stalls`.
+`measurements.json` in each simulator's test directory records these counters
+separately from CPU instructions and whole-machine cycles, including load,
+poll and CPU-reference overhead. Random seeds are reproducible within each
+simulator; Icarus and Verilator's `$random` streams need not coincide.
+There is no claim of a CPU speedup from this small, copy-driven workload.
+
+## Three reset waveform observations
+
+The focused protocol wave is generated by either integration test target at
+`build/rv32/simd4-tests/<simulator>/protocol.vcd`. Its edges are deliberately
+10 ns apart; these are testbench timestamps, not physical timing claims.
+
+- At **5,144 ns**, START transfers ownership. At **5,294 ns**, a second START is
+  rejected while a store waits. Busy stays high and the transfer count stays
+  zero. At **5,334 ns**, RESET cancels that store even though memory hold is
+  released on the same edge; the destination still reads `4321`.
+- At **5,434 ns**, lane zero's store of `abcd` is accepted. Lane one's store is
+  held, then global reset at **5,454 ns** cancels it. Reads show `abcd` only in
+  the first output slot and `4321` in the other three: reset is not rollback.
+- At **10,884 ns**, the first lane of a LOAD captures `7654`. RESET at
+  **10,904 ns** clears all lane registers and counters, preserving memory.
+  The subsequent launch completes normally.
+
+Optional exercises on the verified baseline: predict the two-wait counts from
+the transfer totals; move reset one edge earlier/later and predict which stores
+survive; trace why the CPU slot address `DATA + 4*128` becomes engine word
+address `0x80`. Then inspect which costs G1 must address before accelerating
+framebuffer operations: this device only accesses its own 256 data words.

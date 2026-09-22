@@ -81,7 +81,7 @@ Each row is a bounded milestone, potentially split into several verified commits
 | F1 — completed 2026-09-21 ([record](../fp32.md)) | Standalone FP32 arithmetic unit, built in increments: add/subtract, multiply, fused multiply-add, divide/square root, and conversion/comparison support needed by F. Compare exact result bits and exception flags with an independent reference across rounding modes, ordinary/edge values, and seeded vectors. Check handshake/reset behavior, lint, synthesis, and short waves. | Trace exponent alignment, significand arithmetic, normalization, and rounding; explain why fused multiply-add has one final rounding. | 5–10 |
 | F2 — completed 2026-09-22 ([record](../rv32-f.md)) | Integrate the complete F instruction/state contract into CPU and emulator: floating registers, loads/stores, arithmetic, moves/classification/sign operations, comparisons/conversions, and floating-point CSRs with required Zicsr support. Compare retirement effects and run compiled C float programs. Publish instruction/rounding/exception coverage and preserve integer-only firmware regressions. | Follow C float operands through ABI, registers, FPU request/completion, result writeback, and accrued flags. | 2–4 |
 | A1 — completed 2026-09-22 ([record](../simd4.md#a1-acceptance-record-2026-09-22), [walkthrough](../simd4-to-gates.md)) | Resume parallel arithmetic: defined multiply/accumulate widths and a small matrix kernel, building on SIMD4 where appropriate. Compare extreme and ordinary cases against a software model; report transfers, cycles, and stalls. | Work one dot product by hand; predict overflow and the effect of serialized memory. | 2–4 |
-| A2 — A1/M5 | CPU-commanded accelerator integration with shared buffers, driver, completion polling, and error/reset semantics. CPU launches and checks matrix work; stalled-memory and interrupted-transfer tests pass. | Trace descriptor/register writes through bus decode to accelerator state. Explain ownership and exactly-once memory effects. | 2–4 |
+| A2 — completed 2026-09-22 ([record](../rv32-simd4.md)) | CPU-commanded accelerator integration with shared buffers, driver, completion polling, and error/reset semantics. CPU launches and checks matrix work; stalled-memory and interrupted-transfer tests pass. | Trace descriptor/register writes through bus decode to accelerator state. Explain ownership and exactly-once memory effects. | 2–4 |
 | G1 — A2 | 2D accelerator: bounded fill/blit operations followed by lines/triangles as needed. Software reference and RTL agree on clipped/edge cases and framebuffer contents. Guest demo compares CPU drawing and acceleration. | Explain pixel address generation, clipping, datapath reuse, and when memory bandwidth limits speedup. | 2–4 |
 | N1 — A2 | Choose a small pretrained digit model and numeric contract. Software inference first, then accelerator kernels and driver. Match integer reference outputs, report dataset accuracy and effects of quantization, and infer a guest-drawn digit in the native UI. | Trace one input through multiply/accumulate, bias, activation, scaling, and output selection. Separate numerical correctness from model accuracy. | 3–6 |
 | G2 — G1/F2 | Software-reference 3D transform/rasterization, then a limited programmable stage and hardware pipeline rendering a rotating shaded object. Define stage ISA and precision before RTL. Test clipping/depth/interpolation and compare images with documented tolerances. | Follow a vertex to a covered pixel and explain which work is programmable versus fixed-function. | 4–8 |
@@ -103,28 +103,19 @@ F2 selected and verified `-march=rv32if_zicsr -mabi=ilp32`, preserving the integ
 
 GPU FP32/other formats and NPU integer/other formats remain independent choices. The CPU FPU may help with reference computations or scene setup, but does not automatically create floating-point GPU lanes or change the digit model's quantization contract.
 
-## Next implementation session: A2
+## Next implementation session: G1
 
-A1 completed on 2026-09-22. The [A1 record](../simd4.md#a1-acceptance-record-2026-09-22)
-fixes SIMD4's multiply/accumulate contract (16×16→32 signed/unsigned products,
-a per-lane 32-bit wrapping accumulator, truncating read-back, opcodes `0e`–`ff`
-fault), verifies it against hand-computed extremes on both simulators, and
-measures a 4×4 matrix kernel whose 144 transfers do not fall with lane count.
-The vector-add kernel, its measurements and every lab command are preserved.
+A2 attached the unchanged four-lane SIMD4 core to bus-mapped private memories,
+with a matched incremental C emulator device, a guest driver, vector/matrix
+self-checks and verified ownership, stalls, reset and fault recovery. See the
+[A2 record](../rv32-simd4.md). The standalone A1 harness remains preserved.
 
-1. Inspect Git status, preserve commands, start a branch, and end with one PR.
-2. Define the device contract before RTL: launch/status/fault registers, where
-   the engine's program and data words live (a window of RV32 RAM or private
-   memories loaded through the bus), CPU/device buffer ownership while busy,
-   and exactly-once memory effects under stalls and reset.
-3. Attach the engine behind `rtl/rv32/rv32_bus.v` and the emulator's region
-   table with the same fault edges; keep the standalone SIMD4 harness passing.
-4. Write the guest driver (load kernel and operands, launch, poll, read C) and
-   a firmware image that runs the vector and matrix kernels and checks them
-   against CPU arithmetic; compare emulator and RTL at the results level.
-5. Test stalled memory, reset during a transfer, a fault mid-kernel, and a
-   relaunch; report device cycles separately from CPU instructions.
-6. Keep 2D drawing (G1) and the digit model (N1) out of A2.
+1. Inspect Git status and merged work, preserve existing commands, start a branch, and end with one PR.
+2. Define bounded fill/blit commands, clipping, pixel format, buffer ownership and completion/error/reset behavior before RTL.
+3. Establish an independent guest software pixel reference; select the data path and memory access needed to reach the framebuffer explicitly (A2 has no DMA).
+4. Match emulator and RTL behavior and verify framebuffer contents on clipped, overlapping and boundary cases.
+5. Run a guest demo comparing CPU drawing and acceleration; measure command, transfer and execution costs separately.
+6. Preserve A2, games, CPU/F and lab regressions; leave digit inference and programmable 3D for N1/G2.
 
 ## Verification and learning discipline
 
