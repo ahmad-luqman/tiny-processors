@@ -6,6 +6,9 @@ from tools.simd4_model import MAC, MACU
 
 def kernels():
     signed = matrix(4, 4, 16)
+    mac_count = sum(w >> 24 == MAC for w in signed)
+    if mac_count != 4:
+        raise ValueError(f"expected four unrolled MAC words in 4x4 kernel, found {mac_count}")
     unsigned = [(w & 0xffffff) | (MACU << 24) if w >> 24 == MAC else w for w in signed]
     return {'vector': vector(), 'matrix': signed, 'unsigned_matrix': unsigned}
 

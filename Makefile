@@ -34,7 +34,7 @@ RV32_SELFCHECK_OBJS := build/rv32/selfcheck.o $(RV32_COMMON_OBJS)
 RV32_DIAG_OBJS := build/rv32/diag.o build/rv32/trap.o $(RV32_COMMON_OBJS)
 RV32_PONG_OBJS := build/rv32/pong.o build/rv32/pong_game.o build/rv32/gfx.o $(RV32_COMMON_OBJS)
 RV32_CAPSTONE_OBJS := build/rv32/gfx_text.o build/rv32/capstone.o build/rv32/runtime.o build/rv32/tetris_game.o build/rv32/pong_game.o build/rv32/gfx.o $(RV32_COMMON_OBJS)
-RV32_HEADERS += programs/rv32/runtime.h programs/rv32/tetris_game.h
+RV32_HEADERS += programs/rv32/runtime.h programs/rv32/tetris_game.h programs/rv32/simd4.h
 RV32_IMAGES := selfcheck diag pong capstone
 RV32_IMAGE_FILES := $(foreach image,$(RV32_IMAGES),$(foreach ext,elf lst bin readelf,build/rv32/$(image).$(ext)))
 RV32_SELFCHECK_HEX := 807d9fad
@@ -582,15 +582,13 @@ run-rv32-f-soft-qemu: check-rv32-f-image
 test-rv32: run-rv32-f-soft-qemu
 
 # A2: guest-owned program/data windows and asynchronous completion.
-RV32_SIMD4_ARGS = --image build/rv32/simdcheck.bin --compare results --expect-last-line "PASS A2"
+RV32_SIMD4_ARGS = --image build/rv32/simdcheck.bin --compare results --compare-stores --emulator $(RV32EMU) --expect-last-line "PASS A2"
 .PHONY: run-rv32-simd4-emu run-rv32-simd4-rtl run-rv32-simd4-rtl-verilator waves-rv32-simd4 check-rv32-simd4-image
 build/rv32/simd4_kernels.h: tools/rv32_simd4_kernels.py programs/simd4/vector_add.py programs/simd4/matrix_mac.py tools/simd4_model.py | build/rv32
 	$(PYTHON) -m tools.rv32_simd4_kernels $@
 
-build/rv32/simdcheck.o: programs/rv32/simdcheck.c programs/rv32/simd4.h build/rv32/simd4_kernels.h $(RV32_HEADERS)
+build/rv32/simdcheck.o: programs/rv32/simdcheck.c build/rv32/simd4_kernels.h $(RV32_HEADERS)
 	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c -o $@ $<
-
-build/rv32/simd4.o: programs/rv32/simd4.h
 
 build/rv32/simdcheck.elf: build/rv32/simdcheck.o build/rv32/simd4.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
 	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ build/rv32/simdcheck.o build/rv32/simd4.o $(RV32_COMMON_OBJS)
@@ -602,15 +600,13 @@ run-rv32-simd4-emu: check-rv32-simd4-image $(RV32EMU)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_SIMD4_ARGS) --backend emulator --out build/rv32/simd4-emu
 
 run-rv32-simd4-rtl: check-rv32-simd4-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_SIMD4_ARGS) --out build/rv32/simd4-icarus
+	$(PYTHON) tools/rv32_rtl.py $(RV32_SIMD4_ARGS) --simulator $(RV32_TB_VVP) --out build/rv32/simd4-icarus
 
 run-rv32-simd4-rtl-verilator: check-rv32-simd4-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_SIMD4_ARGS) --simulator $(RV32_TB_VERILATOR) --out build/rv32/simd4-verilator
 
 waves-rv32-simd4: check-rv32-simd4-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_SIMD4_ARGS) --mode waves --out build/rv32/simd4-waves
-
-test-rv32: run-rv32-simd4-emu run-rv32-simd4-rtl run-rv32-simd4-rtl-verilator
+	$(PYTHON) tools/rv32_rtl.py $(RV32_SIMD4_ARGS) --simulator $(RV32_TB_VVP) --mode waves --out build/rv32/simd4-waves
 
 build/rv32/simd4-protocol.vvp: rtl/rv32/rv32_simd4.v $(SIMD4_RTL) tests/rv32_simd4_tb.sv | build/rv32
 	iverilog -g2012 -Wall -s rv32_simd4_tb -o $@ tests/rv32_simd4_tb.sv rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
@@ -625,4 +621,4 @@ test-rv32-simd4: check-rv32-simd4-image $(RV32EMU) $(RV32_TB_VVP) build/rv32/sim
 test-rv32-simd4-verilator: check-rv32-simd4-image $(RV32EMU) $(RV32_TB_VERILATOR) build/verilator-rv32-simd4/protocol
 	A2_SIM=verilator $(PYTHON) -m unittest discover -s tests -p 'test_rv32_simd4.py' -v
 
-test-rv32: test-rv32-simd4 test-rv32-simd4-verilator
+test-rv32: test-rv32-simd4 test-rv32-simd4-verilator run-rv32-simd4-emu run-rv32-simd4-rtl run-rv32-simd4-rtl-verilator

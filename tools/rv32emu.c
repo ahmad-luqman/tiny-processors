@@ -7,7 +7,7 @@
  * else does; diagnostics go to stderr; the retirement trace goes to a file.
  * The machine itself is rv32emu_core.c, shared with the window (rv32win.c).
  *
- * Build: cc -std=c11 -O2 -Wall -Wextra -Werror -o rv32emu rv32emu.c rv32emu_core.c
+ * Build: make build-rv32-emu (links the core, SIMD4 device and pinned SoftFloat objects).
  */
 #define _POSIX_C_SOURCE 200809L
 #include "rv32emu_core.h"

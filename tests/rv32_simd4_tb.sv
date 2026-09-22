@@ -8,7 +8,9 @@ module rv32_simd4_tb;
     wire [31:0] rdata;
     wire ready, error;
     rv32_simd4 dut (.*);
-    integer fd, count, rows = 0, expected_rows, i;
+    integer fd, count, rows = 0, expected_rows, i, field_index, field_count, bits;
+    reg [407:0] fields [0:17];
+    reg expected_ready;
     reg expected_error;
     reg [31:0] expected_data, status, entry, cycles, stalls, transfers, instructions;
     reg [407:0] snapshot;
@@ -17,6 +19,35 @@ module rv32_simd4_tb;
     reg [24:0] held_request;
     wire [24:0] request = {dut.memory_write, dut.memory_address, dut.memory_wdata};
     string fixture, wave;
+    // Scan text before narrowing. %h directly into a small destination can
+    // silently truncate malformed fixture values on either simulator.
+    task automatic read_field;
+        input integer width;
+        output reg [407:0] value;
+        output integer consumed;
+        string token;
+        integer index, character;
+        reg [3:0] digit;
+        begin
+            value = 408'd0;
+            consumed = $fscanf(fd, "%s", token);
+            if (consumed == 0 && $feof(fd)) consumed = -1;
+            if (consumed == 1) begin
+                if (token.len() == 0 || token.len() > (width+3)/4)
+                    $fatal(1, "Fixture field width at row %0d", rows);
+                for (index = 0; index < token.len(); index = index+1) begin
+                    character = {24'd0, token[index]};
+                    if (character >= 48 && character <= 57) digit = character[3:0];
+                    else if ((character >= 65 && character <= 70) || (character >= 97 && character <= 102))
+                        digit = character[3:0] + 4'd9;
+                    else $fatal(1, "Invalid fixture hex at row %0d", rows);
+                    value = (value << 4) | {404'd0, digit};
+                end
+                if ((value >> width) != 408'd0)
+                    $fatal(1, "Fixture field width at row %0d", rows);
+            end
+        end
+    endtask
     initial begin
         if (!$value$plusargs("fixture=%s", fixture)) $fatal(1, "Missing fixture");
         if (!$value$plusargs("rows=%d", expected_rows) || expected_rows <= 0) $fatal(1, "Missing row count");
@@ -33,17 +64,32 @@ module rv32_simd4_tb;
         end
         fd = $fopen(fixture, "r");
         if (fd == 0) $fatal(1, "Cannot open fixture");
-        count = 17;
-        while (count == 17) begin
-            count = $fscanf(fd, "%h %h %h %h %h %h %h %h %h %h %h %h %h %h %h %h %h\n",
-                reset, valid, we, addr, strb, wdata, memory_hold, expected_error, expected_data,
-                status, entry, cycles, stalls, transfers, instructions, snapshot, transfer);
-            if (count == 17) begin
+        count = 1;
+        while (count == 1) begin
+            read_field(1, fields[0], count);
+            if (count == 1) begin
+                for (field_index = 1; field_index < 18; field_index = field_index+1) begin
+                    case (field_index)
+                        1, 2, 6, 7, 17: bits = 1;
+                        4: bits = 4;
+                        15: bits = 408;
+                        16: bits = 26;
+                        default: bits = 32;
+                    endcase
+                    read_field(bits, fields[field_index], field_count);
+                    if (field_count != 1) $fatal(1, "Incomplete fixture at row %0d", rows);
+                end
+                reset = fields[0][0]; valid = fields[1][0]; we = fields[2][0];
+                addr = fields[3][31:0]; strb = fields[4][3:0]; wdata = fields[5][31:0];
+                memory_hold = fields[6][0]; expected_error = fields[7][0]; expected_data = fields[8][31:0];
+                status = fields[9][31:0]; entry = fields[10][31:0]; cycles = fields[11][31:0];
+                stalls = fields[12][31:0]; transfers = fields[13][31:0]; instructions = fields[14][31:0];
+                snapshot = fields[15]; transfer = fields[16][25:0]; expected_ready = fields[17][0];
                 #4;
                 if ((^{reset, valid, we, addr, strb, wdata, memory_hold,
                     expected_error, expected_data, status, entry, cycles, stalls, transfers, instructions, snapshot, transfer}) === 1'bx)
                     $fatal(1, "Unknown fixture at row %0d", rows);
-                if (ready !== (valid && !reset)) $fatal(1, "Ready row %0d", rows);
+                if (ready !== expected_ready) $fatal(1, "Ready row %0d", rows);
                 if (valid && !reset) begin
                     if (error !== expected_error) $fatal(1, "Error row %0d addr %h", rows, addr);
                     if (!we && !expected_error && rdata !== expected_data)

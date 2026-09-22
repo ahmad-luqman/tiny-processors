@@ -19,7 +19,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tools.rv32_asm import PROGRAM_INPUTS, PROGRAMS, TIMER, words_to_bytes, words_to_hex  # noqa: E402
+from tools.rv32_asm import PROGRAM_INPUTS, PROGRAMS, TIMER, SIMD_BASE, SIMD_COMMAND, SIMD_STATUS, SIMD_ENTRY, SIMD_CYCLES, SIMD_STALLS, SIMD_TRANSFERS, SIMD_INSTRUCTIONS, words_to_bytes, words_to_hex  # noqa: E402
 from tools.rv32_image import to_hex_words  # noqa: E402
 from tools.rv32_run_emu import DEFAULT_EMULATOR, emulator_command, halt_line, last_halt_line, parse_halt_line  # noqa: E402
 
@@ -234,15 +234,26 @@ def trap_records(trace):
     return [line.split(" ", 1)[1] for line in trace if " trap " in line]
 
 
+SIMD_ACCESS = re.compile(r"mem\[(?:" + "|".join(f"{SIMD_BASE+offset:08x}" for offset in
+    (SIMD_COMMAND, SIMD_STATUS, SIMD_ENTRY, SIMD_CYCLES, SIMD_STALLS, SIMD_TRANSFERS, SIMD_INSTRUCTIONS)) + r")\](?:->|<-)")
+
+
 def uses_accelerator(trace):
     """Only successful register accesses justify asynchronous result comparison."""
-    return any(re.search(r"mem\[200040(?:00|04|08|0c|10|14|18)\](?:->|<-)", line) for line in trace)
+    return any(SIMD_ACCESS.search(line) for line in trace)
 
 
-def compare_backends(rtl, emulator, compare):
+def store_records(trace):
+    """Ordered stores including PC, instruction, address, data and width, without step numbers."""
+    return [line.split(" ", 1)[1] for line in trace if "<-" in line]
+
+
+def compare_backends(rtl, emulator, compare, compare_stores=False):
     """What must agree between two passing runs, as the first mismatch or None: the console
     transcript and the checkpoint lines always; the whole retirement trace in trace mode; in
-    results mode (device time) the trap records, which step numbers never move."""
+    results mode (device time) the trap records, which step numbers never move.
+    compare_stores is an opt-in for firmware whose stores are timing-independent;
+    even timer-free accelerator polling may store a varying poll count."""
     if rtl.console != emulator.console:
         return f"console mismatch: RTL {rtl.console!r}, emulator {emulator.console!r}"
     if rtl.checkpoints != emulator.checkpoints:
@@ -251,6 +262,10 @@ def compare_backends(rtl, emulator, compare):
         rtl_traps, emulator_traps = trap_records(rtl.trace), trap_records(emulator.trace)
         if rtl_traps != emulator_traps:
             return f"trap mismatch: RTL {rtl_traps}, emulator {emulator_traps}"
+        if compare_stores:
+            difference = diff_traces(store_records(rtl.trace), store_records(emulator.trace))
+            if difference:
+                return f"store mismatch: {difference}"
         return None
     difference = diff_traces(rtl.trace, emulator.trace)
     return f"trace mismatch: {difference}" if difference else None
@@ -346,6 +361,8 @@ def main():
     parser.add_argument("--compare", choices=("trace", "results"), default="trace",
                         help="`trace`: identical retirement traces and the cycle formula; `results`: identical "
                              "console, outcome, and checkpoints, for a program that reads the timer or accesses accelerator registers (device time)")
+    parser.add_argument("--compare-stores", action="store_true",
+                        help="also compare ordered stores in results mode; firmware must have timing-independent stores")
     parser.add_argument("--backend", choices=("both", "emulator"), default="both",
                         help="`emulator` runs and checks the emulator only")
     parser.add_argument("--allow-traps", action="store_true",
@@ -359,6 +376,8 @@ def main():
     parser.add_argument("--seed", type=int, default=None, help="random 0..3 stall cycles per request")
     parser.add_argument("--expect-fp-waits", type=int, help="pin total RTL FPU issue/wait cycles")
     args = parser.parse_args()
+    if args.compare_stores and args.compare != "results":
+        parser.error("--compare-stores requires --compare results")
     for option in ("simd_stall", "simd_seed"):
         value = getattr(args, option)
         if value is not None and not 0 <= value <= 2147483647:
@@ -442,7 +461,7 @@ def main():
                           allow_lost_events=args.allow_lost_events, simd_stall=args.simd_stall, simd_seed=args.simd_seed)
             check_passed(rtl)
             check_fp_waits(rtl, args.expect_fp_waits)
-            mismatch = compare_backends(rtl, emulator, args.compare)  # the same agreement as a check run
+            mismatch = compare_backends(rtl, emulator, args.compare, compare_stores=args.compare_stores)  # the same agreement as a check run
             if mismatch:
                 sys.exit(f"stall={stall} seed={seed}: {mismatch}")
             if stall is not None and rtl.halt["stalls"] != stall * rtl.halt["transfers"]:
@@ -469,12 +488,14 @@ def main():
     print(rtl.stderr.strip().splitlines()[-1] if rtl.stderr.strip() else "rv32_tb: no halt line")
     check_passed(rtl)
     check_fp_waits(rtl, args.expect_fp_waits)
-    mismatch = compare_backends(rtl, emulator, args.compare)
+    mismatch = compare_backends(rtl, emulator, args.compare, compare_stores=args.compare_stores)
     if mismatch:
         sys.exit(mismatch)
     if args.compare == "results":
         # What the guest printed and presented agreed, and so did every fault it took: the same PC,
         # word, cause, and value in the same order, only the step numbers differing.
+        if args.compare_stores:
+            print(f"stores identical: {len(store_records(rtl.trace))} ordered records (step numbers excluded)")
         traps = len(trap_records(rtl.trace))
         print(f"results identical: {len(emulator.console.splitlines())} console line(s) ending {last_line!r}, "
               f"{len(rtl.checkpoints)} checkpoint(s) {rtl.checkpoints}, {traps} trap(s) alike; RTL "

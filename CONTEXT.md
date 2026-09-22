@@ -30,7 +30,7 @@ _Avoid_: guest renderer, guest operating system.
 The point where an executed instruction commits its architectural effects, used to compare CPU behavior across implementations.
 
 **Device time**:
-The rule that a timer tick is a clock cycle on the RTL and an executed instruction on the emulator, so only the timer's values differ between backends; programs that read it are compared at the results level (console, outcome, checkpoints, and the trap records in order), everything else trace for trace.
+A device tick is a clock cycle on RTL and an executed instruction (retired or trapped) on the emulator. Timer reads and A2 accelerator completion/status/counters can differ between backends. Programs using those interfaces are compared at the results level (console, outcome, checkpoints and ordered trap records); programs using neither retain trace comparison. Deterministic diagnostics can additionally opt into ordered-store comparison.
 _Avoid_: wall-clock time, a claim that the backends run at the same speed.
 
 **Session recording**:

@@ -322,6 +322,25 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertIn("RV32_PONG_INPUT := programs/rv32/pong.input", makefile)
         self.assertIn("RV32_PONG_EXPECTED := programs/rv32/pong.expected", makefile)
 
+    def test_simd_register_contract_constants(self):
+        from tools import rv32_asm as asm
+        expected = dict(COMMAND=0,STATUS=4,ENTRY=8,CYCLES=12,STALLS=16,TRANSFERS=20,INSTRUCTIONS=24,
+                        BUSY=1,DONE=2,FAULT=4,START=1,RESET=2)
+        for filename,prefix in [('programs/rv32/board.h','RV32_SIMD4_'),('tools/rv32_simd4.h','SIMD_')]:
+            source = (ROOT/filename).read_text()
+            for name,value in expected.items():
+                match = re.search(rf'#define {prefix}{name}\s+0x([0-9a-f]+)\b',source)
+                self.assertIsNotNone(match,(filename,name))
+                self.assertEqual(int(match[1],16),value,(filename,name))
+        rtl = (ROOT/'rtl/rv32/rv32_simd4.v').read_text()
+        for name,value in expected.items():
+            self.assertEqual(getattr(asm,'SIMD_'+name),value)
+            match = re.search(rf"SIMD4_{name} = (?:5|32)'h([0-9a-f]+);",rtl)
+            self.assertIsNotNone(match,name)
+            self.assertEqual(int(match[1],16),value,name)
+        self.assertEqual((asm.SIMD_BASE,asm.SIMD_PROGRAM,asm.SIMD_DATA),
+                         (0x20004000,0x20005000,0x20006000))
+
     def test_key_table_and_windows_agree_across_languages(self):
         """The key table lives in board.h, the emulator, the window, the testbench, and this module's KEYS; the
         window bases in board.h, the bus, the machine's memory instances, and the assembler. None of

@@ -26,23 +26,26 @@ flowchart LR
     BUS -->|input_valid| IN["rv32_input 0x2000_1000"]
     BUS -->|display_valid| DISP["rv32_display 0x2000_2000"]
     BUS -->|fb_valid| FB["rv32_ram 76,800 B at 0x3000_0000"]
+    BUS -->|simd_valid| SIMD["rv32_simd4: registers + program/data memories"]
+    SIMD_HOLD["testbench simd_memory_hold"] --> SIMD
     CON -->|"console_valid, byte"| HOST["host: testbench or native window"]
     DONE -->|"done_valid, word"| HOST
     DISP -->|"display_present, frames"| HOST
     HOST -->|"in_push, in_event"| IN
 ```
 
-Every slave has the same port: `clk`, `reset`, `valid`, `addr`, `we`, `strb`, `wdata` in; `rdata`, `ready`, `error` out. Only `valid` may gate a state change, a side-effect strobe, `ready` (plus a host-side input such as the input device's `push`), or a busy counter; `rdata` and `error` are combinational from the address, the strobe, and the device's state. A device that answers in the same cycle therefore costs the core nothing beyond the cycle the request is presented, which is why every M4 cycle count survived the move.
+Every slave has a common bus port: `clk`, `reset`, `valid`, `addr`, `we`, `strb`, `wdata` in; `rdata`, `ready`, `error` out. Peripherals also have device-specific ports such as input `push` and accelerator `memory_hold`. CPU-induced side effects require a valid accepted request without error. Autonomous timer/accelerator state continues independently of CPU requests. A device that answers in the same cycle costs the CPU no additional wait cycle, which is why the M4 baseline counts survived the original bus integration.
 
 ### The bus decoder is comparators and muxes
 
-[rv32_bus.v](../rtl/rv32/rv32_bus.v) has no registers. One comparator per window turns the address into a select: the RAM and framebuffer windows are a subtraction and a compare against the size (`addr - base < bytes`), the 16-byte device windows compare the top 28 bits (`addr[31:4] == base[31:4]`), the console compares the top 29 bits, and the done register compares the whole address. The windows are disjoint, so at most one select is set, and `none_sel` is the NOR of all of them. Three rules compose in the four equations that follow:
+[rv32_bus.v](../rtl/rv32/rv32_bus.v) has no registers. One comparator per window turns the address into a select: the RAM and framebuffer windows are a subtraction and a compare against the size (`addr - base < bytes`), the 16-byte device windows compare the top 28 bits (`addr[31:4] == base[31:4]`), the console compares the top 29 bits, and the done register compares the whole address. The windows are disjoint, so at most one select is set, and `none_sel` is the NOR of all of them. The decoder applies the following rules:
 
+- A2 adds a 32-byte register select (`addr & 0xffffffe0`) and two 1 KiB memory selects (`addr & 0xfffffc00`), all gated against instruction fetches.
 - A request reaches a slave only as `<slave>_valid = req & <slave>_sel`, where `req = mem_valid & ~mem_hold`. While the host holds the bus no slave sees the request and `mem_ready` stays low: that is how the testbench models a slow memory, and it is why the stall counts did not change.
 - Only RAM is fetchable. Every device select is gated with `~mem_fetch`, so a jump into a device window is answered like an unmapped address: `ready` and `error` in the same cycle, cause 1. The `mem_fetch` sideband became part of the contract in M5 for this reason.
 - An address that selects nothing is answered at once with `ready` and `error` (`none_sel` is a term of both), which the core turns into cause 5 or 7 with the address in `mtval`.
 
-`mem_ready` is `req` AND the OR of each select ANDed with its slave's `ready` (plus `none_sel`); `mem_error` is the OR of each select ANDed with its slave's `error` (plus `none_sel`); `mem_rdata` is a one-hot AND-OR mux of the slaves' read data. Adding a slave is one select, one `_valid`, one term in `none_sel`, and one term in each of the three ORs. Synthesis makes 525 cells of it, all logic.
+`mem_ready` is `req` AND the OR of each select ANDed with its slave's `ready` (plus `none_sel`); `mem_error` is the OR of each select ANDed with its slave's `error` (plus `none_sel`); `mem_rdata` is a one-hot AND-OR mux of the slaves' read data. Adding a slave is one select, one `_valid`, one term in `none_sel`, and one term in each of the three ORs. The M5 synthesis baseline made 525 cells of it, all logic; current A2 synthesis is recorded separately.
 
 ### The devices
 
@@ -69,7 +72,9 @@ The image is loaded into `dut.ram.mem` with a hierarchical `$readmemh`, which Ic
 
 ## Device time in practice
 
-The [contract](rv32.md#device-time) makes the timer the only device whose values differ between backends. The diagnostic shows what that costs and what it does not:
+At M5, the timer was the only device whose values differed between backends.
+A2 adds accelerator status/counters to the [device-time contract](rv32.md#device-time).
+The M5 diagnostic shows what timer-dependent execution costs and what it does not:
 
 | Backend | Instructions | Of which traps | Cycles | Transfers | Stalls |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -168,7 +173,8 @@ Limitations that remained after M5: no palette and no host-time timer mode; no i
 
 The bus now also selects [SIMD4 registers and private memories](rv32-simd4.md).
 The wrapper owns the memories while idle on behalf of CPU accesses and gives
-them to the engine while busy; CPU buffer accesses then fault. The optional
-`simd_memory_hold` SoC input delays engine transfers independently of `mem_hold`.
+them to the engine while busy; CPU buffer accesses then fault. The required
+`simd_memory_hold` SoC input delays engine transfers independently of `mem_hold`;
+tie it low when no delay is wanted. The testbench stall generator is optional.
 The M5 measurements above remain historical; A2 records current synthesis and
 its asynchronous result comparisons separately.

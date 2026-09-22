@@ -57,14 +57,15 @@ module rv32_tb;
         end
     end
     always @(posedge clk) begin
+        if (simd_held && !dut.accelerator.engine_reset &&
+            (dut.accelerator.memory_valid !== 1'b1 || simd_request !== {dut.accelerator.memory_write,
+                dut.accelerator.memory_address, dut.accelerator.memory_wdata}))
+            $fatal(1, "SIMD4 request changed while stalled");
         if (dut.accelerator.engine_reset || !dut.accelerator.memory_valid) begin
             simd_age = 0;
             simd_held = 0;
             simd_chosen = 0;
         end else begin
-            if (simd_held && simd_request !== {dut.accelerator.memory_write,
-                    dut.accelerator.memory_address, dut.accelerator.memory_wdata})
-                $fatal(1, "SIMD4 request changed while stalled");
             simd_request = {dut.accelerator.memory_write, dut.accelerator.memory_address, dut.accelerator.memory_wdata};
             simd_held = !dut.accelerator.memory_ready;
             if (dut.accelerator.memory_ready) begin

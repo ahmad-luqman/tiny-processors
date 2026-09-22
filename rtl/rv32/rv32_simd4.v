@@ -14,6 +14,19 @@ module rv32_simd4 (
     localparam [31:0] SIMD4_BASE = 32'h2000_4000;
     localparam [31:0] SIMD4_PROGRAM = 32'h2000_5000;
     localparam [31:0] SIMD4_DATA = 32'h2000_6000;
+    localparam [4:0] SIMD4_COMMAND = 5'h00;
+    localparam [4:0] SIMD4_STATUS = 5'h04;
+    localparam [4:0] SIMD4_ENTRY = 5'h08;
+    localparam [4:0] SIMD4_CYCLES = 5'h0c;
+    localparam [4:0] SIMD4_STALLS = 5'h10;
+    localparam [4:0] SIMD4_TRANSFERS = 5'h14;
+    localparam [4:0] SIMD4_INSTRUCTIONS = 5'h18;
+    localparam [31:0] SIMD4_BUSY = 32'h00000001;
+    localparam [31:0] SIMD4_DONE = 32'h00000002;
+    localparam [31:0] SIMD4_FAULT = 32'h00000004;
+    localparam [31:0] SIMD4_START = 32'h00000001;
+    localparam [31:0] SIMD4_RESET = 32'h00000002;
+    localparam integer LANES = 4;
     reg [31:0] program_mem [0:255];
     reg [15:0] data_mem [0:255];
     reg [7:0] entry;
@@ -43,14 +56,14 @@ module rv32_simd4 (
             access_ok = !busy;
             rdata = {16'd0, data_read_data};
         end else if (regs_sel) begin
-            case (addr[4:2])
-                3'd0: access_ok = we && ((wdata == 32'd1 && !busy) || wdata == 32'd2);
-                3'd1: begin access_ok = !we; rdata = {29'd0, fault, done, busy}; end
-                3'd2: begin access_ok = !we || (!busy && wdata < 32'd256); rdata = {24'd0, entry}; end
-                3'd3: begin access_ok = !we; rdata = cycles; end
-                3'd4: begin access_ok = !we; rdata = stalls; end
-                3'd5: begin access_ok = !we; rdata = transfers; end
-                3'd6: begin access_ok = !we; rdata = instructions; end
+            case (addr[4:0])
+                SIMD4_COMMAND: access_ok = we && ((wdata == SIMD4_START && !busy) || wdata == SIMD4_RESET);
+                SIMD4_STATUS: begin access_ok = !we; rdata = ({32{busy}} & SIMD4_BUSY) | ({32{done}} & SIMD4_DONE) | ({32{fault}} & SIMD4_FAULT); end
+                SIMD4_ENTRY: begin access_ok = !we || (!busy && wdata < 32'd256); rdata = {24'd0, entry}; end
+                SIMD4_CYCLES: begin access_ok = !we; rdata = cycles; end
+                SIMD4_STALLS: begin access_ok = !we; rdata = stalls; end
+                SIMD4_TRANSFERS: begin access_ok = !we; rdata = transfers; end
+                SIMD4_INSTRUCTIONS: begin access_ok = !we; rdata = instructions; end
                 default: begin end
             endcase
         end
@@ -58,16 +71,16 @@ module rv32_simd4 (
     assign ready = valid && !reset;
     assign error = !word_ok || !access_ok;
     wire accepted_write = valid && ready && !error && we;
-    wire command = accepted_write && regs_sel && addr[4:2] == 3'd0;
-    wire engine_reset = reset || (command && wdata == 32'd2);
-    wire start = command && wdata == 32'd1;
+    wire command = accepted_write && regs_sel && addr[4:0] == SIMD4_COMMAND;
+    wire engine_reset = reset || (command && wdata == SIMD4_RESET);
+    wire start = command && wdata == SIMD4_START;
     wire memory_ready = !memory_hold && !engine_reset;
 
     wire data_write = (accepted_write && data_sel) || (memory_valid && memory_ready && memory_write);
     wire [15:0] data_write_value = busy ? memory_wdata : wdata[15:0];
     always @(posedge clk) begin
         if (engine_reset) entry <= 8'd0;
-        else if (accepted_write && regs_sel && addr[4:2] == 3'd2) entry <= wdata[7:0];
+        else if (accepted_write && regs_sel && addr[4:0] == SIMD4_ENTRY) entry <= wdata[7:0];
         if (accepted_write && program_sel) program_mem[addr[9:2]] <= wdata;
         if (data_write) data_mem[data_address] <= data_write_value;
     end
@@ -78,9 +91,9 @@ module rv32_simd4 (
     wire [1:0] state, memory_lane;
     wire [15:0] loop_count;
     wire retired;
-    wire [255:0] register_state;
-    wire [127:0] accumulator_state;
-    simd4 engine (
+    wire [LANES*64-1:0] register_state;
+    wire [LANES*32-1:0] accumulator_state;
+    simd4 #(.LANES(LANES)) engine (
         .clk(clk), .reset(engine_reset), .start(start), .entry_pc(entry),
         .busy(busy), .done(done), .fault(fault),
         .program_address(program_address), .program_data(program_read_data),
