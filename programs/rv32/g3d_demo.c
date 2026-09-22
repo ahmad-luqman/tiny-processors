@@ -36,7 +36,7 @@ void g3d_demo_event(struct g3d_demo *d, uint32_t code)
 {
     if (code == RV32_KEY_SPACE) d->shader = d->shader + 1 == G3D_SHADERS ? 0 : d->shader + 1;
     if (code == RV32_KEY_P) d->paused ^= 1;
-    if (code == RV32_KEY_R) d->frame = d->paused = d->status = 0;
+    if (code == RV32_KEY_R) g3d_demo_init(d);   /* restart: frame, shader, pause and status */
     if (d->shader >= G3D_SHADERS) d->shader = 0;   /* a public field; keep the table index in range */
 }
 

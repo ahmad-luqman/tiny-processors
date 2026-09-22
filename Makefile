@@ -845,7 +845,7 @@ test-rv32: test-rv32-3d test-rv32-3d-verilator run-rv32-3d-emu run-rv32-3d-rtl-v
 # the C reference draws them natively, and all three must match the pinned
 # checkpoints. Re-pin with tools/rv32_capstone_native.py --input programs/rv32/g3d.input --write.
 .PHONY: run-rv32-3d-menu-emu run-rv32-3d-menu-rtl run-rv32-3d-menu-rtl-verilator
-RV32_3D_MENU_HEX := bbbaeef2
+RV32_3D_MENU_HEX := 278a4eac
 RV32_3D_MENU_ARGS = --image build/rv32/capstone.bin --input programs/rv32/g3d.input --expect-checkpoints programs/rv32/g3d.expected --expect-last-line "PASS $(RV32_3D_MENU_HEX)" --compare results --emulator $(RV32EMU) --timeout 1800
 run-rv32-3d-menu-emu: check-rv32-image $(RV32EMU)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_3D_MENU_ARGS) --backend emulator --out build/g3d/menu-emu

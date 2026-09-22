@@ -497,6 +497,9 @@ int check_g3d_screen(void)
         CHECK(r.g3d.shader == shader % G3D_SHADERS);
         runtime_event(&r, RELEASE(SPACE));
     }
+    runtime_event(&r, PRESS(SPACE));             /* toon, so R has a shader to reset */
+    runtime_event(&r, RELEASE(SPACE));
+    CHECK(r.g3d.shader == G3D_SHADER_TOON);
     runtime_event(&r, PRESS(P));
     runtime_event(&r, RELEASE(P));
     runtime_frame(&r, 0);
