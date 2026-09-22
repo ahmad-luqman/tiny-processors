@@ -92,7 +92,11 @@ def main():
         sys.exit(f"{args.input}: {error}")
     if args.write:
         expected.write_text("\n".join(checkpoints) + "\n")
-        print(f"wrote {len(checkpoints)} checkpoint(s) to {expected.resolve().relative_to(ROOT)}")
+        # Relative only when inside the repository: an --expected elsewhere is legal.
+        shown = expected.resolve()
+        if shown.is_relative_to(ROOT):
+            shown = shown.relative_to(ROOT)
+        print(f"wrote {len(checkpoints)} checkpoint(s) to {shown}")
     print(f"{frames} frames, PASS {checksum:08x}")
 
 
