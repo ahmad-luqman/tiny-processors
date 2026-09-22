@@ -2,7 +2,7 @@
 
 module simd4_tb;
     parameter integer LANES = 4;
-    localparam integer STATE_BITS = LANES * 64 + 24;
+    localparam integer STATE_BITS = LANES * 96 + 24;
     localparam integer TRACE_BITS = STATE_BITS + 40;
     reg clk = 0;
     reg reset = 0;
@@ -14,6 +14,7 @@ module simd4_tb;
     wire [31:0] instruction, retire_instruction, cycles, stalls, memory_transfers, instructions;
     wire [1:0] state, memory_lane;
     wire [LANES*64-1:0] register_state;
+    wire [LANES*32-1:0] accumulator_state;
     reg mem_ready = 0;
     reg [31:0] program_memory [0:255];
     reg [15:0] memory [0:255];
@@ -38,8 +39,8 @@ module simd4_tb;
     reg stalled_request = 0;
     reg [24:0] held_request;
     reg [1:0] held_lane;
-    reg [LANES*64+55:0] held_machine;
-    reg [LANES*64-1:0] pre_reset_registers;
+    reg [LANES*96+55:0] held_machine;
+    reg [LANES*96-1:0] pre_reset_registers;
     string case_path, wave_path;
 
     simd4 #(.LANES(LANES)) dut (.*);
@@ -83,7 +84,7 @@ module simd4_tb;
             if (stalled_request && (mem_valid !== 1 ||
                 {mem_write, mem_address, mem_write_data} !== held_request ||
                 memory_lane !== held_lane ||
-                {pc, instruction, loop_count, register_state} !== held_machine))
+                {pc, instruction, loop_count, accumulator_state, register_state} !== held_machine))
                 $fatal(1, "Request or architectural state changed while stalled");
             if (mem_valid) begin
                 if (mem_ready) begin
@@ -107,7 +108,7 @@ module simd4_tb;
                     stalled_request = 1;
                     held_request = {mem_write, mem_address, mem_write_data};
                     held_lane = memory_lane;
-                    held_machine = {pc, instruction, loop_count, register_state};
+                    held_machine = {pc, instruction, loop_count, accumulator_state, register_state};
                 end
             end else begin
                 request_age = 0;
@@ -118,14 +119,14 @@ module simd4_tb;
         if (checking && !reset) begin
             if (retired) begin
                 if (observed_retirements >= int'(metadata[0]) ||
-                    {retire_pc, retire_instruction, loop_count, pc, register_state} !==
+                    {retire_pc, retire_instruction, loop_count, pc, accumulator_state, register_state} !==
                     expected_retirements[observed_retirements])
-                    $fatal(1, "Retirement %0d differs from Python: pc=%h instruction=%h regs=%h",
-                           observed_retirements, retire_pc, retire_instruction, register_state);
+                    $fatal(1, "Retirement %0d differs from Python: pc=%h instruction=%h acc=%h regs=%h",
+                           observed_retirements, retire_pc, retire_instruction, accumulator_state, register_state);
                 observed_retirements = observed_retirements + 1;
                 if ($test$plusargs("trace"))
-                    $display("%t retire pc=%h instruction=%h next=%h loop=%0d regs=%h",
-                             $time, retire_pc, retire_instruction, pc, loop_count, register_state);
+                    $display("%t retire pc=%h instruction=%h next=%h loop=%0d acc=%h regs=%h",
+                             $time, retire_pc, retire_instruction, pc, loop_count, accumulator_state, register_state);
             end
             if (cycles !== observed_cycles || stalls !== observed_stalls ||
                 memory_transfers !== observed_transfers || instructions !== observed_retirements)
@@ -149,7 +150,7 @@ module simd4_tb;
             entry_pc = metadata[4][7:0];
             start = 1;
             @(posedge clk); #2;
-            if (busy !== 1 || done !== 0 || fault !== 0 || register_state !== 0 ||
+            if (busy !== 1 || done !== 0 || fault !== 0 || register_state !== 0 || accumulator_state !== 0 ||
                 loop_count !== 0 || cycles !== 0 || retired !== 0 || pc !== entry_pc)
                 $fatal(1, "Launch did not initialize the machine");
             @(negedge clk);
@@ -165,7 +166,7 @@ module simd4_tb;
                 timeout_cycles = timeout_cycles + 1;
             end
             if (done !== 1 || busy !== 0 || fault !== metadata[3][0] ||
-                {loop_count, pc, register_state} !== expected_final[0] ||
+                {loop_count, pc, accumulator_state, register_state} !== expected_final[0] ||
                 instructions !== metadata[0] || memory_transfers !== metadata[1] ||
                 cycles !== metadata[2] + stalls)
                 $fatal(1, "Final state/count mismatch or timeout");
@@ -176,7 +177,7 @@ module simd4_tb;
                 @(posedge clk); #2;
                 if (busy !== 0 || done !== 1 || fault !== metadata[3][0] ||
                     mem_valid !== 0 || retired !== 0 ||
-                    {loop_count, pc, register_state} !== expected_final[0])
+                    {loop_count, pc, accumulator_state, register_state} !== expected_final[0])
                     $fatal(1, "Completed state did not hold");
             end
             $display("RESULT lanes=%0d wait=%0d cycles=%0d stalls=%0d transfers=%0d instructions=%0d fault=%0d",
@@ -215,7 +216,7 @@ module simd4_tb;
         end
         @(negedge clk); reset = 1;
         @(posedge clk); #2;
-        if (busy !== 0 || done !== 0 || fault !== 0 || register_state !== 0 || cycles !== 0)
+        if (busy !== 0 || done !== 0 || fault !== 0 || register_state !== 0 || accumulator_state !== 0 || cycles !== 0)
             $fatal(1, "Initial reset failed");
         @(negedge clk); reset = 0;
         checking = 1;
@@ -230,13 +231,13 @@ module simd4_tb;
             end
             if (timeout_cycles == 10000) $fatal(1, "Abort point was never reached");
             for (i = 0; i < 256; i = i + 1) saved_memory[i] = memory[i];
-            pre_reset_registers = register_state;
+            pre_reset_registers = {accumulator_state, register_state};
             @(negedge clk); reset = 1;
             #1;
-            if (mem_valid !== 0 || register_state !== pre_reset_registers)
+            if (mem_valid !== 0 || {accumulator_state, register_state} !== pre_reset_registers)
                 $fatal(1, "Reset must cancel request immediately but reset registers synchronously");
             @(posedge clk); #2;
-            if (busy !== 0 || done !== 0 || fault !== 0 || register_state !== 0 ||
+            if (busy !== 0 || done !== 0 || fault !== 0 || register_state !== 0 || accumulator_state !== 0 ||
                 loop_count !== 0 || cycles !== 0 || stalls !== 0 || memory_transfers !== 0 || instructions !== 0)
                 $fatal(1, "Reset failed to clear an in-flight kernel");
             for (i = 0; i < 256; i = i + 1)

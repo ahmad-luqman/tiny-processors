@@ -8,7 +8,7 @@ import re
 import subprocess
 
 from programs.simd4.vector_add import program as vector_program
-from tools.simd4_model import execute, image, word
+from tools.simd4_model import CLRA, LAST_OPCODE, MAC, MACU, MUL, RDA, execute, image, word
 
 
 RESULT = re.compile(r"RESULT lanes=(\d+) wait=(\d+) cycles=(\d+) stalls=(\d+) transfers=(\d+) instructions=(\d+) fault=(\d+)")
@@ -28,6 +28,30 @@ def vector_memory(length):
     return memory
 
 
+def extreme_products():
+    """Every hand-computed product from the model tests, back to back through one launch.
+
+    Each group loads a pair, accumulates it once or three times with MAC then MACU,
+    reads both halves back, and stores them so the transfers pin the same values.
+    """
+    words = [word(2, rd=3), word(1, rd=2, imm=0x00c0)]  # r3 = lane, r2 = store base
+    for a, b, times in ((0xffff, 0xffff, 1), (0x8000, 0x8000, 1), (0x8000, 0x7fff, 1),
+                        (0xffff, 0x0001, 1), (0x7fff, 0x7fff, 3), (0xffff, 0xffff, 3), (0x0003, 0x0004, 1)):
+        for op in (MAC, MACU):
+            words += [word(1, rd=0, imm=a), word(1, rd=1, imm=b), word(CLRA)]
+            words += [word(op, ra=0, rb=1)] * times
+            words += [word(RDA, rd=0, imm=0), word(RDA, rd=1, imm=16), word(MUL, rd=3, ra=0, rb=1)]
+            words += [word(6, rd=0, ra=2, imm=0), word(6, rd=1, ra=2, imm=1), word(4, rd=2, ra=2, imm=2)]
+    words += [word(1, rd=0, imm=0x7fff), word(1, rd=1, imm=0x7fff), word(CLRA)] + [word(MAC, ra=0, rb=1)] * 3
+    words += [word(RDA, rd=0, imm=1), word(RDA, rd=1, imm=31), word(RDA, rd=3, imm=33), word(MAC, ra=0, rb=0),
+              word(RDA, rd=0, imm=4), word(6, rd=0, ra=2, imm=0), word(6, rd=1, ra=2, imm=1),
+              word(6, rd=3, ra=2, imm=2), word(0)]
+    return image(words)
+
+
+EXTREMES = extreme_products()
+
+
 class Runner:
     def __init__(self, simulator):
         self.simulator = simulator
@@ -41,9 +65,9 @@ class Runner:
         write_hex(Path(f"{prefix}.program.hex"), code, 8)
         write_hex(Path(f"{prefix}.memory.hex"), memory, 4)
         write_hex(Path(f"{prefix}.expected-memory.hex"), reference.memory, 4)
-        write_hex(Path(f"{prefix}.retire.hex"), reference.retirements, (lanes * 64 + 64) // 4)
+        write_hex(Path(f"{prefix}.retire.hex"), reference.retirements, (lanes * 96 + 64) // 4)
         write_hex(Path(f"{prefix}.transfers.hex"), reference.transfers, 7)
-        write_hex(Path(f"{prefix}.final.hex"), [reference.final_state], (lanes * 64 + 24) // 4)
+        write_hex(Path(f"{prefix}.final.hex"), [reference.final_state], (lanes * 96 + 24) // 4)
         write_hex(Path(f"{prefix}.meta.hex"), [len(reference.retirements), len(reference.transfers),
                   reference.base_cycles, int(reference.fault), entry], 8)
         command = (["vvp", f"build/simd4-{lanes}.vvp"] if self.simulator == "icarus"
@@ -123,7 +147,17 @@ class Runner:
                 words = [word(2)] + [word(rng.randint(1, 6), rng.randrange(4), rng.randrange(4),
                                          rng.randrange(4), rng.randrange(65536)) for _ in range(32)] + [0]
                 self.run(f"mixed-{lanes}-{index}", image(words), memory, lanes, index % 4)
-        for opcode in range(9, 256):
+            rng = random.Random(0xACC + lanes)
+            for index in range(8):
+                # Loads, stores and every arithmetic opcode, including the accumulator ones.
+                ops = [1, 2, 3, 4, 5, 6, MUL, MAC, MAC, MACU, CLRA, RDA, RDA]
+                words = [word(2)] + [word(rng.choice(ops), rng.randrange(4), rng.randrange(4),
+                                         rng.randrange(4), rng.randrange(65536)) for _ in range(40)] + [0]
+                self.run(f"mixed-mac-{lanes}-{index}", image(words), memory, lanes, index % 4)
+            self.run(f"extremes-{lanes}", EXTREMES, memory, lanes, 3)
+            # Reset after the first MAC has changed the accumulator, then relaunch.
+            self.run(f"reset-mac-{lanes}", EXTREMES, memory, lanes, 3, abort_after=2 * lanes, relaunch=True)
+        for opcode in range(LAST_OPCODE + 1, 256):
             self.run(f"illegal-{opcode:02x}", image([word(1, rd=2, imm=0xabcd),
                      word(opcode, rd=1, ra=2, imm=0x44)]), [0x5a5a] * 256)
         self.run("zero-loop-count", image([word(2, rd=2), word(6, rd=2, imm=33), word(7)]),
