@@ -51,6 +51,10 @@ OUT_X, OUT_Y, OUT_Z, OUT_W, OUT_R, OUT_G, OUT_B = range(7)
 OPS = ('END LDI LDC IN OUT SPC MOV ADD SUB MUL MAD MIN MAX ABS AND OR XOR SHL SRA ADDI '
        'SLT SEQ IF ELSE ENDIF LOOP ENDLOOP BREAK').split()
 OP = {name: code for code, name in enumerate(OPS)}
+# Operands per mnemonic in the assembly syntax; the rest take three registers.
+ARITY = {'END': 0, 'IF': 0, 'ELSE': 0, 'ENDIF': 0, 'LOOP': 0, 'ENDLOOP': 0, 'BREAK': 0,
+         'LDI': 2, 'LDC': 2, 'IN': 2, 'OUT': 2, 'SPC': 2, 'MOV': 2, 'ABS': 2, 'SLT': 2, 'SEQ': 2,
+         'MAD': 4}
 IF_KIND, LOOP_KIND = 'IF', 'LOOP'
 
 
@@ -126,7 +130,9 @@ def assemble(text):
     for pc, (name, args) in enumerate(lines):
         if name not in OP:
             raise ValueError(f'unknown mnemonic {name}')
-        r = [_reg(a) for a in args] if name in ('MOV', 'ADD', 'SUB', 'MUL', 'MAD', 'MIN', 'MAX', 'ABS',
+        if len(args) != ARITY.get(name, 3):
+            raise ValueError(f'{name} at {pc} takes {ARITY.get(name, 3)} operands, not {len(args)}')
+        r =[_reg(a) for a in args] if name in ('MOV', 'ADD', 'SUB', 'MUL', 'MAD', 'MIN', 'MAX', 'ABS',
                                                 'AND', 'OR', 'XOR', 'SLT', 'SEQ') else None
         if name in ('END', 'ENDIF', 'LOOP', 'BREAK'):
             w = encode(name)

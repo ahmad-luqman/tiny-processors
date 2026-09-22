@@ -146,7 +146,8 @@ class Assembler(unittest.TestCase):
         for bad in ('ELSE\nEND', 'IF\nEND', 'ENDIF\nEND', 'LOOP\nEND', 'ENDLOOP\nEND', 'BREAK\nEND',
                     'IF\nELSE\nELSE\nENDIF\nEND', 'IF\nENDLOOP\nEND', 'ADD r0, r1, r2', 'LDI r0, 4194304',
                     'LDC r0, 32\nEND', 'IN r0, 8\nEND', 'ADDI r0, r0, 8192\nEND', 'ADD r16, r0, r0\nEND',
-                    'NOP\nEND', 'IF\n' * 9 + 'ENDIF\n' * 9 + 'END', 'LDI r0, 0\n' * 128 + 'END'):
+                    'NOP\nEND', 'ADD r0, r1, r2, r3\nEND', 'ADD r0, r1\nEND', 'IF r0\nENDIF\nEND',
+                    'MAD r0, r1, r2\nEND', 'END r0', 'LDI r0\nEND', 'OUT 0, r1, r2\nEND', 'IF\n' * 9 + 'ENDIF\n' * 9 + 'END', 'LDI r0, 0\n' * 128 + 'END'):
             with self.assertRaises(ValueError, msg=bad):
                 assemble(bad)
         assemble('IF\n' * 8 + 'ENDIF\n' * 8 + 'LDI r0, 0\n' * 110 + 'END')
