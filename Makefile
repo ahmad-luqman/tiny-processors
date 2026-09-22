@@ -744,3 +744,22 @@ run-rv32-digit-menu-rtl-verilator: check-rv32-image $(RV32EMU) $(RV32_TB_VERILAT
 	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_MENU_ARGS) --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --stall 1 --simd-stall 2 --out build/digit/menu-verilator
 test-rv32: test-rv32-digit accuracy-rv32-digit run-rv32-digit-emu run-rv32-digit-rtl-verilator
 test-rv32: run-rv32-digit-menu-emu run-rv32-digit-menu-rtl-verilator
+
+.PHONY: bench-rv32-digit waves-rv32-digit
+# Two workload sizes per variant: subtracting them cancels startup and the bank load.
+build/rv32/digitbench_cpu_%.o: programs/rv32/digitbench.c $(RV32_DIGIT_GENERATED) $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -DDIGIT_BENCH_CPU -DDIGIT_BENCH_COUNT=$*u -c $< -o $@
+build/rv32/digitbench_hw_%.o: programs/rv32/digitbench.c $(RV32_DIGIT_GENERATED) $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -DDIGIT_BENCH_COUNT=$*u -c $< -o $@
+build/rv32/digitbench_%.elf: build/rv32/digitbench_%.o build/rv32/digit_model.o build/rv32/digit_hw.o build/rv32/simd4.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -o $@ $(filter %.o,$^)
+RV32_DIGIT_BENCH_BINS := $(foreach v,cpu hw,$(foreach n,1 5,build/rv32/digitbench_$(v)_$(n).bin))
+bench-rv32-digit: $(RV32_DIGIT_BENCH_BINS) $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) tools/rv32_digit_bench.py --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR)
+# The single-inference bench image, not the diagnostic: dumping all eight
+# classifications and both recovery paths produced a five-gigabyte VCD, and one
+# inference already contains every launch edge worth looking at.
+waves-rv32-digit: build/rv32/digitbench_hw_1.bin $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/digitbench_hw_1.bin --compare results \
+	  --expect-last-line "bench 3791" --emulator $(RV32EMU) --timeout 900 \
+	  --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VVP) --mode waves --out build/digit/waves

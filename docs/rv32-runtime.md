@@ -2,8 +2,9 @@
 
 ## Behavior contract
 
-One RV32I image boots to a three-entry menu. UP/DOWN cycles through Pong, Tetris and the G1 2D demo;
-ENTER starts the selected game or demo. ESCAPE returns to the menu. Q ends the session
+One RV32I image boots to a four-entry menu. UP/DOWN cycles through Pong, Tetris,
+the N1 digit screen and the G1 2D demo; ENTER starts the selected entry. The
+selection wraps over four with a mask, so UP moves by three rather than by two. ESCAPE returns to the menu. Q ends the session
 with `PASS <state checksum>`. P pauses and R restarts a game. At game over,
 the result remains for 180 presented frames (R can restart), then the menu
 returns. Standalone M6 Pong keeps its original controls and recording. The [G1 demo](rv32-gfx.md#guest-demo-and-commands) also uses SPACE to switch CPU/accelerator rendering.

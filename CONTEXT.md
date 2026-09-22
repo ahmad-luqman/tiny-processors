@@ -60,7 +60,16 @@ _Avoid_: Hack computer, RISC-V CPU.
 **SIMD4**:
 The project's teaching compute engine, whose lanes execute a shared instruction stream on separate data; since A1 each lane also owns a 32-bit accumulator for 16×16 multiply-accumulate. See [the contract](docs/simd4.md).
 A2 attaches this core as a CPU-commanded peripheral with private bus-mapped memories; see [the device contract](docs/rv32-simd4.md).
-_Avoid_: complete GPU, graphics renderer, NPU, or a DMA engine.
+_Avoid_: complete GPU, graphics renderer, a general NPU, or a DMA engine. N1 runs a
+digit classifier on this engine; that is one workload, not a neural accelerator.
+
+**Digit classifier**:
+The N1 integer neural network the guest runs: a 196-32-10 multilayer perceptron
+with int8 weights, whose multiply-accumulate work the SIMD4 engine performs and
+whose bias, rounding, saturation and output selection the CPU performs. See
+[the contract](docs/rv32-digit.md).
+_Avoid_: training on the machine, a convolutional network, floating-point
+inference, a general neural accelerator.
 
 **Learning milestone**:
 A bounded working artifact with verified behavior, an explanation connecting its source to the hardware or software it represents, and exercises for understanding it.

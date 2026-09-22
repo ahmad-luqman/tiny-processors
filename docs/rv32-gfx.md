@@ -83,7 +83,8 @@ a completed command after recovery.
 
 ## Guest demo and commands
 
-`make run-rv32-capstone` opens the existing native window. Choose **2D DEMO**
+`make run-rv32-capstone` opens the existing native window. Choose **2D DEMO**,
+now the fourth entry since [N1](rv32-digit.md) added the digit screen before it,
 with UP/DOWN and ENTER. SPACE selects CPU/device drawing, P pauses, R restarts,
 ESC returns, and Q ends the session. The scene contains clipped rectangles,
 shared-edge triangles, a clipped line, a RAM sprite, and an overlapping framebuffer
@@ -218,7 +219,9 @@ and workload, not architectural guarantees.
 The full `make test-rv32` aggregate passes after the complete six-agent review fixes, covering
 RV32I/F, QEMU, device/window, A2 and game regressions. The original game replay
 retains `PASS ea60197e` and 68 checkpoints; nine menu checkpoints intentionally
-change for the third entry, while the game state checksum is unchanged. It now
+change for the third entry, while the game state checksum is unchanged. N1 moved
+those menu frames again for a fourth entry and re-pinned this replay's own hash,
+leaving `PASS ea60197e` untouched for the same reason. It now
 executes 2,356,102 instructions because code layout and startup storage changed.
 The aggregate runs the G1 menu replay on Verilator and the complete pixel
 diagnostic on both simulators; the optional `run-rv32-gfx-menu-rtl` Icarus target is available

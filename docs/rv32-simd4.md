@@ -194,7 +194,10 @@ framebuffer operations: this device only accesses its own 256 data words.
   storage/cell counts above. Both the short protocol wave and whole-machine
   wave are generated and checked.
 
-DMA, interrupts, coherent caches, framebuffer acceleration and inference remain
+N1 added block data-slot writers to this driver and two dense kernels to the
+replay corpus without changing the device contract or the RTL; see
+[the digit record](rv32-digit.md).
+DMA, interrupts, coherent caches and framebuffer acceleration remain
 outside A2. Shared buffers here mean memories accessible to both owners in turn,
 not arbitrary RV32 RAM addresses.
 
