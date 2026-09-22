@@ -384,7 +384,7 @@ def triangle_setup(v0, v1, v2):
     return v0, v1, v2, area, grads
 
 
-DIVIDE_TICKS = 32
+DIVIDE_TICKS = 35   # LOAD, PREP, 32 restoring steps, FINISH
 
 
 def valid_zbase(zbase):

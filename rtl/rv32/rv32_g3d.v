@@ -119,11 +119,19 @@ module rv32_g3d #(
     reg [7:0]  tr0, tr1, tr2, tg0, tg1, tg2, tb0, tb1, tb2;
     reg [31:0] area;
     reg [8:0]  left, right, top, bottom, x, y;
-    // Divider (restoring, 32 ticks) and its sequence: projection k = 0..2, setup k = 0..7.
+    // Divider sequence: projection k = 0..2, setup k = 0..7.
+    // A divide takes DIVIDE_TICKS = 35 ticks, counted down by div_left: LOAD (35)
+    // registers the numerator and denominator, PREP (34) forms the magnitude,
+    // sign and saturation test from those registers, 33..2 are the 32 restoring
+    // steps, and FINISH (1) stores the registered quotient. The registers keep
+    // every multiplier from feeding more arithmetic in the same cycle; without
+    // them ABC spent over half an hour mapping the combined cones.
+    localparam [5:0] DIV_LOAD = 6'd35, DIV_PREP = 6'd34, DIV_LAST = 6'd2, DIV_FINISH = 6'd1;
     reg        div_setup, div_neg, div_sat;
     reg [2:0]  div_k;
     reg [5:0]  div_left;
-    reg [31:0] div_den, div_bits, div_q, div_rem;
+    reg signed [63:0] div_num;
+    reg [31:0] div_den, div_bits, div_q, div_rem, div_out;
     // Gradients (Q16 per subpixel), edge functions and attribute accumulators at the
     // current pixel and at the start of the current row.
     reg signed [31:0] gx [0:3];
@@ -183,45 +191,40 @@ module rv32_g3d #(
     endfunction
 
     // ---------------------------------------------------------------- divider
-    // Numerator for the divide about to start. Projection: x*2560, y*1920, z*65535
-    // over w. Setup: attribute gradients over the area; in AREA the triangle
-    // registers still hold the unswapped order, so the swap is applied here too.
-    wire load_setup = state == AREA || (state == DIVIDE && div_setup);
-    wire [2:0] load_k = state == DIVIDE ? div_k + 3'd1 : 3'd0;
-    wire swap_now = state == AREA;
+    // Numerator of divide div_k, registered in its LOAD tick. Projection: x*2560,
+    // y*1920, z*65535 over w. Setup: attribute gradients over the area of the
+    // triangle registers, which AREA has already put in positive-area order.
+    wire load_setup = div_setup;
+    wire [2:0] load_k = div_k;
     // Sign-extended screen coordinates of the stored triangle.
     wire signed [16:0] ex_x0 = {tx0[15], tx0}, ex_y0 = {ty0[15], ty0}, ex_x1 = {tx1[15], tx1}, ex_y1 = {ty1[15], ty1};
     wire signed [16:0] ex_x2 = {tx2[15], tx2}, ex_y2 = {ty2[15], ty2};
     wire signed [16:0] ex1_raw = ex_x1 - ex_x0, ey1_raw = ex_y1 - ex_y0, ex2_raw = ex_x2 - ex_x0, ey2_raw = ex_y2 - ex_y0;
-    // 17 x 17-bit products: the guard band bounds every screen difference, and the
-    // difference of the two products fits 32 bits (docs/rv32-3d.md "Projection").
-    wire signed [33:0] area_p = ex1_raw * ey2_raw, area_q = ey1_raw * ex2_raw;
-    wire signed [33:0] area_full = area_p - area_q;
-    wire signed [31:0] area_raw = area_full[31:0];
-    wire signed [16:0] sx0 = ex_x0, sy0 = ex_y0;
-    wire signed [16:0] sx1 = swap_now ? ex_x2 : ex_x1, sy1 = swap_now ? ex_y2 : ex_y1;
-    wire signed [16:0] sx2 = swap_now ? ex_x1 : ex_x2, sy2 = swap_now ? ex_y1 : ex_y2;
+    // The shared multiplier pair, defined with its operand selection further down.
+    wire signed [49:0] mul_a, mul_b, mul_diff;
+    // The area uses the shared multiplier pair in the AREA tick. The guard
+    // band bounds every screen difference, so the difference fits 32 bits.
+    wire signed [31:0] area_raw = mul_diff[31:0];
+    wire signed [16:0] sx0 = ex_x0, sy0 = ex_y0, sx1 = ex_x1, sy1 = ex_y1, sx2 = ex_x2, sy2 = ex_y2;
     reg signed [16:0] a0, a1, a2;
     always @* begin
         case (load_k[2:1])
-            2'd0: begin a0 = {1'b0, tz0}; a1 = {1'b0, swap_now ? tz2 : tz1}; a2 = {1'b0, swap_now ? tz1 : tz2}; end
-            2'd1: begin a0 = {9'd0, tr0}; a1 = {9'd0, swap_now ? tr2 : tr1}; a2 = {9'd0, swap_now ? tr1 : tr2}; end
-            2'd2: begin a0 = {9'd0, tg0}; a1 = {9'd0, swap_now ? tg2 : tg1}; a2 = {9'd0, swap_now ? tg1 : tg2}; end
-            default: begin a0 = {9'd0, tb0}; a1 = {9'd0, swap_now ? tb2 : tb1}; a2 = {9'd0, swap_now ? tb1 : tb2}; end
+            2'd0: begin a0 = {1'b0, tz0}; a1 = {1'b0, tz1}; a2 = {1'b0, tz2}; end
+            2'd1: begin a0 = {9'd0, tr0}; a1 = {9'd0, tr1}; a2 = {9'd0, tr2}; end
+            2'd2: begin a0 = {9'd0, tg0}; a1 = {9'd0, tg1}; a2 = {9'd0, tg2}; end
+            default: begin a0 = {9'd0, tb0}; a1 = {9'd0, tb1}; a2 = {9'd0, tb2}; end
         endcase
     end
     wire signed [17:0] d1 = a1 - a0, d2 = a2 - a0;
     wire signed [17:0] ex1 = sx1 - sx0, ey1 = sy1 - sy0, ex2 = sx2 - sx0, ey2 = sy2 - sy0;
-    wire signed [35:0] m_p = load_k[0] ? d2 * ex1 : d1 * ey2;
-    wire signed [35:0] m_q = load_k[0] ? d1 * ex2 : d2 * ey1;
-    wire signed [36:0] setup_diff = {m_p[35], m_p} - {m_q[35], m_q};
+    wire signed [36:0] setup_diff = mul_diff[36:0];     // the shared pair in a LOAD tick
     wire signed [63:0] setup_num = {{11{setup_diff[36]}}, setup_diff, 16'd0};
     wire signed [63:0] ox64 = {{32{ox[31]}}, ox}, oy64 = {{32{oy[31]}}, oy}, oz64 = {{32{oz[31]}}, oz};
     wire signed [63:0] project_num = load_k == 3'd0 ? (ox64 <<< 11) + (ox64 <<< 9) :
                                      load_k == 3'd1 ? (oy64 <<< 11) - (oy64 <<< 7) : (oz64 <<< 16) - oz64;
     wire signed [63:0] load_num = load_setup ? setup_num : project_num;
-    wire [31:0] load_den = load_setup ? (state == AREA ? 32'd0 - area_raw : area) : ow;
-    wire [63:0] load_mag = load_num[63] ? 64'd0 - load_num : load_num;
+    wire [31:0] load_den = load_setup ? area : ow;
+    wire [63:0] div_mag = div_num[63] ? 64'd0 - div_num : div_num;   // PREP, from registers
     // One restoring step; the last one also forms the signed, saturated result.
     wire [32:0] div_trial = {div_rem, div_bits[31]};
     wire div_take = div_trial >= {1'b0, div_den};
@@ -265,11 +268,26 @@ module rv32_g3d #(
         endcase
         if (done_k[0]) begin
             init_p1 = gx[done_k[2:1]]; init_q1 = px0 - {ex_x0[16], ex_x0};
-            init_p2 = div_result; init_q2 = py0 - {ex_y0[16], ex_y0};
+            init_p2 = div_out; init_q2 = py0 - {ex_y0[16], ex_y0};
         end
     end
-    wire signed [49:0] init_m1 = init_p1 * init_q1, init_m2 = init_p2 * init_q2;
-    wire signed [49:0] init_value = done_k[0] ? init_m1 + init_m2 : init_m1 - init_m2;
+    // One multiplier pair serves three ticks that never coincide: AREA (the screen
+    // area), a setup divide's LOAD (gradient numerators) and a setup divide's
+    // FINISH (edge and accumulator start values). Six multipliers here kept ABC
+    // busy for tens of minutes; two map in seconds.
+    wire use_area = state == AREA;
+    wire use_init = state == DIVIDE && div_left == DIV_FINISH;
+    wire signed [17:0] setup_a = load_k[0] ? d2 : d1, setup_b = load_k[0] ? d1 : d2;
+    wire signed [31:0] mul_a1 = use_area ? {{15{ex1_raw[16]}}, ex1_raw} : use_init ? init_p1 :
+                                {{14{setup_a[17]}}, setup_a};
+    wire signed [17:0] mul_a2 = use_area ? {ey2_raw[16], ey2_raw} : use_init ? init_q1 : load_k[0] ? ex1 : ey2;
+    wire signed [31:0] mul_b1 = use_area ? {{15{ey1_raw[16]}}, ey1_raw} : use_init ? init_p2 :
+                                {{14{setup_b[17]}}, setup_b};
+    wire signed [17:0] mul_b2 = use_area ? {ex2_raw[16], ex2_raw} : use_init ? init_q2 : load_k[0] ? ex2 : ey1;
+    assign mul_a = mul_a1 * mul_a2;
+    assign mul_b = mul_b1 * mul_b2;
+    assign mul_diff = mul_a - mul_b;
+    wire signed [49:0] init_value = done_k[0] ? mul_a + mul_b : mul_diff;
 
     function covers;
         input signed [31:0] e;
@@ -382,42 +400,44 @@ module rv32_g3d #(
                         vr[vid_now] <= channel(ocr[31:16]); vg[vid_now] <= channel(ocg[31:16]); vb[vid_now] <= channel(ocb[31:16]);
                         vvalid[vid_now] <= vertex_ok;
                         if (vertex_ok) begin
-                            div_setup <= 0; div_k <= 0; div_left <= 6'd32; div_den <= load_den;
-                            div_neg <= load_num[63]; div_sat <= {31'd0, load_mag[63:31]} >= {32'd0, load_den};
-                            div_rem <= load_mag[63:32]; div_bits <= load_mag[31:0]; div_q <= 0;
-                            state <= DIVIDE;
+                            div_setup <= 0; div_k <= 0; div_left <= DIV_LOAD; state <= DIVIDE;
                         end else if (more_lanes) lane <= lane + 1;
                         else if (more_batches) begin batch <= batch + 1; state <= BATCH; end
                         else begin index <= 0; state <= tcount != 0 ? FETCH : FINISH; end
                     end
                     DIVIDE: begin
-                        div_rem <= div_take ? div_trial[31:0] - div_den : div_trial[31:0];
-                        div_bits <= {div_bits[30:0], 1'b0};
-                        div_q <= div_next_q;
                         div_left <= div_left - 1;
-                        if (div_left == 6'd1) begin
+                        if (div_left == DIV_LOAD) begin
+                            div_num <= load_num; div_den <= load_den;
+                        end else if (div_left == DIV_PREP) begin
+                            div_neg <= div_num[63]; div_sat <= {31'd0, div_mag[63:31]} >= {32'd0, div_den};
+                            div_rem <= div_mag[63:32]; div_bits <= div_mag[31:0]; div_q <= 0;
+                        end else if (div_left != DIV_FINISH) begin
+                            div_rem <= div_take ? div_trial[31:0] - div_den : div_trial[31:0];
+                            div_bits <= {div_bits[30:0], 1'b0};
+                            div_q <= div_next_q;
+                            if (div_left == DIV_LAST) div_out <= div_result;
+                        end else begin
                             divides <= divides + 1;
                             if (!div_setup) begin
                                 case (div_k)
-                                    3'd0: vsx[vid_now] <= 16'sd2560 + div_result[15:0];
-                                    3'd1: vsy[vid_now] <= 16'sd1920 - div_result[15:0];
-                                    default: vz[vid_now] <= div_result[15:0];
+                                    3'd0: vsx[vid_now] <= 16'sd2560 + div_out[15:0];
+                                    3'd1: vsy[vid_now] <= 16'sd1920 - div_out[15:0];
+                                    default: vz[vid_now] <= div_out[15:0];
                                 endcase
                             end else begin
                                 if (!done_k[0]) begin
-                                    gx[done_k[2:1]] <= div_result;
+                                    gx[done_k[2:1]] <= div_out;
                                     if (done_k != 3'd6) begin
                                         edge_row[edge_i] <= init_value[31:0]; edge_now[edge_i] <= init_value[31:0];
                                     end
                                 end else begin
-                                    gy[done_k[2:1]] <= div_result;
+                                    gy[done_k[2:1]] <= div_out;
                                     acc_row[done_k[2:1]] <= init_value[47:0]; acc_now[done_k[2:1]] <= init_value[47:0];
                                 end
                             end
                             if ((!div_setup && div_k != 3'd2) || (div_setup && div_k != 3'd7)) begin
-                                div_k <= div_k + 1; div_left <= 6'd32; div_den <= load_den;
-                                div_neg <= load_num[63]; div_sat <= {31'd0, load_mag[63:31]} >= {32'd0, load_den};
-                                div_rem <= load_mag[63:32]; div_bits <= load_mag[31:0]; div_q <= 0;
+                                div_k <= div_k + 1; div_left <= DIV_LOAD;
                             end else if (!div_setup) begin
                                 if (more_lanes) begin lane <= lane + 1; state <= VCHECK; end
                                 else if (more_batches) begin batch <= batch + 1; state <= BATCH; end
@@ -448,10 +468,7 @@ module rv32_g3d #(
                             area <= 32'd0 - area_raw;
                             left <= new_left; right <= new_right; top <= new_top; bottom <= new_bottom;
                             box_empty_r <= box_empty;
-                            div_setup <= 1; div_k <= 0; div_left <= 6'd32; div_den <= load_den;
-                            div_neg <= load_num[63]; div_sat <= {31'd0, load_mag[63:31]} >= {32'd0, load_den};
-                            div_rem <= load_mag[63:32]; div_bits <= load_mag[31:0]; div_q <= 0;
-                            state <= DIVIDE;
+                            div_setup <= 1; div_k <= 0; div_left <= DIV_LOAD; state <= DIVIDE;
                         end
                     TEST, ZREAD, ZWRITE, PWRITE: begin
                         // `advance` below moves to the next pixel, row or triangle.
@@ -501,7 +518,7 @@ module rv32_g3d #(
             end
         end
     end
-    wire unused_ok = &{1'b0, addr[31:13], div_q[31], area_full[33:32], lane_out[255:224], linear[31], box_l[15:9], box_r[15:9], box_t[15:9],
+    wire unused_ok = &{1'b0, addr[31:13], div_q[31], mul_diff[49:37], lane_out[255:224], linear[31], box_l[15:9], box_r[15:9], box_t[15:9],
                        box_b[15:9], ocr[15:0], ocg[15:0], ocb[15:0], init_value[49:48], cr[4:0], cg[4:0],
                        cb[5:0], z_addr[0], tri_word[31:24]};
     function signed [31:0] edge_dx;

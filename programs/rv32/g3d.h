@@ -77,7 +77,7 @@ struct g3d_job {
 struct g3d_counts {
     uint32_t error, fault_pc, instructions, transfers, divides, pixels, zfail, culled, cycles;
 };
-#define G3D_DIVIDE_TICKS 32u
+#define G3D_DIVIDE_TICKS 35u   /* LOAD, PREP, 32 restoring steps, FINISH */
 #define G3D_CLEAR_CYCLES (1u+320u*240u*2u/4u+1u)
 /* Software reference over a caller-owned 320x240 framebuffer and Z buffer.
  * Returns the ERROR value (0 on success); every fault precedes the first
