@@ -44,21 +44,21 @@ module rv32_tb;
     reg gpu_memory_hold = 0;
     integer gpu_stall=0,gpu_seed=0,gpu_age=0,gpu_delay=0;
     reg gpu_fixed=0,gpu_random=0,gpu_chosen=0,gpu_held=0;
-    reg [40:0] gpu_request;
+    reg [68:0] gpu_request;
     always @(negedge clk)begin
-        if(reset || !dut.gm_valid)begin gpu_memory_hold=0;gpu_chosen=0;end
+        if(reset || !dut.em_valid)begin gpu_memory_hold=0;gpu_chosen=0;end
         else begin
             if(!gpu_chosen)begin gpu_delay=gpu_random?($unsigned($random(gpu_seed))%4):gpu_stall;gpu_chosen=1;end
             gpu_memory_hold=gpu_age<gpu_delay;
         end
     end
     always @(posedge clk)begin
-        if(gpu_held && !dut.gpu_cancel && (!dut.gm_valid || gpu_request!=={dut.gm_we,dut.gm_addr,dut.gm_wdata}))
+        if(gpu_held && !dut.em_cancel && (!dut.em_valid || gpu_request!=={dut.em_we,dut.em_addr,dut.em_strb,dut.em_wdata}))
             $fatal(1,"GPU request changed while stalled");
-        if(reset || dut.gpu_cancel || !dut.gm_valid)begin gpu_age=0;gpu_held=0;gpu_chosen=0;end
+        if(reset || dut.em_cancel || !dut.em_valid)begin gpu_age=0;gpu_held=0;gpu_chosen=0;end
         else begin
-            gpu_request={dut.gm_we,dut.gm_addr,dut.gm_wdata};gpu_held=!dut.gm_ready;
-            if(dut.gm_ready)begin gpu_age=0;gpu_chosen=0;end else gpu_age=gpu_age+1;
+            gpu_request={dut.em_we,dut.em_addr,dut.em_strb,dut.em_wdata};gpu_held=!dut.em_ready;
+            if(dut.em_ready)begin gpu_age=0;gpu_chosen=0;end else gpu_age=gpu_age+1;
         end
     end
     integer simd_stall = 0, simd_seed = 0, simd_age = 0, simd_delay = 0;

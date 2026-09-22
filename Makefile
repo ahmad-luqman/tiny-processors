@@ -87,7 +87,7 @@ RV32WIN := build/rv32/rv32win
 SDL3_CFLAGS = $(shell pkg-config --cflags sdl3 2>/dev/null)
 SDL3_LIBS = $(shell pkg-config --libs sdl3 2>/dev/null)
 RV32_RTL := rtl/rv32/rv32_fregfile.v rtl/rv32/rv32_fdecode.v $(FP32_RTL) rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32.v
-RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_timer.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
+RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_timer.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
 RV32_TB := tests/rv32_tb.sv
 RV32_TB_VVP := build/rv32/rv32_tb.vvp
 RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
@@ -816,11 +816,25 @@ build/rv32/g3dcheck.elf: build/rv32/g3dcheck.o build/rv32/g3d.o $(RV32_COMMON_OB
 	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(filter %.o,$^)
 check-rv32-3d-image: build/rv32/g3dcheck.bin build/rv32/g3dcheck.lst
 	$(PYTHON) tools/rv32_image.py build/rv32/g3dcheck.elf --listing build/rv32/g3dcheck.lst --bin build/rv32/g3dcheck.bin --hex build/rv32/g3dcheck.hex
-test-rv32-3d: $(RV32EMU) | build
+RV32_G3D_MAX_CYCLES := 200000000
+test-rv32-3d: $(RV32EMU) $(RV32_TB_VVP) | build
 	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_3d*.py' -v
+# Runs the standalone corpus in full and the SoC contracts on Verilator; it fails
+# when Verilator is missing because both tests build with it.
+test-rv32-3d-verilator: $(RV32EMU) $(RV32_TB_VERILATOR) | build
+	G2_SIM=verilator $(PYTHON) -m unittest tests.test_rv32_3d_rtl tests.test_rv32_3d_soc -v
 run-rv32-3d-emu: check-rv32-3d-image $(RV32EMU)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_G3D_ARGS) --backend emulator --out build/g3d/emu
-test-rv32: test-rv32-3d run-rv32-3d-emu
+run-rv32-3d-rtl: check-rv32-3d-image $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_G3D_ARGS) --max-cycles $(RV32_G3D_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/g3d/icarus
+run-rv32-3d-rtl-verilator: check-rv32-3d-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_G3D_ARGS) --max-cycles $(RV32_G3D_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --stall 1 --gpu-stall 2 --out build/g3d/verilator
+.PHONY: test-rv32-3d-verilator run-rv32-3d-rtl run-rv32-3d-rtl-verilator lint-rv32-3d synth-rv32-3d
+lint-rv32-3d:
+	verilator --lint-only --Wall --language 1364-2005 --top-module rv32_g3d rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v
+synth-rv32-3d: | build
+	yosys -Q -T -l build/g3d-synth.log -p 'read_verilog rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v; synth -top rv32_g3d; check -assert; select -assert-none t:*LATCH*; stat; write_json build/g3d.json'
+test-rv32: test-rv32-3d test-rv32-3d-verilator run-rv32-3d-emu run-rv32-3d-rtl-verilator lint-rv32-3d synth-rv32-3d
 .PHONY: test-rv32-3d-sanitize
 test-rv32-3d-sanitize: $(RV32_G3D_DEPS) tools/rv32_g3d_corpus.py | build
 	mkdir -p build/g3d
