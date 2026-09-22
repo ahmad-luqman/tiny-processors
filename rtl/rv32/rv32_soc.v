@@ -16,6 +16,7 @@ module rv32_soc #(
     input  wire        clk,
     input  wire        reset,
     input  wire        mem_hold,
+    input  wire        simd_memory_hold,
     // Core memory port, observed.
     output wire        mem_valid,
     output wire [31:0] mem_addr,
@@ -59,6 +60,8 @@ module rv32_soc #(
     input  wire [31:0] in_event,
     output wire        in_full
 );
+    wire simd_valid, simd_ready, simd_error;
+    wire [31:0] simd_rdata;
     wire ram_valid, ram_ready, ram_error;
     wire [31:0] ram_rdata;
     wire con_valid, con_ready, con_error;
@@ -96,7 +99,14 @@ module rv32_soc #(
         .timer_valid(tm_valid), .timer_ready(tm_ready), .timer_error(tm_error), .timer_rdata(tm_rdata),
         .input_valid(in_valid), .input_ready(in_ready), .input_error(in_error), .input_rdata(in_rdata),
         .display_valid(dp_valid), .display_ready(dp_ready), .display_error(dp_error), .display_rdata(dp_rdata),
-        .fb_valid(fb_valid), .fb_ready(fb_ready), .fb_error(fb_error), .fb_rdata(fb_rdata)
+        .fb_valid(fb_valid), .fb_ready(fb_ready), .fb_error(fb_error), .fb_rdata(fb_rdata),
+        .simd_valid(simd_valid), .simd_ready(simd_ready), .simd_error(simd_error), .simd_rdata(simd_rdata)
+    );
+
+    rv32_simd4 accelerator (
+        .clk(clk), .reset(reset), .valid(simd_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
+        .wdata(mem_wdata), .rdata(simd_rdata), .ready(simd_ready), .error(simd_error),
+        .memory_hold(simd_memory_hold)
     );
 
     // The memories index from their window's base, which is the bus's business: the two

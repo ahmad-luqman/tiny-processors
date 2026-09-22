@@ -10,6 +10,10 @@
 #ifndef RV32_BOARD_H
 #define RV32_BOARD_H
 
+#define RV32_SIMD4_BASE        0x20004000
+#define RV32_SIMD4_PROGRAM     0x20005000
+#define RV32_SIMD4_DATA        0x20006000
+
 /* RAM: 4 MiB planned; the M1 firmware image, .bss, and stack fit in the
  * first 256 KiB so a small emulator or RTL memory can run the same ELF. */
 #define RV32_RAM_BASE          0x80000000

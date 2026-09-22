@@ -63,7 +63,10 @@ module rv32_bus #(
     output wire        fb_valid,
     input  wire        fb_ready,
     input  wire        fb_error,
-    input  wire [31:0] fb_rdata
+    input  wire [31:0] fb_rdata,
+    output wire simd_valid,
+    input wire simd_ready, simd_error,
+    input wire [31:0] simd_rdata
 );
     localparam [31:0] RAM_BASE = 32'h8000_0000;
     localparam [31:0] RAM_BYTES = RAM_WORDS * 4;
@@ -91,8 +94,12 @@ module rv32_bus #(
     wire input_sel = !mem_fetch && (mem_addr[31:4] == INPUT_BASE[31:4]);
     wire display_sel = !mem_fetch && (mem_addr[31:4] == DISPLAY_BASE[31:4]);
     wire fb_sel = !mem_fetch && (mem_addr >= FB_BASE) && (fb_offset < FB_BYTES);
-    wire none_sel = !(ram_sel || console_sel || done_sel || timer_sel || input_sel || display_sel || fb_sel);
+    wire simd_sel = !mem_fetch && (((mem_addr & 32'hffff_ffe0) == 32'h2000_4000) ||
+                      ((mem_addr & 32'hffff_fc00) == 32'h2000_5000) ||
+                      ((mem_addr & 32'hffff_fc00) == 32'h2000_6000));
+    wire none_sel = !(ram_sel || console_sel || done_sel || timer_sel || input_sel || display_sel || fb_sel || simd_sel);
 
+    assign simd_valid = req && simd_sel;
     assign ram_valid = req && ram_sel;
     assign console_valid = req && console_sel;
     assign done_valid = req && done_sel;
@@ -104,15 +111,15 @@ module rv32_bus #(
     assign mem_ready = req && ((ram_sel && ram_ready) || (console_sel && console_ready) ||
                                (done_sel && done_ready) || (timer_sel && timer_ready) ||
                                (input_sel && input_ready) || (display_sel && display_ready) ||
-                               (fb_sel && fb_ready) || none_sel);
+                               (fb_sel && fb_ready) || (simd_sel && simd_ready) || none_sel);
     assign mem_error = (ram_sel && ram_error) || (console_sel && console_error) ||
                        (done_sel && done_error) || (timer_sel && timer_error) ||
                        (input_sel && input_error) || (display_sel && display_error) ||
-                       (fb_sel && fb_error) || none_sel;
+                       (fb_sel && fb_error) || (simd_sel && simd_error) || none_sel;
     assign mem_rdata = ({32{ram_sel}} & ram_rdata) | ({32{console_sel}} & console_rdata) |
                        ({32{done_sel}} & done_rdata) | ({32{timer_sel}} & timer_rdata) |
                        ({32{input_sel}} & input_rdata) | ({32{display_sel}} & display_rdata) |
-                       ({32{fb_sel}} & fb_rdata);
+                       ({32{fb_sel}} & fb_rdata) | ({32{simd_sel}} & simd_rdata);
 
     // `mem_we` is routed to the slaves by the machine, not decoded here: a write to a
     // read-only register is the slave's refusal, so the decoder stays direction-blind.

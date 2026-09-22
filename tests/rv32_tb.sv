@@ -40,6 +40,39 @@ module rv32_tb;
     integer frame_reached = 0; // the frame count the guest has observably reached
     integer dropped = 0;       // pushes the full queue refused
     reg allow_lost_events = 0; // +allow-lost-events: a dropped or undelivered event is not a failure
+    reg simd_memory_hold = 0;
+    integer simd_stall = 0, simd_seed = 0, simd_age = 0, simd_delay = 0;
+    reg simd_fixed = 0, simd_random = 0, simd_chosen = 0, simd_held = 0;
+    reg [24:0] simd_request;
+    always @(negedge clk) begin
+        if (reset || !dut.accelerator.memory_valid) begin
+            simd_memory_hold = 0;
+            simd_chosen = 0;
+        end else begin
+            if (!simd_chosen) begin
+                simd_delay = simd_random ? ($unsigned($random(simd_seed)) % 4) : simd_stall;
+                simd_chosen = 1;
+            end
+            simd_memory_hold = simd_age < simd_delay;
+        end
+    end
+    always @(posedge clk) begin
+        if (dut.accelerator.engine_reset || !dut.accelerator.memory_valid) begin
+            simd_age = 0;
+            simd_held = 0;
+            simd_chosen = 0;
+        end else begin
+            if (simd_held && simd_request !== {dut.accelerator.memory_write,
+                    dut.accelerator.memory_address, dut.accelerator.memory_wdata})
+                $fatal(1, "SIMD4 request changed while stalled");
+            simd_request = {dut.accelerator.memory_write, dut.accelerator.memory_address, dut.accelerator.memory_wdata};
+            simd_held = !dut.accelerator.memory_ready;
+            if (dut.accelerator.memory_ready) begin
+                simd_age = 0;
+                simd_chosen = 0;
+            end else simd_age = simd_age + 1;
+        end
+    end
     reg mem_hold = 1; // acceptance deferred until the stall generator releases it
 
     // Stall generator and counters.
@@ -523,6 +556,15 @@ module rv32_tb;
             stall_seed = plusarg_count("stall-seed", text, 0);
             random_stall = 1;
         end
+        if ($value$plusargs("simd-stall=%s", text)) begin
+            simd_stall = plusarg_count("simd-stall", text, 0);
+            simd_fixed = 1;
+        end
+        if ($value$plusargs("simd-seed=%s", text)) begin
+            simd_seed = plusarg_count("simd-seed", text, 0);
+            simd_random = 1;
+        end
+        if (simd_fixed && simd_random) $fatal(1, "+simd-stall and +simd-seed are exclusive");
         if (stall_given && random_stall) $fatal(1, "+stall and +stall-seed are exclusive");
         if ($value$plusargs("max-cycles=%s", text))
             max_cycles = plusarg_count("max-cycles", text, 1);
@@ -559,6 +601,10 @@ module rv32_tb;
             dut.ram.mem[i] = 32'd0;
         for (i = 0; i < FB_WORDS; i = i + 1)
             dut.fb.mem[i] = 32'd0; // unspecified by the contract; zero like the emulator's calloc
+        for (i = 0; i < 256; i = i + 1) begin
+            dut.accelerator.program_mem[i] = 0;
+            dut.accelerator.data_mem[i] = 0;
+        end
         $readmemh(image_path, dut.ram.mem, 0, image_words - 1);
         repeat (2) @(posedge clk);
         #1 reset = 0;

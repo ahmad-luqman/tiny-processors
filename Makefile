@@ -63,13 +63,13 @@ FP32_RANDOM ?= 100
 RV32_FP_OBJ := build/fp32/rv32_fp.o $(SOFTFLOAT_OBJ)
 RV32EMU := build/rv32/rv32emu
 RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
-RV32EMU_CORE := tools/rv32emu_core.c tools/rv32emu_core.h tools/rv32_fp.h
+RV32EMU_CORE := tools/rv32emu_core.c tools/rv32emu_core.h tools/rv32_fp.h tools/rv32_simd4.c tools/rv32_simd4.h
 RV32WIN := build/rv32/rv32win
 # Recursive `=`: pkg-config runs only where the window is built, so a machine without SDL3 still runs every test.
 SDL3_CFLAGS = $(shell pkg-config --cflags sdl3 2>/dev/null)
 SDL3_LIBS = $(shell pkg-config --libs sdl3 2>/dev/null)
 RV32_RTL := rtl/rv32/rv32_fregfile.v rtl/rv32/rv32_fdecode.v $(FP32_RTL) rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32.v
-RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_timer.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v
+RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_timer.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
 RV32_TB := tests/rv32_tb.sv
 RV32_TB_VVP := build/rv32/rv32_tb.vvp
 RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
@@ -274,7 +274,7 @@ test-rv32-rt:
 	$(PYTHON) -m unittest discover -s tests -p 'test_rv32_rt.py' -v
 
 $(RV32EMU): tools/rv32emu.c $(RV32EMU_CORE) $(RV32_FP_OBJ) | build/rv32
-	$(HOST_CC) $(RV32EMU_CFLAGS) -o $@ tools/rv32emu.c tools/rv32emu_core.c $(RV32_FP_OBJ)
+	$(HOST_CC) $(RV32EMU_CFLAGS) -o $@ tools/rv32emu.c tools/rv32emu_core.c tools/rv32_simd4.c $(RV32_FP_OBJ)
 
 build-rv32-emu: toolchain-rv32-emu $(RV32EMU)
 
@@ -286,7 +286,7 @@ toolchain-rv32-win: toolchain-rv32-emu
 # The toolchain check is a prerequisite of the binary, so every target that needs the window says
 # what to install rather than failing on a missing header.
 $(RV32WIN): tools/rv32win.c $(RV32EMU_CORE) $(RV32_FP_OBJ) | build/rv32 toolchain-rv32-win
-	$(HOST_CC) $(RV32EMU_CFLAGS) $(SDL3_CFLAGS) -o $@ tools/rv32win.c tools/rv32emu_core.c $(RV32_FP_OBJ) $(SDL3_LIBS)
+	$(HOST_CC) $(RV32EMU_CFLAGS) $(SDL3_CFLAGS) -o $@ tools/rv32win.c tools/rv32emu_core.c tools/rv32_simd4.c $(RV32_FP_OBJ) $(SDL3_LIBS)
 
 build-rv32-win: toolchain-rv32-win $(RV32WIN)
 
@@ -580,3 +580,49 @@ run-rv32-f-soft-qemu: check-rv32-f-image
 	$(PYTHON) tools/rv32_run_qemu.py build/rv32/floatsoft.elf --qemu $(QEMU_RV32) --timeout 20 --expect-hex $(RV32_FLOAT_HEX) --transcript build/rv32/floatsoft.qemu.transcript --qemu-log build/rv32/floatsoft.qemu.log
 
 test-rv32: run-rv32-f-soft-qemu
+
+# A2: guest-owned program/data windows and asynchronous completion.
+RV32_SIMD4_ARGS = --image build/rv32/simdcheck.bin --compare results --expect-last-line "PASS A2"
+.PHONY: run-rv32-simd4-emu run-rv32-simd4-rtl run-rv32-simd4-rtl-verilator waves-rv32-simd4 check-rv32-simd4-image
+build/rv32/simd4_kernels.h: tools/rv32_simd4_kernels.py programs/simd4/vector_add.py programs/simd4/matrix_mac.py tools/simd4_model.py | build/rv32
+	$(PYTHON) -m tools.rv32_simd4_kernels $@
+
+build/rv32/simdcheck.o: programs/rv32/simdcheck.c programs/rv32/simd4.h build/rv32/simd4_kernels.h $(RV32_HEADERS)
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c -o $@ $<
+
+build/rv32/simd4.o: programs/rv32/simd4.h
+
+build/rv32/simdcheck.elf: build/rv32/simdcheck.o build/rv32/simd4.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ build/rv32/simdcheck.o build/rv32/simd4.o $(RV32_COMMON_OBJS)
+
+check-rv32-simd4-image: build/rv32/simdcheck.bin build/rv32/simdcheck.lst
+	$(PYTHON) tools/rv32_image.py build/rv32/simdcheck.elf --listing build/rv32/simdcheck.lst --bin build/rv32/simdcheck.bin --hex build/rv32/simdcheck.hex
+
+run-rv32-simd4-emu: check-rv32-simd4-image $(RV32EMU)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_SIMD4_ARGS) --backend emulator --out build/rv32/simd4-emu
+
+run-rv32-simd4-rtl: check-rv32-simd4-image $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_SIMD4_ARGS) --out build/rv32/simd4-icarus
+
+run-rv32-simd4-rtl-verilator: check-rv32-simd4-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_SIMD4_ARGS) --simulator $(RV32_TB_VERILATOR) --out build/rv32/simd4-verilator
+
+waves-rv32-simd4: check-rv32-simd4-image $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_SIMD4_ARGS) --mode waves --out build/rv32/simd4-waves
+
+test-rv32: run-rv32-simd4-emu run-rv32-simd4-rtl run-rv32-simd4-rtl-verilator
+
+build/rv32/simd4-protocol.vvp: rtl/rv32/rv32_simd4.v $(SIMD4_RTL) tests/rv32_simd4_tb.sv | build/rv32
+	iverilog -g2012 -Wall -s rv32_simd4_tb -o $@ tests/rv32_simd4_tb.sv rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
+
+build/verilator-rv32-simd4/protocol: rtl/rv32/rv32_simd4.v $(SIMD4_RTL) tests/rv32_simd4_tb.sv | build
+	verilator --binary --timing --trace --top-module rv32_simd4_tb --Mdir build/verilator-rv32-simd4 -o protocol tests/rv32_simd4_tb.sv rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
+
+.PHONY: test-rv32-simd4 test-rv32-simd4-verilator
+test-rv32-simd4: check-rv32-simd4-image $(RV32EMU) $(RV32_TB_VVP) build/rv32/simd4-protocol.vvp
+	$(PYTHON) -m unittest discover -s tests -p 'test_rv32_simd4.py' -v
+
+test-rv32-simd4-verilator: check-rv32-simd4-image $(RV32EMU) $(RV32_TB_VERILATOR) build/verilator-rv32-simd4/protocol
+	A2_SIM=verilator $(PYTHON) -m unittest discover -s tests -p 'test_rv32_simd4.py' -v
+
+test-rv32: test-rv32-simd4 test-rv32-simd4-verilator
