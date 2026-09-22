@@ -24,6 +24,7 @@ def build(optimization="O2"):
     output = ROOT / f"build/rv32/host/librv32capstone-{optimization}.dylib"
     output.parent.mkdir(parents=True, exist_ok=True)
     sources = [ROOT / f"programs/rv32/{name}.c" for name in ("gpu_demo", "gpu_ref", "runtime", "tetris_game", "pong_game", "gfx", "gfx_text", "digit_ui", "digit_model")]
+    sources.append(ROOT / "build/rv32/digit_weights.c")
     sources.append(ROOT / "tests/rv32_capstone_native.c")
     subprocess.run([os.environ.get("HOST_CC", "cc"), "-shared", "-fPIC", f"-{optimization}", "-std=c11",
                     "-Wall", "-Wextra", "-Werror", "-fno-builtin", "-I" + str(ROOT / "programs/rv32"),

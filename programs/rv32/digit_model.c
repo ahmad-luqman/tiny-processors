@@ -3,9 +3,12 @@
 
 /* Centring runs on the canvas before pooling because a digit drawn with the
  * arrow keys sits wherever the cursor happened to be, while the training images
- * were centred. Both go through this function, so the model sees one
- * distribution. Row and column bases advance by addition: a multiply would be a
- * 32-step software loop here. */
+ * were centred. Both go through this function, so the model sees one distribution.
+ *
+ * Multiplying by DIGIT_SIDE is fine here: it is a compile-time constant, so the
+ * compiler turns it into a pair of shifts rather than calling the runtime's
+ * 32-step helper. Only a runtime operand would need avoiding, which is what
+ * digit_mac does. */
 void digit_prepare(const uint8_t canvas[DIGIT_PIXELS], uint8_t x[DIGIT_INPUTS])
 {
     uint32_t top = DIGIT_SIDE, bottom = 0, left = DIGIT_SIDE, right = 0, row = 0;
@@ -23,11 +26,11 @@ void digit_prepare(const uint8_t canvas[DIGIT_PIXELS], uint8_t x[DIGIT_INPUTS])
     if (top < DIGIT_SIDE) {                       /* there is ink to centre */
         uint32_t down = ((DIGIT_SIDE - (bottom - top + 1)) >> 1) - top;
         uint32_t across = ((DIGIT_SIDE - (right - left + 1)) >> 1) - left;
-        /* down and across are taken modulo 2^32 when the shift is negative; adding
-         * them back to an in-range row or column lands in range again. */
-        uint32_t source = 0, destination = 0;
-        for (uint32_t r = 0; r < top; r++) source += DIGIT_SIDE;
-        for (uint32_t r = top + down; r; r--) destination += DIGIT_SIDE;
+        /* The halved leftovers are never negative, but subtracting `top` and `left`
+         * can be, so `down` and `across` wrap modulo 2^32. Adding a wrapped value
+         * back to an in-range row or column lands in range again, which is why
+         * these stay unsigned rather than becoming signed offsets. */
+        uint32_t source = top * DIGIT_SIDE, destination = (top + down) * DIGIT_SIDE;
         for (uint32_t r = top; r <= bottom; r++, source += DIGIT_SIDE, destination += DIGIT_SIDE)
             for (uint32_t c = left; c <= right; c++)
                 centred[destination + c + across] = canvas[source + c];
@@ -72,7 +75,7 @@ static void logits_from_hidden(const uint8_t hidden[DIGIT_HIDDEN], int32_t logit
 /* The weights are stored in launch order, so this walks them with one moving
  * pointer in exactly the order the accelerator launches, which keeps the two
  * paths from drifting apart through a layout mistake. */
-void digit_infer_cpu(const uint8_t x[DIGIT_INPUTS], int32_t logits[DIGIT_CLASSES])
+static void hidden_from_inputs(const uint8_t x[DIGIT_INPUTS], uint8_t hidden[DIGIT_HIDDEN])
 {
     uint32_t accumulators[DIGIT_HIDDEN];
     for (uint32_t n = 0; n < DIGIT_HIDDEN; n++) accumulators[n] = 0;
@@ -90,8 +93,13 @@ void digit_infer_cpu(const uint8_t x[DIGIT_INPUTS], int32_t logits[DIGIT_CLASSES
         }
         chunk_inputs += DIGIT_L1_DEPTH;
     }
-    uint8_t hidden[DIGIT_HIDDEN];
     digit_requantize(accumulators, hidden);
+}
+
+void digit_infer_cpu(const uint8_t x[DIGIT_INPUTS], int32_t logits[DIGIT_CLASSES])
+{
+    uint8_t hidden[DIGIT_HIDDEN];
+    hidden_from_inputs(x, hidden);
     logits_from_hidden(hidden, logits);
 }
 
@@ -115,7 +123,8 @@ uint32_t digit_argmax(const int32_t logits[DIGIT_CLASSES], uint32_t *margin)
     return best;
 }
 
-/* Accessors so host tests never need this file's struct or array layout. */
+/* Accessors so host tests read the generated sizes and shift constants from the
+ * same header the firmware compiles against, instead of restating them. */
 #ifdef RV32_DIGIT_NATIVE
 uint32_t digit_native_inputs(void) { return DIGIT_INPUTS; }
 uint32_t digit_native_pixels(void) { return DIGIT_PIXELS; }
@@ -123,24 +132,5 @@ uint32_t digit_native_classes(void) { return DIGIT_CLASSES; }
 uint32_t digit_native_hidden(void) { return DIGIT_HIDDEN; }
 uint32_t digit_native_shift(void) { return DIGIT_SHIFT; }
 uint32_t digit_native_hidden_max(void) { return DIGIT_HIDDEN_MAX; }
-void digit_native_hidden_vector(const uint8_t *x, uint8_t *hidden)
-{
-    uint32_t accumulators[DIGIT_HIDDEN];
-    for (uint32_t n = 0; n < DIGIT_HIDDEN; n++) accumulators[n] = 0;
-    const uint8_t *chunk_inputs = x;
-    for (uint32_t chunk = 0, launch = 0; chunk < DIGIT_L1_CHUNKS; chunk++) {
-        for (uint32_t group = 0; group < DIGIT_L1_GROUPS; group++, launch++) {
-            const int8_t *weights = digit_w1[launch];
-            uint32_t neuron = group * DIGIT_LANES;
-            for (uint32_t lane = 0; lane < DIGIT_LANES; lane++) {
-                uint32_t accumulator = accumulators[neuron + lane];
-                for (uint32_t j = 0; j < DIGIT_L1_DEPTH; j++)
-                    accumulator = digit_mac(accumulator, *weights++, chunk_inputs[j]);
-                accumulators[neuron + lane] = accumulator;
-            }
-        }
-        chunk_inputs += DIGIT_L1_DEPTH;
-    }
-    digit_requantize(accumulators, hidden);
-}
+void digit_native_hidden_vector(const uint8_t *x, uint8_t *hidden) { hidden_from_inputs(x, hidden); }
 #endif

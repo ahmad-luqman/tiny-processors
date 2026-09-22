@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Train the N1 digit model once and export its integer weights. NOT part of any build.
 
-This is the only file in the repository that imports a third-party package (numpy)
-and the only one that reaches the network. No make target runs it. Everything the
+This is the only file in the repository that imports a third-party package (numpy),
+and the only one that triggers network access: the download itself is
+`tools.digit_data.fetch_training_set`, which nothing else calls. No make target runs
+either of them. Everything the
 build, the tests and the firmware need is the committed output,
 `programs/rv32/digit_model.json`, read back by the standard-library oracle in
 `tools/digit_ref.py`. Rerun this only to retrain:

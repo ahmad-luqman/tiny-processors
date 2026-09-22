@@ -1,6 +1,7 @@
 /* N1 cost measurement: the same classifications on the CPU and on the
  * accelerator. Built twice with different DIGIT_BENCH_COUNT values so the
- * difference cancels startup and leaves the cost of one inference.
+ * difference cancels startup; it covers the extra inferences between the two
+ * counts, and tools/rv32_digit_bench.py divides it down to one.
  * Nothing here is compared across backends; it is a measurement, not a test.
  */
 #include "digit_hw.h"

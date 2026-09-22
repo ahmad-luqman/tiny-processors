@@ -1,4 +1,5 @@
 """N1: dataset provenance, the preprocessing contract, and the integer model oracle."""
+import gzip
 import hashlib
 import json
 import random
@@ -61,7 +62,6 @@ class DatasetTest(unittest.TestCase):
         self.assertTrue(all(len(image) == digit_data.PIXELS for image in images))
         self.assertTrue(all(0 <= label <= 9 for label in labels))
         # The header fields the parser insists on, read independently here.
-        import gzip
         with gzip.open(digit_data.DATASET / 't10k-images-idx3-ubyte.gz', 'rb') as stream:
             magic, count, rows, columns = struct.unpack('>IIII', stream.read(16))
         self.assertEqual((magic, count, rows, columns), (0x803, 10000, 28, 28))
@@ -70,7 +70,6 @@ class DatasetTest(unittest.TestCase):
         self.assertEqual((magic, count), (0x801, 10000))
 
     def test_truncated_and_mistyped_files_are_refused(self):
-        import gzip
         with tempfile.TemporaryDirectory() as work:
             short = Path(work) / 'short.gz'
             with gzip.open(short, 'wb') as stream:
@@ -134,12 +133,19 @@ class PreprocessingTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'must be 784 bytes'):
             digit_data.prepare(bytes(100))
 
-    def test_prepared_inputs_stay_in_the_legal_mac_range(self):
+    def test_pooling_is_the_floor_mean_of_the_centred_canvas(self):
+        """Recomputed independently here; asserting `max <= 255` on a bytes object
+        cannot fail, so it said nothing about the pooling."""
         images, _ = digit_data.load_test_set()
-        for image in images[:200]:
+        side, pooled = digit_data.SIDE, digit_data.POOLED
+        for image in images[:50]:
+            centred = digit_data.centre(image)
             prepared = digit_data.prepare(image)
-            self.assertEqual(len(prepared), digit_data.INPUTS)
-            self.assertLessEqual(max(prepared), 255)
+            for i in range(pooled):
+                for j in range(pooled):
+                    block = (centred[(2 * i) * side + 2 * j], centred[(2 * i) * side + 2 * j + 1],
+                             centred[(2 * i + 1) * side + 2 * j], centred[(2 * i + 1) * side + 2 * j + 1])
+                    self.assertEqual(prepared[i * pooled + j], sum(block) // 4)
 
 
 class ModelTest(unittest.TestCase):
@@ -161,11 +167,19 @@ class ModelTest(unittest.TestCase):
         self.assertTrue(0 < self.model['hidden_max'] <= 32767)
 
     def test_loader_refuses_a_damaged_model(self):
+        wide = dict(self.model['architecture'], pooled_side=15)
         for damage, message in (
                 ({'shift': 32}, 'shift must be'),
-                ({'hidden_max': 40000}, 'legal 16-bit'),
+                # 300 is a legal MAC operand but does not fit the uint8_t the guest
+                # stores the hidden vector in, so the oracle would clamp where the
+                # guest truncates.
+                ({'hidden_max': 300}, 'uint8_t'),
                 ({'w1': [[0] * digit_data.INPUTS] * 3}, 'layer 1 shape'),
-                ({'w2': [[0] * 4] * 10}, 'layer 2 shape')):
+                ({'w2': [[0] * 4] * 10}, 'layer 2 shape'),
+                ({'architecture': wide}, 'pooled_side'),
+                ({'b1': [2 ** 31] + self.model['b1'][1:]}, 'fit int32'),
+                # A bias large enough to bring the layer-1 accumulator to 2^31.
+                ({'b1': [2 ** 31 - 1000] + self.model['b1'][1:]}, 'could wrap')):
             broken = dict(self.model, **damage)
             with tempfile.TemporaryDirectory() as work:
                 path = Path(work) / 'model.json'
@@ -227,8 +241,10 @@ class ModelTest(unittest.TestCase):
             self.assertEqual(len(logits), 10, name)
             self.assertTrue(all(abs(value) < 2 ** 31 for value in logits), name)
             best, margin = digit_ref.argmax(logits)
-            self.assertTrue(0 <= best <= 9, name)
-            self.assertGreaterEqual(margin, 0, name)
+            # `best` indexes the list and `margin` is a max-minus-rest, so bounding
+            # them proves nothing; assert the defining property instead.
+            self.assertEqual(logits[best], max(logits), name)
+            self.assertEqual(margin, max(logits) - max(v for i, v in enumerate(logits) if i != best), name)
 
     def test_an_engineered_input_reaches_the_saturation_clamp(self):
         """The clamp is unreachable on real digits, so construct the input that hits it.
@@ -246,9 +262,10 @@ class ModelTest(unittest.TestCase):
             self.fail('no input saturated any hidden unit; the clamp would be dead code')
         self.assertEqual(digit_ref.hidden_layer(x, self.model)[neuron], self.model['hidden_max'])
         # The same canvas still classifies cleanly, clamp and all.
-        best, margin = digit_ref.argmax(digit_ref.infer(x, self.model))
-        self.assertTrue(0 <= best <= 9)
-        self.assertGreaterEqual(margin, 0)
+        logits = digit_ref.infer(x, self.model)
+        best, margin = digit_ref.argmax(logits)
+        self.assertEqual(logits[best], max(logits))
+        self.assertGreater(margin, -1)
 
     def test_real_digits_stay_below_the_clamp(self):
         """Recorded as a property of this model: saturation is a guard, not routine."""
@@ -259,7 +276,7 @@ class ModelTest(unittest.TestCase):
 
     def test_predictions_match_the_pinned_file(self):
         """The stdlib oracle reproduces the exporter's numpy arithmetic exactly."""
-        pinned = [int(value) for value in digit_ref.PREDICTIONS.read_text().split()]
+        pinned = digit_ref.pinned_predictions()
         images, labels = digit_data.load_test_set()
         self.assertEqual(len(pinned), len(images))
         model = self.model
@@ -470,7 +487,7 @@ class NativeModelTest(unittest.TestCase):
         self.each(check)
 
     def test_classification_agrees_with_the_pinned_predictions(self):
-        pinned = [int(value) for value in digit_ref.PREDICTIONS.read_text().split()]
+        pinned = digit_ref.pinned_predictions()
 
         def check(guest):
             for index in range(200):

@@ -57,11 +57,11 @@ def check(k, base=0):
         raise ValueError('base must be a non-negative program address')
     if base + PROGRAM_WORDS > 256:
         raise ValueError(f'a kernel at {base} would run past the 256-word program memory')
-    # Every address the engine forms is (register + immediate) mod 256; none may wrap,
-    # or a lane would silently read another lane's weights.
-    highest = max(k - 1, k + (LANES - 1) * k + k - 1, data_words(k) - 1)
-    if highest > 255:
-        raise ValueError(f'depth {k} forms address {highest}, which would wrap')
+    # Every address the engine forms is (register + immediate) mod 256, and none may
+    # wrap or a lane would silently read another lane's weights. No separate check is
+    # needed: the highest address the kernel forms is data_words(k) - 1, so the slot
+    # bound above already implies it. The largest admissible K is 49, whose highest
+    # address is 252.
 
 
 def program(k, base=0):
@@ -120,10 +120,18 @@ def base_cycles(k):
 def memory(x, weights, k):
     """Lay out one launch's data image: the input chunk and four lanes' weights."""
     check(k)
+    # These are 16-bit patterns, not magnitudes: the engine's MAC sign-extends, so
+    # any value at or above 0x8000 is a negative operand. The digit path only ever
+    # writes 0..255.
     if len(x) != k or any(not 0 <= value <= 0xffff for value in x):
         raise ValueError(f'expected {k} input words in 0..65535')
     if len(weights) != LANES or any(len(row) != k for row in weights):
         raise ValueError(f'expected {LANES} weight rows of {k}')
+    # Checked like the inputs rather than masked: silently truncating a weight would
+    # give the oracle and the engine the same wrong number, which is the one kind of
+    # disagreement neither would notice.
+    if any(not 0 <= value <= 0xffff for row in weights for value in row):
+        raise ValueError('weight words must be 16-bit patterns in 0..65535')
     data = [0] * 256
     where = slots(k)
     for j, value in enumerate(x):

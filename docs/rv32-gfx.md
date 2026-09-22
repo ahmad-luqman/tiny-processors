@@ -219,10 +219,11 @@ and workload, not architectural guarantees.
 The full `make test-rv32` aggregate passes after the complete six-agent review fixes, covering
 RV32I/F, QEMU, device/window, A2 and game regressions. The original game replay
 retains `PASS ea60197e` and 68 checkpoints; nine menu checkpoints intentionally
-change for the third entry, while the game state checksum is unchanged. N1 moved
-those menu frames again for a fourth entry and re-pinned this replay's own hash,
-leaving `PASS ea60197e` untouched for the same reason. It now
-executes 2,356,102 instructions because code layout and startup storage changed.
+change for the third entry, while the game state checksum is unchanged. At G1 it
+executed 2,356,102 instructions because code layout and startup storage changed.
+N1 then moved those menu frames again for a fourth entry and re-pinned this
+replay's own hash, leaving `PASS ea60197e` untouched for the same reason; the
+capstone session's count at N1 is in the [N1 record](rv32-digit.md).
 The aggregate runs the G1 menu replay on Verilator and the complete pixel
 diagnostic on both simulators; the optional `run-rv32-gfx-menu-rtl` Icarus target is available
 separately. Counter, ALU, SAP8, standalone SIMD4 and FP32 checks also pass.

@@ -20,7 +20,9 @@ typedef uint32_t (*digit_classify)(const uint8_t canvas[DIGIT_PIXELS], int32_t l
 #define DIGIT_UI_LEFT 6u
 #define DIGIT_UI_TOP 30u
 #define DIGIT_UI_PANEL 214u
-#define DIGIT_UI_REPEAT 4u               /* frames between moves while a key is held */
+/* Frames skipped between moves while a direction is held, so the cadence is one
+ * move every DIGIT_UI_REPEAT + 1 frames. */
+#define DIGIT_UI_REPEAT 4u
 
 struct digit_ui {
     uint8_t canvas[DIGIT_PIXELS];
@@ -30,7 +32,15 @@ struct digit_ui {
     digit_classify classify;
 };
 
+/* Construct: clears the canvas, every result field, and the classifier. Call this
+ * once, then digit_ui_attach. Leaving `classify` out of initialization made the
+ * null guard in digit_ui_event read an indeterminate pointer whenever the struct
+ * had automatic storage, which is how the native tests allocate it. */
 void digit_ui_init(struct digit_ui *ui);
+/* Reset the canvas and the result, keeping the classifier attached. This is what
+ * entering the screen and pressing R do: clearing the drawing must not detach the
+ * classifier, or ENTER would silently stop working on the second visit. */
+void digit_ui_clear(struct digit_ui *ui);
 /* Install the classifier. Kept separate from init so the runtime never has to
  * know which one it is running with. */
 void digit_ui_attach(struct digit_ui *ui, digit_classify classify);

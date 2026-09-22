@@ -22,7 +22,7 @@ import argparse
 import json
 from pathlib import Path
 
-from tools.digit_data import INPUTS, load_test_set, prepare
+from tools.digit_data import INPUTS, POOLED, load_test_set, prepare
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = ROOT / 'programs/rv32/digit_model.json'
@@ -46,10 +46,24 @@ def load_model(path=MODEL):
         raise ValueError('layer 2 shape disagrees with the architecture block')
     if any(not -127 <= value <= 127 for row in w1 + w2 for value in row):
         raise ValueError('weights must be int8 and symmetric: -127..127')
+    if any(not -2**31 <= value < 2**31 for value in b1 + b2):
+        raise ValueError('biases must fit int32, the type the generated header declares')
     if not 0 <= model['shift'] <= 31:
         raise ValueError('shift must be 0..31')
-    if not 0 < model['hidden_max'] <= 32767:
-        raise ValueError('hidden_max must be a legal 16-bit MAC operand')
+    # The guest stores the hidden vector in uint8_t, so the MAC operand limit of
+    # 32767 is not the binding one: a larger cap would have the oracle clamp where
+    # the guest truncates, and the two would disagree only as a diagnostic failure.
+    if not 0 < model['hidden_max'] <= 255:
+        raise ValueError('hidden_max must fit the uint8_t the guest stores it in')
+    if shape['pooled_side'] != POOLED or shape['pooled_side'] ** 2 != shape['inputs']:
+        raise ValueError(f"pooled_side must be {POOLED} and square to {shape['inputs']}")
+    # Recompute the wrap proof here. The exporter also proves it, but nothing in a
+    # build runs the exporter, so that proof covers no shipped artifact.
+    roundterm = (1 << (model['shift'] - 1)) if model['shift'] else 0
+    first = shape['inputs'] * 255 * 128 + max(abs(v) for v in b1) + roundterm
+    second = shape['hidden'] * model['hidden_max'] * 128 + max(abs(v) for v in b2)
+    if first >= 2**31 or second >= 2**31:
+        raise ValueError(f'accumulator could wrap: layer bounds {first} and {second}')
     _CACHE[key] = model
     return model
 
@@ -98,11 +112,18 @@ def classify_canvas(canvas, model=None):
     return argmax(infer(prepare(canvas), model))
 
 
+def pinned_predictions(path=PREDICTIONS):
+    """The exporter's per-image predictions, the file the oracle is checked against."""
+    return [int(value) for value in Path(path).read_text().split()]
+
+
 def accuracy(count=None, model=None):
     """Measure the integer model on the vendored test set; returns (correct, total, predictions)."""
     model = model or load_model()
     images, labels = load_test_set()
-    if count:
+    if count is not None:
+        if count < 1:
+            raise ValueError('count must be at least one image')
         images, labels = images[:count], labels[:count]
     predictions = [predict(prepare(image), model) for image in images]
     correct = sum(p == label for p, label in zip(predictions, labels))
@@ -130,8 +151,12 @@ def main():
         PREDICTIONS.write_text(''.join(f'{p}\n' for p in predictions))
         print(f'wrote {PREDICTIONS.relative_to(ROOT)}')
     else:
-        pinned = PREDICTIONS.read_text().split()
-        if len(pinned) == len(predictions) and [int(v) for v in pinned] != predictions:
+        pinned = pinned_predictions()
+        # Comparing only when the lengths agree would turn a truncated pinned file
+        # into a silent pass, which is the one case the guard exists for.
+        if not arguments.count and len(pinned) != len(predictions):
+            raise SystemExit(f'pinned file holds {len(pinned)} predictions, measured {len(predictions)}')
+        if pinned[:len(predictions)] != predictions:
             raise SystemExit('predictions differ from the pinned file')
 
 

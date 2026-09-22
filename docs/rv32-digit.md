@@ -31,10 +31,15 @@ script into an ignored directory and is not committed.
 
 | Measurement | Value |
 | --- | --- |
-| Integer accuracy, 10,000 vendored test images | 96.16% |
+| Integer accuracy, 10,000 vendored test images | 96.16% (asserted against a 95% floor in `tests/test_rv32_digit.py`) |
 | Float accuracy, same images | 96.10% |
 | Effect of quantization | the integer model scores 0.06 points **higher** than the float one, so quantization is not what limits this model; at this size the difference is noise, not an improvement to claim |
 | Hidden shift `s1` | 11, calibrated on a 5,000-image holdout of the training set |
+
+Every number in this document describes the committed model. Retraining replaces
+`digit_model.json` and its pinned predictions, and the accuracy assertions follow
+the new metadata, so these figures would need re-measuring rather than staying
+true by themselves.
 
 The committed test set tunes nothing: the shift and every other calibration use a
 training holdout, and the test set is measured once at the end.
@@ -75,8 +80,9 @@ Three decisions are worth their own sentences.
 into a wrapping accumulator and deferred saturation and rounding to N1. N1 answers
 them without touching the hardware: the engine stays exact and wrapping, the full
 32-bit accumulator is read back through `RDA 0` and `RDA 16`, and the CPU adds the
-bias, rounds half up, applies ReLU and clamps. A saturating read-back and a
-rounded shift remain the exercises `docs/simd4-to-gates.md` describes.
+bias, rounds half up, applies ReLU and clamps. A saturating read-back is the
+exercise `docs/simd4-to-gates.md` describes; a rounded shift is its natural
+counterpart and is not written up anywhere yet.
 
 **The arithmetic is unsigned.** The accumulator wraps modulo 2^32 exactly as the
 engine's does, ReLU is a sign-bit test so a negative value is never shifted, and
@@ -228,7 +234,10 @@ logits against the oracle's. Two of them also run the software model, so the
 comparison covers the arithmetic rather than two readings of one computation. It
 then recovers from an illegal-opcode fault and from a poll-budget timeout,
 confirms that every buffer access is refused while the engine is busy, and ends
-with `PASS N1`. All eight canvases are classified correctly.
+with `PASS N1`. All eight canvases happen to be classified correctly, which is an
+observation about this model rather than something the diagnostic requires: it
+compares against the oracle's answer, not the dataset's label, so a model that
+misread an image would still pass.
 
 The Python suite drives no simulator: the dense kernels reach RTL through the A2
 replay corpus, which checks them against the instruction-level interpreter on the
@@ -260,13 +269,15 @@ each variant at two workload sizes:
 | Path | Emulator instructions | RTL cycles |
 | --- | --- | --- |
 | CPU only | 133,742 | 546,830 |
-| Accelerated | 92,281 | 285,742 |
+| Accelerated | 92,437 | 286,448 |
 
 The accelerator roughly halves the RTL cycles and removes about a third of the CPU
 instructions. It does not remove more because the work is memory-bound by
 construction: each product needs two loads, every lane transfers separately, and
-streaming 6,592 weights through the bus costs more than the arithmetic saved. That
+streaming the weights through the bus costs more than the arithmetic saved. That
 is the serialized-memory lesson A1 measured, now visible at the application level.
+The model holds 6,592 weights, but 6,656 cross the bus each inference: layer 2
+pads ten outputs to twelve, and those two zero rows are written like any other.
 
 Per inference the engine retires 10,334 instructions and performs 13,592
 transfers across 35 launches. Comparing RTL cycles with emulator instructions
@@ -274,19 +285,28 @@ would be meaningless, so the two columns are never divided into one another.
 
 | Run | Backend | Instructions | Cycles |
 | --- | --- | --- | --- |
-| `digitcheck` | emulator | 1,199,029 | — |
-| `digitcheck` | Icarus | 937,329 | 3,983,687 |
-| `digitcheck` | Verilator, CPU stall 1, engine stall 2 | 969,529 | 5,329,267 |
-| 199-frame drawing session | emulator | 3,865,463 | — |
-| 199-frame drawing session | Verilator, stalls as above | 3,819,563 | 20,334,067 |
+| `digitcheck` | emulator | 1,365,251 | — |
+| `digitcheck` | Icarus | 1,051,211 | 4,479,094 |
+| `digitcheck` | Verilator, CPU stall 1, engine stall 2 | 1,089,851 | 6,013,211 |
+| 199-frame drawing session | emulator | 3,865,757 | — |
+| 199-frame drawing session | Verilator, stalls as above | 3,819,857 | 20,335,815 |
 
 RTL runs fewer CPU instructions than the emulator because the poll loop spins
 fewer times, which is the device-time contract doing its job.
 
-The diagnostic image is 30,036 bytes: 7,432 of text, 22,092 of read-only data
-(mostly the 6,592 weights and the eight embedded canvases), 512 of data and 1,048
-of bss. The capstone image is 45,808 bytes. Both sit well inside the 256 KiB
+The diagnostic image is 23,496 bytes: 7,932 of text, 15,052 of read-only data
+(mostly the weights and the eight embedded canvases) and 512 of data. Its 1,048
+bytes of bss are allocated at load rather than stored, so they are not part of
+that total. The capstone image is 39,776 bytes. Both sit well inside the 256 KiB
 slice.
+
+Those numbers are smaller than they first were. The weight tables began as
+`static const` in a generated header, which gave every translation unit that
+included it a private copy: 7,040 bytes of the diagnostic's read-only data and
+6,656 of the capstone's were duplicates of one another. They are now defined once
+in a generated `digit_weights.c` and declared `extern`, which is worth recording
+because the header split that preceded it limited the spread without preventing
+it.
 
 Synthesis is **unchanged**, as it must be: no RTL file differs from G1. The
 machine is still 164,861 generic cells and 22,981 flip-flops with no latches.
@@ -300,6 +320,8 @@ launch, 10 ns clock:
 
 1. **START to DONE spans exactly 1,008 clock cycles**, the `20K + 28` the builder
    predicts for K = 49, and 400 transfers are accepted, the predicted `8K + 8`.
+   These are properties of the kernel, so they do not move when the driver around
+   it changes.
    The prediction is not fitted to the hardware: it comes from the instruction
    shape and the testbench agrees.
 2. **The first four transfers all read slot 0.** Every lane fetches the same input

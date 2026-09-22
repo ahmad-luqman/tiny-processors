@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.rv32_digit_model import ensure_headers  # noqa: E402
 
-SOURCES = (ROOT / 'programs/rv32/digit_model.c',)
+SOURCES = (ROOT / 'programs/rv32/digit_model.c', ROOT / 'build/rv32/digit_weights.c')
 GENERATED = ROOT / 'build/rv32'
 HOST_DIR = ROOT / 'build/rv32/host'
 

@@ -8,7 +8,7 @@ accepted START clears lane state but leaves both memories alone.
     python3 -m tools.rv32_digit_kernels build/rv32/digit_kernels.h
 """
 
-from programs.simd4.dense4 import LANES, bank, base_cycles, expected_counts
+from programs.simd4.dense4 import bank, base_cycles, expected_counts, slots
 
 LAYER1_DEPTH = 49          # 196 inputs as four chunks of 49, the largest chunk that fits
 LAYER2_DEPTH = 32          # the whole hidden vector in one chunk
@@ -26,13 +26,23 @@ def header():
              '#ifndef RV32_DIGIT_KERNELS_H', '#define RV32_DIGIT_KERNELS_H', '#include <stdint.h>', '']
     for name, depth in SHAPES.items():
         instructions, transfers = expected_counts(depth)
-        lines += [f'#define DIGIT_{name.upper()}_ENTRY {entries[name]}u',
-                  f'#define DIGIT_{name.upper()}_DEPTH {depth}u',
-                  f'#define DIGIT_{name.upper()}_INSTRUCTIONS {instructions}u',
-                  f'#define DIGIT_{name.upper()}_TRANSFERS {transfers}u',
+        where = slots(depth)
+        tag = name.upper()
+        lines += [f'#define DIGIT_{tag}_ENTRY {entries[name]}u',
+                  f'#define DIGIT_{tag}_INSTRUCTIONS {instructions}u',
+                  f'#define DIGIT_{tag}_TRANSFERS {transfers}u',
+                  # The slot map is emitted from dense4.slots rather than restated in
+                  # the driver: a layout change there becomes a compile-time update
+                  # instead of a silent read from the wrong slot.
+                  f'#define DIGIT_{tag}_X {where["x"]}u',
+                  f'#define DIGIT_{tag}_W {where["w"]}u',
+                  f'#define DIGIT_{tag}_LO {where["lo"]}u',
+                  f'#define DIGIT_{tag}_HI {where["hi"]}u',
                   f'/* {base_cycles(depth)} engine cycles with no memory waits. */']
-    lines += [f'#define DIGIT_LANES {LANES}u', '',
-              'static const uint32_t digit_kernel_bank[256] = {']
+    # The depths and the lane count live in digit_shape.h, which every file that
+    # needs them already reaches through digit_model.h; defining them here too put
+    # two spellings of one number in a single translation unit.
+    lines += ['', 'static const uint32_t digit_kernel_bank[256] = {']
     lines += ['    ' + ', '.join(f'0x{w:08x}u' for w in words[i:i + 8]) + ',' for i in range(0, 256, 8)]
     lines += ['};', '', '#endif']
     return '\n'.join(lines) + '\n'

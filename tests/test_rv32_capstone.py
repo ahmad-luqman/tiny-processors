@@ -84,10 +84,11 @@ class CapstoneTests(unittest.TestCase):
                 seen.append((runs, lib.native_digit_predicted(game.state),
                              lib.native_digit_status(game.state)))
             previous = runs
-        predictions = [entry[1] for entry in seen]
-        statuses = [entry[2] for entry in seen]
-        self.assertEqual(statuses, [0] * len(statuses))
-        self.assertEqual(predictions, [1, 7], "the drawn strokes must read as a one and a seven")
+        # Both lists are asserted against literals: comparing statuses with
+        # [0] * len(statuses) passes on an empty list and cannot fail on length.
+        self.assertEqual([entry[1] for entry in seen], [1, 7],
+                         "the drawn strokes must read as a one and a seven")
+        self.assertEqual([entry[2] for entry in seen], [0, 0])
 
     def test_bad_sessions_fail(self):
         lib = self.libs[-1]

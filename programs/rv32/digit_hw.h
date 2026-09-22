@@ -30,9 +30,14 @@ enum digit_status digit_hw_infer(const uint8_t x[DIGIT_INPUTS], int32_t logits[D
  * never print, draw or checksum them. Transfers and instructions are
  * deterministic and are checked against the kernel's predicted counts. */
 struct digit_counters { uint32_t launches, cycles, stalls, transfers, instructions; };
-void digit_hw_counters(struct digit_counters *out);
+/* False when the last inference did not finish, in which case the counters are a
+ * partial sum: without this a caller cannot tell 17 launches from 35. */
+bool digit_hw_counters(struct digit_counters *out);
 
-/* Forget that the device was initialized, so the next inference reloads it.
- * The recovery tests use this after deliberately resetting the device. */
+/* Forget that the device was initialized, so the next inference reloads it. Any
+ * code that loads its own program into the accelerator must call this, or the next
+ * inference launches whatever that code left behind. A fault or a timeout inside
+ * digit_hw_infer already does it: both mean program memory is no longer what this
+ * driver believes, and a reload is the only thing that can fix that. */
 void digit_hw_forget(void);
 #endif

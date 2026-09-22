@@ -1,4 +1,7 @@
-# Third menu entry, pause, CPU/accelerator switch, restart, return and quit.
+# The 2D demo, reached by wrapping upward from the first entry. It was the third
+# menu entry when this was written and is the fourth since N1 added the digit
+# screen before it; UP from entry 0 still lands on it, which is why this script
+# did not change.
 frame 1 down UP
 frame 2 up UP
 frame 2 down ENTER

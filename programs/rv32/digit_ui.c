@@ -8,7 +8,7 @@
 #define LABEL 0x92u
 #define RESULT 0x1fu
 
-void digit_ui_init(struct digit_ui *ui)
+void digit_ui_clear(struct digit_ui *ui)
 {
     for (uint32_t i = 0; i < DIGIT_PIXELS; i++) ui->canvas[i] = 0;
     for (uint32_t c = 0; c < DIGIT_CLASSES; c++) ui->logits[c] = 0;
@@ -18,6 +18,12 @@ void digit_ui_init(struct digit_ui *ui)
     ui->repeat = ui->painting = ui->classified = 0;
     ui->predicted = ui->margin = ui->status = ui->runs = 0;
     ui->dirty = 1;
+}
+
+void digit_ui_init(struct digit_ui *ui)
+{
+    digit_ui_clear(ui);
+    ui->classify = 0;
 }
 
 void digit_ui_attach(struct digit_ui *ui, digit_classify classify) { ui->classify = classify; }
@@ -40,16 +46,22 @@ static void paint(struct digit_ui *ui)
 void digit_ui_event(struct digit_ui *ui, uint32_t code)
 {
     if (code == RV32_KEY_R) {
-        digit_classify keep = ui->classify;
-        digit_ui_init(ui);
-        ui->classify = keep;
+        digit_ui_clear(ui);
         return;
     }
     if (code != RV32_KEY_ENTER || !ui->classify) return;
     ui->status = ui->classify(ui->canvas, ui->logits);
     ui->runs++;
     ui->classified = 1;
-    if (!ui->status) ui->predicted = digit_argmax(ui->logits, &ui->margin);
+    if (ui->status) {
+        /* A failed classification leaves `logits` partially written, so give
+         * failure one representation instead of checksumming a mix of this run
+         * and the last one. */
+        for (uint32_t c = 0; c < DIGIT_CLASSES; c++) ui->logits[c] = 0;
+        ui->predicted = ui->margin = 0;
+    } else {
+        ui->predicted = digit_argmax(ui->logits, &ui->margin);
+    }
     ui->dirty = 1;
 }
 
@@ -89,11 +101,14 @@ static void draw_scores(const struct digit_ui *ui, const struct gfx_surface *s)
         if (ui->logits[c] < low) low = ui->logits[c];
         if (ui->logits[c] > high) high = ui->logits[c];
     }
-    uint32_t span = (uint32_t)(high - low), shift = 0;
+    /* Unsigned subtraction, for the reason digit_model.h gives for the margin: the
+     * difference of two valid int32 logits can overflow a signed subtraction, and the
+     * native build runs UBSan without recovery. */
+    uint32_t span = (uint32_t)high - (uint32_t)low, shift = 0;
     while ((span >> shift) > 88u && shift < 31u) shift++;
     for (uint32_t c = 0; c < DIGIT_CLASSES; c++) {
         int32_t y = (int32_t)(150u + c * 8u);
-        uint32_t length = (uint32_t)(ui->logits[c] - low) >> shift;
+        uint32_t length = ((uint32_t)ui->logits[c] - (uint32_t)low) >> shift;
         gfx_draw_digit(s, (int32_t)DIGIT_UI_PANEL, y, c, 1, LABEL);
         gfx_fill_rect(s, (int32_t)DIGIT_UI_PANEL + 6, y, 90, 5, 0);
         gfx_fill_rect(s, (int32_t)DIGIT_UI_PANEL + 6, y, (int32_t)length, 5,

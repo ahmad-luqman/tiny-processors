@@ -11,8 +11,9 @@
  *
  * The arithmetic is deliberately written in unsigned types. Accumulators wrap
  * modulo 2^32 exactly as the engine's do, shifts are never applied to a negative
- * value, and the one place a signed result is needed converts explicitly. The
- * exporter proves the true values fit in int32, so no wrap ever loses data.
+ * value, and every signed result is produced by an explicit conversion. The
+ * model loader proves the true values fit in int32 for the committed weights, so
+ * no wrap ever loses data.
  */
 #ifndef RV32_DIGIT_MODEL_H
 #define RV32_DIGIT_MODEL_H
@@ -24,7 +25,9 @@
  * tools/digit_data.py defines the same function for the oracle. */
 void digit_prepare(const uint8_t canvas[DIGIT_PIXELS], uint8_t x[DIGIT_INPUTS]);
 
-/* Bias, round half up, ReLU and saturate the four-lane accumulators of layer 1. */
+/* Bias, round half up, ReLU and saturate every layer-1 accumulator. The
+ * accelerator produces these four at a time, but this takes the whole hidden
+ * layer, which is what both callers pass. */
 void digit_requantize(const uint32_t accumulators[DIGIT_HIDDEN], uint8_t hidden[DIGIT_HIDDEN]);
 
 /* The whole model on the CPU: the reference the accelerator must reproduce. */
@@ -42,9 +45,10 @@ static inline int32_t digit_signed(uint32_t value)
     return (value & 0x80000000u) ? (int32_t)(value - 0x80000000u) - 2147483647 - 1 : (int32_t)value;
 }
 
-/* acc += weight * value for an int8 weight and a 0..255 input, in eight shift-add
- * steps. The runtime's `*` helper iterates over the bit length of its second
- * operand, which is 32 for a negative weight; this loop is bounded by the input. */
+/* acc += weight * value for an int8 weight and a 0..255 input, in at most eight
+ * shift-add steps and none at all for a zero input. The runtime's `*` helper
+ * iterates over the bit length of its second operand, which is 32 for a negative
+ * weight; this loop is bounded by the input instead. */
 static inline uint32_t digit_mac(uint32_t accumulator, int32_t weight, uint32_t value)
 {
     uint32_t shifted = (uint32_t)weight;

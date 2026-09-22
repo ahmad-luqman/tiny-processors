@@ -18,9 +18,10 @@ static void change_screen(struct runtime *r, uint32_t screen)
     r->transition = r->dirty = 1;
     r->over_frames = 0;
     if (screen == RUNTIME_GPU) gpu_demo_init(&r->demo);
-    /* The canvas survives a visit to the menu only if it is not reinitialized
-     * here; clearing it makes every entry to the screen start from blank. */
-    if (screen == RUNTIME_DIGIT) digit_ui_init(&r->digit);
+    /* Entering the digit screen always starts from a blank canvas; it is
+     * deliberately not preserved across a visit to the menu. Clear rather than
+     * init, so the classifier the host attached at boot stays attached. */
+    if (screen == RUNTIME_DIGIT) digit_ui_clear(&r->digit);
     if (screen == RUNTIME_PONG) pong_init(&r->pong);
     if (screen == RUNTIME_TETRIS) tetris_init(&r->tetris, 1);
 }
@@ -114,8 +115,10 @@ void runtime_draw(struct runtime *r, const struct gfx_surface *s)
         gfx_draw_text(s, 40, 26, "TINY COMPUTER", 4, 0x1f);
         /* Four entries need tighter spacing than three: 30 pixels apart from y=70
          * keeps the last one clear of the help line. Every menu frame hash changes
-         * with this layout; the state checksum does not, because it folds the
-         * selection and not the pixels. */
+         * with this layout. The state checksum does not change for a session whose
+         * final selection is unchanged, which is why the capstone replay kept its
+         * PASS word; the graphics replay wraps upward from entry 0 and so now ends
+         * on selection 3 instead of 2, and its word did change. */
         gfx_draw_text(s, 100, 70, "PONG", 3, 0xff);
         gfx_draw_text(s, 100, 100, "TETRIS", 3, 0xff);
         gfx_draw_text(s, 100, 130, "DIGIT", 3, 0xff);

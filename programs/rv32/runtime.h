@@ -6,7 +6,9 @@
 #include "gpu_demo.h"
 #include "tetris_game.h"
 /* The order of this enum is the order of the menu: runtime_event selects with
- * RUNTIME_PONG + selected, so a new screen must keep the range contiguous. */
+ * RUNTIME_PONG + selected, so a new screen must keep the range contiguous.
+ * Selection wraps with a mask, which is correct only while RUNTIME_ENTRIES is a
+ * power of two; a fifth entry needs a modulo or an explicit compare. */
 enum runtime_screen { RUNTIME_MENU, RUNTIME_PONG, RUNTIME_TETRIS, RUNTIME_DIGIT, RUNTIME_GPU };
 #define RUNTIME_ENTRIES 4u
 struct runtime {
