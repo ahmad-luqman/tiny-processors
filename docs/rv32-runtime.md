@@ -2,11 +2,11 @@
 
 ## Behavior contract
 
-One RV32I image boots to a two-entry menu. UP/DOWN toggles the selection between Pong and Tetris;
-ENTER starts a fresh game. ESCAPE returns to the menu. Q ends the session
+One RV32I image boots to a three-entry menu. UP/DOWN cycles through Pong, Tetris and the G1 2D demo;
+ENTER starts the selected game or demo. ESCAPE returns to the menu. Q ends the session
 with `PASS <state checksum>`. P pauses and R restarts a game. At game over,
 the result remains for 180 presented frames (R can restart), then the menu
-returns. Standalone M6 Pong keeps its original controls and recording.
+returns. Standalone M6 Pong keeps its original controls and recording. The [G1 demo](rv32-gfx.md#guest-demo-and-commands) also uses SPACE to switch CPU/accelerator rendering.
 
 Each iteration drains queued events, checks quit, reads KEYS, advances one
 logical frame, draws, and presents. Events delivered by present N affect
@@ -167,7 +167,8 @@ Addresses and step numbers describe this build and can move after edits.
   at both `-O0` and `-O2`, and under AddressSanitizer/UndefinedBehaviorSanitizer;
   the 68-frame native session matches the pinned hashes.
 - Emulator, Icarus and Verilator: `PASS ea60197e`, 68 identical checkpoints and
-  2,220,509 identical retirement lines, zero traps. Icarus: 9,304,243 cycles;
+  2,220,509 identical retirement lines at M7, zero traps (the current G1 build
+  has a larger startup/menu path; see [G1 acceptance](rv32-gfx.md#acceptance-evidence)). Icarus: 9,304,243 cycles;
   Verilator with one stall/request: 11,946,959 cycles, 2,642,716 transfers.
   The cycle relation is exact: `4 × 1,798,302 + 5 × 422,207 + stalls`.
 - All existing RV32 suites, QEMU reference checks, strict lint and the existing

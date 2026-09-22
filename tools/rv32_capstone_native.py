@@ -19,7 +19,7 @@ EXPECTED = ROOT / "programs/rv32/capstone.expected"
 def build(optimization="O2"):
     output = ROOT / f"build/rv32/host/librv32capstone-{optimization}.dylib"
     output.parent.mkdir(parents=True, exist_ok=True)
-    sources = [ROOT / f"programs/rv32/{name}.c" for name in ("runtime", "tetris_game", "pong_game", "gfx", "gfx_text")]
+    sources = [ROOT / f"programs/rv32/{name}.c" for name in ("gpu_demo", "gpu_ref", "runtime", "tetris_game", "pong_game", "gfx", "gfx_text")]
     sources.append(ROOT / "tests/rv32_capstone_native.c")
     subprocess.run([os.environ.get("HOST_CC", "cc"), "-shared", "-fPIC", f"-{optimization}", "-std=c11",
                     "-Wall", "-Wextra", "-Werror", "-fno-builtin", "-I" + str(ROOT / "programs/rv32"),

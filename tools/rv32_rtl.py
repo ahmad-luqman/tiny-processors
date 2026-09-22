@@ -20,12 +20,13 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.rv32_asm import PROGRAM_INPUTS, PROGRAMS, TIMER, SIMD_BASE, SIMD_COMMAND, SIMD_STATUS, SIMD_ENTRY, SIMD_CYCLES, SIMD_STALLS, SIMD_TRANSFERS, SIMD_INSTRUCTIONS, words_to_bytes, words_to_hex  # noqa: E402
+from tools.rv32_asm import GPU_BASE, GPU_COMMAND, GPU_STATUS, GPU_ERROR, GPU_CYCLES, GPU_STALLS, GPU_READS, GPU_WRITES
 from tools.rv32_image import to_hex_words  # noqa: E402
 from tools.rv32_run_emu import DEFAULT_EMULATOR, emulator_command, halt_line, last_halt_line, parse_halt_line  # noqa: E402
 
 RTL_SOURCES = [ROOT / "rtl" / "rv32" / name
                for name in ("rv32_fregfile.v", "rv32_fdecode.v", "rv32_regfile.v", "rv32_alu.v", "rv32_decode.v", "rv32.v",
-                            "rv32_bus.v", "rv32_ram.v", "rv32_console.v", "rv32_done.v", "rv32_timer.v", "rv32_input.v", "rv32_display.v", "rv32_soc.v", "rv32_simd4.v")]
+                            "rv32_bus.v", "rv32_ram.v", "rv32_console.v", "rv32_done.v", "rv32_timer.v", "rv32_input.v", "rv32_display.v", "rv32_soc.v", "rv32_gpu.v", "rv32_simd4.v")]
 RTL_SOURCES.extend([ROOT / "rtl/fp32/fp32.v", ROOT / "rtl/simd4/simd4.v"])
 TESTBENCH = ROOT / "tests" / "rv32_tb.sv"
 DEFAULT_SIMULATOR = "build/rv32/rv32_tb.vvp"
@@ -54,7 +55,7 @@ def compile_testbench(output, iverilog="iverilog", params=None):
 
 
 def simulator_command(simulator, image, trace=None, console=None, wave=None, stall=None, seed=None, max_cycles=None,
-                      checkpoints=None, input_script=None, reset_at=None, allow_lost_events=False, simd_stall=None, simd_seed=None):
+                      checkpoints=None, input_script=None, reset_at=None, allow_lost_events=False, simd_stall=None, simd_seed=None, gpu_stall=None, gpu_seed=None):
     """The command line for a compiled testbench: `vvp` for a .vvp file, else a Verilator binary."""
     simulator = Path(simulator)
     if simulator.suffix == ".vvp":
@@ -84,6 +85,8 @@ def simulator_command(simulator, image, trace=None, console=None, wave=None, sta
         command.append(f"+simd-stall={simd_stall}")
     if simd_seed is not None:
         command.append(f"+simd-seed={simd_seed}")
+    if gpu_stall is not None: command.append(f"+gpu-stall={gpu_stall}")
+    if gpu_seed is not None: command.append(f"+gpu-seed={gpu_seed}")
     if allow_lost_events:
         command.append("+allow-lost-events")
     return command
@@ -160,13 +163,13 @@ def run_backend(command, trace, parse_halt, timeout, console=None, checkpoints=N
 
 
 def run_rtl(simulator, image_hex, trace, stall=None, seed=None, wave=None, max_cycles=None, timeout=120,
-            checkpoints=None, input_script=None, reset_at=None, allow_lost_events=False, simd_stall=None, simd_seed=None):
+            checkpoints=None, input_script=None, reset_at=None, allow_lost_events=False, simd_stall=None, simd_seed=None, gpu_stall=None, gpu_seed=None):
     """Run the testbench on a hex image with the documented plusargs; the console goes next to the trace."""
     console = Path(trace).with_name(Path(trace).name + ".console")
     command = simulator_command(simulator, image_hex, trace=trace, console=console, wave=wave,
                                 stall=stall, seed=seed, max_cycles=max_cycles, checkpoints=checkpoints,
                                 input_script=input_script, reset_at=reset_at, allow_lost_events=allow_lost_events,
-                                simd_stall=simd_stall, simd_seed=simd_seed)
+                                simd_stall=simd_stall, simd_seed=simd_seed, gpu_stall=gpu_stall, gpu_seed=gpu_seed)
     return run_backend(command, trace, rtl_halt_line, timeout, console=console, checkpoints=checkpoints)
 
 
@@ -237,10 +240,12 @@ def trap_records(trace):
 SIMD_ACCESS = re.compile(r"mem\[(?:" + "|".join(f"{SIMD_BASE+offset:08x}" for offset in
     (SIMD_COMMAND, SIMD_STATUS, SIMD_ENTRY, SIMD_CYCLES, SIMD_STALLS, SIMD_TRANSFERS, SIMD_INSTRUCTIONS)) + r")\](?:->|<-)")
 
+GPU_ACCESS = re.compile(r"mem\[(?:" + "|".join(f"{GPU_BASE+offset:08x}" for offset in
+    (GPU_COMMAND, GPU_STATUS, GPU_ERROR, GPU_CYCLES, GPU_STALLS, GPU_READS, GPU_WRITES)) + r")\](?:->|<-)")
 
 def uses_accelerator(trace):
     """Only successful register accesses justify asynchronous result comparison."""
-    return any(SIMD_ACCESS.search(line) for line in trace)
+    return any(SIMD_ACCESS.search(line) or GPU_ACCESS.search(line) for line in trace)
 
 
 def store_records(trace):
@@ -355,6 +360,9 @@ def main():
     parser.add_argument("--input", type=Path,
                         help="input script delivered to both backends (docs/rv32.md, Input); not a file under --out")
     parser.add_argument("--frames", type=Path, help="directory for the emulator's frame-NNNN.ppm pictures")
+    gpu_delay = parser.add_mutually_exclusive_group()
+    gpu_delay.add_argument("--gpu-stall",type=int,help="fixed waits per graphics memory transfer")
+    gpu_delay.add_argument("--gpu-seed",type=int,help="seeded 0..3 graphics memory waits")
     simd_delay = parser.add_mutually_exclusive_group()
     simd_delay.add_argument("--simd-stall", type=int, help="fixed wait cycles per accelerator data transfer")
     simd_delay.add_argument("--simd-seed", type=int, help="seeded 0..3 waits per accelerator data transfer")
@@ -378,7 +386,7 @@ def main():
     args = parser.parse_args()
     if args.compare_stores and args.compare != "results":
         parser.error("--compare-stores requires --compare results")
-    for option in ("simd_stall", "simd_seed"):
+    for option in ("simd_stall", "simd_seed", "gpu_stall", "gpu_seed"):
         value = getattr(args, option)
         if value is not None and not 0 <= value <= 2147483647:
             parser.error(f"--{option.replace('_', '-')} must be in 0..2147483647")
@@ -458,7 +466,7 @@ def main():
         for stall, seed in [(0, None), (1, None), (2, None), (3, None), (None, seed)]:
             rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=seed,
                           timeout=args.timeout, max_cycles=args.max_cycles, checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input,
-                          allow_lost_events=args.allow_lost_events, simd_stall=args.simd_stall, simd_seed=args.simd_seed)
+                          allow_lost_events=args.allow_lost_events, simd_stall=args.simd_stall, simd_seed=args.simd_seed, gpu_stall=args.gpu_stall, gpu_seed=args.gpu_seed)
             check_passed(rtl)
             check_fp_waits(rtl, args.expect_fp_waits)
             mismatch = compare_backends(rtl, emulator, args.compare, compare_stores=args.compare_stores)  # the same agreement as a check run
@@ -483,7 +491,7 @@ def main():
     wave = out / f"{name}.vcd" if args.mode == "waves" else None
     rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=args.seed, wave=wave,
                   timeout=args.timeout, max_cycles=args.max_cycles, checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input,
-                  allow_lost_events=args.allow_lost_events, simd_stall=args.simd_stall, simd_seed=args.simd_seed)
+                  allow_lost_events=args.allow_lost_events, simd_stall=args.simd_stall, simd_seed=args.simd_seed, gpu_stall=args.gpu_stall, gpu_seed=args.gpu_seed)
     print(emulator.stderr.strip().splitlines()[-1])
     print(rtl.stderr.strip().splitlines()[-1] if rtl.stderr.strip() else "rv32_tb: no halt line")
     check_passed(rtl)

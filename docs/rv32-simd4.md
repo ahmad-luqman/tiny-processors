@@ -130,13 +130,13 @@ continues to use its original results comparison.
    with FAULT set; it never rolls back earlier stores.
 
 Synthesis uses the repository's 64-word RAM/framebuffer configuration but full
-256-word accelerator memories. The final SoC has **112,374 generic cells and
+256-word accelerator memories. Current SoC totals are in [G1](rv32-gfx.md#from-commands-to-gates). The A2 milestone SoC had **112,374 generic cells and
 21,840 flip-flops**, with no latches. The wrapper plus SIMD4 accounts for
 53,867 cells and 12,925 flip-flops: 12,288 memory bits, eight ENTRY bits and the
 629-flop engine. These are generic flattened-memory costs, not FPGA block-RAM
 utilization or a clock-frequency prediction. Ownership muxes select addresses
 before the memories, avoiding duplicate read ports; the full protocol suite
-verifies both owners through these ports. Reproduce the counts with
+verifies both owners through these ports. Reproduce current whole-SoC counts with
 `make synth-rv32-soc` (`build/rv32-soc-synth.log` and `build/rv32-soc.json`).
 
 ## Measured device work

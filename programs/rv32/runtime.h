@@ -2,9 +2,11 @@
 #ifndef RV32_RUNTIME_H
 #define RV32_RUNTIME_H
 #include "pong_game.h"
+#include "gpu_demo.h"
 #include "tetris_game.h"
-enum runtime_screen { RUNTIME_MENU, RUNTIME_PONG, RUNTIME_TETRIS };
+enum runtime_screen { RUNTIME_MENU, RUNTIME_PONG, RUNTIME_TETRIS, RUNTIME_GPU };
 struct runtime {
+    struct gpu_demo demo;
     struct pong pong;
     struct tetris tetris;
     uint32_t screen, selected, quit, blocked, transition, dirty, over_frames, frames;

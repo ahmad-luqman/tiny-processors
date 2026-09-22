@@ -41,6 +41,26 @@ module rv32_tb;
     integer dropped = 0;       // pushes the full queue refused
     reg allow_lost_events = 0; // +allow-lost-events: a dropped or undelivered event is not a failure
     reg simd_memory_hold = 0;
+    reg gpu_memory_hold = 0;
+    integer gpu_stall=0,gpu_seed=0,gpu_age=0,gpu_delay=0;
+    reg gpu_fixed=0,gpu_random=0,gpu_chosen=0,gpu_held=0;
+    reg [40:0] gpu_request;
+    always @(negedge clk)begin
+        if(reset || !dut.gm_valid)begin gpu_memory_hold=0;gpu_chosen=0;end
+        else begin
+            if(!gpu_chosen)begin gpu_delay=gpu_random?($unsigned($random(gpu_seed))%4):gpu_stall;gpu_chosen=1;end
+            gpu_memory_hold=gpu_age<gpu_delay;
+        end
+    end
+    always @(posedge clk)begin
+        if(gpu_held && !dut.gpu_cancel && (!dut.gm_valid || gpu_request!=={dut.gm_we,dut.gm_addr,dut.gm_wdata}))
+            $fatal(1,"GPU request changed while stalled");
+        if(reset || dut.gpu_cancel || !dut.gm_valid)begin gpu_age=0;gpu_held=0;gpu_chosen=0;end
+        else begin
+            gpu_request={dut.gm_we,dut.gm_addr,dut.gm_wdata};gpu_held=!dut.gm_ready;
+            if(dut.gm_ready)begin gpu_age=0;gpu_chosen=0;end else gpu_age=gpu_age+1;
+        end
+    end
     integer simd_stall = 0, simd_seed = 0, simd_age = 0, simd_delay = 0;
     reg simd_fixed = 0, simd_random = 0, simd_chosen = 0, simd_held = 0;
     reg [24:0] simd_request;
@@ -565,6 +585,9 @@ module rv32_tb;
             simd_seed = plusarg_count("simd-seed", text, 0);
             simd_random = 1;
         end
+        if($value$plusargs("gpu-stall=%s",text))begin gpu_stall=plusarg_count("gpu-stall",text,0);gpu_fixed=1;end
+        if($value$plusargs("gpu-seed=%s",text))begin gpu_seed=plusarg_count("gpu-seed",text,0);gpu_random=1;end
+        if(gpu_fixed && gpu_random)$fatal(1,"+gpu-stall and +gpu-seed are exclusive");
         if (simd_fixed && simd_random) $fatal(1, "+simd-stall and +simd-seed are exclusive");
         if (stall_given && random_stall) $fatal(1, "+stall and +stall-seed are exclusive");
         if ($value$plusargs("max-cycles=%s", text))

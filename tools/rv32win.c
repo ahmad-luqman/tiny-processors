@@ -9,7 +9,7 @@
  * nothing else does; diagnostics and the final `rv32win: halt=...` line go
  * to stderr with the headless exit status.
  *
- * Build: make build-rv32-win (links the core, SIMD4 device and pinned SoftFloat objects).
+ * Build: make build-rv32-win (links the core, SIMD4/graphics devices and pinned SoftFloat objects).
  * SDL 3.4.16 from Homebrew (zlib license, https://libsdl.org/).
  */
 #define _POSIX_C_SOURCE 200809L

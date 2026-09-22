@@ -63,7 +63,19 @@ windows and matching emulator behavior. The guest checks vector addition and
 signed/unsigned matrix products, faults, relaunch and timeout recovery. CPU and
 accelerator take turns owning the buffers; reset preserves accepted stores.
 See [the A2 contract, gates, measurements and reset walkthrough](docs/rv32-simd4.md).
-G1 (2D acceleration) is next.
+## 2D accelerator (G1)
+
+```sh
+make run-rv32-capstone                 # Select 2D DEMO: SPACE switches CPU/GPU
+make test-rv32-gfx test-rv32-gfx-verilator
+make run-rv32-gfx-menu-rtl-verilator    # Bounded scripted menu replay
+make bench-rv32-gfx waves-rv32-gfx
+```
+
+Fill, RAM/framebuffer blits, lines and filled triangles run on a dedicated integer
+engine. Guest software checks accelerated pixels against its reference; ownership,
+clipping, overlap, stalls and reset are verified. See [the G1 contract, measurements
+and gates walkthrough](docs/rv32-gfx.md). N1 digit inference follows G1.
 
 ## Start here
 
@@ -170,7 +182,7 @@ The 78-instruction loop produces identical traces on both backends at every stal
 
 ## RV32 machine: bus, devices, and the diagnostic
 
-[rtl/rv32/rv32_soc.v](rtl/rv32/rv32_soc.v) wires the core to a bus decoder (one comparator per window, a one-hot read mux, fetches refused outside RAM) and to the machine's memories and devices: RAM, the console, the done register, a timer, a 16-event input queue with a held-key mask, a display controller, and a 320×240 framebuffer of 8-bit pixels. [tools/rv32emu_core.c](tools/rv32emu_core.c) models the same windows with the same fault edges, schedules key events from a script by frame, hashes the framebuffer into a checkpoint at each present, and writes frames as PPM files. A tick is a clock cycle on the RTL and an executed instruction on the emulator, so the [device diagnostic](programs/rv32/diag.c), which exercises every device and reads the timer, is compared at the results level: five identical console lines ending `PASS 8bd87e9a` and identical checkpoints on the emulator, Icarus, and Verilator, with the frame hash and the checksum derived independently in Python. Programs that neither read the timer nor access asynchronous accelerator registers stay trace-identical.
+[rtl/rv32/rv32_soc.v](rtl/rv32/rv32_soc.v) wires the core to a bus decoder (one comparator per window, a one-hot read mux, fetches refused outside RAM) and to the machine's memories and devices: RAM, the console, the done register, a timer, a 16-event input queue with a held-key mask, a display controller, a 320×240 framebuffer of 8-bit pixels, the A2 SIMD4 accelerator, and the G1 integer rasterizer. [tools/rv32emu_core.c](tools/rv32emu_core.c) models the same windows with the same fault edges, schedules key events from a script by frame, hashes the framebuffer into a checkpoint at each present, and writes frames as PPM files. A tick is a clock cycle on the RTL and an executed instruction on the emulator, so the [device diagnostic](programs/rv32/diag.c), which exercises every device and reads the timer, is compared at the results level: five identical console lines ending `PASS 8bd87e9a` and identical checkpoints on the emulator, Icarus, and Verilator, with the frame hash and the checksum derived independently in Python. Programs that neither read the timer nor access asynchronous accelerator registers stay trace-identical.
 
 ```sh
 make run-rv32-diag-emu        # the diagnostic on the emulator: PASS, checkpoints, build/rv32/frames/*.ppm

@@ -33,6 +33,15 @@ class CapstoneTests(unittest.TestCase):
             self.assertEqual(checkpoints, EXPECTED.read_text().splitlines())
             self.assertEqual(f"{checksum:08x}", expected_hex[1])
 
+    def test_g1_menu_session(self):
+        expected_hex=re.search(r"^RV32_GFX_MENU_HEX := ([0-9a-f]{8})$",(ROOT/'Makefile').read_text(),re.M)
+        self.assertIsNotNone(expected_hex)
+        for lib in self.libs:
+            checkpoints,checksum,frames=run_session(lib,parse_input_script((ROOT/'programs/rv32/gfx.input').read_text()))
+            self.assertEqual(frames,8)
+            self.assertEqual(f"{checksum:08x}",expected_hex[1])
+            self.assertEqual(checkpoints,(ROOT/'programs/rv32/gfx.expected').read_text().splitlines())
+
     def test_bad_sessions_fail(self):
         lib = self.libs[-1]
         for script, message in (("", "no quit within"),

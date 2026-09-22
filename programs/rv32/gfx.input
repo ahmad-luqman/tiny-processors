@@ -1,0 +1,16 @@
+# Third menu entry, pause, CPU/accelerator switch, restart, return and quit.
+frame 1 down UP
+frame 2 up UP
+frame 2 down ENTER
+frame 3 up ENTER
+frame 3 down P
+frame 4 up P
+frame 4 down SPACE
+frame 5 up SPACE
+frame 5 down SPACE
+frame 6 up SPACE
+frame 6 down R
+frame 7 up R
+frame 7 down ESCAPE
+frame 8 up ESCAPE
+frame 8 down Q
