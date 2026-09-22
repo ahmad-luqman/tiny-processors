@@ -1,22 +1,23 @@
 #include "rv32_gpu.h"
 #include <string.h>
-enum { SETUP=1, SCAN, READ, WRITE, ADVANCE };
 static int32_t min(int32_t a,int32_t b){return a<b?a:b;}
 static int32_t max(int32_t a,int32_t b){return a>b?a:b;}
 static bool coord(uint32_t a){return (int32_t)a>=-1024 && (int32_t)a<=1023;}
+static uint64_t source_end(const uint32_t *p)
+{return (uint64_t)p[GP_SRC]+(uint64_t)(p[GP_SH]?p[GP_SH]-1:0)*p[GP_STRIDE]+p[GP_SW];}
 void gpu_device_reset(gpu_device *g){memset(g,0,sizeof *g);}
 bool gpu_access(gpu_device *g,uint32_t off,int width,bool write,uint32_t *v)
 {
     if(width!=4 || (off&3)) return false;
     if(off>=GPU_PARAMS && off<128) {
-        if(write){if(g->status&GPU_BUSY)return false;g->p[(off-GPU_PARAMS)/4]=*v;}
+        if(write){if(gpu_busy(g))return false;g->p[(off-GPU_PARAMS)/4]=*v;}
         else *v=g->p[(off-GPU_PARAMS)/4];
         return true;
     }
     if(write) {
         if(off!=GPU_COMMAND)return false;
         if(*v==GPU_RESET){gpu_device_reset(g);g->command_tick=true;return true;}
-        if(*v!=GPU_START || (g->status&GPU_BUSY))return false;
+        if(*v!=GPU_START || gpu_busy(g))return false;
         g->status=GPU_BUSY;g->phase=SETUP;g->error=g->cycles=g->stalls=g->reads=g->writes=0;
         g->command_tick=true;return true;
     }
@@ -30,8 +31,8 @@ bool gpu_access(gpu_device *g,uint32_t off,int width,bool write,uint32_t *v)
 bool gpu_source_locked(const gpu_device *g,uint32_t addr,int width)
 {
     const uint32_t *p=g->p;
-    uint64_t end=(uint64_t)p[GP_SRC]+(uint64_t)(p[GP_SH]?p[GP_SH]-1:0)*p[GP_STRIDE]+p[GP_SW];
-    return (g->status&GPU_BUSY) && p[GP_OP]==GPU_BLIT && p[GP_SRC]>=0x80000000u &&
+    uint64_t end=source_end(p);
+    return gpu_busy(g) && p[GP_OP]==GPU_BLIT && p[GP_SRC]>=0x80000000u &&
            p[GP_SH]!=0 && end<=UINT32_MAX &&
            (uint64_t)addr+width>p[GP_SRC] && addr<end;
 }
@@ -42,7 +43,7 @@ static bool inside(int32_t ax,int32_t ay,int32_t bx,int32_t by,int32_t x,int32_t
 void gpu_tick(gpu_device *g,uint8_t *ram,uint32_t ram_size,uint8_t *fb,bool hold)
 {
     if(g->command_tick){g->command_tick=false;return;}
-    if(!(g->status&GPU_BUSY))return;
+    if(!gpu_busy(g))return;
     uint32_t *p=g->p,op=p[GP_OP];
     g->cycles++;
     if(g->phase==SETUP){
@@ -51,13 +52,13 @@ void gpu_tick(gpu_device *g,uint8_t *ram,uint32_t ram_size,uint8_t *fb,bool hold
         if(op==GPU_TRIANGLE)valid=valid&&coord(p[GP_X2])&&coord(p[GP_Y2]);
         if(op==GPU_FILL || op==GPU_BLIT)valid=valid&&p[GP_W]<=2048&&p[GP_H]<=2048;
         if(op==GPU_BLIT){
-            uint64_t end=(uint64_t)p[GP_SRC]+(uint64_t)(p[GP_SH]?p[GP_SH]-1:0)*p[GP_STRIDE]+p[GP_SW];
+            uint64_t end=source_end(p);
             bool source=p[GP_SRC]==0x30000000u ? p[GP_SW]==320&&p[GP_SH]==240&&p[GP_STRIDE]==320 :
                 p[GP_SRC]>=0x80000000u && end<=(uint64_t)0x80000000u+ram_size;
             valid=valid&&coord(p[GP_SX])&&coord(p[GP_SY])&&p[GP_SW]>0&&p[GP_SW]<=2048&&
                 p[GP_SH]>0&&p[GP_SH]<=2048&&p[GP_STRIDE]>=p[GP_SW]&&p[GP_STRIDE]<=65535&&source;
         }
-        if(!valid){g->status=GPU_FAULT;g->error=1;g->phase=0;return;}
+        if(!valid){g->status=GPU_FAULT;g->error=GPU_INVALID;g->phase=IDLE;return;}
         g->ax=(int32_t)p[GP_X0];g->ay=(int32_t)p[GP_Y0];
         g->bx=(int32_t)p[GP_X1];g->by=(int32_t)p[GP_Y1];
         g->cx=(int32_t)p[GP_X2];g->cy=(int32_t)p[GP_Y2];
@@ -68,8 +69,10 @@ void gpu_tick(gpu_device *g,uint8_t *ram,uint32_t ram_size,uint8_t *fb,bool hold
             g->x=g->ax;g->y=g->ay;g->dx=g->bx-g->ax;g->dy=g->by-g->ay;
             g->sy=g->dy<0?-1:1;if(g->dy<0)g->dy=-g->dy;g->err=g->dx-g->dy;
         }else{
-            g->lo=max(0,g->ax);g->top=max(0,g->ay);
-            g->hi=min(320,g->ax+(int32_t)p[GP_W]);g->bottom=min(240,g->ay+(int32_t)p[GP_H]);
+            if(op==GPU_FILL || op==GPU_BLIT){
+                g->lo=max(0,g->ax);g->top=max(0,g->ay);
+                g->hi=min(320,g->ax+(int32_t)p[GP_W]);g->bottom=min(240,g->ay+(int32_t)p[GP_H]);
+            }
             g->step=1;
             if(op==GPU_BLIT){
                 int32_t sx=(int32_t)p[GP_SX],sy=(int32_t)p[GP_SY];
@@ -79,12 +82,12 @@ void gpu_tick(gpu_device *g,uint8_t *ram,uint32_t ram_size,uint8_t *fb,bool hold
             }
             if(op==GPU_TRIANGLE){
                 int32_t area=(g->bx-g->ax)*(g->cy-g->ay)-(g->by-g->ay)*(g->cx-g->ax);
-                if(!area){g->status=GPU_DONE;g->phase=0;return;}
+                if(!area){g->status=GPU_DONE;g->phase=IDLE;return;}
                 if(area<0){int32_t t=g->bx;g->bx=g->cx;g->cx=t;t=g->by;g->by=g->cy;g->cy=t;}
                 g->lo=max(0,min(g->ax,min(g->bx,g->cx)));g->top=max(0,min(g->ay,min(g->by,g->cy)));
                 g->hi=min(320,max(g->ax,max(g->bx,g->cx)));g->bottom=min(240,max(g->ay,max(g->by,g->cy)));
             }
-            if(g->lo>=g->hi || g->top>=g->bottom){g->status=GPU_DONE;g->phase=0;return;}
+            if(g->lo>=g->hi || g->top>=g->bottom){g->status=GPU_DONE;g->phase=IDLE;return;}
             g->x=g->step>0?g->lo:g->hi-1;g->y=g->step>0?g->top:g->bottom-1;
         }
         g->phase=SCAN;
@@ -100,7 +103,7 @@ void gpu_tick(gpu_device *g,uint8_t *ram,uint32_t ram_size,uint8_t *fb,bool hold
             g->pixel=p[GP_SRC]==0x30000000u?fb[off]:ram[p[GP_SRC]-0x80000000u+off];
             g->reads++;g->phase=WRITE;
         }else{fb[g->y*320+g->x]=g->pixel;g->writes++;g->phase=ADVANCE;}
-    }else{
+    }else if(g->phase==ADVANCE){
         bool done=false;
         if(op==GPU_LINE){
             done=g->x==g->bx&&g->y==g->by;int32_t e2=2*g->err;
@@ -108,6 +111,6 @@ void gpu_tick(gpu_device *g,uint8_t *ram,uint32_t ram_size,uint8_t *fb,bool hold
         }else if(g->x==(g->step>0?g->hi-1:g->lo)){
             done=g->y==(g->step>0?g->bottom-1:g->top);g->x=g->step>0?g->lo:g->hi-1;g->y+=g->step;
         }else g->x+=g->step;
-        g->status=done?GPU_DONE:GPU_BUSY;g->phase=done?0:SCAN;
-    }
+        g->status=done?GPU_DONE:GPU_BUSY;g->phase=done?IDLE:SCAN;
+    }else{g->status=GPU_FAULT;g->error=GPU_INTERNAL;g->phase=IDLE;}
 }

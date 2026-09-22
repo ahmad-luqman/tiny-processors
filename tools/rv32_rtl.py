@@ -20,6 +20,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.rv32_asm import PROGRAM_INPUTS, PROGRAMS, TIMER, SIMD_BASE, SIMD_COMMAND, SIMD_STATUS, SIMD_ENTRY, SIMD_CYCLES, SIMD_STALLS, SIMD_TRANSFERS, SIMD_INSTRUCTIONS, words_to_bytes, words_to_hex  # noqa: E402
+from tools.rv32_asm import GPU_BASE, GPU_COMMAND, GPU_STATUS, GPU_ERROR, GPU_CYCLES, GPU_STALLS, GPU_READS, GPU_WRITES
 from tools.rv32_image import to_hex_words  # noqa: E402
 from tools.rv32_run_emu import DEFAULT_EMULATOR, emulator_command, halt_line, last_halt_line, parse_halt_line  # noqa: E402
 
@@ -239,10 +240,12 @@ def trap_records(trace):
 SIMD_ACCESS = re.compile(r"mem\[(?:" + "|".join(f"{SIMD_BASE+offset:08x}" for offset in
     (SIMD_COMMAND, SIMD_STATUS, SIMD_ENTRY, SIMD_CYCLES, SIMD_STALLS, SIMD_TRANSFERS, SIMD_INSTRUCTIONS)) + r")\](?:->|<-)")
 
+GPU_ACCESS = re.compile(r"mem\[(?:" + "|".join(f"{GPU_BASE+offset:08x}" for offset in
+    (GPU_COMMAND, GPU_STATUS, GPU_ERROR, GPU_CYCLES, GPU_STALLS, GPU_READS, GPU_WRITES)) + r")\](?:->|<-)")
 
 def uses_accelerator(trace):
     """Only successful register accesses justify asynchronous result comparison."""
-    return any(SIMD_ACCESS.search(line) or re.search(r"mem\[200070[0-7][0-9a-f]\](?:->|<-)",line) for line in trace)
+    return any(SIMD_ACCESS.search(line) or GPU_ACCESS.search(line) for line in trace)
 
 
 def store_records(trace):
@@ -359,7 +362,7 @@ def main():
     parser.add_argument("--frames", type=Path, help="directory for the emulator's frame-NNNN.ppm pictures")
     gpu_delay = parser.add_mutually_exclusive_group()
     gpu_delay.add_argument("--gpu-stall",type=int,help="fixed waits per graphics memory transfer")
-    gpu_delay.add_argument("--gpu-seed",type=int,help="seeded graphics memory waits")
+    gpu_delay.add_argument("--gpu-seed",type=int,help="seeded 0..3 graphics memory waits")
     simd_delay = parser.add_mutually_exclusive_group()
     simd_delay.add_argument("--simd-stall", type=int, help="fixed wait cycles per accelerator data transfer")
     simd_delay.add_argument("--simd-seed", type=int, help="seeded 0..3 waits per accelerator data transfer")

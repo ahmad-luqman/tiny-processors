@@ -7,7 +7,6 @@ int native_gpu_access(uint32_t off,int width,int write,uint32_t *v){return gpu_a
 void native_gpu_tick(int hold){gpu_tick(&g,ram,sizeof ram,fb,hold!=0);}
 uint8_t *native_gpu_fb(void){return fb;}
 uint8_t *native_gpu_ram(void){return ram;}
-uint32_t native_gpu_phase(void){return g.phase;}
 int native_gpu_lock(uint32_t addr,int width){return gpu_source_locked(&g,addr,width);}
 /* Two triangles exactly partition a 4x4 square; literal independent coverage. */
 int native_gpu_anchor(void)
@@ -35,6 +34,9 @@ int native_gpu_anchor(void)
 }
 #ifdef G1_NATIVE_MAIN
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
 int main(int argc,char **argv)
 {
     int result=native_gpu_anchor();
@@ -45,9 +47,13 @@ int main(int argc,char **argv)
         int mode,abort_tick,rc;unsigned jobs=0;
         native_gpu_init();
         while((rc=fscanf(input,"%d %d",&mode,&abort_tick))==2){
+            if(mode<0 || mode>3 || abort_tick < -1 || abort_tick>4000000)return 18;
             struct gpu_command c;
             for(unsigned i=0;i<16;i++){
-                if(fscanf(input,"%x",&c.p[i])!=1)return 11;
+                char token[10];
+                if(fscanf(input,"%9s",token)!=1 || strlen(token)!=8)return 11;
+                for(unsigned k=0;k<8;k++)if(!isxdigit((unsigned char)token[k]))return 11;
+                c.p[i]=(uint32_t)strtoul(token,0,16);
                 if(!gpu_access(&g,64+4*i,4,true,&c.p[i]))return 12;
             }
             for(unsigned i=0;i<76800;i++)before[i]=fb[i];
@@ -59,7 +65,7 @@ int main(int argc,char **argv)
                     if(mode&2)gpu_device_reset(&g);
                     else{uint32_t reset=2;if(!gpu_access(&g,0,4,true,&reset))return 14;}
                 }
-                gpu_tick(&g,ram,sizeof ram,fb,(mode&1) && ticks%7<2);
+                gpu_tick(&g,ram,sizeof ram,fb,(mode&1) && (ticks%7==2 || ticks%7==4));
                 if(++ticks>4000000)return 15;
             }
             if(g.status==GPU_DONE){
@@ -67,6 +73,9 @@ int main(int argc,char **argv)
                     c.p[GP_OP]==GPU_BLIT?ram+(c.p[GP_SRC]-0x80000000u):0;
                 gpu_reference(before,source,&c);
                 for(unsigned i=0;i<76800;i++)if(before[i]!=fb[i])return 16;
+            }
+            if(g.status==GPU_FAULT){
+                if(g.writes || g.reads || g.stalls || memcmp(before,fb,sizeof fb))return 19;
             }
             jobs++;
         }

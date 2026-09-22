@@ -7,7 +7,7 @@
  * emu_run_until reports, and host keys enter through emu_queue_event at the
  * same point scripted events do.
  *
- * Build: make build-rv32-emu (links the pinned host SoftFloat objects)
+ * Build: make build-rv32-emu (links SoftFloat, SIMD4 and the G1 device)
  */
 #ifndef RV32EMU_CORE_H
 #define RV32EMU_CORE_H
@@ -19,7 +19,8 @@
 #include "rv32_simd4.h"
 #include "rv32_gpu.h"
 
-/* Machine contract constants; keep in step with programs/rv32/board.h. */
+/* Machine contract constants; keep in step with programs/rv32/board.h;
+ * the graphics contract is imported from programs/rv32/gpu.h. */
 #define RAM_BASE 0x80000000u
 #define RAM_SIZE 0x00400000u
 #define CONSOLE_BASE 0x10000000u

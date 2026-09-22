@@ -19,7 +19,7 @@ int main(void)
 #ifdef G1_CPU
         gpu_reference((uint8_t *)RV32_FB_BASE,source,&c);
 #else
-        if(!gpu_submit(&c) || !gpu_wait(1000000))return 1;
+        if(!gpu_run(&c,1000000))return 1;
 #endif
         uint32_t elapsed=mmio_read32(RV32_TIMER_BASE)-start;
         rv32_puts("BENCH");number(op);number(elapsed);

@@ -11,7 +11,7 @@ static void pixel(uint8_t *fb, int32_t x, int32_t y, uint8_t c)
     if (x>=0 && x<320 && y>=0 && y<240) fb[(uint32_t)y*320u+(uint32_t)x]=c;
 }
 static int32_t edge(int32_t ax,int32_t ay,int32_t bx,int32_t by,int32_t x,int32_t y)
-{ return (bx-ax)*(y-2*ay)-(by-ay)*(x-2*ax); }
+{ return (bx-ax)*(2*y+1-2*ay)-(by-ay)*(2*x+1-2*ax); }
 static int inside(int32_t ax,int32_t ay,int32_t bx,int32_t by,int32_t x,int32_t y)
 {
     int32_t e=edge(ax,ay,bx,by,x,y);
@@ -58,8 +58,8 @@ void gpu_reference(uint8_t *fb, const uint8_t *source, const struct gpu_command 
         if(bottom>240)bottom=240;
         /* Evaluate each center directly, without device state or transfers. */
         for(int32_t y=top;y<bottom;y++) for(int32_t x=left;x<right;x++)
-            if(inside(x0,y0,x1,y1,2*x+1,2*y+1) && inside(x1,y1,x2,y2,2*x+1,2*y+1) &&
-               inside(x2,y2,x0,y0,2*x+1,2*y+1)) pixel(fb,x,y,color);
+            if(inside(x0,y0,x1,y1,x,y) && inside(x1,y1,x2,y2,x,y) &&
+               inside(x2,y2,x0,y0,x,y)) pixel(fb,x,y,color);
     } else {
         int32_t w=(int32_t)p[GP_W],h=(int32_t)p[GP_H];
         int32_t sx=(int32_t)p[GP_SX],sy=(int32_t)p[GP_SY];

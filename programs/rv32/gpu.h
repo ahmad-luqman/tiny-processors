@@ -13,6 +13,10 @@
 #define GPU_PARAMS 0x40u
 #define GPU_START 1u
 #define GPU_RESET 2u
+/* Status is a whole-value enumeration, not combinable flags. */
+#define GPU_IDLE 0u
+#define GPU_INVALID 1u
+#define GPU_INTERNAL 2u
 #define GPU_BUSY 1u
 #define GPU_DONE 2u
 #define GPU_FAULT 4u
@@ -28,9 +32,19 @@ void gpu_command_init(struct gpu_command *c, uint32_t op, uint32_t color);
 /* Software reference: RAM sources are supplied as a host/guest pointer separately.
  * Caller supplies valid bounded parameters; destination is exactly 320x240. */
 void gpu_reference(uint8_t *fb, const uint8_t *source, const struct gpu_command *c);
-/* Submit fails without mutation while busy. Wait resets on timeout (accepted
- * pixel writes survive); zero budget aborts immediately. */
+/* Submit fails without mutation while BUSY. Status values are returned by wait;
+ * GPU_TIMEOUT is driver-only. The budget counts MMIO polls, not device ticks.
+ * FAULT/IDLE return without reset; a subsequent submit is legal. Timeout saves
+ * diagnostics then resets; accepted pixel writes survive, even at budget zero. */
+#define GPU_TIMEOUT 8u
+struct gpu_result { uint32_t status, reason, cycles, stalls, reads, writes; };
 int gpu_submit(const struct gpu_command *c);
-int gpu_wait(uint32_t budget);
+uint32_t gpu_wait(uint32_t budget);
+/* Last failed wait's snapshot remains available after timeout reset. */
+const struct gpu_result *gpu_last_result(void);
+/* Submit and wait; print op/status/reason/counters on any failure. */
+int gpu_run(const struct gpu_command *c, uint32_t budget);
+/* Legal while BUSY; clears all parameters/status/counters and cancels unaccepted
+ * transfers. A raw START must rewrite parameters after RESET. */
 void gpu_reset(void);
 #endif

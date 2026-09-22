@@ -113,8 +113,6 @@ module rv32_soc #(
         .memory_hold(simd_memory_hold)
     );
 
-    // The memories index from their window's base, which is the bus's business: the two
-    // BASE values below repeat rv32_bus.v's RAM_BASE and FB_BASE, and a test pins them equal.
     wire gpu_busy, gpu_cancel, gpu_source_lock, gm_valid, gm_we, gm_ready;
     wire [31:0] gpu_source_begin, gpu_source_end, gm_addr;
     wire [7:0] gm_wdata, gm_rdata;
@@ -127,16 +125,18 @@ module rv32_soc #(
         .memory_ready(gm_ready), .memory_rdata(gm_rdata)
     );
     wire gm_ram=gm_valid && gm_addr[31];
-    wire gm_fb=gm_valid && !gm_addr[31];
+    wire gm_fb=gm_valid && gm_addr>=32'h3000_0000 && gm_addr<32'h3001_2c00;
     // RAM is immediate once granted. A held graphics request retains its grant;
     // after an acceptance simultaneous requests alternate, so neither starves.
     reg prefer_gpu, gpu_grant_held;
     wire grant_gpu=gm_ram && (gpu_grant_held || !ram_valid || prefer_gpu);
-    wire ram_cpu_fault=ram_valid && mem_we && gpu_source_lock &&
-        (((mem_strb[0] && {mem_addr[31:2],2'b00}>=gpu_source_begin && {mem_addr[31:2],2'b00}<gpu_source_end)) ||
-         ((mem_strb[1] && {mem_addr[31:2],2'b01}>=gpu_source_begin && {mem_addr[31:2],2'b01}<gpu_source_end)) ||
-         ((mem_strb[2] && {mem_addr[31:2],2'b10}>=gpu_source_begin && {mem_addr[31:2],2'b10}<gpu_source_end)) ||
-         ((mem_strb[3] && {mem_addr[31:2],2'b11}>=gpu_source_begin && {mem_addr[31:2],2'b11}<gpu_source_end)));
+    wire [3:0] source_byte_locked;
+    genvar lane;
+    generate for(lane=0;lane<4;lane=lane+1)begin: source_lanes
+        wire [31:0] byte_addr={mem_addr[31:2],2'b00}+lane;
+        assign source_byte_locked[lane]=mem_strb[lane] && byte_addr>=gpu_source_begin && byte_addr<gpu_source_end;
+    end endgenerate
+    wire ram_cpu_fault=ram_valid && mem_we && gpu_source_lock && |source_byte_locked;
     wire ram_physical_valid=grant_gpu ? !gpu_memory_hold : ram_valid && !ram_cpu_fault;
     wire ram_physical_ready, ram_physical_error;
     wire [31:0] ram_physical_rdata;
@@ -146,12 +146,13 @@ module rv32_soc #(
     always @(posedge clk) begin
         if(reset || gpu_cancel)begin prefer_gpu<=0;gpu_grant_held<=0;end
         else begin
+            gpu_grant_held<=grant_gpu && gpu_memory_hold;
             if(grant_gpu)begin
-                gpu_grant_held<=gpu_memory_hold;
                 if(!gpu_memory_hold)prefer_gpu<=0;
             end else if(ram_valid && ram_ready)prefer_gpu<=1;
         end
     end
+    // Memory BASE values repeat the bus decode; cross-language tests pin both.
     rv32_ram #(.WORDS(RAM_WORDS), .BASE(32'h8000_0000)) ram (
         .clk(clk), .reset(reset), .valid(ram_physical_valid), .we(!grant_gpu && mem_we),
         .addr(grant_gpu?gm_addr:mem_addr), .strb(grant_gpu?4'b1111:mem_strb), .wdata(mem_wdata),
@@ -204,7 +205,7 @@ module rv32_soc #(
     assign gm_rdata=gm_read_word[8*gm_addr[1:0]+:8];
     rv32_ram #(.WORDS(FB_WORDS), .BASE(32'h3000_0000)) fb (
         .clk(clk), .reset(reset), .valid(gpu_busy?fb_engine_accept:fb_valid),
-        .we(gpu_busy?gm_we:mem_we), .addr(gpu_busy?gm_addr:mem_addr),
+        .we(gpu_busy?gm_we:mem_we), .addr(gm_fb?gm_addr:(fb_valid?mem_addr:32'h3000_0000)),
         .strb(gpu_busy?(4'b0001<<gm_addr[1:0]):mem_strb),
         .wdata(gpu_busy?{4{gm_wdata}}:mem_wdata),
         .rdata(fb_physical_rdata), .ready(fb_physical_ready), .error(fb_physical_error)

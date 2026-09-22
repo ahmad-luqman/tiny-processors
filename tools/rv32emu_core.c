@@ -189,14 +189,14 @@ static mem_access input_load(machine *m, uint32_t offset, int width, uint32_t *v
 
 static mem_access fb_load(machine *m, uint32_t offset, int width, uint32_t *value)
 {
-    if(m->gpu.status & GPU_BUSY) return ACC_FAULT;
+    if(gpu_busy(&m->gpu)) return ACC_FAULT;
     *value = bytes_read(m->fb + offset, width);
     return ACC_OK;
 }
 
 static mem_access fb_store(machine *m, uint32_t offset, int width, uint32_t value)
 {
-    if(m->gpu.status & GPU_BUSY) return ACC_FAULT;
+    if(gpu_busy(&m->gpu)) return ACC_FAULT;
     bytes_write(m->fb + offset, width, value);
     return ACC_OK;
 }
@@ -281,7 +281,7 @@ static mem_access display_store(machine *m, uint32_t offset, int width, uint32_t
 {
     (void)value; /* any word presents */
     if (width == 4 && offset == DISPLAY_PRESENT) {
-        if(m->gpu.status & GPU_BUSY) return ACC_FAULT;
+        if(gpu_busy(&m->gpu)) return ACC_FAULT;
         present(m);
         return ACC_OK;
     }

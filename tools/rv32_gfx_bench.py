@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from tools.rv32_asm import GPU_BASE, GPU_PARAMS, GPU_STATUS, TIMER, FB, FB_SIZE
 from tools.rv32_rtl import run_rtl,run_emulator,check_passed,write_image
 
 def main():
@@ -29,21 +30,27 @@ def main():
             checks=(out/(tag+'.checkpoints')).read_text().splitlines()
             if len(checks)!=4:raise RuntimeError('missing benchmark checkpoints')
             if checks!=reference:raise RuntimeError(f'{tag}: framebuffer mismatch')
-            jobs=[list(map(int,line.split()[1:])) for line in run.console.splitlines() if line.startswith('BENCH ')]
-            if [j[0] for j in jobs]!=[1,2,3,4] or not run.console.endswith('PASS BENCH\n'):raise RuntimeError('invalid benchmark output')
+            fields=('op','elapsed') if name.endswith('_cpu') else ('op','elapsed','cycles','stalls','reads','writes')
+            rows=[list(map(int,line.split()[1:])) for line in run.console.splitlines() if line.startswith('BENCH ')]
+            if any(len(row)!=len(fields) for row in rows):raise RuntimeError('invalid benchmark row')
+            jobs=[dict(zip(fields,row,strict=True)) for row in rows]
+            if not name.endswith('_cpu'):
+                for job,(reads,writes) in zip(jobs,[(0,76800),(1024,1024),(0,51),(0,975)]):
+                    if (job['reads'],job['writes'])!=(reads,writes):raise RuntimeError('incorrect device traffic')
+            if [j['op'] for j in jobs]!=[1,2,3,4] or not run.console.endswith('PASS BENCH\n'):raise RuntimeError('invalid benchmark output')
             intervals=[];active=None
             for line in run.trace:
-                if 'mem[20000000]->' in line:
-                    if active is None:active={'cpu_instructions':0,'command_stores':0,'status_reads':0,'framebuffer_reads':0,'framebuffer_writes':0}
+                if f'mem[{TIMER:08x}]->' in line:
+                    if active is None:active={'cpu_instructions':0,'register_stores':0,'status_reads':0,'framebuffer_reads':0,'framebuffer_writes':0}
                     else:intervals.append(active);active=None
                 elif active is not None:
                     active['cpu_instructions']+=1
                     match=re.search(r'mem\[([0-9a-f]{8})\](->|<-)',line)
                     if match:
                         addr=int(match[1],16);write=match[2]=='<-'
-                        if 0x20007000<=addr<0x20007080 and write:active['command_stores']+=1
-                        if addr==0x20007004 and not write:active['status_reads']+=1
-                        if 0x30000000<=addr<0x30012c00:active['framebuffer_writes' if write else 'framebuffer_reads']+=1
+                        if GPU_BASE<=addr<GPU_BASE+GPU_PARAMS+64 and write:active['register_stores']+=1
+                        if addr==GPU_BASE+GPU_STATUS and not write:active['status_reads']+=1
+                        if FB<=addr<FB+FB_SIZE:active['framebuffer_writes' if write else 'framebuffer_reads']+=1
             if len(intervals)!=4 or active is not None:raise RuntimeError('missing timing intervals')
             results[tag]={'jobs':jobs,'traffic':intervals,'halt':run.halt,'checkpoints':checks}
             print(tag,jobs,flush=True)

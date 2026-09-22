@@ -341,6 +341,21 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertEqual((asm.SIMD_BASE,asm.SIMD_PROGRAM,asm.SIMD_DATA),
                          (0x20004000,0x20005000,0x20006000))
 
+    def test_gpu_register_contract_constants(self):
+        from tools import rv32_asm as asm
+        expected=dict(COMMAND=0,STATUS=4,ERROR=8,CYCLES=12,STALLS=16,READS=20,WRITES=24,
+                      PARAMS=64,IDLE=0,BUSY=1,DONE=2,FAULT=4,START=1,RESET=2,
+                      INVALID=1,INTERNAL=2,FILL=1,BLIT=2,LINE=3,TRIANGLE=4)
+        header=(ROOT/'programs/rv32/gpu.h').read_text()
+        rtl=(ROOT/'rtl/rv32/rv32_gpu.v').read_text()
+        for name,value in expected.items():
+            self.assertEqual(getattr(asm,'GPU_'+name),value,name)
+            match=re.search(rf'#define GPU_{name} (0x[0-9a-f]+|[0-9]+)u',header)
+            self.assertIsNotNone(match,name);self.assertEqual(int(match[1],0),value,name)
+            match=re.search(rf"GPU_{name} = 32'h([0-9a-f]+);",rtl)
+            self.assertIsNotNone(match,name);self.assertEqual(int(match[1],16),value,name)
+        self.assertEqual(asm.GPU_BASE,0x20007000)
+
     def test_key_table_and_windows_agree_across_languages(self):
         """The key table lives in board.h, the emulator, the window, the testbench, and this module's KEYS; the
         window bases in board.h, the bus, the machine's memory instances, and the assembler. None of

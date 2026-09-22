@@ -9,7 +9,7 @@ static uint8_t gpu_expected[320*240];
 static int hardware_emit(void *context,const struct gpu_command *c,const uint8_t *source)
 {
     (void)context;(void)source;
-    return gpu_submit(c) && gpu_wait(2000000);
+    return gpu_run(c,2000000);
 }
 static void draw_demo(void)
 {
@@ -18,7 +18,7 @@ static void draw_demo(void)
     (void)gpu_scene(app.demo.frame,gpu_software_emit,gpu_expected);
     if(!gpu_scene(app.demo.frame,hardware_emit,0))rv32_exit(80);
     volatile uint8_t *actual=(volatile uint8_t *)RV32_FB_BASE;
-    for(uint32_t i=0;i<sizeof gpu_expected;i++)if(actual[i]!=gpu_expected[i])rv32_exit(81);
+    for(uint32_t i=0;i<sizeof gpu_expected;i++)if(actual[i]!=gpu_expected[i]){rv32_puts("G1 pixel mismatch at ");rv32_put_hex32(i);rv32_putc('\n');rv32_exit(81);}
     gpu_demo_labels(&app.demo,&screen);
 }
 int main(void)

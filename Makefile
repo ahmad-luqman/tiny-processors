@@ -437,7 +437,7 @@ test-rv32: test-rv32-capstone run-rv32-capstone-emu run-rv32-capstone-rtl run-rv
 .PHONY: test-rv32-capstone-sanitize
 test-rv32-capstone-sanitize: | build/rv32
 	mkdir -p build/rv32/host
-	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fno-builtin -fsanitize=address,undefined -fno-omit-frame-pointer -DRV32_NATIVE_MAIN -Iprograms/rv32 tests/rv32_capstone_native.c programs/rv32/gpu_demo.c programs/rv32/gpu_ref.c programs/rv32/runtime.c programs/rv32/tetris_game.c programs/rv32/pong_game.c programs/rv32/gfx.c programs/rv32/gfx_text.c -o build/rv32/host/capstone-sanitize
+	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fno-builtin -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -DRV32_NATIVE_MAIN -Iprograms/rv32 tests/rv32_capstone_native.c programs/rv32/gpu_demo.c programs/rv32/gpu_ref.c programs/rv32/runtime.c programs/rv32/tetris_game.c programs/rv32/pong_game.c programs/rv32/gfx.c programs/rv32/gfx_text.c -o build/rv32/host/capstone-sanitize
 	build/rv32/host/capstone-sanitize
 
 # F1: standalone floating-point hardware with the pinned host oracle.
@@ -625,8 +625,10 @@ test-rv32: test-rv32-simd4 test-rv32-simd4-verilator run-rv32-simd4-emu run-rv32
 
 # G1: integer rasterizer, RAM/framebuffer blits, and menu integration.
 .PHONY: test-rv32-gfx test-rv32-gfx-verilator check-rv32-gfx-image run-rv32-gfx-emu run-rv32-gfx-rtl run-rv32-gfx-rtl-verilator run-rv32-gfx-menu-emu run-rv32-gfx-menu-rtl run-rv32-gfx-menu-rtl-verilator lint-rv32-gfx synth-rv32-gfx
+RV32_GFX_MAX_CYCLES := 150000000
+RV32_GFX_MENU_HEX := 78d4a476
 RV32_GFX_ARGS = --image build/rv32/gfxcheck.bin --compare results --expect-last-line "PASS G1" --emulator $(RV32EMU) --timeout 600
-RV32_GFX_MENU_ARGS = --image build/rv32/capstone.bin --input programs/rv32/gfx.input --expect-checkpoints programs/rv32/gfx.expected --expect-last-line "PASS 78d4a476" --compare results --emulator $(RV32EMU) --timeout 600
+RV32_GFX_MENU_ARGS = --image build/rv32/capstone.bin --input programs/rv32/gfx.input --expect-checkpoints programs/rv32/gfx.expected --expect-last-line "PASS $(RV32_GFX_MENU_HEX)" --compare results --emulator $(RV32EMU) --timeout 600
 build/rv32/gfxcheck.elf: build/rv32/gfxcheck.o build/rv32/gpu.o build/rv32/gpu_ref.o build/rv32/gfx.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
 	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(filter %.o,$^)
 check-rv32-gfx-image: build/rv32/gfxcheck.bin build/rv32/gfxcheck.lst
@@ -638,15 +640,15 @@ test-rv32-gfx-verilator: $(RV32EMU) $(RV32_TB_VERILATOR)
 run-rv32-gfx-emu: check-rv32-gfx-image $(RV32EMU)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_ARGS) --backend emulator --out build/gfx/emu
 run-rv32-gfx-rtl: check-rv32-gfx-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_ARGS) --max-cycles 150000000 --simulator $(RV32_TB_VVP) --out build/gfx/icarus
+	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_ARGS) --max-cycles $(RV32_GFX_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/gfx/icarus
 run-rv32-gfx-rtl-verilator: check-rv32-gfx-image $(RV32EMU) $(RV32_TB_VERILATOR)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_ARGS) --max-cycles 150000000 --simulator $(RV32_TB_VERILATOR) --stall 1 --gpu-stall 2 --out build/gfx/verilator
+	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_ARGS) --max-cycles $(RV32_GFX_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --stall 1 --gpu-stall 2 --out build/gfx/verilator
 run-rv32-gfx-menu-emu: check-rv32-image $(RV32EMU)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_MENU_ARGS) --backend emulator --out build/gfx/menu-emu
 run-rv32-gfx-menu-rtl: check-rv32-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_MENU_ARGS) --max-cycles 150000000 --simulator $(RV32_TB_VVP) --out build/gfx/menu-icarus
+	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_MENU_ARGS) --max-cycles $(RV32_GFX_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/gfx/menu-icarus
 run-rv32-gfx-menu-rtl-verilator: check-rv32-image $(RV32EMU) $(RV32_TB_VERILATOR)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_MENU_ARGS) --max-cycles 150000000 --simulator $(RV32_TB_VERILATOR) --seed 17 --gpu-seed 31 --out build/gfx/menu-verilator
+	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_MENU_ARGS) --max-cycles $(RV32_GFX_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --seed 17 --gpu-seed 31 --out build/gfx/menu-verilator
 lint-rv32-gfx:
 	verilator --lint-only --Wall --language 1364-2005 --top-module rv32_gpu rtl/rv32/rv32_gpu.v
 synth-rv32-gfx: | build
@@ -667,6 +669,6 @@ waves-rv32-gfx: test-rv32-gfx
 .PHONY: test-rv32-gfx-sanitize
 test-rv32-gfx-sanitize: test-rv32-gfx | build
 	mkdir -p build/gfx
-	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -DG1_NATIVE_MAIN tests/rv32_gpu_native.c tools/rv32_gpu.c programs/rv32/gpu_ref.c programs/rv32/gfx.c -o build/gfx/sanitize
+	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -DG1_NATIVE_MAIN tests/rv32_gpu_native.c tools/rv32_gpu.c programs/rv32/gpu_ref.c programs/rv32/gfx.c -o build/gfx/sanitize
 	build/gfx/sanitize build/gfx/commands.txt
 test-rv32: test-rv32-gfx-sanitize
