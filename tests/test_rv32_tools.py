@@ -377,7 +377,8 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertIn(f"32'h{EVENT_VALID:08x} | ((token2 == \"down\") ? 32'h{EVENT_PRESS:x} : 32'h0)".replace("8000_0000", "80000000"),
                       testbench.replace("8000_0000", "80000000"))
         bases = {"RAM": RAM, "CONSOLE": CONSOLE, "DONE": DONE, "TIMER": TIMER, "INPUT": INPUT, "DISPLAY": DISPLAY, "FB": FB,
-                 "SIMD4": 0x20004000, "SIMD4_PROGRAM": 0x20005000, "SIMD4_DATA": 0x20006000, "GPU": 0x20007000}
+                 "SIMD4": 0x20004000, "SIMD4_PROGRAM": 0x20005000, "SIMD4_DATA": 0x20006000, "GPU": 0x20007000,
+                 "G3D": 0x20008000}
         header_bases = {name: int(value, 16) for name, value in re.findall(r"#define RV32_(\w+)_BASE\s+0x([0-9a-fA-F]+)", header)}
         self.assertEqual(header_bases, {name: bases[name] for name in header_bases}, "board.h")
         self.assertEqual(set(header_bases) >= {"TIMER", "INPUT", "DISPLAY", "FB"}, True)

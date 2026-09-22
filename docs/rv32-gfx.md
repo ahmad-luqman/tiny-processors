@@ -53,6 +53,9 @@ CPU framebuffer reads/writes and PRESENT fault while BUSY. Display metadata is
 readable. During RAM blits, CPU writes intersecting the complete source extent
 (including row padding) fault; CPU reads and instruction fetches continue. Other
 RAM locations remain writable. A fair arbiter shares the single RAM port.
+Since G2 the engine memory port is shared with the [3D device](rv32-3d.md): a
+G1 START while G2 is busy is an access fault answered by the SoC (this module
+is unchanged), and G2 refuses its own launches while G1 runs.
 A graphics grant retains the port during backpressure: contended CPU RAM
 accesses, including instruction fetches, wait without faulting until it releases.
 
@@ -84,7 +87,8 @@ a completed command after recovery.
 ## Guest demo and commands
 
 `make run-rv32-capstone` opens the existing native window. Choose **2D DEMO**,
-now the fourth entry since [N1](rv32-digit.md) added the digit screen before it,
+now the fifth entry since [N1](rv32-digit.md) added the digit screen and
+[G2](rv32-3d.md) the 3D screen before it,
 with UP/DOWN and ENTER. SPACE selects CPU/device drawing, P pauses, R restarts,
 ESC returns, and Q ends the session. The scene contains clipped rectangles,
 shared-edge triangles, a clipped line, a RAM sprite, and an overlapping framebuffer
@@ -109,7 +113,8 @@ The bounded diagnostic checks every pixel after each operation and exercises
 invalid commands, busy submission, zero-budget cancellation, nonzero budget
 expiry with retained diagnostics, and relaunch. It prints
 `PASS G1` and presents `frame 1 d8e316f6`. The eight-frame menu replay prints
-`PASS 78d4a476`; software-native rendering independently supplies its expected
+`PASS 8ed0d4a0` (`RV32_GFX_MENU_HEX`; G2's fifth entry moved its final selection,
+and it was `c883a14f` after N1); software-native rendering independently supplies its expected
 checkpoints. `--gpu-stall N` and `--gpu-seed N` add independent fixed or seeded
 0–3-cycle graphics memory waits; CPU stalls use the existing options.
 

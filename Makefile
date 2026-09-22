@@ -33,8 +33,8 @@ RV32_COMMON_OBJS := build/rv32/start.o build/rv32/console.o build/rv32/muldiv.o
 RV32_SELFCHECK_OBJS := build/rv32/selfcheck.o $(RV32_COMMON_OBJS)
 RV32_DIAG_OBJS := build/rv32/diag.o build/rv32/trap.o $(RV32_COMMON_OBJS)
 RV32_PONG_OBJS := build/rv32/pong.o build/rv32/pong_game.o build/rv32/gfx.o $(RV32_COMMON_OBJS)
-RV32_CAPSTONE_OBJS := build/rv32/gpu.o build/rv32/gpu_ref.o build/rv32/gpu_demo.o  build/rv32/gfx_text.o build/rv32/capstone.o build/rv32/runtime.o build/rv32/tetris_game.o build/rv32/pong_game.o build/rv32/gfx.o build/rv32/digit_ui.o build/rv32/digit_model.o build/rv32/digit_hw.o build/rv32/digit_weights.o build/rv32/simd4.o $(RV32_COMMON_OBJS)
-RV32_HEADERS += programs/rv32/gpu.h programs/rv32/gpu_demo.h  programs/rv32/runtime.h programs/rv32/tetris_game.h programs/rv32/simd4.h programs/rv32/digit_model.h programs/rv32/digit_hw.h programs/rv32/digit_ui.h
+RV32_CAPSTONE_OBJS := build/rv32/gpu.o build/rv32/gpu_ref.o build/rv32/gpu_demo.o  build/rv32/gfx_text.o build/rv32/capstone.o build/rv32/runtime.o build/rv32/tetris_game.o build/rv32/pong_game.o build/rv32/gfx.o build/rv32/digit_ui.o build/rv32/digit_model.o build/rv32/digit_hw.o build/rv32/digit_weights.o build/rv32/simd4.o build/rv32/g3d.o build/rv32/g3d_ref.o build/rv32/g3d_demo.o $(RV32_COMMON_OBJS)
+RV32_HEADERS += programs/rv32/g3d.h programs/rv32/g3d_demo.h programs/rv32/gpu.h programs/rv32/gpu_demo.h  programs/rv32/runtime.h programs/rv32/tetris_game.h programs/rv32/simd4.h programs/rv32/digit_model.h programs/rv32/digit_hw.h programs/rv32/digit_ui.h
 
 # N1's generated headers. Defined here, above every rule that names them: make
 # expands a prerequisite when it reads the rule, so a variable defined further
@@ -48,6 +48,10 @@ RV32_DIGIT_KERNEL_DEPS := tools/rv32_digit_kernels.py programs/simd4/dense4.py t
 RV32_DIGIT_MODEL_DEPS := tools/rv32_digit_model.py tools/digit_ref.py tools/digit_data.py \
                          programs/rv32/digit_model.json $(RV32_DIGIT_KERNEL_DEPS)
 RV32_DIGIT_GENERATED := build/rv32/digit_kernels.h build/rv32/digit_shape.h build/rv32/digit_weights.h build/rv32/digit_weights.c build/rv32/digit_check.h
+# G2's headers come from the Python oracle, so they depend on every module the
+# generator imports: a change to the model or the shaders must regenerate them.
+RV32_G3D_DEPS := tools/rv32_g3d_header.py tools/rv32_g3d_model.py tools/rv32_g3d_scene.py
+RV32_G3D_GENERATED := build/rv32/g3d_shaders.h build/rv32/g3d_scenes.h
 
 RV32_IMAGES := selfcheck diag pong capstone
 RV32_IMAGE_FILES := $(foreach image,$(RV32_IMAGES),$(foreach ext,elf lst bin readelf,build/rv32/$(image).$(ext)))
@@ -77,13 +81,13 @@ FP32_RANDOM ?= 100
 RV32_FP_OBJ := build/fp32/rv32_fp.o $(SOFTFLOAT_OBJ)
 RV32EMU := build/rv32/rv32emu
 RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
-RV32EMU_CORE := tools/rv32_gpu.c tools/rv32_gpu.h programs/rv32/gpu.h  tools/rv32emu_core.c tools/rv32emu_core.h tools/rv32_fp.h tools/rv32_simd4.c tools/rv32_simd4.h
+RV32EMU_CORE := tools/rv32_gpu.c tools/rv32_gpu.h programs/rv32/gpu.h tools/rv32_g3d.c tools/rv32_g3d.h programs/rv32/g3d.h  tools/rv32emu_core.c tools/rv32emu_core.h tools/rv32_fp.h tools/rv32_simd4.c tools/rv32_simd4.h
 RV32WIN := build/rv32/rv32win
 # Recursive `=`: pkg-config runs only where the window is built, so a machine without SDL3 still runs every test.
 SDL3_CFLAGS = $(shell pkg-config --cflags sdl3 2>/dev/null)
 SDL3_LIBS = $(shell pkg-config --libs sdl3 2>/dev/null)
 RV32_RTL := rtl/rv32/rv32_fregfile.v rtl/rv32/rv32_fdecode.v $(FP32_RTL) rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32.v
-RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_timer.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
+RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_timer.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
 RV32_TB := tests/rv32_tb.sv
 RV32_TB_VVP := build/rv32/rv32_tb.vvp
 RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
@@ -288,7 +292,7 @@ test-rv32-rt:
 	$(PYTHON) -m unittest discover -s tests -p 'test_rv32_rt.py' -v
 
 $(RV32EMU): tools/rv32emu.c $(RV32EMU_CORE) $(RV32_FP_OBJ) | build/rv32
-	$(HOST_CC) $(RV32EMU_CFLAGS) -o $@ tools/rv32emu.c tools/rv32emu_core.c tools/rv32_simd4.c tools/rv32_gpu.c $(RV32_FP_OBJ)
+	$(HOST_CC) $(RV32EMU_CFLAGS) -o $@ tools/rv32emu.c tools/rv32emu_core.c tools/rv32_simd4.c tools/rv32_gpu.c tools/rv32_g3d.c $(RV32_FP_OBJ)
 
 build-rv32-emu: toolchain-rv32-emu $(RV32EMU)
 
@@ -300,7 +304,7 @@ toolchain-rv32-win: toolchain-rv32-emu
 # The toolchain check is a prerequisite of the binary, so every target that needs the window says
 # what to install rather than failing on a missing header.
 $(RV32WIN): tools/rv32win.c $(RV32EMU_CORE) $(RV32_FP_OBJ) | build/rv32 toolchain-rv32-win
-	$(HOST_CC) $(RV32EMU_CFLAGS) $(SDL3_CFLAGS) -o $@ tools/rv32win.c tools/rv32emu_core.c tools/rv32_simd4.c tools/rv32_gpu.c $(RV32_FP_OBJ) $(SDL3_LIBS)
+	$(HOST_CC) $(RV32EMU_CFLAGS) $(SDL3_CFLAGS) -o $@ tools/rv32win.c tools/rv32emu_core.c tools/rv32_simd4.c tools/rv32_gpu.c tools/rv32_g3d.c $(RV32_FP_OBJ) $(SDL3_LIBS)
 
 build-rv32-win: toolchain-rv32-win $(RV32WIN)
 
@@ -425,7 +429,7 @@ RV32_CAPSTONE_ARGS := --image build/rv32/capstone.bin --input programs/rv32/caps
 
 # The native model now compiles digit_ui.c and digit_model.c too, which include
 # the generated headers.
-test-rv32-capstone: $(RV32_DIGIT_GENERATED)
+test-rv32-capstone: $(RV32_DIGIT_GENERATED) $(RV32_G3D_GENERATED)
 	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_capstone.py' -v
 
 run-rv32-capstone: check-rv32-image $(RV32WIN)
@@ -451,9 +455,9 @@ test-rv32: test-rv32-capstone run-rv32-capstone-emu run-rv32-capstone-rtl run-rv
 
 # Compile the same directed C checks as a standalone sanitized executable.
 .PHONY: test-rv32-capstone-sanitize
-test-rv32-capstone-sanitize: build/rv32/digit_shape.h build/rv32/digit_weights.h | build/rv32
+test-rv32-capstone-sanitize: build/rv32/digit_shape.h build/rv32/digit_weights.h $(RV32_G3D_GENERATED) | build/rv32
 	mkdir -p build/rv32/host
-	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fno-builtin -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -DRV32_NATIVE_MAIN -Iprograms/rv32 -Ibuild/rv32 tests/rv32_capstone_native.c programs/rv32/gpu_demo.c programs/rv32/gpu_ref.c programs/rv32/runtime.c programs/rv32/tetris_game.c programs/rv32/pong_game.c programs/rv32/gfx.c programs/rv32/gfx_text.c programs/rv32/digit_ui.c programs/rv32/digit_model.c build/rv32/digit_weights.c -o build/rv32/host/capstone-sanitize
+	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fno-builtin -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -DRV32_NATIVE_MAIN -Iprograms/rv32 -Ibuild/rv32 tests/rv32_capstone_native.c programs/rv32/gpu_demo.c programs/rv32/gpu_ref.c programs/rv32/runtime.c programs/rv32/tetris_game.c programs/rv32/pong_game.c programs/rv32/gfx.c programs/rv32/gfx_text.c programs/rv32/digit_ui.c programs/rv32/digit_model.c build/rv32/digit_weights.c programs/rv32/g3d_demo.c programs/rv32/g3d_ref.c -o build/rv32/host/capstone-sanitize
 	build/rv32/host/capstone-sanitize
 
 # F1: standalone floating-point hardware with the pinned host oracle.
@@ -642,7 +646,7 @@ test-rv32: test-rv32-simd4 test-rv32-simd4-verilator run-rv32-simd4-emu run-rv32
 # G1: integer rasterizer, RAM/framebuffer blits, and menu integration.
 .PHONY: test-rv32-gfx test-rv32-gfx-verilator check-rv32-gfx-image run-rv32-gfx-emu run-rv32-gfx-rtl run-rv32-gfx-rtl-verilator run-rv32-gfx-menu-emu run-rv32-gfx-menu-rtl run-rv32-gfx-menu-rtl-verilator lint-rv32-gfx synth-rv32-gfx
 RV32_GFX_MAX_CYCLES := 150000000
-RV32_GFX_MENU_HEX := c883a14f
+RV32_GFX_MENU_HEX := 8ed0d4a0
 RV32_GFX_ARGS = --image build/rv32/gfxcheck.bin --compare results --expect-last-line "PASS G1" --emulator $(RV32EMU) --timeout 600
 RV32_GFX_MENU_ARGS = --image build/rv32/capstone.bin --input programs/rv32/gfx.input --expect-checkpoints programs/rv32/gfx.expected --expect-last-line "PASS $(RV32_GFX_MENU_HEX)" --compare results --emulator $(RV32EMU) --timeout 600
 build/rv32/gfxcheck.elf: build/rv32/gfxcheck.o build/rv32/gpu.o build/rv32/gpu_ref.o build/rv32/gfx.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
@@ -730,6 +734,8 @@ build/rv32/digit_ui.o: programs/rv32/digit_ui.c build/rv32/digit_shape.h $(RV32_
 	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
 build/rv32/runtime.o: programs/rv32/runtime.c build/rv32/digit_shape.h $(RV32_HEADERS) | build/rv32
 	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
+build/rv32/g3d_demo.o: programs/rv32/g3d_demo.c $(RV32_G3D_GENERATED) $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
 build/rv32/capstone.o: programs/rv32/capstone.c $(RV32_DIGIT_GENERATED) $(RV32_HEADERS) | build/rv32
 	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
 build/rv32/digit_model.o: programs/rv32/digit_model.c build/rv32/digit_weights.h $(RV32_HEADERS) | build/rv32
@@ -797,3 +803,78 @@ waves-rv32-digit: build/rv32/digitbench_hw_1.bin $(RV32EMU) $(RV32_TB_VVP)
 	$(PYTHON) tools/rv32_rtl.py --image build/rv32/digitbench_hw_1.bin --compare results \
 	  --expect-last-line "bench 00000ecf" --emulator $(RV32EMU) --timeout 900 \
 	  --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VVP) --mode waves --out build/digit/waves
+
+# G2: programmable 3D. The Python oracle, the guest C reference, the emulator
+# device and the RTL are compared bit for bit; g3dcheck checks the device from
+# the guest against counters and image hashes the oracle generated.
+.PHONY: test-rv32-3d check-rv32-3d-image run-rv32-3d-emu
+RV32_G3D_ARGS = --image build/rv32/g3dcheck.bin --compare results --expect-last-line "PASS G2" --emulator $(RV32EMU) --timeout 900
+# One generator run writes both headers. Make 3.81 has no grouped targets, so the
+# scenes header is the real target and the shaders header follows it: two parallel
+# generator runs could otherwise race on the same files.
+build/rv32/g3d_scenes.h: $(RV32_G3D_DEPS) | build/rv32
+	$(PYTHON) tools/rv32_g3d_header.py --out build/rv32
+build/rv32/g3d_shaders.h: build/rv32/g3d_scenes.h
+	@test -f $@ || $(PYTHON) tools/rv32_g3d_header.py --out build/rv32
+build/rv32/g3dcheck.o: programs/rv32/g3dcheck.c $(RV32_G3D_GENERATED) $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
+build/rv32/g3dcheck.elf: build/rv32/g3dcheck.o build/rv32/g3d.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(filter %.o,$^)
+check-rv32-3d-image: build/rv32/g3dcheck.bin build/rv32/g3dcheck.lst
+	$(PYTHON) tools/rv32_image.py build/rv32/g3dcheck.elf --listing build/rv32/g3dcheck.lst --bin build/rv32/g3dcheck.bin --hex build/rv32/g3dcheck.hex
+RV32_G3D_MAX_CYCLES := 200000000
+test-rv32-3d: $(RV32EMU) $(RV32_TB_VVP) | build
+	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_3d*.py' -v
+# Runs the standalone corpus in full and the SoC contracts on Verilator; it fails
+# when Verilator is missing because both tests build with it.
+test-rv32-3d-verilator: $(RV32EMU) $(RV32_TB_VERILATOR) | build
+	G2_SIM=verilator $(PYTHON) -m unittest tests.test_rv32_3d_rtl tests.test_rv32_3d_soc -v
+run-rv32-3d-emu: check-rv32-3d-image $(RV32EMU)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_G3D_ARGS) --backend emulator --out build/g3d/emu
+run-rv32-3d-rtl: check-rv32-3d-image $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_G3D_ARGS) --max-cycles $(RV32_G3D_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/g3d/icarus
+run-rv32-3d-rtl-verilator: check-rv32-3d-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_G3D_ARGS) --max-cycles $(RV32_G3D_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --stall 1 --gpu-stall 2 --out build/g3d/verilator
+.PHONY: test-rv32-3d-verilator run-rv32-3d-rtl run-rv32-3d-rtl-verilator lint-rv32-3d synth-rv32-3d
+lint-rv32-3d:
+	verilator --lint-only --Wall --language 1364-2005 --top-module rv32_g3d rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v
+synth-rv32-3d: | build
+	yosys -Q -T -l build/g3d-synth.log -p 'read_verilog rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v; synth -top rv32_g3d; check -assert; select -assert-none t:*LATCH*; stat; write_json build/g3d.json'
+test-rv32: test-rv32-3d test-rv32-3d-verilator run-rv32-3d-emu run-rv32-3d-rtl-verilator lint-rv32-3d synth-rv32-3d
+# The 3D menu replay: the device draws every 3D frame on the emulator and the RTL,
+# the C reference draws them natively, and all three must match the pinned
+# checkpoints. Re-pin with tools/rv32_capstone_native.py --input programs/rv32/g3d.input --write.
+.PHONY: run-rv32-3d-menu-emu run-rv32-3d-menu-rtl run-rv32-3d-menu-rtl-verilator
+RV32_3D_MENU_HEX := 278a4eac
+RV32_3D_MENU_ARGS = --image build/rv32/capstone.bin --input programs/rv32/g3d.input --expect-checkpoints programs/rv32/g3d.expected --expect-last-line "PASS $(RV32_3D_MENU_HEX)" --compare results --emulator $(RV32EMU) --timeout 1800
+run-rv32-3d-menu-emu: check-rv32-image $(RV32EMU)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_3D_MENU_ARGS) --backend emulator --out build/g3d/menu-emu
+run-rv32-3d-menu-rtl: check-rv32-image $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_3D_MENU_ARGS) --max-cycles $(RV32_G3D_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/g3d/menu-icarus
+run-rv32-3d-menu-rtl-verilator: check-rv32-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_3D_MENU_ARGS) --max-cycles $(RV32_G3D_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --seed 17 --gpu-seed 31 --out build/g3d/menu-verilator
+test-rv32: run-rv32-3d-menu-emu run-rv32-3d-menu-rtl-verilator
+
+# One demo frame drawn by the C reference on the RV32I CPU and by the device.
+.PHONY: bench-rv32-3d
+build/rv32/g3dbench_cpu_%.o: programs/rv32/g3dbench.c $(RV32_G3D_GENERATED) $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -DG3D_BENCH_CPU -DG3D_BENCH_COUNT=$*u -c $< -o $@
+build/rv32/g3dbench_hw_%.o: programs/rv32/g3dbench.c $(RV32_G3D_GENERATED) $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -DG3D_BENCH_COUNT=$*u -c $< -o $@
+build/rv32/g3dbench_%.elf: build/rv32/g3dbench_%.o build/rv32/g3d_demo.o build/rv32/g3d_ref.o build/rv32/g3d.o build/rv32/gpu.o build/rv32/gpu_ref.o build/rv32/gfx.o build/rv32/gfx_text.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -o $@ $(filter %.o,$^)
+RV32_G3D_BENCH_BINS := $(foreach v,cpu hw,$(foreach n,1 3,build/rv32/g3dbench_$(v)_$(n).bin))
+bench-rv32-3d: $(RV32_G3D_BENCH_BINS) $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) tools/rv32_g3d_bench.py --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR)
+# One small job, not a frame: the dump stays around a megabyte and the phase
+# totals are checked against the oracle's cycle count.
+.PHONY: waves-rv32-3d
+waves-rv32-3d: | build
+	$(PYTHON) tools/rv32_g3d_waves.py
+.PHONY: test-rv32-3d-sanitize
+test-rv32-3d-sanitize: $(RV32_G3D_DEPS) tools/rv32_g3d_corpus.py tools/rv32_g3d_scene.py | build
+	mkdir -p build/g3d
+	$(PYTHON) tools/rv32_g3d_corpus.py > build/g3d/corpus.txt
+	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -DG3D_NATIVE_MAIN -Iprograms/rv32 tests/rv32_g3d_native.c tools/rv32_g3d.c programs/rv32/g3d_ref.c -o build/g3d/sanitize
+	build/g3d/sanitize build/g3d/corpus.txt
+test-rv32: test-rv32-3d-sanitize

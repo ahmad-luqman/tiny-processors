@@ -26,7 +26,7 @@ from tools.rv32_run_emu import DEFAULT_EMULATOR, emulator_command, halt_line, la
 
 RTL_SOURCES = [ROOT / "rtl" / "rv32" / name
                for name in ("rv32_fregfile.v", "rv32_fdecode.v", "rv32_regfile.v", "rv32_alu.v", "rv32_decode.v", "rv32.v",
-                            "rv32_bus.v", "rv32_ram.v", "rv32_console.v", "rv32_done.v", "rv32_timer.v", "rv32_input.v", "rv32_display.v", "rv32_soc.v", "rv32_gpu.v", "rv32_simd4.v")]
+                            "rv32_bus.v", "rv32_ram.v", "rv32_console.v", "rv32_done.v", "rv32_timer.v", "rv32_input.v", "rv32_display.v", "rv32_soc.v", "rv32_gpu.v", "rv32_g3d.v", "rv32_g3d_core.v", "rv32_simd4.v")]
 RTL_SOURCES.extend([ROOT / "rtl/fp32/fp32.v", ROOT / "rtl/simd4/simd4.v"])
 TESTBENCH = ROOT / "tests" / "rv32_tb.sv"
 DEFAULT_SIMULATOR = "build/rv32/rv32_tb.vvp"
@@ -237,15 +237,22 @@ def trap_records(trace):
     return [line.split(" ", 1)[1] for line in trace if " trap " in line]
 
 
+from tools import rv32_asm as asm  # noqa: E402
+
 SIMD_ACCESS = re.compile(r"mem\[(?:" + "|".join(f"{SIMD_BASE+offset:08x}" for offset in
     (SIMD_COMMAND, SIMD_STATUS, SIMD_ENTRY, SIMD_CYCLES, SIMD_STALLS, SIMD_TRANSFERS, SIMD_INSTRUCTIONS)) + r")\](?:->|<-)")
 
 GPU_ACCESS = re.compile(r"mem\[(?:" + "|".join(f"{GPU_BASE+offset:08x}" for offset in
     (GPU_COMMAND, GPU_STATUS, GPU_ERROR, GPU_CYCLES, GPU_STALLS, GPU_READS, GPU_WRITES)) + r")\](?:->|<-)")
 
+G3D_ACCESS = re.compile(r"mem\[(?:" + "|".join(f"{asm.G3D_BASE+offset:08x}" for offset in
+    (asm.G3D_COMMAND, asm.G3D_STATUS, asm.G3D_ERROR, asm.G3D_FAULT_PC, asm.G3D_CYCLES, asm.G3D_STALLS,
+     asm.G3D_INSTRUCTIONS, asm.G3D_TRANSFERS, asm.G3D_DIVIDES, asm.G3D_PIXELS, asm.G3D_ZFAIL, asm.G3D_CULLED))
+    + r")\](?:->|<-)")
+
 def uses_accelerator(trace):
     """Only successful register accesses justify asynchronous result comparison."""
-    return any(SIMD_ACCESS.search(line) or GPU_ACCESS.search(line) for line in trace)
+    return any(SIMD_ACCESS.search(line) or GPU_ACCESS.search(line) or G3D_ACCESS.search(line) for line in trace)
 
 
 def store_records(trace):

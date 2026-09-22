@@ -1,0 +1,25 @@
+# G2: select the 3D screen (fourth entry, three DOWNs), watch the diffuse cube
+# turn, cycle to toon and wobble with SPACE, pause, restart, and leave. Every
+# 3D frame is drawn by the device on the emulator and RTL and by the C reference
+# natively; the pinned checkpoints hold them to the same pixels.
+frame 1 down DOWN
+frame 2 up DOWN
+frame 2 down DOWN
+frame 3 up DOWN
+frame 3 down DOWN
+frame 4 up DOWN
+frame 4 down ENTER
+frame 5 up ENTER
+frame 8 down SPACE
+frame 9 up SPACE
+frame 11 down SPACE
+frame 12 up SPACE
+frame 14 down P
+frame 15 up P
+frame 16 down P
+frame 17 up P
+frame 18 down R
+frame 19 up R
+frame 20 down ESCAPE
+frame 21 up ESCAPE
+frame 21 down Q

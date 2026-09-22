@@ -84,7 +84,7 @@ Each row is a bounded milestone, potentially split into several verified commits
 | A2 — completed 2026-09-22 ([record](../rv32-simd4.md)) | CPU-commanded accelerator integration with shared buffers, driver, completion polling, and error/reset semantics. CPU launches and checks matrix work; stalled-memory and interrupted-transfer tests pass. | Trace register writes through bus decode to accelerator state. Explain ownership and exactly-once memory effects. | 2–4 |
 | G1 — completed 2026-09-22 ([record](../rv32-gfx.md)) | 2D accelerator: bounded fill/blit, line and triangle operations. Software reference and RTL agree on clipped/edge cases and framebuffer contents. Guest demo compares CPU drawing and acceleration. | Explain pixel address generation, clipping, datapath reuse, and when memory bandwidth limits speedup. | 2–4 |
 | N1 — completed 2026-09-22 ([record](../rv32-digit.md)) | Chose a 196-32-10 int8 digit model trained once off-line, a vendored test set with recorded provenance, and one preprocessing contract shared by training and both runtime paths. Software inference and measured accuracy came first, then dense SIMD4 kernels, block driver writers and fault/timeout recovery, all matching a standard-library integer oracle exactly. Reports 96.16% integer against 96.10% float, and classifies a keyboard-drawn digit from the boot menu. Saturation and rounding became CPU operations after an exact two-half accumulator read-back, so no RTL changed. | Trace one input through multiply/accumulate, bias, activation, scaling, and output selection. Separate numerical correctness from model accuracy. | 3–6 |
-| G2 — G1/F2 | Software-reference 3D transform/rasterization, then a limited programmable stage and hardware pipeline rendering a rotating shaded object. Define stage ISA and precision before RTL. Test clipping/depth/interpolation and compare images with documented tolerances. | Follow a vertex to a covered pixel and explain which work is programmable versus fixed-function. | 4–8 |
+| G2 — completed 2026-09-22 ([record](../rv32-3d.md)) | A programmable vertex stage on four SIMT lanes sharing one PC. It has divergent structured IF/ELSE and loops (BREAK on a typed mask stack, with overflow and runaway-loop faults), in Q16.16. A fixed-function pipeline follows: near-plane, guard-band and depth-range cull; an exact saturating divider; S12.4 projection; back-face cull; affine Gouraud; a 4×4 ordered dither; and a 16-bit Z buffer in RAM. The Python oracle, guest C reference, emulator device and RTL agree bit for bit on images, depth and every counter, including CYCLES. A double-precision pipeline justifies the formats: at most 2.5% of cube pixels differ, almost all by one dither level. The menu's rotating cube cycles diffuse, toon and wobble shaders. | Follow a vertex to a covered pixel and explain which work is programmable versus fixed-function. | 4–8 |
 | S1 — G2/N1 | Integrated advanced SoC demonstration: one guest menu drives 2D, programmable 3D, and digit inference on the same machine. End-to-end regressions cover commands, memory, reset, faults, and deterministic output checkpoints. Document cell counts and measured traffic/cycles separately from emulator wall time. | Explain the complete path from C driver to bus transaction to gates and back to a visible result. | 2–4 |
 
 Recommended post-Tetris order is F1 → F2 → A1 → A2 → G1 → N1 → G2 → S1. A1 only technically depends on M7; F1/F2 come first in the recommended learning sequence, and F2 is an explicit prerequisite for G2. N1 and G2 are independently reorderable once their prerequisites pass; this does not require more scope questions now. CPU FP32 support is now a selected milestone. GPU arithmetic precision remains a separate decision; programmable 3D does not imply a modern shader compiler or Vulkan/OpenGL compatibility. Define one meaningful programmable stage before attempting multiple stages or GPU-style scheduling.
@@ -103,20 +103,20 @@ F2 selected and verified `-march=rv32if_zicsr -mabi=ilp32`, preserving the integ
 
 GPU FP32/other formats and NPU integer/other formats remain independent choices. The CPU FPU may help with reference computations or scene setup, but does not automatically create floating-point GPU lanes or change the digit model's quantization contract.
 
-## Next implementation session: G2
+## Next implementation session: S1
 
-N1 completed digit inference: a vendored test set with recorded provenance, an
-integer classifier trained once off-line, one preprocessing contract shared by
-training and both runtime paths, dense SIMD4 kernels with CPU-side requantization,
-reset and fault recovery, and a boot-menu screen where a keyboard-drawn digit is
-classified by the guest. No RTL changed. See the [N1 record](../rv32-digit.md).
+G2 completed programmable 3D. A vertex shader runs on four SIMT lanes with
+divergent IF/ELSE and loops on a typed mask stack. Fixed-function projection,
+culling, Gouraud raster, dither and a 16-bit depth test follow it. Four
+implementations agree bit for bit, and the boot menu draws a rotating cube
+through three shaders. G1 and G2 share one engine memory port and exclude each
+other. See the [G2 record](../rv32-3d.md).
 
 1. Inspect Git status and merged work, preserve existing commands, start a branch, and end with one reviewed PR.
-2. Build a software 3D reference first: transform, clip, rasterize and interpolate, with the precision of each stage written down before any RTL.
-3. Define one programmable stage and its ISA, with a visible effect, rather than several stages or GPU-style scheduling.
-4. Test clipping, depth and interpolation, and compare rendered images against the reference with documented tolerances.
-5. Render a rotating shaded object end to end, and report cell counts and measured traffic separately from emulator wall time.
-6. Preserve inference, graphics, SIMD4, games, CPU/F and lab regressions; unified integration stays S1.
+2. Drive 2D, 3D and digit inference from one guest menu session with end-to-end regressions over commands, memory ownership, reset and faults, and deterministic output checkpoints.
+3. Decide whether accelerators may overlap (today G1 and G2 exclude each other; SIMD4 runs alongside either) and specify it before changing arbitration.
+4. Document cell counts and measured traffic and cycles separately from emulator wall time, and preserve every milestone's regressions.
+5. A programmable fragment stage reusing the G2 core (which only knows numbered input and output slots) is a candidate, not a requirement.
 
 ## Verification and learning discipline
 
@@ -142,7 +142,7 @@ Complete milestones autonomously, then explain what changed, why it works, how i
 | Floating-point compiler flags, ABI, and CSR contract | F2, before linking float firmware | Explicit compatible objects/libraries; retain integer firmware regression |
 | Matrix/NPU precision, saturation, rounding, accumulator width | Widths decided in A1 ([record](../simd4.md#a1-acceptance-record-2026-09-22)): 16×16→32 products, 32-bit wrapping accumulator, truncating shifted read-back; saturation and rounding decided in N1: both are CPU operations after the exact 32-bit accumulator is read back through two RDA reads, so the engine is unchanged and the exporter proves no launch can wrap | Integer arithmetic with explicit bounds and independently checked conversion |
 | Pretrained model/dataset, weight license, accuracy target | Decided in N1 ([record](../rv32-digit.md)): a 196-32-10 int8 classifier trained once off-line, the MNIST test set vendored with a SHA-256 manifest and a provenance note recording that the source states no license, and a 95% target locked before testing, met at 96.16% and asserted in `tests/test_rv32_digit.py` | Small classifier whose operations fit the planned engine; lock a test set and accuracy target before acceptance testing |
-| GPU programmable stage/ISA, clipping and depth rules | G2 after software rendering reference | Limited stage with a visible effect; precision selected by image comparisons |
+| GPU programmable stage/ISA, clipping and depth rules | Decided in G2 ([record](../rv32-3d.md)): a vertex stage on four SIMT lanes with a structured ISA (IF/ELSE, divergent loops with BREAK, mask stack of 8); Q16.16 lanes, S12.4 screen, 16-bit depth, exact divider; whole-triangle cull at w < 1/16, outside the 4w guard band or outside 0 ≤ z ≤ w; strict-less depth; affine Gouraud; zero tolerance among the integer implementations and a measured bound against doubles | Fragment shading and near-plane clipping remain open |
 | Interrupts, DMA, concurrent accelerators, caching | A2 onward, only when polling/ownership or bandwidth limits justify complexity | Polling, simple transfers, no caches/coherence initially |
 | Shell, files, multiple programs, protection | After M7 as a separate OS expansion track | One feature at a time; Linux is a separate platform project if later desired |
 | Own language, compiler, software VM | After M7, when revisiting language learning | Compile a small language to our established machine or to an explicitly defined software VM |

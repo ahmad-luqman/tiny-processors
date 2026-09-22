@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include "rv32_simd4.h"
 #include "rv32_gpu.h"
+#include "rv32_g3d.h"
 
 /* Machine contract constants; keep in step with programs/rv32/board.h;
  * the graphics contract is imported from programs/rv32/gpu.h. */
@@ -66,6 +67,7 @@ typedef struct {
 typedef struct {
     simd_device simd;
     gpu_device gpu;
+    g3d_device g3d;
     uint32_t x[32], f[32];
     uint8_t fcsr;
     uint32_t pc;
