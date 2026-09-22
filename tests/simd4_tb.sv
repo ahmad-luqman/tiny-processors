@@ -23,7 +23,7 @@ module simd4_tb;
     reg [TRACE_BITS-1:0] expected_retirements [0:4095];
     reg [24:0] expected_transfers [0:4095];
     reg [STATE_BITS-1:0] expected_final [0:0];
-    reg [31:0] metadata [0:4]; // retirements, transfers, base cycles, fault, entry
+    reg [31:0] metadata [0:5]; // retirements, transfers, base cycles, fault, entry, snapshot width
     wire [31:0] program_data = program_memory[program_address];
     wire [15:0] mem_read_data = memory[mem_address];
     integer observed_cycles = 0;
@@ -40,7 +40,7 @@ module simd4_tb;
     reg [24:0] held_request;
     reg [1:0] held_lane;
     reg [LANES*96+55:0] held_machine;
-    reg [LANES*96-1:0] pre_reset_registers;
+    reg [LANES*96-1:0] pre_reset_lane_state;
     string case_path, wave_path;
 
     simd4 #(.LANES(LANES)) dut (.*);
@@ -199,6 +199,10 @@ module simd4_tb;
         $readmemh({case_path, ".meta.hex"}, metadata);
         if (metadata[0] > 4096 || metadata[1] > 4096 || metadata[3] > 1 || metadata[4] > 255)
             $fatal(1, "Invalid fixture metadata");
+        // A fixture packed for another snapshot layout would otherwise be truncated or
+        // zero-filled by $readmemh without any diagnostic on Verilator.
+        if (metadata[5] != STATE_BITS)
+            $fatal(1, "Fixture snapshot width %0d differs from STATE_BITS %0d", metadata[5], STATE_BITS);
         $readmemh({case_path, ".program.hex"}, program_memory);
         $readmemh({case_path, ".expected-memory.hex"}, expected_memory);
         $readmemh({case_path, ".final.hex"}, expected_final);
@@ -231,10 +235,14 @@ module simd4_tb;
             end
             if (timeout_cycles == 10000) $fatal(1, "Abort point was never reached");
             for (i = 0; i < 256; i = i + 1) saved_memory[i] = memory[i];
-            pre_reset_registers = {accumulator_state, register_state};
+            pre_reset_lane_state = {accumulator_state, register_state};
+            // The accumulator cases must reach their reset with live accumulators, or
+            // the clear below would only show that zero resets to zero.
+            if ($test$plusargs("expect-nonzero-acc") && accumulator_state == 0)
+                $fatal(1, "Abort point reached with every accumulator still zero");
             @(negedge clk); reset = 1;
             #1;
-            if (mem_valid !== 0 || {accumulator_state, register_state} !== pre_reset_registers)
+            if (mem_valid !== 0 || {accumulator_state, register_state} !== pre_reset_lane_state)
                 $fatal(1, "Reset must cancel request immediately but reset registers synchronously");
             @(posedge clk); #2;
             if (busy !== 0 || done !== 0 || fault !== 0 || register_state !== 0 || accumulator_state !== 0 ||

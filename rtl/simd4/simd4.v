@@ -67,7 +67,7 @@ module simd4 #(
     // above bit 31 with the sign: a 16-bit window of the arithmetically shifted
     // value with no saturation, no rounding, and no flag for the dropped bits.
     // Each output bit is one mux over the accumulator bits, a barrel shifter.
-    function [15:0] accumulator_read;
+    function automatic [15:0] accumulator_read;
         input [31:0] value;
         input [4:0] shift;
         integer position, source;

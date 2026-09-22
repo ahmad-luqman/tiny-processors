@@ -1,9 +1,18 @@
 import unittest
 
-from programs.simd4.matrix_mac import expected_counts, program as matrix_program, reference as matrix_reference
+from programs.simd4.matrix_mac import (expected_counts, program as matrix_program, reference as matrix_reference,
+                                       word_count)
 from programs.simd4.vector_add import program
-from tools.simd4_model import (CLRA, LAST_OPCODE, MAC, MACU, MUL, RDA, execute, image,
-                               signed16, snapshot, word)
+from tools.simd4_model import (CLRA, HLT, LDI, LANE, ADDI, LAST_OPCODE, LOOP, MAC, MACU, MUL, RDA, SETLOOP,
+                               execute, image, signed, snapshot, word)
+
+
+def register(state, lane, reg):
+    return state >> (lane * 64 + reg * 16) & 0xffff
+
+
+def accumulator(state, lanes, lane):
+    return state >> (lanes * 64 + lane * 32) & 0xffffffff
 
 
 class ModelTests(unittest.TestCase):
@@ -26,6 +35,10 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(state >> 160 & 0xffffffff, 0x01234567)
         self.assertEqual(state >> 192 & 0xff, 0xfe)
         self.assertEqual(state >> 200, 0xbeef)
+        self.assertEqual(register(state, 1, 2), 7)
+        self.assertEqual(accumulator(state, 2, 1), 0x01234567)
+        run = execute(image([word(HLT)]), [0] * 256, lanes=2)
+        self.assertEqual((run.lanes, run.state_bits, run.record_bits), (2, 216, 256))
 
     def test_vector_results_independent_of_lane_count(self):
         memory = [0xa55a] * 256
@@ -60,14 +73,19 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(result.final_state >> 16 & 0xffff, 42)
 
     def test_faults_do_not_retire(self):
-        for bad in (word(LAST_OPCODE + 1), word(255), word(7), word(8)):
+        for bad in (word(LAST_OPCODE + 1), word(255), word(SETLOOP), word(LOOP)):
             with self.subTest(word=bad):
-                result = execute(image([word(1, imm=42), bad]), [0] * 256)
+                result = execute(image([word(LDI, imm=42), bad]), [0] * 256)
                 self.assertTrue(result.fault)
                 self.assertEqual(len(result.retirements), 1)
                 self.assertEqual(result.transfers, [])
                 self.assertEqual(result.final_state & 0xffff, 42)
                 self.assertEqual(result.base_cycles, 4)
+        # A fault leaves a live accumulator alone, even with MAC-shaped fields in the bad word.
+        result = execute(image([word(LDI, imm=42), word(MAC, ra=0, rb=0), word(LAST_OPCODE + 1, ra=0, rb=0)]),
+                         [0] * 256, lanes=2)
+        self.assertTrue(result.fault)
+        self.assertEqual([accumulator(result.final_state, 2, lane) for lane in range(2)], [1764, 1764])
 
     def test_matrix_kernel_words(self):
         # Four lanes, one column group: setup, then the unrolled row body.
@@ -104,6 +122,9 @@ class ModelTests(unittest.TestCase):
         for lanes, n in ((3, 6), (4, 2), (2, 3), (1, 8), (4, 16)):
             with self.subTest(lanes=lanes, n=n), self.assertRaises(ValueError):
                 matrix_program(lanes, n)
+        with self.assertRaisesRegex(ValueError, "8x8 on 1 lane"):
+            matrix_program(1, 8)
+        self.assertEqual([word_count(lanes, n) for lanes, n in ((1, 4), (2, 8), (4, 8), (1, 8))], [89, 137, 69, 273])
         with self.assertRaises(ValueError):
             matrix_program(4, 4, shift=32)
         for lanes, length in ((0, 4), (3, 6), (4, 3), (4, 0), (4, 68)):
@@ -115,12 +136,12 @@ class ModelTests(unittest.TestCase):
 
     def accumulate(self, op, a, b, times=1):
         """One lane: load a and b, apply op `times` times, return (acc, r2 after RDA 0, r3 after RDA 16)."""
-        code = image([word(1, rd=0, imm=a), word(1, rd=1, imm=b)] + [word(op, ra=0, rb=1)] * times +
-                     [word(RDA, rd=2), word(RDA, rd=3, imm=16), word(0)])
+        code = image([word(LDI, rd=0, imm=a), word(LDI, rd=1, imm=b)] + [word(op, ra=0, rb=1)] * times +
+                     [word(RDA, rd=2), word(RDA, rd=3, imm=16), word(HLT)])
         result = execute(code, [0] * 256, lanes=1)
         self.assertFalse(result.fault)
-        return (result.final_state >> 64 & 0xffffffff, result.final_state >> 32 & 0xffff,
-                result.final_state >> 48 & 0xffff)
+        return (accumulator(result.final_state, 1, 0), register(result.final_state, 0, 2),
+                register(result.final_state, 0, 3))
 
     def test_extreme_products_signed_and_unsigned(self):
         # (a, b, repetitions): (signed accumulator, unsigned accumulator), hand-computed bit patterns.
@@ -136,7 +157,7 @@ class ModelTests(unittest.TestCase):
         }
         for (a, b, times), (signed_acc, unsigned_acc) in cases.items():
             with self.subTest(a=a, b=b, times=times):
-                expected = (signed16(a) * signed16(b) * times) % 2**32
+                expected = (signed(a) * signed(b) * times) % 2**32
                 self.assertEqual(expected, signed_acc)
                 self.assertEqual((a * b * times) % 2**32, unsigned_acc)
                 self.assertEqual(self.accumulate(MAC, a, b, times),
@@ -147,37 +168,34 @@ class ModelTests(unittest.TestCase):
     def test_mul_keeps_low_sixteen_bits(self):
         for a, b in ((0x7fff, 0x7fff), (0xffff, 0xffff), (0x8000, 0x0002), (0x0123, 0x0456)):
             with self.subTest(a=a, b=b):
-                code = image([word(1, rd=0, imm=a), word(1, rd=1, imm=b), word(MUL, rd=2, ra=0, rb=1), 0])
+                code = image([word(LDI, rd=0, imm=a), word(LDI, rd=1, imm=b), word(MUL, rd=2, ra=0, rb=1), word(HLT)])
                 result = execute(code, [0] * 256, lanes=2)
                 low = (a * b) % 65536
-                self.assertEqual(result.final_state >> 32 & 0xffff, low)
-                self.assertEqual(result.final_state >> 96 & 0xffff, low)
-                self.assertEqual(result.final_state >> 128 & 0xffffffffffffffff, 0)  # accumulators untouched
+                for lane in range(2):
+                    self.assertEqual(register(result.final_state, lane, 2), low)
+                    self.assertEqual(accumulator(result.final_state, 2, lane), 0)  # untouched by MUL
 
     def test_rda_shift_truncation_and_clear(self):
-        # acc = -3 * 32767 * 32767 (0xbffd0003 pattern is negative): shifts sign-extend.
-        base = [word(1, rd=0, imm=0x7fff), word(1, rd=1, imm=0x7fff)] + [word(MAC, ra=0, rb=1)] * 3
+        # acc = 3 * 32767^2 = 0xbffd0003, past 2^31, so the pattern reads as negative: shifts sign-extend.
+        base = [word(LDI, rd=0, imm=0x7fff), word(LDI, rd=1, imm=0x7fff)] + [word(MAC, ra=0, rb=1)] * 3
         for shift, expected in ((0, 0x0003), (1, 0x8001), (4, 0xd000), (16, 0xbffd), (31, 0xffff), (33, 0x8001)):
             with self.subTest(shift=shift):
-                result = execute(image(base + [word(RDA, rd=2, imm=shift), 0]), [0] * 256, lanes=1)
-                self.assertEqual(result.final_state >> 32 & 0xffff, expected)
-        result = execute(image(base + [word(CLRA), word(RDA, rd=2, imm=0), word(RDA, rd=3, imm=31), 0]),
+                result = execute(image(base + [word(RDA, rd=2, imm=shift), word(HLT)]), [0] * 256, lanes=1)
+                self.assertEqual(register(result.final_state, 0, 2), expected)
+        result = execute(image(base + [word(CLRA), word(RDA, rd=2), word(RDA, rd=3, imm=31), word(HLT)]),
                          [0] * 256, lanes=1)
-        self.assertEqual(result.final_state >> 64 & 0xffffffff, 0)
-        self.assertEqual(result.final_state >> 32 & 0xffffffff, 0)
+        self.assertEqual(accumulator(result.final_state, 1, 0), 0)
+        self.assertEqual((register(result.final_state, 0, 2), register(result.final_state, 0, 3)), (0, 0))
 
     def test_mac_aliases_and_per_lane_accumulators(self):
         # MAC r0,r0 squares; RDA into r0 overwrites the operand only after the product is captured.
-        code = image([word(2, rd=0), word(4, rd=0, ra=0, imm=0xfffe), word(MAC, ra=0, rb=0),
-                      word(RDA, rd=0), word(MAC, ra=0, rb=0), word(RDA, rd=1), 0])
+        code = image([word(LANE, rd=0), word(ADDI, rd=0, ra=0, imm=0xfffe), word(MAC, ra=0, rb=0),
+                      word(RDA, rd=0), word(MAC, ra=0, rb=0), word(RDA, rd=1), word(HLT)])
         result = execute(code, [0] * 256, lanes=4)
-        for lane in range(4):
-            value = (lane + 0xfffe) % 65536          # -2, -1, 0, 1
-            square = signed16(value) ** 2             # 4, 1, 0, 1
-            acc = (square + square * square) % 2**32  # 20, 2, 0, 2
-            self.assertEqual(result.final_state >> (lane * 64) & 0xffff, square)
-            self.assertEqual(result.final_state >> (lane * 64 + 16) & 0xffff, acc & 0xffff)
-            self.assertEqual(result.final_state >> (256 + lane * 32) & 0xffffffff, acc)
+        for lane, (square, acc) in enumerate(((4, 20), (1, 2), (0, 0), (1, 2))):  # r0 = -2, -1, 0, 1
+            self.assertEqual(register(result.final_state, lane, 0), square)
+            self.assertEqual(register(result.final_state, lane, 1), acc)
+            self.assertEqual(accumulator(result.final_state, 4, lane), acc)
         self.assertEqual(len(result.retirements), 7)
         self.assertEqual(result.transfers, [])
 

@@ -14,8 +14,9 @@ def word(op, rd=0, ra=0, rb=0, imm=0):
     return (op << 24) | (rd << 22) | (ra << 20) | (rb << 18) | imm
 
 
-def signed16(value):
-    return value - 65536 if value & 0x8000 else value
+def signed(value, bits=16):
+    """Reinterpret an unsigned `bits`-wide word as two's complement."""
+    return value - (1 << bits) if value & (1 << (bits - 1)) else value
 
 
 def snapshot(registers, accumulators, pc, loop):
@@ -29,6 +30,7 @@ def snapshot(registers, accumulators, pc, loop):
 
 @dataclass
 class Execution:
+    lanes: int
     memory: list
     retirements: list
     transfers: list
@@ -39,6 +41,16 @@ class Execution:
     @property
     def base_cycles(self):
         return 2 * self.attempts + len(self.transfers)
+
+    @property
+    def state_bits(self):
+        """Width of one packed snapshot: registers, accumulators, PC and loop count."""
+        return self.lanes * 96 + 24
+
+    @property
+    def record_bits(self):
+        """Width of one retirement record: a snapshot plus the instruction word and its address."""
+        return self.state_bits + 40
 
 
 def execute(program, initial_memory, lanes=4, entry=0, limit=4096):
@@ -59,7 +71,7 @@ def execute(program, initial_memory, lanes=4, entry=0, limit=4096):
                                     instruction & 0xffff)
         fault = op > LAST_OPCODE or (op == SETLOOP and immediate == 0) or (op == LOOP and loop == 0)
         if fault:
-            return Execution(memory, retirements, transfers,
+            return Execution(lanes, memory, retirements, transfers,
                              snapshot(registers, accumulators, pc, loop), attempt, True)
         if op == SETLOOP:
             loop = immediate
@@ -67,7 +79,7 @@ def execute(program, initial_memory, lanes=4, entry=0, limit=4096):
             loop -= 1
             if loop:
                 pc = immediate % 256
-        elif op:
+        elif op != HLT:
             for lane, row in enumerate(registers):
                 if op == LDI:
                     row[rd] = immediate
@@ -88,20 +100,18 @@ def execute(program, initial_memory, lanes=4, entry=0, limit=4096):
                 elif op == MUL:
                     row[rd] = (row[ra] * row[rb]) % 65536
                 elif op == MAC:
-                    accumulators[lane] = (accumulators[lane] + signed16(row[ra]) * signed16(row[rb])) % 2**32
+                    accumulators[lane] = (accumulators[lane] + signed(row[ra]) * signed(row[rb])) % 2**32
                 elif op == MACU:
                     accumulators[lane] = (accumulators[lane] + row[ra] * row[rb]) % 2**32
                 elif op == CLRA:
                     accumulators[lane] = 0
                 elif op == RDA:
-                    acc = accumulators[lane]
-                    signed_acc = acc - 2**32 if acc & 0x80000000 else acc
-                    row[rd] = (signed_acc >> (immediate & 31)) % 65536
+                    row[rd] = (signed(accumulators[lane], 32) >> (immediate & 31)) % 65536
         state = snapshot(registers, accumulators, pc, loop)
         retirements.append(state | (instruction << (lanes * 96 + 24)) |
                            (address << (lanes * 96 + 56)))
         if op == HLT:
-            return Execution(memory, retirements, transfers, state, attempt, False)
+            return Execution(lanes, memory, retirements, transfers, state, attempt, False)
     raise ValueError("reference program exceeded instruction limit")
 
 

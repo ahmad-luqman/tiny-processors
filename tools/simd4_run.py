@@ -7,15 +7,23 @@ import random
 import re
 import subprocess
 
-from programs.simd4.matrix_mac import expected_counts, program as matrix_program, reference as matrix_reference
+from programs.simd4.matrix_mac import expected_counts, program as matrix_program, reference as matrix_reference, word_count
 from programs.simd4.vector_add import program as vector_program
-from tools.simd4_model import CLRA, LAST_OPCODE, MAC, MACU, MUL, RDA, execute, image, word
+from tools.simd4_model import (ADD, ADDI, CLRA, HLT, LANE, LAST_OPCODE, LDI, LOAD, LOOP, MAC, MACU, MUL, RDA,
+                               SETLOOP, STORE, execute, image, word)
 
 
 RESULT = re.compile(r"RESULT lanes=(\d+) wait=(\d+) cycles=(\d+) stalls=(\d+) transfers=(\d+) instructions=(\d+) fault=(\d+)")
+# Icarus reports a fixture row with more hex digits than the array width as a WARNING and
+# keeps the low bits; Verilator says nothing. Neither changes the exit status.
+SIMULATOR_WARNING = re.compile(r"^(WARNING|%Warning)", re.MULTILINE)
+CORNERS = (0x7fff, 0x8000, 0xffff, 0x0001)  # 32767, -32768, -1, 1
 
 
 def write_hex(path, values, width):
+    for value in values:
+        if not 0 <= value < 16 ** width:
+            raise ValueError(f"{path.name}: {value:#x} does not fit {width} hex digits")
     path.write_text("".join(f"{value:0{width}x}\n" for value in values))
 
 
@@ -30,42 +38,75 @@ def vector_memory(length):
 
 
 def matrix_memory(n, extreme=False):
-    """Row-major A at 0x00 and B at 0x40; the extreme variant fills them with +-32767/-32768/-1."""
+    """Row-major A at 0x00 and B at 0x40.
+
+    The ordinary variant uses small signed values so the waveform products stay readable.
+    The extreme variant rotates the corner values 32767, -32768, -1 and 1 through every row
+    of A and every column of B, then fills row 0 of A and column 0 of B with 32767 so that
+    C[0][0] accumulates n * 32767^2, which passes 2^31 for n = 4 and wraps past 2^32 for n = 8.
+    """
     rng = random.Random(0x3A7 + n)
     memory = [rng.randrange(65536) for _ in range(256)]
     if extreme:
-        corners = [0x7fff, 0x8000, 0xffff, 0x0001]
-        memory[:n * n] = [corners[(i + i // n) % 4] for i in range(n * n)]
-        memory[64:64 + n * n] = [corners[(3 * i) % 4] for i in range(n * n)]
+        memory[:n * n] = [CORNERS[(i + i // n) % 4] for i in range(n * n)]
+        memory[64:64 + n * n] = [CORNERS[(3 * i + i // n) % 4] for i in range(n * n)]
+        memory[:n] = [0x7fff] * n
+        for k in range(n):
+            memory[64 + k * n] = 0x7fff
     else:
-        # Small signed values keep ordinary products readable in the waveform.
-        memory[:n * n] = [(rng.randrange(-9, 10)) % 65536 for _ in range(n * n)]
-        memory[64:64 + n * n] = [(rng.randrange(-9, 10)) % 65536 for _ in range(n * n)]
+        memory[:n * n] = [rng.randrange(-9, 10) % 65536 for _ in range(n * n)]
+        memory[64:64 + n * n] = [rng.randrange(-9, 10) % 65536 for _ in range(n * n)]
     return memory
 
 
 def extreme_products():
-    """Every hand-computed product from the model tests, back to back through one launch.
+    """The hand-computed operand pairs from the model tests, back to back in one launch.
 
-    Each group loads a pair, accumulates it once or three times with MAC then MACU,
-    reads both halves back, and stores them so the transfers pin the same values.
+    Each group clears, accumulates a pair once or three times with MAC then MACU, reads
+    both halves back, multiplies the read-back halves into r3, and stores the two halves
+    at the same addresses in every lane. A tail exercises RDA shifts 1, 31, 33 (mod 32)
+    and 4, the MAC r0, r0 alias, and the fields CLRA and RDA must ignore.
     """
-    words = [word(2, rd=3), word(1, rd=2, imm=0x00c0)]  # r3 = lane, r2 = store base
-    for a, b, times in ((0xffff, 0xffff, 1), (0x8000, 0x8000, 1), (0x8000, 0x7fff, 1),
-                        (0xffff, 0x0001, 1), (0x7fff, 0x7fff, 3), (0xffff, 0xffff, 3), (0x0003, 0x0004, 1)):
+    words = [word(LANE, rd=3), word(LDI, rd=2, imm=0x00c0)]  # r3 = lane until the first MUL, r2 = store base
+    for a, b, times in ((0xffff, 0xffff, 1), (0x8000, 0x8000, 1), (0x8000, 0x7fff, 1), (0xffff, 0x0001, 1),
+                        (0x7fff, 0x7fff, 3), (0xffff, 0xffff, 3), (0x0003, 0x0004, 1), (0x0000, 0xffff, 5)):
         for op in (MAC, MACU):
-            words += [word(1, rd=0, imm=a), word(1, rd=1, imm=b), word(CLRA)]
+            words += [word(LDI, rd=0, imm=a), word(LDI, rd=1, imm=b), word(CLRA)]
             words += [word(op, ra=0, rb=1)] * times
-            words += [word(RDA, rd=0, imm=0), word(RDA, rd=1, imm=16), word(MUL, rd=3, ra=0, rb=1)]
-            words += [word(6, rd=0, ra=2, imm=0), word(6, rd=1, ra=2, imm=1), word(4, rd=2, ra=2, imm=2)]
-    words += [word(1, rd=0, imm=0x7fff), word(1, rd=1, imm=0x7fff), word(CLRA)] + [word(MAC, ra=0, rb=1)] * 3
+            words += [word(RDA, rd=0), word(RDA, rd=1, imm=16), word(MUL, rd=3, ra=0, rb=1)]
+            words += [word(STORE, rd=0, ra=2), word(STORE, rd=1, ra=2, imm=1), word(ADDI, rd=2, ra=2, imm=2)]
+    # acc = 3 * 32767^2 = bffd0003: windows past bit 31 (shift 31; 33 wraps to 1), then MAC r0, r0
+    # squares the read-back and RDA 4 stores the result.
+    words += [word(LDI, rd=0, imm=0x7fff), word(LDI, rd=1, imm=0x7fff), word(CLRA)] + [word(MAC, ra=0, rb=1)] * 3
     words += [word(RDA, rd=0, imm=1), word(RDA, rd=1, imm=31), word(RDA, rd=3, imm=33), word(MAC, ra=0, rb=0),
-              word(RDA, rd=0, imm=4), word(6, rd=0, ra=2, imm=0), word(6, rd=1, ra=2, imm=1),
-              word(6, rd=3, ra=2, imm=2), word(0)]
+              word(RDA, rd=0, imm=4), word(STORE, rd=0, ra=2), word(STORE, rd=1, ra=2, imm=1),
+              word(STORE, rd=3, ra=2, imm=2)]
+    # CLRA ignores every field; RDA ignores ra/rb; MUL may write an operand register.
+    words += [word(MAC, ra=1, rb=1), word(CLRA, rd=3, ra=1, rb=2, imm=0xffff), word(MAC, ra=0, rb=1),
+              word(RDA, rd=2, ra=3, rb=1, imm=16), word(MUL, rd=0, ra=0, rb=1), word(MUL, rd=1, ra=0, rb=1),
+              word(HLT)]
     return image(words)
 
 
+def rda_sweep():
+    """Read a negative, then a positive, accumulator back through every shift, plus out-of-range immediates."""
+    shifts = list(range(32)) + [32, 47, 0x7fff, 0xffff]
+    words = [word(LDI, rd=0, imm=0x7fff), word(LDI, rd=1, imm=0x7fff)] + [word(MAC, ra=0, rb=1)] * 3  # bffd0003
+    words += [word(RDA, rd=2 + (i & 1), imm=shift) for i, shift in enumerate(shifts)]
+    words += [word(CLRA)] + [word(MACU, ra=0, rb=1)] * 3                                               # same bits
+    words += [word(RDA, rd=2 + (i & 1), imm=shift) for i, shift in enumerate(shifts)]
+    words += [word(CLRA), word(MAC, ra=0, rb=1)]                                                        # 3fff0001
+    words += [word(RDA, rd=2 + (i & 1), imm=shift) for i, shift in enumerate(shifts)] + [word(HLT)]
+    return image(words)
+
+
+def fault_after_mac(bad):
+    """acc = 0xabcd * 3 and r0 = 3 before the faulting word: the fault must leave both alone."""
+    return image([word(LDI, rd=2, imm=0xabcd), word(LDI, rd=0, imm=3), word(MAC, ra=2, rb=0), bad])
+
+
 EXTREMES = extreme_products()
+RDA_SWEEP = rda_sweep()
 
 
 class Runner:
@@ -75,17 +116,18 @@ class Runner:
         self.root.mkdir(parents=True, exist_ok=True)
         self.results = []
 
-    def run(self, name, code, memory, lanes=4, wait=0, entry=0, abort_after=None, relaunch=False, wave=False):
+    def run(self, name, code, memory, lanes=4, wait=0, entry=0, abort_after=None, relaunch=False, wave=False,
+            expect_nonzero_acc=False):
         reference = execute(code, memory, lanes, entry)
         prefix = self.root / name
         write_hex(Path(f"{prefix}.program.hex"), code, 8)
         write_hex(Path(f"{prefix}.memory.hex"), memory, 4)
         write_hex(Path(f"{prefix}.expected-memory.hex"), reference.memory, 4)
-        write_hex(Path(f"{prefix}.retire.hex"), reference.retirements, (lanes * 96 + 64) // 4)
+        write_hex(Path(f"{prefix}.retire.hex"), reference.retirements, reference.record_bits // 4)
         write_hex(Path(f"{prefix}.transfers.hex"), reference.transfers, 7)
-        write_hex(Path(f"{prefix}.final.hex"), [reference.final_state], (lanes * 96 + 24) // 4)
+        write_hex(Path(f"{prefix}.final.hex"), [reference.final_state], reference.state_bits // 4)
         write_hex(Path(f"{prefix}.meta.hex"), [len(reference.retirements), len(reference.transfers),
-                  reference.base_cycles, int(reference.fault), entry], 8)
+                  reference.base_cycles, int(reference.fault), entry, reference.state_bits], 8)
         command = (["vvp", f"build/simd4-{lanes}.vvp"] if self.simulator == "icarus"
                    else [f"build/verilator-simd4-{lanes}/simd4_sim"])
         command += [f"+case={prefix}", f"+wait={wait}"]
@@ -93,12 +135,18 @@ class Runner:
             command.append(f"+abort-after={abort_after}")
         if relaunch:
             command.append("+relaunch")
+        if expect_nonzero_acc:
+            command.append("+expect-nonzero-acc")
         if wave:
             command += [f"+wave={prefix}.vcd", "+trace"]
-        process = subprocess.run(command, capture_output=True, text=True, timeout=20)
+        try:
+            process = subprocess.run(command, capture_output=True, text=True, timeout=20)
+        except subprocess.TimeoutExpired as timeout:
+            Path(f"{prefix}.log").write_text((timeout.stdout or "") + (timeout.stderr or ""))
+            raise
         log = process.stdout + process.stderr
         Path(f"{prefix}.log").write_text(log)
-        if process.returncode or "PASS: SIMD4" not in log:
+        if process.returncode or "PASS: SIMD4" not in log or SIMULATOR_WARNING.search(log):
             raise RuntimeError(f"{name} failed ({self.simulator}):\n{log}")
         matches = RESULT.findall(log)
         if len(matches) != (2 if relaunch else 1):
@@ -121,8 +169,9 @@ class Runner:
         # A direct array calculation checks the interpreter too.
         expected = memory.copy()
         expected[128:128 + length] = [(memory[i] + memory[64 + i]) % 65536 for i in range(length)]
-        if execute(code, memory, lanes).memory != expected:
-            raise RuntimeError("Vector interpreter disagrees with direct Python array addition")
+        run = execute(code, memory, lanes)
+        if run.fault or run.memory != expected:
+            raise RuntimeError("Vector interpreter faulted or disagrees with direct Python array addition")
         return self.run(name or f"vector-{length}-lanes-{lanes}-wait-{wait}", code, memory,
                         lanes, wait, **kwargs)
 
@@ -132,11 +181,12 @@ class Runner:
         expected = memory.copy()
         expected[128:128 + n * n] = matrix_reference(memory[:n * n], memory[64:64 + n * n], n, shift)
         run = execute(code, memory, lanes)
-        if run.memory != expected:
-            raise RuntimeError("Matrix interpreter disagrees with direct Python matrix product")
+        if run.fault or run.memory != expected:
+            raise RuntimeError("Matrix interpreter faulted or disagrees with direct Python matrix product")
         if (len(run.retirements), len(run.transfers)) != expected_counts(lanes, n):
             raise RuntimeError("Matrix kernel retired a different instruction/transfer count than predicted")
-        return self.run(name or f"matrix-{n}-lanes-{lanes}-wait-{wait}-shift-{shift}", code, memory,
+        variant = "-extreme" if extreme else ""
+        return self.run(name or f"matrix-{n}-lanes-{lanes}-wait-{wait}-shift-{shift}{variant}", code, memory,
                         lanes, wait, **kwargs)
 
     def benchmark(self):
@@ -186,27 +236,34 @@ class Runner:
             rng = random.Random(0xACC + lanes)
             for index in range(8):
                 # Loads, stores and every arithmetic opcode, including the accumulator ones.
-                ops = [1, 2, 3, 4, 5, 6, MUL, MAC, MAC, MACU, CLRA, RDA, RDA]
-                words = [word(2)] + [word(rng.choice(ops), rng.randrange(4), rng.randrange(4),
-                                         rng.randrange(4), rng.randrange(65536)) for _ in range(40)] + [0]
+                ops = [LDI, LANE, ADD, ADDI, LOAD, STORE, MUL, MAC, MAC, MACU, CLRA, RDA, RDA]
+                words = [word(LANE)] + [word(rng.choice(ops), rng.randrange(4), rng.randrange(4),
+                                            rng.randrange(4), rng.randrange(65536)) for _ in range(40)] + [word(HLT)]
                 self.run(f"mixed-mac-{lanes}-{index}", image(words), memory, lanes, index % 4)
             self.run(f"extremes-{lanes}", EXTREMES, memory, lanes, 3)
+            self.run(f"rda-sweep-{lanes}", RDA_SWEEP, memory, lanes, 1)
             for n in (2, 4, 8):
-                if n % lanes == 0 and (n, lanes) != (8, 1):
+                if n % lanes == 0 and word_count(lanes, n) <= 256:
                     self.matrix(lanes, n, 3)
                     self.matrix(lanes, n, 1, extreme=True)
-            self.matrix(lanes, 4, 0, shift=16, extreme=True)
+                    self.matrix(lanes, n, 0, shift=16, extreme=True)
             self.matrix(lanes, 4, 0, shift=31, extreme=True)
-            # Reset inside the first row's accumulation (after the third transfer of the first group).
-            self.matrix(lanes, 4, 3, name=f"matrix-reset-{lanes}", abort_after=2 * lanes + 1, relaunch=True)
-            # Reset after the first MAC has changed the accumulator, then relaunch.
-            self.run(f"reset-mac-{lanes}", EXTREMES, memory, lanes, 3, abort_after=2 * lanes, relaunch=True)
+            # Reset inside row 0 of column group 0: after both k=0 operand loads, the first MAC and
+            # one lane of the k=1 A load (2*lanes+1 transfers), while the next lane's request is pending.
+            self.matrix(lanes, 4, 3, name=f"matrix-reset-{lanes}", abort_after=2 * lanes + 1, relaunch=True,
+                        expect_nonzero_acc=True)
+            # Reset while the accumulators hold the first MACU result (fffe0001) and its store is
+            # pending; the relaunch must start from zero.
+            self.run(f"reset-mac-{lanes}", EXTREMES, memory, lanes, 3, abort_after=2 * lanes, relaunch=True,
+                     expect_nonzero_acc=True)
+            for opcode in (LAST_OPCODE + 1, 0x1a, 0x8d, 0xff):
+                self.run(f"illegal-{opcode:02x}-lanes-{lanes}", fault_after_mac(word(opcode, rd=1, ra=2, imm=0x44)),
+                         [0x5a5a] * 256, lanes)
         for opcode in range(LAST_OPCODE + 1, 256):
-            self.run(f"illegal-{opcode:02x}", image([word(1, rd=2, imm=0xabcd),
-                     word(opcode, rd=1, ra=2, imm=0x44)]), [0x5a5a] * 256)
-        self.run("zero-loop-count", image([word(2, rd=2), word(6, rd=2, imm=33), word(7)]),
-                 [0] * 256, wait=3, relaunch=True)
-        self.run("loop-without-count", image([word(1, imm=42), word(8)]), [0] * 256, relaunch=True)
+            self.run(f"illegal-{opcode:02x}", fault_after_mac(word(opcode, rd=1, ra=2, imm=0x44)), [0x5a5a] * 256)
+        self.run("zero-loop-count", image([word(LANE, rd=2), word(STORE, rd=2, imm=33), word(LDI, rd=0, imm=3),
+                                           word(MAC, ra=2, rb=0), word(SETLOOP)]), [0] * 256, wait=3, relaunch=True)
+        self.run("loop-without-count", fault_after_mac(word(LOOP)), [0] * 256, relaunch=True)
 
 
 def main():
