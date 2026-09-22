@@ -7,6 +7,7 @@ import random
 import re
 import subprocess
 
+from programs.simd4.matrix_mac import expected_counts, program as matrix_program, reference as matrix_reference
 from programs.simd4.vector_add import program as vector_program
 from tools.simd4_model import CLRA, LAST_OPCODE, MAC, MACU, MUL, RDA, execute, image, word
 
@@ -25,6 +26,21 @@ def vector_memory(length):
     b = [1, 1, 32768, 65535, 65535, 65535, 456, 123]
     memory[:min(length, 8)] = a[:min(length, 8)]
     memory[64:64 + min(length, 8)] = b[:min(length, 8)]
+    return memory
+
+
+def matrix_memory(n, extreme=False):
+    """Row-major A at 0x00 and B at 0x40; the extreme variant fills them with +-32767/-32768/-1."""
+    rng = random.Random(0x3A7 + n)
+    memory = [rng.randrange(65536) for _ in range(256)]
+    if extreme:
+        corners = [0x7fff, 0x8000, 0xffff, 0x0001]
+        memory[:n * n] = [corners[(i + i // n) % 4] for i in range(n * n)]
+        memory[64:64 + n * n] = [corners[(3 * i) % 4] for i in range(n * n)]
+    else:
+        # Small signed values keep ordinary products readable in the waveform.
+        memory[:n * n] = [(rng.randrange(-9, 10)) % 65536 for _ in range(n * n)]
+        memory[64:64 + n * n] = [(rng.randrange(-9, 10)) % 65536 for _ in range(n * n)]
     return memory
 
 
@@ -110,6 +126,19 @@ class Runner:
         return self.run(name or f"vector-{length}-lanes-{lanes}-wait-{wait}", code, memory,
                         lanes, wait, **kwargs)
 
+    def matrix(self, lanes, n, wait=0, shift=0, extreme=False, name=None, **kwargs):
+        code, memory = matrix_program(lanes, n, shift), matrix_memory(n, extreme)
+        # A direct Python matrix product checks the interpreter and the kernel shape too.
+        expected = memory.copy()
+        expected[128:128 + n * n] = matrix_reference(memory[:n * n], memory[64:64 + n * n], n, shift)
+        run = execute(code, memory, lanes)
+        if run.memory != expected:
+            raise RuntimeError("Matrix interpreter disagrees with direct Python matrix product")
+        if (len(run.retirements), len(run.transfers)) != expected_counts(lanes, n):
+            raise RuntimeError("Matrix kernel retired a different instruction/transfer count than predicted")
+        return self.run(name or f"matrix-{n}-lanes-{lanes}-wait-{wait}-shift-{shift}", code, memory,
+                        lanes, wait, **kwargs)
+
     def benchmark(self):
         rows = []
         for wait in (0, 1, 2):
@@ -118,6 +147,13 @@ class Runner:
                 rows.append(row)
                 print(f"32 elements | lanes={lanes} wait={wait} | cycles={row['cycles']} "
                       f"stalls={row['stalls']} transfers={row['transfers']}")
+        for wait in (0, 1, 2):
+            for lanes in (1, 2, 4):
+                row = self.matrix(lanes, 4, wait)
+                row["kernel"] = "matrix"
+                rows.append(row)
+                print(f"4x4 matrix  | lanes={lanes} wait={wait} | cycles={row['cycles']} "
+                      f"stalls={row['stalls']} transfers={row['transfers']} instructions={row['instructions']}")
         (self.root / "benchmark.json").write_text(json.dumps(rows, indent=2) + "\n")
 
     def suite(self):
@@ -155,6 +191,14 @@ class Runner:
                                          rng.randrange(4), rng.randrange(65536)) for _ in range(40)] + [0]
                 self.run(f"mixed-mac-{lanes}-{index}", image(words), memory, lanes, index % 4)
             self.run(f"extremes-{lanes}", EXTREMES, memory, lanes, 3)
+            for n in (2, 4, 8):
+                if n % lanes == 0 and (n, lanes) != (8, 1):
+                    self.matrix(lanes, n, 3)
+                    self.matrix(lanes, n, 1, extreme=True)
+            self.matrix(lanes, 4, 0, shift=16, extreme=True)
+            self.matrix(lanes, 4, 0, shift=31, extreme=True)
+            # Reset inside the first row's accumulation (after the third transfer of the first group).
+            self.matrix(lanes, 4, 3, name=f"matrix-reset-{lanes}", abort_after=2 * lanes + 1, relaunch=True)
             # Reset after the first MAC has changed the accumulator, then relaunch.
             self.run(f"reset-mac-{lanes}", EXTREMES, memory, lanes, 3, abort_after=2 * lanes, relaunch=True)
         for opcode in range(LAST_OPCODE + 1, 256):
@@ -178,7 +222,10 @@ def main():
     else:
         runner.vector(4, 8, name="vector-wave", wave=True)
         runner.vector(4, 8, wait=3, name="stalled-wave", wave=True)
-        print(f"Waveforms and text traces: {runner.root}/vector-wave.vcd and stalled-wave.vcd (.log for text)")
+        runner.matrix(4, 4, name="matrix-wave", wave=True)
+        runner.run("overflow-wave", EXTREMES, vector_memory(8), 4, wave=True)
+        print(f"Waveforms and text traces: {runner.root}/vector-wave.vcd, stalled-wave.vcd, "
+              "matrix-wave.vcd and overflow-wave.vcd (.log for text)")
     (runner.root / f"{args.mode}-results.json").write_text(json.dumps(runner.results, indent=2) + "\n")
     print(f"PASS: SIMD4 {args.simulator}: {len(runner.results)} cases, "
           f"{sum(row['launches'] for row in runner.results)} completed launches")

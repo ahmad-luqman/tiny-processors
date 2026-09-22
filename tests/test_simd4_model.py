@@ -1,5 +1,6 @@
 import unittest
 
+from programs.simd4.matrix_mac import expected_counts, program as matrix_program, reference as matrix_reference
 from programs.simd4.vector_add import program
 from tools.simd4_model import (CLRA, LAST_OPCODE, MAC, MACU, MUL, RDA, execute, image,
                                signed16, snapshot, word)
@@ -68,7 +69,43 @@ class ModelTests(unittest.TestCase):
                 self.assertEqual(result.final_state & 0xffff, 42)
                 self.assertEqual(result.base_cycles, 4)
 
+    def test_matrix_kernel_words(self):
+        # Four lanes, one column group: setup, then the unrolled row body.
+        self.assertEqual(matrix_program(4, 4)[:9], [0x02000000, 0x04000000, 0x01400000, 0x07000004,
+                         0x0c000000, 0x05900000, 0x05c00040, 0x0a2c0000, 0x05900001])
+        self.assertEqual(matrix_program(4, 4)[17:23], [0x0d800000, 0x03d00000, 0x06b00080, 0x04500004,
+                         0x08000004, 0])
+        self.assertEqual(matrix_program(2, 4)[22:26], [0x02000000, 0x04000002, 0x01400000, 0x07000004])
+
+    def test_matrix_kernel_matches_direct_product_and_predicted_counts(self):
+        a = [0x7fff, 0x8000, 0xffff, 0x0001] * 4
+        # Each row of B is the previous row rotated left, so every column holds all four corners.
+        b = [[0x0001, 0x7fff, 0x8000, 0xffff][(c + r) % 4] for r in range(4) for c in range(4)]
+        memory = [0x5a5a] * 256
+        memory[:16], memory[64:80] = a, b
+        for lanes in (1, 2, 4):
+            for shift in (0, 16):
+                with self.subTest(lanes=lanes, shift=shift):
+                    result = execute(matrix_program(lanes, 4, shift), memory, lanes)
+                    self.assertFalse(result.fault)
+                    self.assertEqual(result.memory[128:144], matrix_reference(a, b, 4, shift))
+                    self.assertEqual(result.memory[:128] + result.memory[144:], memory[:128] + memory[144:])
+                    self.assertEqual((len(result.retirements), len(result.transfers)), expected_counts(lanes, 4))
+        # Row 0 of A times column 0 of B (1, 32767, -32768, -1) by hand:
+        # 32767*1 + (-32768)*32767 + (-1)*(-32768) + 1*(-1) = 32767 - 1073709056 + 32768 - 1
+        # = -1073643522 = 0xc0017ffe; RDA 0 keeps 7ffe, RDA 16 keeps c001.
+        self.assertEqual(matrix_reference(a, b, 4, 0)[0], 0x7ffe)
+        self.assertEqual(matrix_reference(a, b, 4, 16)[0], 0xc001)
+        self.assertEqual(expected_counts(4, 4), (77, 144))
+        self.assertEqual(expected_counts(1, 4), (305, 144))
+        self.assertEqual(expected_counts(2, 8), (977, 1088))
+
     def test_reject_bad_kernel_dimensions_and_words(self):
+        for lanes, n in ((3, 6), (4, 2), (2, 3), (1, 8), (4, 16)):
+            with self.subTest(lanes=lanes, n=n), self.assertRaises(ValueError):
+                matrix_program(lanes, n)
+        with self.assertRaises(ValueError):
+            matrix_program(4, 4, shift=32)
         for lanes, length in ((0, 4), (3, 6), (4, 3), (4, 0), (4, 68)):
             with self.subTest(lanes=lanes, length=length), self.assertRaises(ValueError):
                 program(lanes, length)

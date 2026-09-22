@@ -195,7 +195,7 @@ sim-simd4: test-simd4
 	$(PYTHON) -m tools.simd4_run --mode waves
 
 waves-simd4: sim-simd4
-	@echo "Open build/simd4/icarus/vector-wave.vcd or stalled-wave.vcd in Surfer: https://app.surfer-project.org/"
+	@echo "Open build/simd4/icarus/vector-wave.vcd, stalled-wave.vcd, matrix-wave.vcd or overflow-wave.vcd in Surfer: https://app.surfer-project.org/"
 
 bench-simd4: $(SIMD4_ICARUS)
 	$(PYTHON) -m tools.simd4_run --mode bench
