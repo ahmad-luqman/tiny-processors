@@ -322,6 +322,25 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertIn("RV32_PONG_INPUT := programs/rv32/pong.input", makefile)
         self.assertIn("RV32_PONG_EXPECTED := programs/rv32/pong.expected", makefile)
 
+    def test_simd_register_contract_constants(self):
+        from tools import rv32_asm as asm
+        expected = dict(COMMAND=0,STATUS=4,ENTRY=8,CYCLES=12,STALLS=16,TRANSFERS=20,INSTRUCTIONS=24,
+                        BUSY=1,DONE=2,FAULT=4,START=1,RESET=2)
+        for filename,prefix in [('programs/rv32/board.h','RV32_SIMD4_'),('tools/rv32_simd4.h','SIMD_')]:
+            source = (ROOT/filename).read_text()
+            for name,value in expected.items():
+                match = re.search(rf'#define {prefix}{name}\s+0x([0-9a-f]+)\b',source)
+                self.assertIsNotNone(match,(filename,name))
+                self.assertEqual(int(match[1],16),value,(filename,name))
+        rtl = (ROOT/'rtl/rv32/rv32_simd4.v').read_text()
+        for name,value in expected.items():
+            self.assertEqual(getattr(asm,'SIMD_'+name),value)
+            match = re.search(rf"SIMD4_{name} = (?:5|32)'h([0-9a-f]+);",rtl)
+            self.assertIsNotNone(match,name)
+            self.assertEqual(int(match[1],16),value,name)
+        self.assertEqual((asm.SIMD_BASE,asm.SIMD_PROGRAM,asm.SIMD_DATA),
+                         (0x20004000,0x20005000,0x20006000))
+
     def test_key_table_and_windows_agree_across_languages(self):
         """The key table lives in board.h, the emulator, the window, the testbench, and this module's KEYS; the
         window bases in board.h, the bus, the machine's memory instances, and the assembler. None of
@@ -342,7 +361,8 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertRegex(header, rf"#define RV32_EVENT_PRESS\s+{EVENT_PRESS:#010x}\b")
         self.assertIn(f"32'h{EVENT_VALID:08x} | ((token2 == \"down\") ? 32'h{EVENT_PRESS:x} : 32'h0)".replace("8000_0000", "80000000"),
                       testbench.replace("8000_0000", "80000000"))
-        bases = {"RAM": RAM, "CONSOLE": CONSOLE, "DONE": DONE, "TIMER": TIMER, "INPUT": INPUT, "DISPLAY": DISPLAY, "FB": FB}
+        bases = {"RAM": RAM, "CONSOLE": CONSOLE, "DONE": DONE, "TIMER": TIMER, "INPUT": INPUT, "DISPLAY": DISPLAY, "FB": FB,
+                 "SIMD4": 0x20004000, "SIMD4_PROGRAM": 0x20005000, "SIMD4_DATA": 0x20006000}
         header_bases = {name: int(value, 16) for name, value in re.findall(r"#define RV32_(\w+)_BASE\s+0x([0-9a-fA-F]+)", header)}
         self.assertEqual(header_bases, {name: bases[name] for name in header_bases}, "board.h")
         self.assertEqual(set(header_bases) >= {"TIMER", "INPUT", "DISPLAY", "FB"}, True)
@@ -350,6 +370,12 @@ class DeviceHelperTests(unittest.TestCase):
         bus_bases = {name.replace("_BASE", "").replace("_ADDR", ""): int(value.replace("_", ""), 16)
                      for name, value in re.findall(r"localparam \[31:0\] (\w+) = 32'h([0-9a-fA-F_]+);", bus)}
         self.assertEqual(bus_bases, bases, "rv32_bus.v")
+        wrapper = (ROOT / "rtl/rv32/rv32_simd4.v").read_text()
+        simd_header = (ROOT / "tools/rv32_simd4.h").read_text()
+        for name, value in (("BASE", 0x20004000), ("PROGRAM", 0x20005000), ("DATA", 0x20006000)):
+            self.assertRegex(header, rf"#define RV32_SIMD4_{name}\s+0x{value:08x}\b")
+            self.assertRegex(simd_header, rf"#define SIMD_{name}\s+0x{value:08x}u\b")
+            self.assertIn(f"SIMD4_{name} = 32'h{value:08x}", wrapper.replace("2000_", "2000"))
         machine = (ROOT / "rtl/rv32/rv32_soc.v").read_text()
         instances = re.findall(r"rv32_ram #\(\.WORDS\((\w+)\), \.BASE\(32'h([0-9a-fA-F_]+)\)\)", machine)
         self.assertEqual([(words, int(value.replace("_", ""), 16)) for words, value in instances],

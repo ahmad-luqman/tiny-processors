@@ -30,11 +30,11 @@ _Avoid_: guest renderer, guest operating system.
 The point where an executed instruction commits its architectural effects, used to compare CPU behavior across implementations.
 
 **Device time**:
-The rule that a timer tick is a clock cycle on the RTL and an executed instruction on the emulator, so only the timer's values differ between backends; programs that read it are compared at the results level (console, outcome, checkpoints, and the trap records in order), everything else trace for trace.
+A device tick is a clock cycle on RTL and an executed instruction (retired or trapped) on the emulator. Timer reads and A2 accelerator completion/status/counters can differ between backends. Programs using those interfaces are compared at the results level (console, outcome, checkpoints and ordered trap records); programs using neither retain trace comparison. Deterministic diagnostics can additionally opt into ordered-store comparison.
 _Avoid_: wall-clock time, a claim that the backends run at the same speed.
 
 **Session recording**:
-The `frame N down|up KEY` script a host writes of every event it offered to the input queue, typed or scripted, so a hand-played session replays identically on every backend (trace for trace when the guest never reads the timer, at the results level otherwise).
+The `frame N down|up KEY` script a host writes of every event it offered to the input queue, typed or scripted, so a hand-played session replays identically on every backend (trace for trace when the guest uses neither timer reads nor asynchronous accelerator registers, at the results level otherwise).
 _Avoid_: a video, a save file, a trace.
 
 **Frame checkpoint**:
@@ -59,7 +59,8 @@ _Avoid_: Hack computer, RISC-V CPU.
 
 **SIMD4**:
 The project's teaching compute engine, whose lanes execute a shared instruction stream on separate data; since A1 each lane also owns a 32-bit accumulator for 16×16 multiply-accumulate. See [the contract](docs/simd4.md).
-_Avoid_: complete GPU, graphics renderer, NPU, a device on the RV32 bus (that is A2).
+A2 attaches this core as a CPU-commanded peripheral with private bus-mapped memories; see [the device contract](docs/rv32-simd4.md).
+_Avoid_: complete GPU, graphics renderer, NPU, or a DMA engine.
 
 **Learning milestone**:
 A bounded working artifact with verified behavior, an explanation connecting its source to the hardware or software it represents, and exercises for understanding it.

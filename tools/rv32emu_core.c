@@ -284,6 +284,26 @@ static mem_access display_store(machine *m, uint32_t offset, int width, uint32_t
     return ACC_FAULT; /* FRAMES, WIDTH, and HEIGHT are read-only */
 }
 
+/* Region callbacks normalize their offsets to the command-window base. */
+static mem_access simd_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    return simd_access(&m->simd, SIMD_BASE + offset, width, false, value) ? ACC_OK : ACC_FAULT;
+}
+
+static mem_access simd_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    return simd_access(&m->simd, SIMD_BASE + offset, width, true, &value) ? ACC_OK : ACC_FAULT;
+}
+
+static mem_access simd_program_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{ return simd_load(m, SIMD_PROGRAM - SIMD_BASE + offset, width, value); }
+static mem_access simd_program_store(machine *m, uint32_t offset, int width, uint32_t value)
+{ return simd_store(m, SIMD_PROGRAM - SIMD_BASE + offset, width, value); }
+static mem_access simd_data_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{ return simd_load(m, SIMD_DATA - SIMD_BASE + offset, width, value); }
+static mem_access simd_data_store(machine *m, uint32_t offset, int width, uint32_t value)
+{ return simd_store(m, SIMD_DATA - SIMD_BASE + offset, width, value); }
+
 /* The memory map (docs/rv32.md). RAM is last only for readability; the
  * windows are disjoint so the order does not matter. */
 static const region REGIONS[] = {
@@ -293,6 +313,9 @@ static const region REGIONS[] = {
     {"input", INPUT_BASE, 16, input_load, NULL},
     {"display", DISPLAY_BASE, 16, display_load, display_store},
     {"framebuffer", FB_BASE, FB_SIZE, fb_load, fb_store},
+    {"simd4", SIMD_BASE, 32, simd_load, simd_store},
+    {"simd4_program", SIMD_PROGRAM, 1024, simd_program_load, simd_program_store},
+    {"simd4_data", SIMD_DATA, 1024, simd_data_load, simd_data_store},
     {"ram", RAM_BASE, RAM_SIZE, ram_load, ram_store},
 };
 
@@ -367,6 +390,7 @@ static void trace_effects(const machine *m)
  * handler would be fetched from unmapped memory): halt and report both traps. */
 static void trap(machine *m, uint32_t word, uint32_t cause, uint32_t tval)
 {
+    simd_tick(&m->simd, false);
     m->steps++;
     if (m->trace) {
         fprintf(m->trace, "%" PRIu64 " %08" PRIx32 " %08" PRIx32 " trap %" PRIu32 " %08" PRIx32 "\n",
@@ -703,6 +727,7 @@ static void step(machine *m)
         m->wr_reg = (int)rd;
         m->wr_value = result;
     }
+    simd_tick(&m->simd, false);
     m->steps++;
     m->retired++;
     m->in_trap = false;
@@ -1003,6 +1028,7 @@ void emu_read_input_script(machine *m, const char *path)
 void emu_init(machine *m)
 {
     memset(m, 0, sizeof *m);
+    simd_reset(&m->simd);
     m->limit = 100000000ull;
 }
 

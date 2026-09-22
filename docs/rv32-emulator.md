@@ -202,3 +202,7 @@ Completed on 2026-09-19 on branch `m2-rv32-emulator`. `make test-rv32` passes fr
 - Counter, ALU, SAP8, SIMD4, and all M1 targets unchanged and passing.
 
 Limitations that remained after M2: no timer, input, or framebuffer; no interrupts, `mstatus`, or privilege modes; no cycle timing of any kind; trace mode is about fifty times slower than plain execution. M3 and M4 built the RTL core whose trace matches this emulator's line for line ([record](rv32-rtl.md)); M5 (completed 2026-09-21, [record](rv32-soc.md)) added the timer, input queue, display, and framebuffer here and as RTL peripherals, with the diagnostic image passing on both. M6 (completed 2026-09-21, [record](rv32-window.md)) split this file into a core library and the headless main so a native SDL3 window could run the same machine, and decided against a host-time timer mode: the window paces presents and the timer counts instructions everywhere. Interrupts and privilege modes remain.
+
+The [A2 model](rv32-simd4.md) keeps program/data storage separate from one
+execution-state struct. Reset clears that struct as a whole and preserves the
+memories; machine initialization calls the same reset routine explicitly.

@@ -48,8 +48,22 @@ CSRs, all five rounding modes and accrued exception flags. Float builds retain
 ILP32; existing games remain RV32I. The same C arithmetic workload takes 6,037
 unstalled RTL cycles with F and 80,924 with guest software floating point.
 See [the F2 contract, coverage, ABI walkthrough and gates](docs/rv32-f.md).
-`make test-rv32` includes these checks. A1 (multiply/accumulate and a matrix
-kernel) is the next roadmap milestone.
+`make test-rv32` includes these checks.
+
+## CPU-commanded accelerator (A2)
+
+```sh
+make run-rv32-simd4-emu                 # Guest loads, launches, polls and checks results
+make test-rv32-simd4 test-rv32-simd4-verilator
+make waves-rv32-simd4                   # Whole-machine launch/poll waveform
+```
+
+The four-lane SIMD4 engine is attached to the RV32 bus with private program/data
+windows and matching emulator behavior. The guest checks vector addition and
+signed/unsigned matrix products, faults, relaunch and timeout recovery. CPU and
+accelerator take turns owning the buffers; reset preserves accepted stores.
+See [the A2 contract, gates, measurements and reset walkthrough](docs/rv32-simd4.md).
+G1 (2D acceleration) is next.
 
 ## Start here
 
@@ -115,7 +129,7 @@ make waves-simd4           # Tests, vector/stalled/matrix/overflow traces, and t
 
 Both simulators pass 395 cases with 423 completed launches and agree on the benchmarks. For 32 elements, one lane takes 486 cycles and four lanes take 198 cycles with no memory waits: **2.45× speedup**. All still need 96 transfers through the single port. The 4×4 matrix kernel takes 754 cycles on one lane and 298 on four (**2.53×**) and always 144 transfers, because every lane loads its own copy of the shared A operand. Read the [gate and performance walkthrough](docs/simd4-to-gates.md) to connect lane duplication, stalls, multipliers, overflow, and measured speedup.
 
-The [vector kernel](programs/simd4/vector_add.py), the [matrix kernel](programs/simd4/matrix_mac.py), interpreter, and runner use Python's standard library. Generated reports and traces are under `build/simd4/icarus/` and `build/simd4/verilator/`. Every lane is active, so vector length and matrix size must be divisible by lane count. MUL keeps the low 16 bits of a product; MAC/MACU add the signed/unsigned 32-bit product into the accumulator modulo 2^32; RDA reads a 16-bit window back with truncation and no saturation. Divergent branches, a broadcast load, and saturation are not implemented. A1 is complete; A2 attaches the engine to the RV32 bus.
+The [vector kernel](programs/simd4/vector_add.py), the [matrix kernel](programs/simd4/matrix_mac.py), interpreter, and runner use Python's standard library. Generated reports and traces are under `build/simd4/icarus/` and `build/simd4/verilator/`. Every lane is active, so vector length and matrix size must be divisible by lane count. MUL keeps the low 16 bits of a product; MAC/MACU add the signed/unsigned 32-bit product into the accumulator modulo 2^32; RDA reads a 16-bit window back with truncation and no saturation. Divergent branches, a broadcast load, and saturation are not implemented. A1 and A2 are complete; the [A2 peripheral](docs/rv32-simd4.md) attaches this unchanged core to the RV32 bus.
 
 ## RV32I firmware on a reference runner
 
@@ -156,7 +170,7 @@ The 78-instruction loop produces identical traces on both backends at every stal
 
 ## RV32 machine: bus, devices, and the diagnostic
 
-[rtl/rv32/rv32_soc.v](rtl/rv32/rv32_soc.v) wires the core to a bus decoder (one comparator per window, a one-hot read mux, fetches refused outside RAM) and to the machine's memories and devices: RAM, the console, the done register, a timer, a 16-event input queue with a held-key mask, a display controller, and a 320×240 framebuffer of 8-bit pixels. [tools/rv32emu_core.c](tools/rv32emu_core.c) models the same windows with the same fault edges, schedules key events from a script by frame, hashes the framebuffer into a checkpoint at each present, and writes frames as PPM files. A tick is a clock cycle on the RTL and an executed instruction on the emulator, so the [device diagnostic](programs/rv32/diag.c), which exercises every device and reads the timer, is compared at the results level: five identical console lines ending `PASS 8bd87e9a` and identical checkpoints on the emulator, Icarus, and Verilator, with the frame hash and the checksum derived independently in Python. Everything that never reads the timer stays trace-identical.
+[rtl/rv32/rv32_soc.v](rtl/rv32/rv32_soc.v) wires the core to a bus decoder (one comparator per window, a one-hot read mux, fetches refused outside RAM) and to the machine's memories and devices: RAM, the console, the done register, a timer, a 16-event input queue with a held-key mask, a display controller, and a 320×240 framebuffer of 8-bit pixels. [tools/rv32emu_core.c](tools/rv32emu_core.c) models the same windows with the same fault edges, schedules key events from a script by frame, hashes the framebuffer into a checkpoint at each present, and writes frames as PPM files. A tick is a clock cycle on the RTL and an executed instruction on the emulator, so the [device diagnostic](programs/rv32/diag.c), which exercises every device and reads the timer, is compared at the results level: five identical console lines ending `PASS 8bd87e9a` and identical checkpoints on the emulator, Icarus, and Verilator, with the frame hash and the checksum derived independently in Python. Programs that neither read the timer nor access asynchronous accelerator registers stay trace-identical.
 
 ```sh
 make run-rv32-diag-emu        # the diagnostic on the emulator: PASS, checkpoints, build/rv32/frames/*.ppm
@@ -170,7 +184,7 @@ Read the [SoC record](docs/rv32-soc.md): the decoder as comparators and muxes, e
 
 ## RV32 native window and Pong
 
-[tools/rv32win.c](tools/rv32win.c) shows the emulator's framebuffer in an SDL3 window, scaled by an integer, and turns keys into the contract's input events at each present, so a hand-played session recorded with `--record` is an input script that replays identically on the headless emulator and on the RTL (trace for trace when the guest never reads the timer, at the results level otherwise); the timer stays an instruction counter and the window paces presents to 60 a second. The emulator is now a core library ([tools/rv32emu_core.c](tools/rv32emu_core.c)) with two mains. [programs/rv32/gfx.c](programs/rv32/gfx.c) draws rectangles and digits on any byte surface and [programs/rv32/pong_game.c](programs/rv32/pong_game.c) is Pong with no device in it, so the same C is tested natively at `-O0` and `-O2` against hand-computed expectations; the 200-frame session of [pong.input](programs/rv32/pong.input) gives the same 200 checkpoints and `PASS 8fef54bc` on the native build, the emulator, Icarus (1,998,070 cycles, about 22 s), and Verilator (about 2 s), and the RTL trace equals the emulator's for all 478,797 instructions.
+[tools/rv32win.c](tools/rv32win.c) shows the emulator's framebuffer in an SDL3 window, scaled by an integer, and turns keys into the contract's input events at each present, so a hand-played session recorded with `--record` is an input script that replays identically on the headless emulator and on the RTL (trace for trace when the guest uses neither timer reads nor asynchronous accelerator registers, at the results level otherwise); the timer stays an instruction counter and the window paces presents to 60 a second. The emulator is now a core library ([tools/rv32emu_core.c](tools/rv32emu_core.c)) with two mains. [programs/rv32/gfx.c](programs/rv32/gfx.c) draws rectangles and digits on any byte surface and [programs/rv32/pong_game.c](programs/rv32/pong_game.c) is Pong with no device in it, so the same C is tested natively at `-O0` and `-O2` against hand-computed expectations; the 200-frame session of [pong.input](programs/rv32/pong.input) gives the same 200 checkpoints and `PASS 8fef54bc` on the native build, the emulator, Icarus (1,998,070 cycles, about 22 s), and Verilator (about 2 s), and the RTL trace equals the emulator's for all 478,797 instructions.
 
 ```sh
 make build-rv32-win           # the window (brew install sdl3)

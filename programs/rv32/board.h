@@ -10,6 +10,22 @@
 #ifndef RV32_BOARD_H
 #define RV32_BOARD_H
 
+#define RV32_SIMD4_BASE        0x20004000
+#define RV32_SIMD4_PROGRAM     0x20005000
+#define RV32_SIMD4_DATA        0x20006000
+#define RV32_SIMD4_COMMAND           0x00
+#define RV32_SIMD4_STATUS            0x04
+#define RV32_SIMD4_ENTRY             0x08
+#define RV32_SIMD4_CYCLES            0x0c
+#define RV32_SIMD4_STALLS            0x10
+#define RV32_SIMD4_TRANSFERS         0x14
+#define RV32_SIMD4_INSTRUCTIONS      0x18
+#define RV32_SIMD4_BUSY              0x01
+#define RV32_SIMD4_DONE              0x02
+#define RV32_SIMD4_FAULT             0x04
+#define RV32_SIMD4_START             0x01
+#define RV32_SIMD4_RESET             0x02
+
 /* RAM: 4 MiB planned; the M1 firmware image, .bss, and stack fit in the
  * first 256 KiB so a small emulator or RTL memory can run the same ELF. */
 #define RV32_RAM_BASE          0x80000000

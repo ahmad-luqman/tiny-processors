@@ -16,6 +16,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include "rv32_simd4.h"
 
 /* Machine contract constants; keep in step with programs/rv32/board.h. */
 #define RAM_BASE 0x80000000u
@@ -61,6 +62,7 @@ typedef struct {
 #define EXIT_EMULATOR_ERROR 2
 
 typedef struct {
+    simd_device simd;
     uint32_t x[32], f[32];
     uint8_t fcsr;
     uint32_t pc;

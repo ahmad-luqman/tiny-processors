@@ -4,12 +4,12 @@
  * scaled by an integer, with host keys turned into the contract's key events.
  * Time enters only through pacing: presents are throttled to --fps, the timer
  * stays an instruction counter, so a session recorded with --record replays
- * identically on rv32emu and on the RTL (trace for trace when the guest never
- * reads the timer, at the results level otherwise). Console bytes go to stdout and
+ * identically on rv32emu and on the RTL (trace for trace when the guest uses neither timer reads
+ * nor asynchronous accelerator registers; at the results level otherwise). Console bytes go to stdout and
  * nothing else does; diagnostics and the final `rv32win: halt=...` line go
  * to stderr with the headless exit status.
  *
- * Build: cc -std=c11 -O2 -Wall -Wextra -Werror $(pkg-config --cflags sdl3) -o rv32win rv32win.c rv32emu_core.c $(pkg-config --libs sdl3)
+ * Build: make build-rv32-win (links the core, SIMD4 device and pinned SoftFloat objects).
  * SDL 3.4.16 from Homebrew (zlib license, https://libsdl.org/).
  */
 #define _POSIX_C_SOURCE 200809L
