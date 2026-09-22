@@ -38,6 +38,15 @@ class Device:
                 sum(self.get(16+i) << (256+32*i) for i in range(4)) |
                 (self.get(20) << 384) | (self.get(21) << 392))
 
+    def transfer(self, hold):
+        if self.get(22) != 3 or hold or self.get(25): return None
+        insn, lane = self.get(23), self.get(24)
+        ra, rd = (insn >> 20) & 3, (insn >> 22) & 3
+        address = (self.get(lane*4+ra) + (insn & 65535)) & 255
+        write = insn >> 24 == model.STORE
+        data = self.get(lane*4+rd) if write else self.lib.native_data(address)
+        return (int(write) << 24) | (address << 16) | data
+
     def step(self, address=None, value=None, *, width=4, hold=False, reset=False, expected=None, error=False):
         write = value is not None
         data = C.c_uint32(value or 0)
@@ -49,6 +58,7 @@ class Device:
             assert failed == error, (hex(address), value, error)
             if expected is not None:
                 assert not write and not failed and data.value == expected, (hex(address), data.value, expected)
+        transfer = self.transfer(hold)
         self.lib.native_tick(hold)
         # Reproduce the CPU's shifted strobes/data, including rejected subword accesses.
         shift = ((address or 0) & 3) * 8
@@ -56,7 +66,7 @@ class Device:
         wdata = ((value or 0) << shift) & 0xffffffff
         self.rows.append([int(reset), int(address is not None), int(write), address or 0,
                           strb, wdata, int(hold), int(failed), data.value,
-                          self.read(4), self.read(8), *[self.read(i) for i in (12,16,20,24)], self.snapshot()])
+                          self.read(4), self.read(8), *[self.read(i) for i in (12,16,20,24)], self.snapshot(), 0 if transfer is None else (1<<25) | transfer])
         return data.value
 
     def load(self, program, data):
@@ -82,13 +92,8 @@ class Device:
             if not self.read(4) & 1: return transfers, snapshots
             hold = seed != 0 and rng.randrange(3) == 0
             before = self.read(24)
-            if self.get(22) == 3 and not hold:
-                insn, lane = self.get(23), self.get(24)
-                ra, rd = (insn >> 20) & 3, (insn >> 22) & 3
-                address = (self.get(lane*4+ra) + (insn & 65535)) & 255
-                write = insn >> 24 == model.STORE
-                data = self.get(lane*4+rd) if write else self.lib.native_data(address)
-                transfers.append((int(write) << 24) | (address << 16) | data)
+            transfer = self.transfer(hold)
+            if transfer is not None: transfers.append(transfer)
             self.step(hold=hold)
             if self.read(24) != before: snapshots.append(self.snapshot())
         raise AssertionError('device never completed')

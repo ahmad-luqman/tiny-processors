@@ -12,6 +12,7 @@ module rv32_simd4_tb;
     reg expected_error;
     reg [31:0] expected_data, status, entry, cycles, stalls, transfers, instructions;
     reg [407:0] snapshot;
+    reg [25:0] transfer;
     reg held = 0;
     reg [24:0] held_request;
     wire [24:0] request = {dut.memory_write, dut.memory_address, dut.memory_wdata};
@@ -32,15 +33,15 @@ module rv32_simd4_tb;
         end
         fd = $fopen(fixture, "r");
         if (fd == 0) $fatal(1, "Cannot open fixture");
-        count = 16;
-        while (count == 16) begin
-            count = $fscanf(fd, "%h %h %h %h %h %h %h %h %h %h %h %h %h %h %h %h\n",
+        count = 17;
+        while (count == 17) begin
+            count = $fscanf(fd, "%h %h %h %h %h %h %h %h %h %h %h %h %h %h %h %h %h\n",
                 reset, valid, we, addr, strb, wdata, memory_hold, expected_error, expected_data,
-                status, entry, cycles, stalls, transfers, instructions, snapshot);
-            if (count == 16) begin
+                status, entry, cycles, stalls, transfers, instructions, snapshot, transfer);
+            if (count == 17) begin
                 #4;
                 if ((^{reset, valid, we, addr, strb, wdata, memory_hold,
-                    expected_error, expected_data, status, entry, cycles, stalls, transfers, instructions, snapshot}) === 1'bx)
+                    expected_error, expected_data, status, entry, cycles, stalls, transfers, instructions, snapshot, transfer}) === 1'bx)
                     $fatal(1, "Unknown fixture at row %0d", rows);
                 if (ready !== (valid && !reset)) $fatal(1, "Ready row %0d", rows);
                 if (valid && !reset) begin
@@ -48,6 +49,14 @@ module rv32_simd4_tb;
                     if (!we && !expected_error && rdata !== expected_data)
                         $fatal(1, "Read row %0d addr %h got %h expected %h", rows, addr, rdata, expected_data);
                 end
+                if ((dut.memory_valid && dut.memory_ready) !== transfer[25])
+                    $fatal(1, "Transfer acceptance row %0d", rows);
+                if (transfer[25] && {dut.memory_write, dut.memory_address,
+                    (dut.memory_write ? dut.memory_wdata : dut.data_read_data)} !== transfer[24:0])
+                    $fatal(1, "Transfer contents row %0d", rows);
+                if (dut.data_write !== ((transfer[25] && transfer[24]) ||
+                    (valid && ready && !error && we && dut.data_sel)))
+                    $fatal(1, "Memory write without acceptance row %0d", rows);
                 if (held && !dut.engine_reset && (dut.memory_valid !== 1'b1 || request !== held_request))
                     $fatal(1, "Held request changed row %0d", rows);
                 held = dut.memory_valid && !dut.memory_ready && !dut.engine_reset;

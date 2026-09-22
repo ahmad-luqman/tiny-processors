@@ -87,7 +87,8 @@ C implementation is independent of the Python interpreter. For 248 images
 sequence), tests compare C retirements, ordered transfers, final buffers and
 counters against that interpreter. The resulting fixtures replay every device
 edge in RTL, checking MMIO responses, all lane registers/accumulators, PC/loop,
-status/counters and held requests. Every final data slot is also read back.
+status/counters, every accepted transfer and held requests. The harness also
+asserts that the physical data write enable equals an accepted CPU/engine store. Every final data slot is also read back.
 Fixtures and logs are under `build/rv32/simd4-tests/{icarus,verilator}/`.
 
 Ten test methods per simulator additionally cover CPU decode/access faults,
@@ -166,3 +167,23 @@ the transfer totals; move reset one edge earlier/later and predict which stores
 survive; trace why the CPU slot address `DATA + 4*128` becomes engine word
 address `0x80`. Then inspect which costs G1 must address before accelerating
 framebuffer operations: this device only accesses its own 256 data words.
+
+## Acceptance record (2026-09-22)
+
+- `make test-rv32` passes end to end, including A2 on both simulators, the native
+  window tests, QEMU checks, and the preserved RV32I/F and device/game replays.
+  Pong retains 478,797 identical retirement lines; the capstone retains
+  2,220,509 identical lines and 68 checkpoints.
+- The A2 diagnostic prints the same four lines on all backends. Unstalled RTL
+  executes 36,563 CPU instructions in 154,753 cycles; the emulator executes
+  37,463 instructions because completion polling observes a different clock.
+- Counter, ALU, SAP8 and standalone SIMD4 tests pass on both simulators, with
+  their lint/synthesis checks. SIMD4 retains its 395 cases and 423 launches.
+- Standalone FP32 passes 70,407 vectors and 38 protocol checks on each simulator;
+  its lint/synthesis checks also pass. SoC synthesis is latch-free with the
+  storage/cell counts above. Both the short protocol wave and whole-machine
+  wave are generated and checked.
+
+DMA, interrupts, coherent caches, framebuffer acceleration and inference remain
+outside A2. Shared buffers here mean memories accessible to both owners in turn,
+not arbitrary RV32 RAM addresses.
