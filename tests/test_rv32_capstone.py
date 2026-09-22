@@ -9,6 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.rv32_capstone_native import Capstone, build, run_session, INPUT, EXPECTED
+from tools.rv32_pong_native import run_script
 from tools.rv32_devices import EVENT_PRESS, parse_input_script
 
 
@@ -56,6 +57,32 @@ class CapstoneTests(unittest.TestCase):
             self.assertEqual(frames, 21)
             self.assertEqual(f"{checksum:08x}", expected_hex[1])
             self.assertEqual(checkpoints, (ROOT / "programs/rv32/g3d.expected").read_text().splitlines())
+            # The C reference must have drawn every 3D frame: a DEVICE ERROR frame would pin as easily.
+            drawn = []
+
+            class Watched(Capstone):
+                def draw(self):
+                    super().draw()
+                    if self.lib.native_screen(self.state) == 4:   # RUNTIME_3D
+                        drawn.append(self.lib.native_g3d_status(self.state))
+
+            run_script(lib, script, game_factory=Watched)
+            self.assertGreater(len(drawn), 10)
+            self.assertEqual(set(drawn), {0})
+
+    def test_g3d_demo_constants_follow_the_scene(self):
+        """The C demo builds its constant bank from integer tables; the Python scene
+        (which the oracle's tests use) from floats. They must describe the same camera."""
+        import math
+        from tools.rv32_g3d_scene import constants
+        lib = self.libs[1]
+        for frame in (0, 5, 37, 100, 255):
+            k = (ctypes.c_uint32 * 32)()
+            lib.native_g3d_constants(frame, k)
+            want = constants(2 * math.pi * ((frame * 2) & 255) / 256, frame=frame & 1023)
+            for i in range(32):
+                got, ref = ctypes.c_int32(k[i]).value, ctypes.c_int32(want[i]).value
+                self.assertLessEqual(abs(got - ref), 8, (frame, i, got, ref))
 
     def test_digit_menu_session(self):
         """Two digits drawn with the keyboard and classified by the software model.

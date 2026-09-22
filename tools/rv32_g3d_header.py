@@ -18,8 +18,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools import rv32_g3d_model as M  # noqa: E402
-from tools.rv32_g3d_model import assemble, encode, render  # noqa: E402
-from tools.rv32_g3d_scene import SHADERS, constants, cube  # noqa: E402
+from tools.rv32_g3d_model import assemble, encode, pack_triangle, render, unpack_triangle  # noqa: E402
+from tools.rv32_g3d_scene import SHADERS, constants, cube, passthrough, vertex  # noqa: E402
 
 ZBASE = 0x80040000
 
@@ -37,15 +37,6 @@ def fb_words(fb):
 
 def z_words(zbuf):
     return [zbuf[i] | zbuf[i + 1] << 16 for i in range(0, len(zbuf), 2)]
-
-
-def passthrough():
-    return assemble('\n'.join(f'IN r{i}, {i}\nOUT {i}, r{i}' for i in range(7)) + '\nEND')
-
-
-def vertex(x, y, z=0.5, w=1.0, r=255, g=255, b=255):
-    q = [round(v * M.ONE) & 0xffffffff for v in (x, y, z, w)]
-    return q + [(c << 16) & 0xffffffff for c in (r, g, b)] + [0]
 
 
 def scenes():
@@ -110,6 +101,8 @@ def scenes():
 
 def expected(scene):
     name, program, consts, inputs, triangles, vcount, limit, zbase = scene
+    # A triangle given as a window word keeps its top byte, which the device ignores.
+    triangles = [unpack_triangle(t) if isinstance(t, int) else t for t in triangles]
     r = render(program, consts, inputs, vcount, triangles, limit, zbase=zbase)
     fault = r['fault']
     return dict(status=M.G3D_FAULT if fault else M.G3D_DONE, error=fault.reason if fault else 0,
@@ -136,7 +129,7 @@ def shaders_header():
               'static const uint32_t g3d_cube_inputs[G3D_CUBE_VERTICES][8] = {']
     lines += ['    {' + ', '.join(f'0x{w:08x}u' for w in row) + '},' for row in inputs]
     lines += ['};', 'static const uint32_t g3d_cube_triangles[G3D_CUBE_TRIANGLES] = {',
-              words([a | b << 8 | c << 16 for a, b, c in triangles]), '};']
+              words([pack_triangle(t) for t in triangles]), '};']
     # sin(2*pi*i/256) in Q16.16; cos is the table a quarter turn on.
     sine = [round(math.sin(2 * math.pi * i / 256) * M.ONE) for i in range(256)]
     lines += ['static const int32_t g3d_sine[256] = {',
@@ -156,7 +149,7 @@ def scenes_header():
         name, program, consts, inputs, triangles, vcount, limit, zbase = scene
         e = expected(scene)
         flat = [w for row in inputs for w in row]
-        tri_words = [a | b << 8 | c << 16 for a, b, c in triangles] or [0]
+        tri_words = [pack_triangle(t) for t in triangles] or [0]
         lines += [f'static const uint32_t scene{i}_program[{len(program)}] = {{', words(program), '};',
                   f'static const uint32_t scene{i}_consts[32] = {{', words(consts), '};',
                   f'static const uint32_t scene{i}_inputs[{len(flat)}] = {{', words(flat), '};',
@@ -170,16 +163,18 @@ def scenes_header():
     return '\n'.join(lines) + '\n'
 
 
-def write_if_changed(path, text):
-    # Always touched, so make sees both targets newer than their dependencies.
+def write_header(path, text):
+    # Written to a temporary name and renamed, so a parallel compile never reads a half-written header.
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
+    temporary = path.with_name(path.name + '.tmp')
+    temporary.write_text(text)
+    temporary.replace(path)
 
 
 def ensure_headers(out_dir):
-    write_if_changed(Path(out_dir) / 'g3d_shaders.h', shaders_header())
-    write_if_changed(Path(out_dir) / 'g3d_scenes.h', scenes_header())
+    write_header(Path(out_dir) / 'g3d_shaders.h', shaders_header())
+    write_header(Path(out_dir) / 'g3d_scenes.h', scenes_header())
 
 
 def main():

@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 from tools import rv32_g3d_model as M  # noqa: E402
 from tools.rv32_g3d_model import (Fault, assemble, encode, render, render_float, run_shader,  # noqa: E402
                                   s32, u32, ONE)
-from tools.rv32_g3d_scene import SHADERS, constants, cube  # noqa: E402
+from tools.rv32_g3d_scene import SHADERS, constants, cube, passthrough, random_program, vertex  # noqa: E402
 
 BUILD = ROOT / 'build/g3d'
 U32 = C.c_uint32
@@ -27,7 +27,7 @@ U32 = C.c_uint32
 class Job(C.Structure):
     _fields_ = [('program', C.POINTER(U32)), ('consts', C.POINTER(U32)), ('inputs', C.POINTER(U32)),
                 ('triangles', C.POINTER(U32)), ('vcount', U32), ('tcount', U32), ('limit', U32),
-                ('program_words', U32)]
+                ('program_words', U32), ('zbase', U32)]
 
 
 class Counts(C.Structure):
@@ -55,14 +55,15 @@ def _array(values, n=None):
     return (U32 * max(1, len(values)))(*values)
 
 
-def c_render(lib, program, consts, inputs, triangles, limit=4096, fb=None, zbuf=None, vcount=None):
+def c_render(lib, program, consts, inputs, triangles, limit=4096, fb=None, zbuf=None, vcount=None, zbase=0x80040000):
     fb = (C.c_uint8 * 76800)(*(fb or [0] * 76800))
     zbuf = (C.c_uint16 * 76800)(*(zbuf or [M.Z_MAX] * 76800))
     counts = Counts()
     words = [t if isinstance(t, int) else t[0] | t[1] << 8 | t[2] << 16 for t in triangles]
-    job = Job(_array(program, M.PROGRAM_WORDS), _array(consts, M.CONSTS),
+    # The program goes in at its own length: words past it must read as END.
+    job = Job(_array(program), _array(consts, M.CONSTS),
               _array([w for row in inputs for w in row]), _array(words),
-              len(inputs) if vcount is None else vcount, len(words), limit, M.PROGRAM_WORDS)
+              len(inputs) if vcount is None else vcount, len(words), limit, len(program), zbase)
     lib.g3d_reference(fb, zbuf, C.byref(job), C.byref(counts))
     return bytes(fb), list(zbuf), counts
 
@@ -81,7 +82,8 @@ class Reference(unittest.TestCase):
         vcount = len(inputs) if vcount is None else vcount
         py = render(program, consts, inputs, vcount, [tri_tuple(t) for t in triangles], limit, **kw)
         fb, zbuf, c = c_render(self.lib, program, consts, inputs, triangles, limit, vcount=vcount,
-                               fb=list(kw['fb']) if 'fb' in kw else None, zbuf=kw.get('zbuf'))
+                               fb=list(kw['fb']) if 'fb' in kw else None, zbuf=kw.get('zbuf'),
+                               zbase=kw.get('zbase', 0x80040000))
         fault = py['fault']
         self.assertEqual(c.error, fault.reason if fault else 0)
         if fault and fault.reason not in (M.E_PARAM, M.E_INDEX):
@@ -105,6 +107,13 @@ class Contract(Reference):
         for name in ('LANES', 'REGS', 'PROGRAM_WORDS', 'CONSTS', 'SLOTS', 'VMAX', 'TMAX', 'DEPTH', 'GUARD', 'SUB'):
             self.assertEqual(defines['G3D_' + name], getattr(M, name), name)
         self.assertEqual(defines['G3D_Z_MAX'], M.Z_MAX)
+        self.assertEqual(defines['G3D_DIVIDE_TICKS'], M.DIVIDE_TICKS)
+        self.assertIn('#define G3D_ONE 0x10000', text)
+        self.assertEqual(M.ONE, 0x10000)
+        self.assertIn('#define G3D_W_NEAR (G3D_ONE >> 4)', text)
+        self.assertEqual(M.W_NEAR, M.ONE >> 4)
+        self.assertIn('#define G3D_CLEAR_CYCLES (1u+320u*240u*2u/4u+1u)', text)
+        self.assertEqual(M.clear_cycles(), 1 + 320 * 240 * 2 // 4 + 1)
         ops = re.search(r'enum \{ (G3D_OP_END.*?) \};', text, re.S)[1]
         names = [n.strip()[len('G3D_OP_'):] for n in ops.split(',')]
         self.assertEqual(names[:-1], list(M.OPS))
@@ -308,49 +317,6 @@ class Shader(Reference):
                        batch=1, vcount=8, limit=50)
 
 
-def random_program(rng, depth=0, budget=None):
-    """A structured program; loops break on a counter so most terminate."""
-    budget = budget if budget is not None else [rng.randrange(20, 110)]
-    lines = []
-    alu = ['ADD', 'SUB', 'MUL', 'MIN', 'MAX', 'AND', 'OR', 'XOR']
-    while budget[0] > 0 and rng.random() < 0.9:
-        budget[0] -= 1
-        r = lambda: f'r{rng.randrange(8)}'  # noqa: E731
-        k = rng.random()
-        if k < 0.35:
-            lines.append(f'{rng.choice(alu)} {r()}, {r()}, {r()}')
-        elif k < 0.45:
-            lines.append(f'MAD {r()}, {r()}, {r()}, {r()}')
-        elif k < 0.55:
-            lines.append(f'{rng.choice(["SLT", "SEQ"])} {r()}, {r()}')
-        elif k < 0.62:
-            lines.append(f'LDI {r()}, {rng.randrange(-(1 << 21), 1 << 21)}')
-        elif k < 0.68:
-            lines.append(rng.choice([f'IN {r()}, {rng.randrange(8)}', f'LDC {r()}, {rng.randrange(32)}',
-                                     f'SPC {r()}, {rng.choice(["lane", "vid", "vcount"])}',
-                                     f'SHL {r()}, {r()}, {rng.randrange(32)}', f'SRA {r()}, {r()}, {rng.randrange(32)}',
-                                     f'ABS {r()}, {r()}', f'MOV {r()}, {r()}', f'ADDI {r()}, {r()}, {rng.randrange(-8192, 8192)}']))
-        elif k < 0.76:
-            lines.append(f'OUT {rng.randrange(8)}, {r()}')
-        elif k < 0.86 and depth < 7:
-            lines.append('IF')
-            lines += random_program(rng, depth + 1, budget)
-            if rng.random() < 0.5:
-                lines.append('ELSE')
-                lines += random_program(rng, depth + 1, budget)
-            lines.append('ENDIF')
-        elif k < 0.93 and depth < 6:
-            # r15 counts iterations; each lane breaks at its own bound (vid & 3) + 1..4.
-            lines += ['LDI r15, 0', 'LOOP', 'ADDI r15, r15, 1']
-            lines += random_program(rng, depth + 1, budget)
-            lines += ['SPC r14, vid', 'LDI r13, 3', 'AND r14, r14, r13', f'ADDI r14, r14, {rng.randrange(1, 4)}',
-                      'SLT r14, r15', 'IF', 'BREAK', 'ENDIF']
-            if rng.random() < 0.3:
-                lines += [f'SLT {r()}, {r()}', 'IF', 'BREAK', 'ENDIF']
-            lines.append('ENDLOOP')
-    return lines
-
-
 class Differential(Reference):
     def test_random_structured_programs(self):
         rng = random.Random(2026)
@@ -386,15 +352,6 @@ class Differential(Reference):
         # Short raw programs end in END padding, so the limit and PC faults come from directed tests.
         for reason in (0, M.E_ILLEGAL, M.E_OVERFLOW, M.E_MISMATCH):
             self.assertIn(reason, seen)
-
-
-def passthrough():
-    """A vertex shader that copies input slots 0..6 to outputs: tests supply clip space directly."""
-    return assemble('\n'.join(f'IN r{i}, {i}\nOUT {i}, r{i}' for i in range(7)) + '\nEND')
-
-
-def vertex(x, y, z=0.5, w=1.0, r=255, g=255, b=255):
-    return [u32(round(v * ONE)) for v in (x, y, z, w)] + [u32(c << 16) for c in (r, g, b)] + [0]
 
 
 class Raster(Reference):
@@ -486,6 +443,20 @@ class Raster(Reference):
         zbuf = [(i * 7) & 0xffff for i in range(76800)]
         py = self.draw(verts, [(0, 1, 2), (3, 4, 2)], fb=fb, zbuf=zbuf)
         self.assertGreater(py['zfail'], 0)
+
+    def test_zbase_is_validated_by_both_references(self):
+        verts = [vertex(-.5, -.5), vertex(.5, -.5), vertex(0, .5)]
+        for zbase, ok in ((0x80040000, True), (0x80400000 - M.Z_BYTES, True), (0x80000000, True),
+                          (0x80040002, False), (0x7ffffffc, False), (0x80400000 - M.Z_BYTES + 4, False), (0, False)):
+            py = self.draw(verts, [(0, 1, 2)], zbase=zbase)
+            self.assertEqual(py['fault'] is None, ok, hex(zbase))
+
+    def test_words_past_the_program_read_as_end(self):
+        # The oracle pads with zeros (END); the C reference is told the length, and the
+        # device's window is zero-filled by g3d_load_program. A program without END runs into them.
+        py = self.agree([encode('LDI', 1)] * 3, [0] * 32, [[0] * 8] * 4, [])
+        self.assertIsNone(py['fault'])
+        self.assertEqual(py['instructions'], 4)
 
     def test_parameter_and_index_faults_touch_nothing(self):
         verts = [vertex(-.5, -.5), vertex(.5, -.5), vertex(0, .5)]

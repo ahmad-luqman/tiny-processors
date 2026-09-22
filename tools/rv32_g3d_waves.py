@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Dump one small G2 job to a VCD and report how long each phase took.
 
-The job is a single triangle (about sixty pixels) shaded by the divergent-loop
+The job is a single triangle (424 pixels) shaded by the divergent-loop
 program over a partial batch of three vertices, so the dump shows the mask
 stack, the divider, setup and the per-pixel transfers without the megabytes a
 whole frame would produce. The phase totals must equal the oracle's cycle count.
@@ -12,7 +12,9 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tools.rv32_g3d_header import ZBASE, expected, scenes, vertex  # noqa: E402
+from tools.rv32_g3d_corpus import job_line  # noqa: E402
+from tools.rv32_g3d_header import ZBASE, expected, scenes  # noqa: E402
+from tools.rv32_g3d_scene import vertex  # noqa: E402
 from tools.rv32_rtl import has_value_changes  # noqa: E402
 
 PHASES = ('IDLE VALIDATE INDEX BATCH EXEC VCHECK DIVIDE FETCH AREA TEST ZREAD ZWRITE PWRITE FINISH CLEAR').split()
@@ -37,16 +39,15 @@ def phase_ticks(vcd):
             scope.pop()
         elif parts[:1] == ['$var'] and parts[4] == 'state' and scope[-1] == 'dut':
             code = parts[3]
-    time, value, spans = 0, 0, {}
+    time, changes = 0, []
     for line in lines:
         if line.startswith('#'):
             time = int(line[1:])
         elif code and line.startswith('b') and line.split()[1] == code:
             bits = line.split()[0][1:]
             if set(bits) <= {'0', '1'}:   # before reset the state is unknown
-                spans.setdefault('changes', []).append((time, int(bits, 2)))
+                changes.append((time, int(bits, 2)))
     ticks = {}
-    changes = spans.get('changes', [])
     for (start, state), (end, _) in zip(changes, changes[1:]):
         if state:
             ticks[PHASES[state]] = ticks.get(PHASES[state], 0) + (end - start) // 10000
@@ -58,12 +59,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     scene = job()
     e = expected(scene)
-    name, program, consts, inputs, triangles, vcount, limit, zbase = scene
-    words = [vcount, len(triangles), limit, zbase, 0] + list(program) + [0] * (128 - len(program)) + consts
-    words += [w for row in inputs for w in row] + [a | b << 8 | c << 16 for a, b, c in triangles]
-    words += [e[k] for k in ('status', 'error', 'fault_pc', 'instructions', 'transfers', 'divides', 'pixels',
-                             'zfail', 'culled', 'cycles', 'fb_hash', 'z_hash')]
-    (out / 'job.txt').write_text(' '.join(f'{w & 0xffffffff:x}' for w in words) + '\n')
+    (out / 'job.txt').write_text(job_line(scene, 0) + '\n')
     subprocess.run(['iverilog', '-g2012', '-s', 'rv32_g3d_tb', '-o', str(out / 'g3d.vvp'), 'tests/rv32_g3d_tb.sv',
                     'rtl/rv32/rv32_g3d.v', 'rtl/rv32/rv32_g3d_core.v'], cwd=ROOT, check=True)
     result = subprocess.run(['vvp', str(out / 'g3d.vvp'), f'+input={out / "job.txt"}', f'+wave={out / "g3d.vcd"}', '+waves-only'],

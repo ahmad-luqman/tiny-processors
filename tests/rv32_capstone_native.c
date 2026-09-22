@@ -42,6 +42,8 @@ static uint32_t native_render(void *context, const struct g3d_job *job, const st
 void native_attach_g3d(struct runtime *r) { g3d_demo_attach(&r->g3d, native_render, 0); }
 uint32_t native_g3d_shader(const struct runtime *r) { return r->g3d.shader; }
 uint32_t native_g3d_frame(const struct runtime *r) { return r->g3d.frame; }
+uint32_t native_g3d_status(const struct runtime *r) { return r->g3d.status; }
+void native_g3d_constants(uint32_t frame, uint32_t *k) { g3d_demo_constants(frame, k); }
 
 /* A classifier that fails the way a device failure would, so the status path is
  * exercised: nothing else in the suite ever returns non-zero. */

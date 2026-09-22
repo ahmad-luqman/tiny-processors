@@ -125,7 +125,7 @@ module rv32_g3d #(
     // sign and saturation test from those registers, 33..2 are the 32 restoring
     // steps, and FINISH (1) stores the registered quotient. The registers keep
     // every multiplier from feeding more arithmetic in the same cycle; without
-    // them ABC spent over half an hour mapping the combined cones.
+    // them ABC had not finished mapping the combined cones after 35 minutes.
     localparam [5:0] DIV_LOAD = 6'd35, DIV_PREP = 6'd34, DIV_LAST = 6'd2, DIV_FINISH = 6'd1;
     reg        div_setup, div_neg, div_sat;
     reg [2:0]  div_k;
@@ -171,7 +171,7 @@ module rv32_g3d #(
     wire [4:0] vid_now = vid_base + {3'd0, lane};
     // A four-way lane mux, then fixed slices. A variable part-select of the
     // 1,024-bit bus (outputs[256*lane + k +: 32]) synthesizes as a 1,024-bit
-    // barrel shifter per slot, which is what took synthesis tens of minutes.
+    // barrel shifter per slot: seven of them, the first of three causes of slow synthesis.
     wire [255:0] lane_out = lane == 2'd0 ? core_outputs[255:0] : lane == 2'd1 ? core_outputs[511:256] :
                             lane == 2'd2 ? core_outputs[767:512] : core_outputs[1023:768];
     wire signed [31:0] ox = lane_out[31:0];
@@ -274,7 +274,7 @@ module rv32_g3d #(
     // One multiplier pair serves three ticks that never coincide: AREA (the screen
     // area), a setup divide's LOAD (gradient numerators) and a setup divide's
     // FINISH (edge and accumulator start values). Six multipliers here kept ABC
-    // busy for tens of minutes; two map in seconds.
+    // busy for over ten minutes; two map with the whole device in about two.
     wire use_area = state == AREA;
     wire use_init = state == DIVIDE && div_left == DIV_FINISH;
     wire signed [17:0] setup_a = load_k[0] ? d2 : d1, setup_b = load_k[0] ? d1 : d2;

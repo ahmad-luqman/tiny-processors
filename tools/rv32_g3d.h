@@ -24,7 +24,8 @@ typedef struct {
     struct { uint8_t loop, parent, taken; } stack[G3D_DEPTH];
     uint32_t regs[G3D_LANES][G3D_REGS], out[G3D_LANES][G3D_SLOTS];
     g3d_vertex verts[G3D_VMAX];
-    /* Divider: 32 ticks per divide; `div_k` indexes the running sequence. */
+    /* Divider: G3D_DIVIDE_TICKS (35) per divide, like the RTL's LOAD, PREP, 32 steps and FINISH;
+     * `div_k` indexes the running sequence. */
     uint32_t div_left, div_k; bool div_setup;
     int64_t div_num[8]; int32_t div_den; int32_t div_q[8];
     /* Triangle being drawn, after the swap that makes its area positive. */

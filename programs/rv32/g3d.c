@@ -26,10 +26,26 @@ const struct g3d_result *g3d_last_result(void) { return &last_result; }
 
 void g3d_reset(void) { mmio_write32(G3D_BASE+G3D_COMMAND,G3D_RESET); }
 
+static uint32_t window_end(uint32_t offset)
+{
+    if (offset>=G3D_CONST && offset<G3D_CONST+4*G3D_CONSTS) return G3D_CONST+4*G3D_CONSTS;
+    if (offset>=G3D_PROGRAM && offset<G3D_PROGRAM+4*G3D_PROGRAM_WORDS) return G3D_PROGRAM+4*G3D_PROGRAM_WORDS;
+    if (offset>=G3D_VERTEX && offset<G3D_VERTEX+4*G3D_VMAX*G3D_SLOTS) return G3D_VERTEX+4*G3D_VMAX*G3D_SLOTS;
+    if (offset>=G3D_TRIANGLE && offset<G3D_TRIANGLE+4*G3D_TMAX) return G3D_TRIANGLE+4*G3D_TMAX;
+    return 0;
+}
+
 int g3d_load(uint32_t offset, const uint32_t *words, uint32_t count)
 {
-    if (reg(G3D_STATUS)==G3D_BUSY) return 0;
+    if (reg(G3D_STATUS)==G3D_BUSY || count>(window_end(offset)-offset)/4u) return 0;
     for (uint32_t i=0;i<count;i++) mmio_write32(G3D_BASE+offset+4*i,words[i]);
+    return 1;
+}
+
+int g3d_load_program(const uint32_t *words, uint32_t count)
+{
+    if (!g3d_load(G3D_PROGRAM,words,count)) return 0;
+    for (uint32_t i=count;i<G3D_PROGRAM_WORDS;i++) mmio_write32(G3D_BASE+G3D_PROGRAM+4*i,0);
     return 1;
 }
 
@@ -50,7 +66,11 @@ uint32_t g3d_wait(uint32_t budget)
         uint32_t status=reg(G3D_STATUS);
         if (status!=G3D_BUSY) { capture(status); return status; }
     }
-    capture(reg(G3D_STATUS));
+    /* The job may have finished between the last poll and the snapshot: keep
+     * that result rather than resetting it away. */
+    uint32_t status=reg(G3D_STATUS);
+    capture(status);
+    if (status!=G3D_BUSY) return status;
     g3d_reset();
     return G3D_TIMEOUT;
 }

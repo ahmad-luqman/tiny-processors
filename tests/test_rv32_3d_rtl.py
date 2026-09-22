@@ -1,7 +1,9 @@
 """G2 RTL device alone: the oracle corpus through rv32_g3d.v with held and cancelled transfers.
 
-Icarus runs a prefix of the corpus (it covers every scene, fault class and hold
-pattern); Verilator (G2_SIM=verilator) runs all of it.
+Icarus runs the corpus prefix (tools/rv32_g3d_corpus.ICARUS_JOBS jobs: the
+g3dcheck scenes and one job for every fault class, including the illegal-opcode,
+control-mismatch and PC faults only raw words reach). Verilator
+(G2_SIM=verilator) runs all of it, including the jobs reset mid-transfer.
 """
 import os
 from pathlib import Path
@@ -11,7 +13,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tools.rv32_g3d_corpus import jobs  # noqa: E402
+from tools.rv32_g3d_corpus import ICARUS_JOBS, job_line, jobs  # noqa: E402
 
 BUILD = ROOT / 'build/g3d'
 SOURCES = ['tests/rv32_g3d_tb.sv', 'rtl/rv32/rv32_g3d.v', 'rtl/rv32/rv32_g3d_core.v']
@@ -20,13 +22,10 @@ SOURCES = ['tests/rv32_g3d_tb.sv', 'rtl/rv32/rv32_g3d.v', 'rtl/rv32/rv32_g3d_cor
 class ShaderRTL(unittest.TestCase):
     def test_corpus(self):
         BUILD.mkdir(parents=True, exist_ok=True)
-        corpus = subprocess.run([sys.executable, 'tools/rv32_g3d_corpus.py'], cwd=ROOT, check=True,
-                                capture_output=True, text=True).stdout.splitlines()
-        self.assertEqual(len(corpus), len(jobs()))
+        corpus = [job_line(scene, flags) for scene, flags in jobs()]
         sim = os.environ.get('G2_SIM', 'icarus')
         if sim == 'icarus':
-            # The scenes come first: every fault class, the three shaders, loops and raster edges.
-            corpus = corpus[:20]
+            corpus = corpus[:ICARUS_JOBS]
             subprocess.run(['iverilog', '-g2012', '-Wall', '-s', 'rv32_g3d_tb', '-o', str(BUILD / 'g3d.vvp'), *SOURCES],
                            cwd=ROOT, check=True)
             run = ['vvp', str(BUILD / 'g3d.vvp')]

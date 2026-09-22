@@ -33,11 +33,13 @@ static uint32_t hardware_render(void *context, const struct g3d_job *job, const 
     struct gpu_command c;
     gpu_command_init(&c,GPU_FILL,G3D_DEMO_BACKGROUND); c.p[GP_W]=320; c.p[GP_H]=240;
     if (!gpu_run(&c,2000000)) rv32_exit(83);
-    if (!g3d_run(G3D_CLEAR_Z,0,0,G3D_DEMO_ZBASE,0,200000)) rv32_exit(84);
-    if (!g3d_load(G3D_PROGRAM,job->program,job->program_words) || !g3d_load(G3D_CONST,job->consts,G3D_CONSTS) ||
-        !g3d_load(G3D_VERTEX,job->inputs[0],job->vcount*G3D_SLOTS) || !g3d_load(G3D_TRIANGLE,job->triangles,job->tcount))
+    if (!g3d_run(G3D_CLEAR_Z,0,0,job->zbase,0,200000)) rv32_exit(84);
+    if (!g3d_load_program(job->program,job->program_words) || !g3d_load(G3D_CONST,job->consts,G3D_CONSTS) ||
+        !g3d_load(G3D_VERTEX,job->inputs[0],job->vcount*G3D_SLOTS) || !g3d_load(G3D_TRIANGLE,job->triangles,job->tcount)) {
+        rv32_puts("G2 load refused\n");
         rv32_exit(85);
-    if (!g3d_run(G3D_START,job->vcount,job->tcount,G3D_DEMO_ZBASE,job->limit,2000000)) rv32_exit(86);
+    }
+    if (!g3d_run(G3D_START,job->vcount,job->tcount,job->zbase,job->limit,2000000)) rv32_exit(86);
     return 0;
 }
 

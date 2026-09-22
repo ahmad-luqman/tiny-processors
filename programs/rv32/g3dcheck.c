@@ -40,7 +40,7 @@ static int scene(const struct g3d_scene *s)
 {
     clear_fb();
     if (!clear_z()) return 0;
-    if (!g3d_load(G3D_PROGRAM,s->program,s->program_words) || !g3d_load(G3D_CONST,s->consts,G3D_CONSTS) ||
+    if (!g3d_load_program(s->program,s->program_words) || !g3d_load(G3D_CONST,s->consts,G3D_CONSTS) ||
         !g3d_load(G3D_VERTEX,s->inputs,s->vcount*G3D_SLOTS) || !g3d_load(G3D_TRIANGLE,s->triangles,s->tcount) ||
         !g3d_submit(G3D_START,s->vcount,s->tcount,s->zbase,s->limit)) {
         rv32_puts("G2 load refused\n");

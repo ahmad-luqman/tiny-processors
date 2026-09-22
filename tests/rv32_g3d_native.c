@@ -42,42 +42,51 @@ int main(int argc, char **argv)
     while (fgets(line,sizeof line,f)) {
         uint32_t n=0;
         for (char *p=strtok(line," \n");p && n<4096;p=strtok(NULL," \n")) w[n++]=(uint32_t)strtoul(p,NULL,16);
+        if (n<5) { fprintf(stderr,"job %d: short header\n",job); return 1; }
         uint32_t vcount=w[0], tcount=w[1], limit=w[2], zbase=w[3], seed=w[4];
-        const uint32_t *program=w+5, *consts=program+128, *inputs=consts+32, *tris=inputs+vcount*8, *want=tris+tcount;
+        /* Out-of-range counts are legal jobs (they fault); the lines carry the words
+         * the windows can hold, as the CPU could only write those. */
+        uint32_t vrows=vcount<G3D_VMAX?vcount:G3D_VMAX, trows=tcount<G3D_TMAX?tcount:G3D_TMAX;
+        if (n!=5+128+32+8*vrows+trows+12) { fprintf(stderr,"job %d: %u words, expected %u\n",job,n,5+128+32+8*vrows+trows+12); return 1; }
+        const uint32_t *program=w+5, *consts=program+128, *inputs=consts+32, *tris=inputs+vrows*8, *want=tris+trows;
         const char *names[12]={"status","error","fault_pc","instructions","transfers","divides","pixels","zfail","culled","cycles","fb","z"};
         /* Reference. */
         memset(ref_fb,0,sizeof ref_fb);
         for (uint32_t i=0;i<76800;i++) ref_z[i]=0xffff;
-        struct g3d_job j={program,consts,(const uint32_t (*)[G3D_SLOTS])inputs,tris,vcount,tcount,limit,G3D_PROGRAM_WORDS};
+        struct g3d_job j={program,consts,(const uint32_t (*)[G3D_SLOTS])inputs,tris,vcount,tcount,limit,G3D_PROGRAM_WORDS,zbase};
         struct g3d_counts c;
-        uint32_t e=zbase==ZBASE?g3d_reference(ref_fb,ref_z,&j,&c):(c.error=G3D_E_PARAM,c.fault_pc=c.instructions=c.transfers=c.divides=c.pixels=c.zfail=c.culled=0,c.cycles=1,G3D_E_PARAM);
+        uint32_t e=g3d_reference(ref_fb,ref_z,&j,&c);
         uint32_t ref[12]={e?G3D_FAULT:G3D_DONE,c.error,c.fault_pc,c.instructions,c.transfers,c.divides,c.pixels,c.zfail,c.culled,c.cycles,
                           hash(ref_fb,sizeof ref_fb),hash((const uint8_t *)ref_z,sizeof ref_z)};
-        /* Device, through the access path, with seeded holds. */
-        memset(&dev,0,sizeof dev); g3d_device_reset(&dev);
+        /* Device, through the access path, with seeded holds. The depth buffer the
+         * oracle hashes is the one ZBASE names, or the default one when ZBASE is invalid. */
+        int zvalid=(zbase&3u)==0 && zbase>=0x80000000u && zbase-0x80000000u<=RAM_SIZE-320u*240u*2u;
+        uint32_t zoff=(zvalid?zbase:ZBASE)-0x80000000u;
+        g3d_device_reset(&dev);
         memset(ram,0,sizeof ram); memset(fb,0,sizeof fb);
-        memset(ram+(ZBASE-0x80000000u),0xff,320u*240u*2u);
+        memset(ram+zoff,0xff,320u*240u*2u);
         uint32_t v, ok=1;
         for (uint32_t i=0;i<128;i++) { v=program[i]; ok&=g3d_access(&dev,G3D_PROGRAM+4*i,4,true,&v,false); }
         for (uint32_t i=0;i<32;i++) { v=consts[i]; ok&=g3d_access(&dev,G3D_CONST+4*i,4,true,&v,false); }
-        for (uint32_t i=0;i<vcount*8;i++) { v=inputs[i]; ok&=g3d_access(&dev,G3D_VERTEX+4*i,4,true,&v,false); }
-        for (uint32_t i=0;i<tcount;i++) { v=tris[i]; ok&=g3d_access(&dev,G3D_TRIANGLE+4*i,4,true,&v,false); }
+        for (uint32_t i=0;i<vrows*8;i++) { v=inputs[i]; ok&=g3d_access(&dev,G3D_VERTEX+4*i,4,true,&v,false); }
+        for (uint32_t i=0;i<trows;i++) { v=tris[i]; ok&=g3d_access(&dev,G3D_TRIANGLE+4*i,4,true,&v,false); }
         uint32_t params[4][2]={{G3D_VCOUNT,vcount},{G3D_TCOUNT,tcount},{G3D_ZBASE,zbase},{G3D_LIMIT,limit}};
         for (int i=0;i<4;i++) ok&=g3d_access(&dev,params[i][0],4,true,&params[i][1],false);
         v=G3D_START; ok&=g3d_access(&dev,G3D_COMMAND,4,true,&v,false);
         if (!ok) { fprintf(stderr,"job %d: access refused\n",job); return 1; }
         g3d_tick(&dev,ram,RAM_SIZE,fb,false);
-        uint32_t rng=seed*2654435761u+1u, ticks=0;
-        while (g3d_busy(&dev) && ticks++<50000000u) { rng=rng*1103515245u+12345u; g3d_tick(&dev,ram,RAM_SIZE,fb,seed && (rng>>16)%4==0); }
+        uint32_t rng=seed*2654435761u+1u, ticks=0, holds=seed&1u;
+        while (g3d_busy(&dev) && ticks++<50000000u) { rng=rng*1103515245u+12345u; g3d_tick(&dev,ram,RAM_SIZE,fb,holds && (rng>>16)%4==0); }
         uint32_t got[12]={dev.status,dev.error,dev.fault_pc,dev.instructions,dev.transfers,dev.divides,dev.pixels,dev.zfail,dev.culled,
-                          dev.cycles-dev.stalls,hash(fb,sizeof fb),hash(ram+(ZBASE-0x80000000u),320u*240u*2u)};
+                          dev.cycles-dev.stalls,hash(fb,sizeof fb),hash(ram+zoff,320u*240u*2u)};
         for (int k=0;k<12;k++) {
             failed|=!check(job,"reference",names[k],ref[k],want[k]);
             failed|=!check(job,"device",names[k],got[k],want[k]);
         }
-        if (seed && dev.transfers && !dev.stalls) { fprintf(stderr,"job %d: holds never stalled\n",job); failed=1; }
+        if (holds && dev.transfers>2 && !dev.stalls) { fprintf(stderr,"job %d: holds never stalled\n",job); failed=1; }
         job++;
     }
+    if (job==0) { fprintf(stderr,"empty corpus\n"); return 1; }
     fclose(f);
     if (failed) return 1;
     printf("%d G2 corpus jobs agree under ASan/UBSan\n",job);

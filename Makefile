@@ -809,9 +809,12 @@ waves-rv32-digit: build/rv32/digitbench_hw_1.bin $(RV32EMU) $(RV32_TB_VVP)
 # the guest against counters and image hashes the oracle generated.
 .PHONY: test-rv32-3d check-rv32-3d-image run-rv32-3d-emu
 RV32_G3D_ARGS = --image build/rv32/g3dcheck.bin --compare results --expect-last-line "PASS G2" --emulator $(RV32EMU) --timeout 900
-# One generator run writes both headers; each rule reruns it so either can be rebuilt alone.
-$(RV32_G3D_GENERATED): $(RV32_G3D_DEPS) | build/rv32
+# One generator run writes both headers. Make 3.81 has no grouped targets, so the
+# scenes header is the real target and the shaders header follows it: two parallel
+# generator runs could otherwise race on the same files.
+build/rv32/g3d_scenes.h: $(RV32_G3D_DEPS) | build/rv32
 	$(PYTHON) tools/rv32_g3d_header.py --out build/rv32
+build/rv32/g3d_shaders.h: build/rv32/g3d_scenes.h ;
 build/rv32/g3dcheck.o: programs/rv32/g3dcheck.c $(RV32_G3D_GENERATED) $(RV32_HEADERS) | build/rv32
 	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
 build/rv32/g3dcheck.elf: build/rv32/g3dcheck.o build/rv32/g3d.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
@@ -868,7 +871,7 @@ bench-rv32-3d: $(RV32_G3D_BENCH_BINS) $(RV32EMU) $(RV32_TB_VERILATOR)
 waves-rv32-3d: | build
 	$(PYTHON) tools/rv32_g3d_waves.py
 .PHONY: test-rv32-3d-sanitize
-test-rv32-3d-sanitize: $(RV32_G3D_DEPS) tools/rv32_g3d_corpus.py | build
+test-rv32-3d-sanitize: $(RV32_G3D_DEPS) tools/rv32_g3d_corpus.py tools/rv32_g3d_scene.py | build
 	mkdir -p build/g3d
 	$(PYTHON) tools/rv32_g3d_corpus.py > build/g3d/corpus.txt
 	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -DG3D_NATIVE_MAIN -Iprograms/rv32 tests/rv32_g3d_native.c tools/rv32_g3d.c programs/rv32/g3d_ref.c -o build/g3d/sanitize

@@ -69,8 +69,10 @@ struct g3d_job {
     const uint32_t (*inputs)[G3D_SLOTS];     /* vcount rows */
     const uint32_t *triangles;               /* tcount words */
     uint32_t vcount, tcount, limit;
-    /* Words a device upload must copy; a program never fetches past its END. */
+    /* Words of `program`; every word past them reads as 0 (END), as the device
+     * window does after g3d_load_program, which zero-fills the rest. */
     uint32_t program_words;
+    uint32_t zbase;                          /* validated like the device's ZBASE */
 };
 /* `cycles` is the device's busy-tick count with no memory stalls, from the
  * tick schedule in docs/rv32-3d.md "Time". */
@@ -79,7 +81,8 @@ struct g3d_counts {
 };
 #define G3D_DIVIDE_TICKS 35u   /* LOAD, PREP, 32 restoring steps, FINISH */
 #define G3D_CLEAR_CYCLES (1u+320u*240u*2u/4u+1u)
-/* Software reference over a caller-owned 320x240 framebuffer and Z buffer.
+/* Software reference over a caller-owned 320x240 framebuffer and Z buffer
+ * (`zbuf` is the buffer ZBASE names; the reference only validates the address).
  * Returns the ERROR value (0 on success); every fault precedes the first
  * framebuffer or Z access, so a fault leaves both untouched. */
 uint32_t g3d_reference(uint8_t *fb, uint16_t *zbuf, const struct g3d_job *job, struct g3d_counts *counts);
@@ -100,12 +103,17 @@ struct g3d_result {
     uint32_t status, error, fault_pc, cycles, stalls, instructions, transfers, divides, pixels, zfail, culled;
 };
 /* Copy `count` words into a window (G3D_CONST, G3D_PROGRAM, G3D_VERTEX or
- * G3D_TRIANGLE plus a word offset); 0 while BUSY. */
+ * G3D_TRIANGLE plus a word offset); 0 while BUSY or when the words would run
+ * past the end of the window (the gap after it faults). */
 int g3d_load(uint32_t offset, const uint32_t *words, uint32_t count);
+/* Load a program and zero the rest of the window, so words past its end read
+ * as END exactly as the reference and the oracle assume. */
+int g3d_load_program(const uint32_t *words, uint32_t count);
 int g3d_submit(uint32_t command, uint32_t vcount, uint32_t tcount, uint32_t zbase, uint32_t limit);
 uint32_t g3d_wait(uint32_t budget);
 const struct g3d_result *g3d_last_result(void);
-/* Submit, wait, and print the snapshot on anything but DONE. */
+/* G1 must be idle: its engine shares the memory port, and the COMMAND store
+ * faults while it runs. Submit, wait, and print the snapshot on anything but DONE. */
 int g3d_run(uint32_t command, uint32_t vcount, uint32_t tcount, uint32_t zbase, uint32_t limit, uint32_t budget);
 /* Legal while BUSY; clears parameters, outcome and counters, keeps the windows
  * and every memory write already accepted. */

@@ -64,7 +64,7 @@ static uint32_t run_shader(const struct g3d_job *job, uint32_t out[][G3D_SLOTS],
             c->fault_pc=pc|batch<<8;
             if (count==job->limit) return G3D_E_LIMIT;
             if (pc>=G3D_PROGRAM_WORDS) return G3D_E_PC;
-            uint32_t w=job->program[pc], op=w>>26, rd=w>>22&15u, ra=w>>18&15u, rb=w>>14&15u;
+            uint32_t w=pc<job->program_words?job->program[pc]:0u, op=w>>26, rd=w>>22&15u, ra=w>>18&15u, rb=w>>14&15u;
             uint32_t rc=w>>10&15u, imm=w&0x3fffu, target=w&0x7fu, next=pc+1;
             if (op>=G3D_OP_COUNT) return G3D_E_ILLEGAL;
             count++; c->instructions++;
@@ -223,7 +223,10 @@ uint32_t g3d_reference(uint8_t *fb, uint16_t *zbuf, const struct g3d_job *job, s
     c->error=c->fault_pc=c->instructions=c->transfers=0;
     c->divides=c->pixels=c->zfail=c->culled=0;
     c->cycles=1;   /* validate */
-    if (job->vcount<1 || job->vcount>G3D_VMAX || job->tcount>G3D_TMAX || job->limit<1 || job->limit>0xffffu)
+    /* ZBASE: word aligned, and its 153,600 bytes inside the 4 MiB RAM at 0x80000000. */
+    int zbase_ok=(job->zbase&3u)==0 && job->zbase>=0x80000000u && job->zbase-0x80000000u<=0x400000u-320u*240u*2u;
+    if (!zbase_ok || job->vcount<1 || job->vcount>G3D_VMAX || job->tcount>G3D_TMAX || job->limit<1 || job->limit>0xffffu
+        || job->program_words>G3D_PROGRAM_WORDS)
         return c->error=G3D_E_PARAM;
     for (uint32_t t=0;t<job->tcount;t++) {
         c->cycles++;   /* one index tick per triangle */

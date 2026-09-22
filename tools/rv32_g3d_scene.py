@@ -1,6 +1,7 @@
-"""G2 demo content: the cube mesh, camera matrices and the three vertex shaders.
+"""G2 content: the cube mesh, camera matrices, the three vertex shaders, and the
+test helpers the corpus, the headers and the tests share.
 
-Constant bank layout, shared by every shader (docs/rv32-3d.md "Constants"):
+Constant bank layout, shared by every shader (docs/rv32-3d.md "Demo content"):
   c0..c15   MVP matrix, row-major; row i is (m[i][0], m[i][1], m[i][2], m[i][3])
   c16..c18  light direction in object space, unit length (the CPU rotates it,
             so shaders never transform normals)
@@ -11,7 +12,7 @@ Vertex input slots: 0..2 position, 3 base colour 0x00RRGGBB (raw), 4..6 normal.
 """
 import math
 
-from tools.rv32_g3d_model import ONE, CONSTS, SLOTS
+from tools.rv32_g3d_model import ONE, CONSTS, SLOTS, assemble
 
 FACES = (  # normal, base colour; the four corners are derived, counter-clockwise from outside
     ((1, 0, 0), 0xe04030), ((-1, 0, 0), 0x30c040), ((0, 1, 0), 0x3060e0),
@@ -223,3 +224,56 @@ WOBBLE = _TRANSFORM.format(wobble=_WOBBLE) + """
 """ + _COLOUR
 
 SHADERS = {'diffuse': DIFFUSE, 'toon': TOON, 'wobble': WOBBLE}
+
+
+def passthrough():
+    """A vertex shader that copies input slots 0..6 to outputs: jobs supply clip space directly."""
+    return assemble('\n'.join(f'IN r{i}, {i}\nOUT {i}, r{i}' for i in range(7)) + '\nEND')
+
+
+def vertex(x, y, z=0.5, w=1.0, r=255, g=255, b=255):
+    """Clip-space position and an RGB colour as passthrough input slots (the colour may leave 0..255)."""
+    return [round(v * ONE) & 0xffffffff for v in (x, y, z, w)] + [(c << 16) & 0xffffffff for c in (r, g, b)] + [0]
+
+
+def random_program(rng, depth=0, budget=None):
+    """A structured program; loops break on a counter so most terminate."""
+    budget = budget if budget is not None else [rng.randrange(20, 110)]
+    lines = []
+    alu = ['ADD', 'SUB', 'MUL', 'MIN', 'MAX', 'AND', 'OR', 'XOR']
+    while budget[0] > 0 and rng.random() < 0.9:
+        budget[0] -= 1
+        r = lambda: f'r{rng.randrange(8)}'  # noqa: E731
+        k = rng.random()
+        if k < 0.35:
+            lines.append(f'{rng.choice(alu)} {r()}, {r()}, {r()}')
+        elif k < 0.45:
+            lines.append(f'MAD {r()}, {r()}, {r()}, {r()}')
+        elif k < 0.55:
+            lines.append(f'{rng.choice(["SLT", "SEQ"])} {r()}, {r()}')
+        elif k < 0.62:
+            lines.append(f'LDI {r()}, {rng.randrange(-(1 << 21), 1 << 21)}')
+        elif k < 0.68:
+            lines.append(rng.choice([f'IN {r()}, {rng.randrange(8)}', f'LDC {r()}, {rng.randrange(32)}',
+                                     f'SPC {r()}, {rng.choice(["lane", "vid", "vcount"])}',
+                                     f'SHL {r()}, {r()}, {rng.randrange(32)}', f'SRA {r()}, {r()}, {rng.randrange(32)}',
+                                     f'ABS {r()}, {r()}', f'MOV {r()}, {r()}', f'ADDI {r()}, {r()}, {rng.randrange(-8192, 8192)}']))
+        elif k < 0.76:
+            lines.append(f'OUT {rng.randrange(8)}, {r()}')
+        elif k < 0.86 and depth < 7:
+            lines.append('IF')
+            lines += random_program(rng, depth + 1, budget)
+            if rng.random() < 0.5:
+                lines.append('ELSE')
+                lines += random_program(rng, depth + 1, budget)
+            lines.append('ENDIF')
+        elif k < 0.93 and depth < 6:
+            # r15 counts iterations; each lane breaks at its own bound (vid & 3) + 1..4.
+            lines += ['LDI r15, 0', 'LOOP', 'ADDI r15, r15, 1']
+            lines += random_program(rng, depth + 1, budget)
+            lines += ['SPC r14, vid', 'LDI r13, 3', 'AND r14, r14, r13', f'ADDI r14, r14, {rng.randrange(1, 4)}',
+                      'SLT r14, r15', 'IF', 'BREAK', 'ENDIF']
+            if rng.random() < 0.3:
+                lines += [f'SLT {r()}, {r()}', 'IF', 'BREAK', 'ENDIF']
+            lines.append('ENDLOOP')
+    return lines

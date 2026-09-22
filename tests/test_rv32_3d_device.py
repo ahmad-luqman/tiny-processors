@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT))
 from tools import rv32_g3d_model as M  # noqa: E402
 from tools.rv32_g3d_model import assemble, render  # noqa: E402
 from tools.rv32_g3d_scene import SHADERS, constants, cube  # noqa: E402
-from tests.test_rv32_3d import passthrough, random_program, vertex  # noqa: E402
+from tools.rv32_g3d_scene import passthrough, random_program, vertex  # noqa: E402
 
 BUILD = ROOT / 'build/g3d'
 RAM_SIZE = 0x400000
@@ -149,6 +149,21 @@ class EmulatorDevice(unittest.TestCase):
             self.agree(words, [rng.getrandbits(32) for _ in range(32)],
                        [[rng.getrandbits(32) for _ in range(8)] for _ in range(vcount)], [],
                        limit=rng.choice([60, 400, 4096]))
+
+    def test_corpus_directed_and_raster_jobs(self):
+        # The directed fault jobs (every ERROR, including ILLEGAL, MISMATCH and PC=128) and the
+        # raster edge cases, through the CPU access path with holds on alternate jobs.
+        from tools.rv32_g3d_corpus import directed_faults, raster_cases
+        from tools.rv32_g3d_model import unpack_triangle
+        seen = set()
+        for i, scene in enumerate(directed_faults() + raster_cases()):
+            name, program, consts, inputs, triangles, vcount, limit, zbase = scene
+            if vcount > M.VMAX or len(triangles) > M.TMAX or isinstance(triangles[:1] and triangles[0], int):
+                continue   # beyond the windows or raw words: the sanitizer corpus runs these
+            _, py = self.agree(program, consts, inputs, triangles, limit=limit, seed=i if i % 2 else None,
+                               vcount=vcount, zbase=zbase)
+            seen.add(py['fault'].reason if py['fault'] else 0)
+        self.assertEqual(seen, {0, M.E_PARAM, M.E_ILLEGAL, M.E_OVERFLOW, M.E_MISMATCH, M.E_LIMIT, M.E_PC})
 
     def test_raster_cases(self):
         verts = [vertex(-.9, -.8, z=.2, r=250, g=10), vertex(.8, -.7, z=.9, b=200), vertex(.1, .9, z=.5, g=90),

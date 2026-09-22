@@ -39,13 +39,14 @@ def build(optimization="O2"):
         ("runtime_init", None, [ctypes.c_void_p]),
         ("native_attach_digit", None, [ctypes.c_void_p]),
         ("native_attach_g3d", None, [ctypes.c_void_p]),
+        ("native_g3d_constants", None, [ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)]),
         ("runtime_event", None, [ctypes.c_void_p, ctypes.c_uint32]),
         ("runtime_frame", None, [ctypes.c_void_p, ctypes.c_uint32]),
         ("runtime_draw", None, [ctypes.c_void_p, ctypes.POINTER(Surface)]),
         *((name, ctypes.c_uint32, [ctypes.c_void_p]) for name in
           ("runtime_checksum", "native_quit", "native_screen", "native_tetris_score", "native_tetris_lines",
            "native_digit_runs", "native_digit_predicted", "native_digit_status", "native_g3d_shader",
-           "native_g3d_frame")),
+           "native_g3d_frame", "native_g3d_status")),
     ):
         fn = getattr(lib, name)
         fn.restype, fn.argtypes = restype, args

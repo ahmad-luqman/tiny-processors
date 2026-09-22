@@ -54,6 +54,15 @@ OP = {name: code for code, name in enumerate(OPS)}
 IF_KIND, LOOP_KIND = 'IF', 'LOOP'
 
 
+def pack_triangle(tri):
+    """A triangle-window word: indices i0 | i1 << 8 | i2 << 16 (the top byte is ignored)."""
+    return tri[0] | tri[1] << 8 | tri[2] << 16
+
+
+def unpack_triangle(word):
+    return word & 255, word >> 8 & 255, word >> 16 & 255
+
+
 def s32(v):
     v &= 0xffffffff
     return v - (1 << 32) if v & 0x80000000 else v
@@ -105,7 +114,7 @@ def assemble(text):
 
     Nesting is checked here, and IF/ELSE/ENDLOOP targets are resolved to
     absolute PCs, so a program the assembler accepts can only fault at run
-    time through the instruction limit or a data-dependent stack depth.
+    time through the instruction limit: nesting depth is static and capped here.
     """
     lines = []
     for raw in text.splitlines():

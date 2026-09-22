@@ -9,7 +9,7 @@ sys.path.insert(0, str(ROOT))
 from tools import rv32_asm as asm  # noqa: E402
 from tools.rv32_asm import LI, LW, SW, SB, SH, ADDI, BNE, CSRRS, CSRRW, MRET, FINISH, RAM, FB, DISPLAY  # noqa: E402
 from tools.rv32_rtl import write_image, run_rtl, run_emulator, check_passed, compare_backends, uses_accelerator  # noqa: E402
-from tools.rv32_g3d_header import passthrough, vertex  # noqa: E402
+from tools.rv32_g3d_scene import passthrough, vertex  # noqa: E402
 
 BASE = asm.G3D_BASE
 ZBASE = 0x80040000

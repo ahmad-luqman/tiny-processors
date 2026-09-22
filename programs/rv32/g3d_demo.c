@@ -37,6 +37,7 @@ void g3d_demo_event(struct g3d_demo *d, uint32_t code)
     if (code == RV32_KEY_SPACE) d->shader = d->shader + 1 == G3D_SHADERS ? 0 : d->shader + 1;
     if (code == RV32_KEY_P) d->paused ^= 1;
     if (code == RV32_KEY_R) d->frame = d->paused = d->status = 0;
+    if (d->shader >= G3D_SHADERS) d->shader = 0;   /* a public field; keep the table index in range */
 }
 
 void g3d_demo_constants(uint32_t frame, uint32_t k[G3D_CONSTS])
@@ -74,6 +75,7 @@ void g3d_demo_job(struct g3d_demo *d, struct g3d_job *job)
     job->tcount = G3D_CUBE_TRIANGLES;
     job->limit = 4096;
     job->program_words = program_words[d->shader];
+    job->zbase = G3D_DEMO_ZBASE;
 }
 
 void g3d_demo_draw(struct g3d_demo *d, const struct gfx_surface *s)
