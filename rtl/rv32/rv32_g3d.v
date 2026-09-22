@@ -161,13 +161,18 @@ module rv32_g3d #(
 
     // ---------------------------------------------------------------- projection
     wire [4:0] vid_now = vid_base + {3'd0, lane};
-    wire signed [31:0] ox = core_outputs[256*lane + 0 +: 32];
-    wire signed [31:0] oy = core_outputs[256*lane + 32 +: 32];
-    wire signed [31:0] oz = core_outputs[256*lane + 64 +: 32];
-    wire signed [31:0] ow = core_outputs[256*lane + 96 +: 32];
-    wire signed [31:0] ocr = core_outputs[256*lane + 128 +: 32];
-    wire signed [31:0] ocg = core_outputs[256*lane + 160 +: 32];
-    wire signed [31:0] ocb = core_outputs[256*lane + 192 +: 32];
+    // A four-way lane mux, then fixed slices. A variable part-select of the
+    // 1,024-bit bus (outputs[256*lane + k +: 32]) synthesizes as a 1,024-bit
+    // barrel shifter per slot, which is what took synthesis tens of minutes.
+    wire [255:0] lane_out = lane == 2'd0 ? core_outputs[255:0] : lane == 2'd1 ? core_outputs[511:256] :
+                            lane == 2'd2 ? core_outputs[767:512] : core_outputs[1023:768];
+    wire signed [31:0] ox = lane_out[31:0];
+    wire signed [31:0] oy = lane_out[63:32];
+    wire signed [31:0] oz = lane_out[95:64];
+    wire signed [31:0] ow = lane_out[127:96];
+    wire signed [31:0] ocr = lane_out[159:128];
+    wire signed [31:0] ocg = lane_out[191:160];
+    wire signed [31:0] ocb = lane_out[223:192];
     wire signed [34:0] w4 = {ow[31], ow[31], ow, 1'b0} + {ow[31], ow[31], ow, 1'b0};  // 4w
     wire signed [34:0] x35 = {{3{ox[31]}}, ox}, y35 = {{3{oy[31]}}, oy};
     wire vertex_ok = ow >= 32'sd4096 && x35 <= w4 && -x35 <= w4 && y35 <= w4 && -y35 <= w4 &&
@@ -496,7 +501,7 @@ module rv32_g3d #(
             end
         end
     end
-    wire unused_ok = &{1'b0, addr[31:13], div_q[31], area_full[33:32], linear[31], box_l[15:9], box_r[15:9], box_t[15:9],
+    wire unused_ok = &{1'b0, addr[31:13], div_q[31], area_full[33:32], lane_out[255:224], linear[31], box_l[15:9], box_r[15:9], box_t[15:9],
                        box_b[15:9], ocr[15:0], ocg[15:0], ocb[15:0], init_value[49:48], cr[4:0], cg[4:0],
                        cb[5:0], z_addr[0], tri_word[31:24]};
     function signed [31:0] edge_dx;
