@@ -11,6 +11,21 @@ uint32_t native_quit(const struct runtime *r) { return r->quit; }
 uint32_t native_screen(const struct runtime *r) { return r->screen; }
 uint32_t native_tetris_score(const struct runtime *r) { return r->tetris.score; }
 uint32_t native_tetris_lines(const struct runtime *r) { return r->tetris.lines; }
+uint32_t native_digit_runs(const struct runtime *r) { return r->digit.runs; }
+uint32_t native_digit_predicted(const struct runtime *r) { return r->digit.predicted; }
+uint32_t native_digit_status(const struct runtime *r) { return r->digit.status; }
+
+/* The native model classifies with the software path only. The firmware installs
+ * a classifier that also runs the accelerator and compares the two. */
+static uint32_t native_classify(const uint8_t canvas[DIGIT_PIXELS], int32_t logits[DIGIT_CLASSES])
+{
+    uint8_t x[DIGIT_INPUTS];
+    digit_prepare(canvas, x);
+    digit_infer_cpu(x, logits);
+    return 0;
+}
+
+void native_attach_digit(struct runtime *r) { digit_ui_attach(&r->digit, native_classify); }
 
 int check_shapes(void)
 {
@@ -297,12 +312,128 @@ int check_runtime_render(void)
     return 0;
 }
 
+/* The digit screen: cursor bounds, the brush, clearing, and the classifier
+ * callback, none of which touch a device. */
+int check_digit_ui(void)
+{
+    struct runtime r;
+    runtime_init(&r);
+    native_attach_digit(&r);
+    CHECK(r.digit.cursor_x == DIGIT_SIDE / 2 && r.digit.cursor_y == DIGIT_SIDE / 2);
+    CHECK(r.digit.runs == 0 && r.digit.classified == 0);
+
+    /* The cursor stops at every edge instead of wrapping or running off. A held
+     * key moves once and then every DIGIT_UI_REPEAT+1 frames, so crossing the
+     * canvas takes that many frames per cell. */
+    const uint32_t sweep = DIGIT_SIDE * (DIGIT_UI_REPEAT + 1) + 8;
+    for (uint32_t i = 0; i < sweep; i++) digit_ui_frame(&r.digit, HELD(LEFT));
+    CHECK(r.digit.cursor_x == 0);
+    for (uint32_t i = 0; i < sweep; i++) digit_ui_frame(&r.digit, HELD(UP));
+    CHECK(r.digit.cursor_y == 0);
+    for (uint32_t i = 0; i < sweep; i++) digit_ui_frame(&r.digit, HELD(RIGHT) | HELD(DOWN));
+    CHECK(r.digit.cursor_x == DIGIT_SIDE - 1 && r.digit.cursor_y == DIGIT_SIDE - 1);
+
+    /* A held direction repeats on a fixed cadence rather than every frame. */
+    digit_ui_init(&r.digit);
+    native_attach_digit(&r);
+    uint32_t start = r.digit.cursor_x;
+    digit_ui_frame(&r.digit, HELD(LEFT));
+    CHECK(r.digit.cursor_x == start - 1);          /* the first frame moves at once */
+    for (uint32_t i = 0; i < DIGIT_UI_REPEAT; i++) digit_ui_frame(&r.digit, HELD(LEFT));
+    CHECK(r.digit.cursor_x == start - 1);          /* the cadence counts down first */
+    digit_ui_frame(&r.digit, HELD(LEFT));
+    CHECK(r.digit.cursor_x == start - 2);          /* so a move lands every REPEAT+1 frames */
+    digit_ui_frame(&r.digit, 0);
+    digit_ui_frame(&r.digit, HELD(LEFT));
+    CHECK(r.digit.cursor_x == start - 3);          /* releasing restarts the cadence */
+
+    /* SPACE paints a 2x2 block clipped at the edge. */
+    digit_ui_init(&r.digit);
+    native_attach_digit(&r);
+    r.digit.cursor_x = r.digit.cursor_y = 5;
+    digit_ui_frame(&r.digit, HELD(SPACE));
+    uint32_t ink = 0;
+    for (uint32_t i = 0; i < DIGIT_PIXELS; i++) if (r.digit.canvas[i]) ink++;
+    CHECK(ink == 4);
+    CHECK(r.digit.canvas[5 * DIGIT_SIDE + 5] && r.digit.canvas[6 * DIGIT_SIDE + 6]);
+    r.digit.cursor_x = r.digit.cursor_y = DIGIT_SIDE - 1;
+    digit_ui_frame(&r.digit, HELD(SPACE));
+    ink = 0;
+    for (uint32_t i = 0; i < DIGIT_PIXELS; i++) if (r.digit.canvas[i]) ink++;
+    CHECK(ink == 5);                               /* only the in-range corner cell */
+
+    /* R clears the canvas and the result but keeps the classifier installed. */
+    digit_ui_event(&r.digit, RV32_KEY_ENTER);
+    CHECK(r.digit.runs == 1 && r.digit.classified == 1 && r.digit.status == 0);
+    uint32_t after_ink = r.digit.predicted;
+    (void)after_ink;
+    digit_ui_event(&r.digit, RV32_KEY_R);
+    for (uint32_t i = 0; i < DIGIT_PIXELS; i++) CHECK(r.digit.canvas[i] == 0);
+    CHECK(r.digit.runs == 0 && r.digit.classified == 0);
+    digit_ui_event(&r.digit, RV32_KEY_ENTER);
+    CHECK(r.digit.runs == 1);                      /* still attached after a clear */
+
+    /* A blank canvas still classifies: every logit is the bias alone. */
+    int32_t blank[DIGIT_CLASSES];
+    uint8_t zeros[DIGIT_INPUTS];
+    for (uint32_t i = 0; i < DIGIT_INPUTS; i++) zeros[i] = 0;
+    digit_infer_cpu(zeros, blank);
+    for (uint32_t c = 0; c < DIGIT_CLASSES; c++) CHECK(r.digit.logits[c] == blank[c]);
+
+    /* Without a classifier ENTER does nothing rather than calling a null pointer. */
+    struct runtime bare;
+    runtime_init(&bare);
+    bare.digit.classify = 0;
+    digit_ui_event(&bare.digit, RV32_KEY_ENTER);
+    CHECK(bare.digit.runs == 0 && bare.digit.classified == 0);
+    return 0;
+}
+
+/* The menu gained a fourth entry, so selection has to wrap over four. */
+int check_digit_menu(void)
+{
+    struct runtime r;
+    runtime_init(&r);
+    native_attach_digit(&r);
+    CHECK(r.selected == 0);
+    runtime_event(&r, PRESS(UP));                  /* wraps back to the last entry */
+    CHECK(r.selected == RUNTIME_ENTRIES - 1);
+    runtime_event(&r, RELEASE(UP));
+    runtime_event(&r, PRESS(DOWN));                /* and forward to the first */
+    CHECK(r.selected == 0);
+    runtime_event(&r, RELEASE(DOWN));
+    for (uint32_t i = 1; i < RUNTIME_ENTRIES; i++) {
+        runtime_event(&r, PRESS(DOWN));
+        CHECK(r.selected == i);
+        runtime_event(&r, RELEASE(DOWN));
+    }
+    /* Entry order is menu order: the third entry is the digit screen. */
+    r.selected = 2;
+    runtime_event(&r, PRESS(ENTER));
+    CHECK(r.screen == RUNTIME_DIGIT);
+    CHECK(native_screen(&r) == RUNTIME_DIGIT);
+    runtime_event(&r, RELEASE(ENTER));
+    runtime_frame(&r, 0);
+    runtime_event(&r, PRESS(ESCAPE));
+    CHECK(r.screen == RUNTIME_MENU);
+    /* Returning to the menu blocks every key and sets the transition flag, so the
+     * next frame has to run before another selection is accepted. */
+    runtime_event(&r, RELEASE(ESCAPE));
+    runtime_frame(&r, 0);
+    /* The fourth entry is still the 2D demo, which the graphics replay selects
+     * by pressing UP from the first entry. */
+    r.selected = 3;
+    runtime_event(&r, PRESS(ENTER));
+    CHECK(r.screen == RUNTIME_GPU);
+    return 0;
+}
+
 #ifdef RV32_NATIVE_MAIN
 #include <stdio.h>
 int main(void)
 {
     int (*checks[])(void)={check_shapes,check_collisions,check_clear_score,check_timing,
-                          check_random_restart,check_transitions,check_quit_batches,check_render,check_runtime_render};
+                          check_random_restart,check_transitions,check_quit_batches,check_render,check_runtime_render,check_digit_ui,check_digit_menu};
     for (unsigned i=0; i<sizeof checks/sizeof checks[0]; i++) {
         int line=checks[i]();
         if (line) { fprintf(stderr,"native check %u failed at line %d\n",i,line); return 1; }

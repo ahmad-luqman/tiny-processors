@@ -8,8 +8,8 @@ import sys
 import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tools.rv32_capstone_native import build, run_session, INPUT, EXPECTED
-from tools.rv32_devices import parse_input_script
+from tools.rv32_capstone_native import Capstone, build, run_session, INPUT, EXPECTED
+from tools.rv32_devices import EVENT_PRESS, parse_input_script
 
 
 class CapstoneTests(unittest.TestCase):
@@ -19,7 +19,7 @@ class CapstoneTests(unittest.TestCase):
 
     def test_directed_rules(self):
         for lib in self.libs:
-            for name in ("shapes", "collisions", "clear_score", "timing", "random_restart", "transitions", "quit_batches", "render", "runtime_render"):
+            for name in ("shapes", "collisions", "clear_score", "timing", "random_restart", "transitions", "quit_batches", "render", "runtime_render", "digit_ui", "digit_menu"):
                 with self.subTest(library=lib._name, check=name):
                     line = getattr(lib, "check_" + name)()
                     self.assertEqual(line, 0, f"C assertion failed: tests/rv32_capstone_native.c:{line}")
@@ -41,6 +41,53 @@ class CapstoneTests(unittest.TestCase):
             self.assertEqual(frames,8)
             self.assertEqual(f"{checksum:08x}",expected_hex[1])
             self.assertEqual(checkpoints,(ROOT/'programs/rv32/gfx.expected').read_text().splitlines())
+
+    def test_digit_menu_session(self):
+        """Two digits drawn with the keyboard and classified by the software model.
+
+        The firmware runs the accelerator as well and stops if the two disagree,
+        so these checkpoints describe the CPU result on every backend.
+        """
+        expected_hex = re.search(r"^RV32_DIGIT_MENU_HEX := ([0-9a-f]{8})$", (ROOT / "Makefile").read_text(), re.M)
+        self.assertIsNotNone(expected_hex)
+        script = parse_input_script((ROOT / "programs/rv32/digit.input").read_text())
+        for lib in self.libs:
+            checkpoints, checksum, frames = run_session(lib, script)
+            self.assertEqual(frames, 199)
+            self.assertEqual(f"{checksum:08x}", expected_hex[1])
+            self.assertEqual(checkpoints, (ROOT / "programs/rv32/digit.expected").read_text().splitlines())
+
+    def test_digit_session_classifies_a_one_then_a_seven(self):
+        """The session is only worth replaying if it actually reads the strokes."""
+        script = parse_input_script((ROOT / "programs/rv32/digit.input").read_text())
+        lib = self.libs[-1]
+        seen, previous = [], 0
+        game = Capstone(lib)
+        queue, keys, pending, index = [], 0, list(script), 0
+        for iteration in range(1, 400):
+            while index < len(pending) and pending[index][0] <= iteration - 1:
+                word = pending[index][1]
+                queue.append(word)
+                bit = 1 << (word & 31)
+                keys = (keys | bit) if word & EVENT_PRESS else (keys & ~bit)
+                index += 1
+            while queue:
+                game.event(queue.pop(0))
+            if game.quit:
+                break
+            game.frame(keys)
+            game.draw()
+            # R clears the screen and its counter, so a classification is a frame
+            # where the counter rose, not simply a frame where it is non-zero.
+            runs = lib.native_digit_runs(game.state)
+            if runs > previous:
+                seen.append((runs, lib.native_digit_predicted(game.state),
+                             lib.native_digit_status(game.state)))
+            previous = runs
+        predictions = [entry[1] for entry in seen]
+        statuses = [entry[2] for entry in seen]
+        self.assertEqual(statuses, [0] * len(statuses))
+        self.assertEqual(predictions, [1, 7], "the drawn strokes must read as a one and a seven")
 
     def test_bad_sessions_fail(self):
         lib = self.libs[-1]

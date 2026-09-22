@@ -19,20 +19,23 @@ EXPECTED = ROOT / "programs/rv32/capstone.expected"
 def build(optimization="O2"):
     output = ROOT / f"build/rv32/host/librv32capstone-{optimization}.dylib"
     output.parent.mkdir(parents=True, exist_ok=True)
-    sources = [ROOT / f"programs/rv32/{name}.c" for name in ("gpu_demo", "gpu_ref", "runtime", "tetris_game", "pong_game", "gfx", "gfx_text")]
+    sources = [ROOT / f"programs/rv32/{name}.c" for name in ("gpu_demo", "gpu_ref", "runtime", "tetris_game", "pong_game", "gfx", "gfx_text", "digit_ui", "digit_model")]
     sources.append(ROOT / "tests/rv32_capstone_native.c")
     subprocess.run([os.environ.get("HOST_CC", "cc"), "-shared", "-fPIC", f"-{optimization}", "-std=c11",
                     "-Wall", "-Wextra", "-Werror", "-fno-builtin", "-I" + str(ROOT / "programs/rv32"),
+                    "-I" + str(ROOT / "build/rv32"),
                     "-o", str(output), *map(str, sources)], check=True)
     lib = ctypes.CDLL(str(output))
     for name, restype, args in (
         ("native_size", ctypes.c_uint32, []),
         ("runtime_init", None, [ctypes.c_void_p]),
+        ("native_attach_digit", None, [ctypes.c_void_p]),
         ("runtime_event", None, [ctypes.c_void_p, ctypes.c_uint32]),
         ("runtime_frame", None, [ctypes.c_void_p, ctypes.c_uint32]),
         ("runtime_draw", None, [ctypes.c_void_p, ctypes.POINTER(Surface)]),
         *((name, ctypes.c_uint32, [ctypes.c_void_p]) for name in
-          ("runtime_checksum", "native_quit", "native_screen", "native_tetris_score", "native_tetris_lines")),
+          ("runtime_checksum", "native_quit", "native_screen", "native_tetris_score", "native_tetris_lines",
+           "native_digit_runs", "native_digit_predicted", "native_digit_status")),
     ):
         fn = getattr(lib, name)
         fn.restype, fn.argtypes = restype, args
@@ -45,6 +48,10 @@ class Capstone:
         self.state = ctypes.create_string_buffer(lib.native_size())
         self.buffer, self.surface = make_surface()
         lib.runtime_init(self.state)
+        # The runtime has no classifier of its own: the firmware installs one that
+        # also runs the accelerator, and the native model installs the software
+        # path alone, so these checkpoints depend only on the CPU result.
+        lib.native_attach_digit(self.state)
 
     def event(self, word): self.lib.runtime_event(self.state, word)
     def frame(self, keys): self.lib.runtime_frame(self.state, keys)

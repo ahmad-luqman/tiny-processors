@@ -33,8 +33,8 @@ RV32_COMMON_OBJS := build/rv32/start.o build/rv32/console.o build/rv32/muldiv.o
 RV32_SELFCHECK_OBJS := build/rv32/selfcheck.o $(RV32_COMMON_OBJS)
 RV32_DIAG_OBJS := build/rv32/diag.o build/rv32/trap.o $(RV32_COMMON_OBJS)
 RV32_PONG_OBJS := build/rv32/pong.o build/rv32/pong_game.o build/rv32/gfx.o $(RV32_COMMON_OBJS)
-RV32_CAPSTONE_OBJS := build/rv32/gpu.o build/rv32/gpu_ref.o build/rv32/gpu_demo.o  build/rv32/gfx_text.o build/rv32/capstone.o build/rv32/runtime.o build/rv32/tetris_game.o build/rv32/pong_game.o build/rv32/gfx.o $(RV32_COMMON_OBJS)
-RV32_HEADERS += programs/rv32/gpu.h programs/rv32/gpu_demo.h  programs/rv32/runtime.h programs/rv32/tetris_game.h programs/rv32/simd4.h programs/rv32/digit_model.h programs/rv32/digit_hw.h
+RV32_CAPSTONE_OBJS := build/rv32/gpu.o build/rv32/gpu_ref.o build/rv32/gpu_demo.o  build/rv32/gfx_text.o build/rv32/capstone.o build/rv32/runtime.o build/rv32/tetris_game.o build/rv32/pong_game.o build/rv32/gfx.o build/rv32/digit_ui.o build/rv32/digit_model.o build/rv32/digit_hw.o build/rv32/simd4.o $(RV32_COMMON_OBJS)
+RV32_HEADERS += programs/rv32/gpu.h programs/rv32/gpu_demo.h  programs/rv32/runtime.h programs/rv32/tetris_game.h programs/rv32/simd4.h programs/rv32/digit_model.h programs/rv32/digit_hw.h programs/rv32/digit_ui.h
 RV32_IMAGES := selfcheck diag pong capstone
 RV32_IMAGE_FILES := $(foreach image,$(RV32_IMAGES),$(foreach ext,elf lst bin readelf,build/rv32/$(image).$(ext)))
 RV32_SELFCHECK_HEX := 807d9fad
@@ -435,9 +435,9 @@ test-rv32: test-rv32-capstone run-rv32-capstone-emu run-rv32-capstone-rtl run-rv
 
 # Compile the same directed C checks as a standalone sanitized executable.
 .PHONY: test-rv32-capstone-sanitize
-test-rv32-capstone-sanitize: | build/rv32
+test-rv32-capstone-sanitize: build/rv32/digit_weights.h | build/rv32
 	mkdir -p build/rv32/host
-	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fno-builtin -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -DRV32_NATIVE_MAIN -Iprograms/rv32 tests/rv32_capstone_native.c programs/rv32/gpu_demo.c programs/rv32/gpu_ref.c programs/rv32/runtime.c programs/rv32/tetris_game.c programs/rv32/pong_game.c programs/rv32/gfx.c programs/rv32/gfx_text.c -o build/rv32/host/capstone-sanitize
+	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fno-builtin -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -DRV32_NATIVE_MAIN -Iprograms/rv32 -Ibuild/rv32 tests/rv32_capstone_native.c programs/rv32/gpu_demo.c programs/rv32/gpu_ref.c programs/rv32/runtime.c programs/rv32/tetris_game.c programs/rv32/pong_game.c programs/rv32/gfx.c programs/rv32/gfx_text.c programs/rv32/digit_ui.c programs/rv32/digit_model.c -o build/rv32/host/capstone-sanitize
 	build/rv32/host/capstone-sanitize
 
 # F1: standalone floating-point hardware with the pinned host oracle.
@@ -626,7 +626,7 @@ test-rv32: test-rv32-simd4 test-rv32-simd4-verilator run-rv32-simd4-emu run-rv32
 # G1: integer rasterizer, RAM/framebuffer blits, and menu integration.
 .PHONY: test-rv32-gfx test-rv32-gfx-verilator check-rv32-gfx-image run-rv32-gfx-emu run-rv32-gfx-rtl run-rv32-gfx-rtl-verilator run-rv32-gfx-menu-emu run-rv32-gfx-menu-rtl run-rv32-gfx-menu-rtl-verilator lint-rv32-gfx synth-rv32-gfx
 RV32_GFX_MAX_CYCLES := 150000000
-RV32_GFX_MENU_HEX := 78d4a476
+RV32_GFX_MENU_HEX := c883a14f
 RV32_GFX_ARGS = --image build/rv32/gfxcheck.bin --compare results --expect-last-line "PASS G1" --emulator $(RV32EMU) --timeout 600
 RV32_GFX_MENU_ARGS = --image build/rv32/capstone.bin --input programs/rv32/gfx.input --expect-checkpoints programs/rv32/gfx.expected --expect-last-line "PASS $(RV32_GFX_MENU_HEX)" --compare results --emulator $(RV32EMU) --timeout 600
 build/rv32/gfxcheck.elf: build/rv32/gfxcheck.o build/rv32/gpu.o build/rv32/gpu_ref.o build/rv32/gfx.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
@@ -697,6 +697,13 @@ build/rv32/digit_check.h: tools/rv32_digit_model.py programs/rv32/digit_model.js
 	$(PYTHON) -m tools.rv32_digit_model check $@
 RV32_DIGIT_GENERATED := build/rv32/digit_kernels.h build/rv32/digit_weights.h build/rv32/digit_check.h
 RV32_MNIST := third_party/mnist/t10k-images-idx3-ubyte.gz third_party/mnist/t10k-labels-idx1-ubyte.gz
+# Every object that reaches digit_model.h needs the generated weights header.
+build/rv32/digit_ui.o: programs/rv32/digit_ui.c build/rv32/digit_weights.h $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
+build/rv32/runtime.o: programs/rv32/runtime.c build/rv32/digit_weights.h $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
+build/rv32/capstone.o: programs/rv32/capstone.c $(RV32_DIGIT_GENERATED) $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
 build/rv32/digit_model.o: programs/rv32/digit_model.c build/rv32/digit_weights.h $(RV32_HEADERS) | build/rv32
 	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
 build/rv32/digit_hw.o: programs/rv32/digit_hw.c build/rv32/digit_weights.h build/rv32/digit_kernels.h $(RV32_HEADERS) | build/rv32
@@ -719,4 +726,21 @@ run-rv32-digit-rtl: check-rv32-digit-image $(RV32EMU) $(RV32_TB_VVP)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_ARGS) --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/digit/icarus
 run-rv32-digit-rtl-verilator: check-rv32-digit-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_ARGS) --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --stall 1 --simd-stall 2 --out build/digit/verilator
+
+# The menu session: the guest draws two digits with the keyboard and classifies
+# them. Results mode, because the classification touches accelerator registers.
+# The Icarus variant is available separately, as the G1 menu replay is.
+.PHONY: run-rv32-digit-menu-emu run-rv32-digit-menu-rtl run-rv32-digit-menu-rtl-verilator
+RV32_DIGIT_MENU_HEX := badb5523
+RV32_DIGIT_MENU_ARGS = --image build/rv32/capstone.bin --input programs/rv32/digit.input \
+                       --expect-checkpoints programs/rv32/digit.expected \
+                       --expect-last-line "PASS $(RV32_DIGIT_MENU_HEX)" --compare results \
+                       --emulator $(RV32EMU) --timeout 900
+run-rv32-digit-menu-emu: check-rv32-image $(RV32EMU)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_MENU_ARGS) --backend emulator --out build/digit/menu-emu
+run-rv32-digit-menu-rtl: check-rv32-image $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_MENU_ARGS) --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/digit/menu-icarus
+run-rv32-digit-menu-rtl-verilator: check-rv32-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_MENU_ARGS) --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --stall 1 --simd-stall 2 --out build/digit/menu-verilator
 test-rv32: test-rv32-digit accuracy-rv32-digit run-rv32-digit-emu run-rv32-digit-rtl-verilator
+test-rv32: run-rv32-digit-menu-emu run-rv32-digit-menu-rtl-verilator

@@ -1,12 +1,17 @@
 /* Polling application runtime, independent of MMIO for native testing. */
 #ifndef RV32_RUNTIME_H
 #define RV32_RUNTIME_H
+#include "digit_ui.h"
 #include "pong_game.h"
 #include "gpu_demo.h"
 #include "tetris_game.h"
-enum runtime_screen { RUNTIME_MENU, RUNTIME_PONG, RUNTIME_TETRIS, RUNTIME_GPU };
+/* The order of this enum is the order of the menu: runtime_event selects with
+ * RUNTIME_PONG + selected, so a new screen must keep the range contiguous. */
+enum runtime_screen { RUNTIME_MENU, RUNTIME_PONG, RUNTIME_TETRIS, RUNTIME_DIGIT, RUNTIME_GPU };
+#define RUNTIME_ENTRIES 4u
 struct runtime {
     struct gpu_demo demo;
+    struct digit_ui digit;
     struct pong pong;
     struct tetris tetris;
     uint32_t screen, selected, quit, blocked, transition, dirty, over_frames, frames;
