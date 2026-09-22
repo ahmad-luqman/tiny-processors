@@ -2,6 +2,13 @@
  * accelerator. Built twice with different DIGIT_BENCH_COUNT values so the
  * difference cancels startup; it covers the extra inferences between the two
  * counts, and tools/rv32_digit_bench.py divides it down to one.
+ *
+ * The sink is printed as fixed-width hex rather than decimal on purpose. The two
+ * builds reach different sink values, and rv32_put_udec costs a software divide
+ * and modulo per decimal digit, so a five-digit total did measurably more work
+ * than a four-digit one and that difference landed inside the subtraction.
+ * rv32_put_hex32 always writes eight digits using shifts alone, so the two runs
+ * now do identical console work and it cancels as the method assumes.
  * Nothing here is compared across backends; it is a measurement, not a test.
  */
 #include "digit_hw.h"
@@ -31,7 +38,7 @@ int main(void)
         sink += digit_argmax(logits, &margin) + margin;
     }
     rv32_puts("bench ");
-    rv32_put_udec(sink);
+    rv32_put_hex32(sink);
     rv32_putc('\n');
     return 0;
 }

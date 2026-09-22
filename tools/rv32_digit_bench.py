@@ -3,7 +3,10 @@
 
 Each variant is built at two workload sizes and the difference is taken, so the
 startup cost, the program-bank load and the console output all cancel and what
-remains is the marginal cost of one classification. Emulator counts are retired
+remains is the marginal cost of one classification. The console only cancels
+because the guest prints its sink as fixed-width hex: in decimal the two builds
+reach totals of different digit lengths, and rv32_put_udec costs a software divide
+and modulo per digit, which put that difference inside the subtraction. Emulator counts are retired
 instructions; RTL counts are clock cycles. They are different quantities and are
 reported separately, never divided into one another to claim a speedup.
 """

@@ -795,5 +795,5 @@ bench-rv32-digit: $(RV32_DIGIT_BENCH_BINS) $(RV32EMU) $(RV32_TB_VERILATOR)
 # class + its margin for canvas 0. Retraining changes it.
 waves-rv32-digit: build/rv32/digitbench_hw_1.bin $(RV32EMU) $(RV32_TB_VVP)
 	$(PYTHON) tools/rv32_rtl.py --image build/rv32/digitbench_hw_1.bin --compare results \
-	  --expect-last-line "bench 3791" --emulator $(RV32EMU) --timeout 900 \
+	  --expect-last-line "bench 00000ecf" --emulator $(RV32EMU) --timeout 900 \
 	  --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VVP) --mode waves --out build/digit/waves

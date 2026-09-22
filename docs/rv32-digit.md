@@ -264,12 +264,17 @@ against weights the model no longer has.
 ## Measured costs
 
 One inference, by the two paths, with the fixed startup subtracted by building
-each variant at two workload sizes:
+each variant at two workload sizes. For that subtraction to be honest the two
+builds must do identical work outside the inferences, which at first they did not:
+the bench printed its sink in decimal, `rv32_put_udec` costs a software divide and
+modulo per digit, and the larger build's total had one more digit. That put 135
+emulator instructions and 542 RTL cycles of console work inside every per-inference
+figure. The sink is printed as fixed-width hex now, which always costs the same.
 
 | Path | Emulator instructions | RTL cycles |
 | --- | --- | --- |
-| CPU only | 133,742 | 546,830 |
-| Accelerated | 92,437 | 286,448 |
+| CPU only | 133,607 | 546,288 |
+| Accelerated | 92,302 | 285,906 |
 
 The accelerator roughly halves the RTL cycles and removes about a third of the CPU
 instructions. It does not remove more because the work is memory-bound by
