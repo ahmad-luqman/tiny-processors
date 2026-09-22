@@ -68,6 +68,9 @@ module rv32_bus #(
     input wire simd_ready, simd_error,
     input wire [31:0] simd_rdata
 );
+    localparam [31:0] SIMD4_BASE = 32'h2000_4000;
+    localparam [31:0] SIMD4_PROGRAM = 32'h2000_5000;
+    localparam [31:0] SIMD4_DATA = 32'h2000_6000;
     localparam [31:0] RAM_BASE = 32'h8000_0000;
     localparam [31:0] RAM_BYTES = RAM_WORDS * 4;
     localparam [31:0] CONSOLE_BASE = 32'h1000_0000;
@@ -94,9 +97,9 @@ module rv32_bus #(
     wire input_sel = !mem_fetch && (mem_addr[31:4] == INPUT_BASE[31:4]);
     wire display_sel = !mem_fetch && (mem_addr[31:4] == DISPLAY_BASE[31:4]);
     wire fb_sel = !mem_fetch && (mem_addr >= FB_BASE) && (fb_offset < FB_BYTES);
-    wire simd_sel = !mem_fetch && (((mem_addr & 32'hffff_ffe0) == 32'h2000_4000) ||
-                      ((mem_addr & 32'hffff_fc00) == 32'h2000_5000) ||
-                      ((mem_addr & 32'hffff_fc00) == 32'h2000_6000));
+    wire simd_sel = !mem_fetch && (((mem_addr & 32'hffff_ffe0) == SIMD4_BASE) ||
+                      ((mem_addr & 32'hffff_fc00) == SIMD4_PROGRAM) ||
+                      ((mem_addr & 32'hffff_fc00) == SIMD4_DATA));
     wire none_sel = !(ram_sel || console_sel || done_sel || timer_sel || input_sel || display_sel || fb_sel || simd_sel);
 
     assign simd_valid = req && simd_sel;

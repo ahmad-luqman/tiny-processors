@@ -1,6 +1,7 @@
 """A2 protocol replay, independent kernel oracle, and whole-machine checks."""
 import ctypes as C
 import os
+import json
 from pathlib import Path
 import random
 import re
@@ -11,7 +12,7 @@ from tools import simd4_model as model
 from tools.rv32_simd4_kernels import kernels
 from tools.rv32_rtl import (run_rtl, run_emulator, check_passed, compare_backends,
                             uses_accelerator, write_image, diff_traces)
-from tools.rv32_asm import LI, LW, LH, LB, SW, SH, SB, JALR, FINISH
+from tools.rv32_asm import LI, LW, LH, LB, SW, SH, SB, JALR, FINISH, CSRRS, CSRRW, ADDI, MRET, RAM
 
 BASE, PROGRAM, DATA = 0x20004000, 0x20005000, 0x20006000
 OUT = Path('build/rv32/simd4-tests')
@@ -153,6 +154,11 @@ class SimdIntegration(unittest.TestCase):
         self.assertEqual(d.get(20), 0)
         d.step(BASE, 2)
         d.step(DATA, expected=0xba98)
+        d.step(PROGRAM, 0)
+        d.launch()
+        d.step() # FETCH -> EXECUTE of HLT
+        d.step(DATA, error=True) # completion edge still belongs to the device
+        d.step(DATA, expected=0xba98)
         self.replay(d, 'access')
 
     def test_kernels_and_independent_oracle(self):
@@ -228,6 +234,53 @@ class SimdIntegration(unittest.TestCase):
         d.complete()
         self.replay(d, 'reset')
 
+    def test_live_reset_and_partial_fault(self):
+        d = Device(self.lib)
+        program = model.image([model.word(model.LDI, rd=0, imm=0x7fff),
+            model.word(model.MAC, ra=0, rb=0), model.word(model.RDA, rd=1, imm=16),
+            model.word(model.LANE, rd=2), model.word(model.STORE, rd=1, ra=2, imm=128),
+            model.word(255)])
+        d.load(program, [0x7654]*256)
+        for abort_pc in (1,2):
+            d.launch()
+            d.until(lambda: d.get(22) == 2 and d.get(20) == abort_pc+1)
+            if abort_pc == 2:
+                self.assertEqual([d.get(16+i) for i in range(4)], [0x3fff0001]*4)
+            d.step(BASE,2)
+            self.assertEqual(d.snapshot(),0)
+        d.launch()
+        d.complete(seed=17)
+        d.step(BASE+4,expected=6)
+        for i in range(4): d.step(DATA+512+4*i,expected=0x3fff)
+        # Fault doesn't clear the MAC result or roll back preceding stores.
+        self.assertEqual([d.get(16+i) for i in range(4)], [0x3fff0001]*4)
+        d.step(PROGRAM+20,0)  # replace only the faulting word, relaunch without reset
+        d.launch()
+        d.complete()
+        d.step(BASE+4,expected=2)
+        self.replay(d,'live-reset-fault')
+
+    def test_busy_faults_through_cpu(self):
+        # A long loop remains busy across trap-handler CPU cycles on both backends.
+        words = LI(1,BASE)+LI(2,PROGRAM)+LI(3,DATA)+LI(4,0x07ffffff)+[SW(4,2,0)]
+        words += LI(4,0x08000001)+[SW(4,2,4)]+LI(4,RAM+1024)+[CSRRW(0,0x305,4)]
+        words += LI(4,1)+[SW(4,1,0)]
+        words += [LW(5,2,0),SW(4,2,0),LW(5,3,0),SW(4,3,0),SW(4,1,8),SW(4,1,0)]
+        words += LI(4,2)+[SW(4,1,0),LW(5,1,4)]+FINISH()
+        words += [0]*((1024//4)-len(words))
+        words += [CSRRS(6,0x341,0),ADDI(6,6,4),CSRRW(0,0x341,6),MRET()]
+        hexpath,binary = write_image(words,self.prefix,'busy-fault')
+        emu = run_emulator('build/rv32/rv32emu',binary,self.prefix/'busy-fault.emu.trace')
+        rtl = run_rtl(self.soc,hexpath,self.prefix/'busy-fault.rtl.trace',seed=19,simd_seed=7)
+        check_passed(emu)
+        check_passed(rtl)
+        self.assertIsNone(compare_backends(rtl,emu,'results'))
+        for result in (emu,rtl):
+            traps = [line.split()[-2:] for line in result.trace if ' trap ' in line]
+            self.assertEqual(traps, [['5',f'{PROGRAM:08x}'],['7',f'{PROGRAM:08x}'],
+                ['5',f'{DATA:08x}'],['7',f'{DATA:08x}'],['7',f'{BASE+8:08x}'],['7',f'{BASE:08x}']])
+            self.assertTrue(any('mem[20004004]->00000000/4' in line for line in result.trace))
+
     def test_nonempty_fixture_guard(self):
         d = Device(self.lib)
         cmd, fixture = self.replay(d, 'guard')
@@ -235,6 +288,13 @@ class SimdIntegration(unittest.TestCase):
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Incomplete fixture', result.stdout+result.stderr)
+
+    def test_invalid_stall_options(self):
+        for options in (['--simd-stall','-1'],['--simd-seed','2147483648'],
+                        ['--simd-stall','1','--simd-seed','1'],['--simd-stall','1','--backend','emulator']):
+            result = subprocess.run(['python3','tools/rv32_rtl.py',*options],capture_output=True,text=True,timeout=20)
+            self.assertEqual(result.returncode,2)
+            self.assertIn('error:',result.stderr)
 
     def test_result_comparison_detection(self):
         self.assertTrue(uses_accelerator(['1 80000000 00000000 x1=1 mem[20004004]->00000001/4']))
@@ -267,11 +327,26 @@ class SimdIntegration(unittest.TestCase):
         emu = run_emulator('build/rv32/rv32emu', binary, self.prefix/'firmware.emu.trace')
         check_passed(emu)
         self.assertEqual(emu.console, 'vector OK\nmatrix signed/unsigned OK\nrecovery OK\nPASS A2\n')
+        reports = []
         for stall, seed, simd_stall, simd_seed in ((0,None,0,None),(3,None,2,None),(None,7,None,19)):
             rtl = run_rtl(self.soc, 'build/rv32/simdcheck.hex', self.prefix/'firmware.rtl.trace', stall=stall, seed=seed,
                           simd_stall=simd_stall, simd_seed=simd_seed)
             check_passed(rtl)
             self.assertIsNone(compare_backends(rtl, emu, 'results'))
+            def counters(trace):
+                reads = {offset: [int(m.group(1),16) for line in trace
+                         if (m := re.search(rf'mem\[200040{offset}\]->([0-9a-f]{{8}})',line))]
+                         for offset in ('0c','10','14','18')}
+                return [dict(zip(('cycles','stalls','transfers','instructions'),row))
+                        for row in zip(*(reads[offset] for offset in ('0c','10','14','18')))]
+            device_counts = counters(rtl.trace)
+            self.assertEqual(len(device_counts),3)
+            if simd_stall is not None:
+                self.assertEqual([c['stalls'] for c in device_counts], [simd_stall*c['transfers'] for c in device_counts])
+            reports.append(dict(cpu_stall=stall,cpu_seed=seed,device_stall=simd_stall,device_seed=simd_seed,
+                rtl_cpu_instructions=len(rtl.trace),rtl_cpu_cycles=rtl.halt['cycles'],
+                emulator_cpu_instructions=len(emu.trace),rtl_device_jobs=device_counts,emulator_device_jobs=counters(emu.trace)))
+        (self.prefix/'measurements.json').write_text(json.dumps(reports,indent=2)+'\n')
 
 
 if __name__ == '__main__':

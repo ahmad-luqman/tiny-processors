@@ -11,6 +11,9 @@ module rv32_simd4 (
     output wire ready, error,
     input wire memory_hold
 );
+    localparam [31:0] SIMD4_BASE = 32'h2000_4000;
+    localparam [31:0] SIMD4_PROGRAM = 32'h2000_5000;
+    localparam [31:0] SIMD4_DATA = 32'h2000_6000;
     reg [31:0] program_mem [0:255];
     reg [15:0] data_mem [0:255];
     reg [7:0] entry;
@@ -19,22 +22,26 @@ module rv32_simd4 (
     wire [7:0] program_address, memory_address;
     wire memory_valid, memory_write;
     wire [15:0] memory_wdata;
-    wire program_sel = (addr & 32'hffff_fc00) == 32'h2000_5000;
-    wire data_sel = (addr & 32'hffff_fc00) == 32'h2000_6000;
-    wire regs_sel = (addr & 32'hffff_ffe0) == 32'h2000_4000;
+    wire program_sel = (addr & 32'hffff_fc00) == SIMD4_PROGRAM;
+    wire data_sel = (addr & 32'hffff_fc00) == SIMD4_DATA;
+    wire regs_sel = (addr & 32'hffff_ffe0) == SIMD4_BASE;
     wire word_ok = strb == 4'b1111 && addr[1:0] == 2'b00;
-    wire [31:0] cpu_program = program_mem[addr[9:2]];
-    wire [15:0] cpu_data = data_mem[addr[9:2]];
+    // Ownership selects an address BEFORE each array, inferring one read
+    // port rather than a CPU port plus an engine port with a mux afterwards.
+    wire [7:0] program_read_address = busy ? program_address : addr[9:2];
+    wire [7:0] data_address = busy ? memory_address : addr[9:2];
+    wire [31:0] program_read_data = program_mem[program_read_address];
+    wire [15:0] data_read_data = data_mem[data_address];
     reg access_ok;
     always @* begin
         access_ok = 1'b0;
         rdata = 32'd0;
         if (program_sel) begin
             access_ok = !busy;
-            rdata = cpu_program;
+            rdata = program_read_data;
         end else if (data_sel) begin
             access_ok = !busy;
-            rdata = {16'd0, cpu_data};
+            rdata = {16'd0, data_read_data};
         end else if (regs_sel) begin
             case (addr[4:2])
                 3'd0: access_ok = we && ((wdata == 32'd1 && !busy) || wdata == 32'd2);
@@ -56,13 +63,13 @@ module rv32_simd4 (
     wire start = command && wdata == 32'd1;
     wire memory_ready = !memory_hold && !engine_reset;
 
+    wire data_write = (accepted_write && data_sel) || (memory_valid && memory_ready && memory_write);
+    wire [15:0] data_write_value = busy ? memory_wdata : wdata[15:0];
     always @(posedge clk) begin
         if (engine_reset) entry <= 8'd0;
         else if (accepted_write && regs_sel && addr[4:2] == 3'd2) entry <= wdata[7:0];
         if (accepted_write && program_sel) program_mem[addr[9:2]] <= wdata;
-        if (accepted_write && data_sel) data_mem[addr[9:2]] <= wdata[15:0];
-        else if (memory_valid && memory_ready && memory_write)
-            data_mem[memory_address] <= memory_wdata;
+        if (data_write) data_mem[data_address] <= data_write_value;
     end
 
     // Observability stays on named wires for waveforms; the CPU sees counters only.
@@ -76,9 +83,9 @@ module rv32_simd4 (
     simd4 engine (
         .clk(clk), .reset(engine_reset), .start(start), .entry_pc(entry),
         .busy(busy), .done(done), .fault(fault),
-        .program_address(program_address), .program_data(program_mem[program_address]),
+        .program_address(program_address), .program_data(program_read_data),
         .mem_valid(memory_valid), .mem_write(memory_write), .mem_address(memory_address),
-        .mem_write_data(memory_wdata), .mem_ready(memory_ready), .mem_read_data(data_mem[memory_address]),
+        .mem_write_data(memory_wdata), .mem_ready(memory_ready), .mem_read_data(data_read_data),
         .pc(pc), .instruction(instruction), .state(state), .memory_lane(memory_lane), .loop_count(loop_count),
         .retired(retired), .retire_pc(retire_pc), .retire_instruction(retire_instruction),
         .cycles(cycles), .stalls(stalls), .memory_transfers(transfers), .instructions(instructions),

@@ -359,6 +359,12 @@ def main():
     parser.add_argument("--seed", type=int, default=None, help="random 0..3 stall cycles per request")
     parser.add_argument("--expect-fp-waits", type=int, help="pin total RTL FPU issue/wait cycles")
     args = parser.parse_args()
+    for option in ("simd_stall", "simd_seed"):
+        value = getattr(args, option)
+        if value is not None and not 0 <= value <= 2147483647:
+            parser.error(f"--{option.replace('_', '-')} must be in 0..2147483647")
+        if value is not None and args.backend == "emulator":
+            parser.error(f"--{option.replace('_', '-')} requires the RTL backend")
     if args.expect_fp_waits is not None:
         if args.expect_fp_waits < 0: parser.error("--expect-fp-waits must not be negative")
         if args.backend == "emulator": parser.error("--expect-fp-waits requires the RTL backend")
@@ -404,8 +410,8 @@ def main():
                             checkpoints=out / f"{name}.emu.checkpoints", input_script=args.input, frames=args.frames,
                             allow_lost_events=args.allow_lost_events)
     check_passed(emulator, "emulator")
-    # Device time (docs/rv32.md): a timer-reading program has no single trace, so its traces are
-    # never diffed; results mode compares what the guest printed, presented, and trapped on instead.
+    # Device time differs for timers and asynchronous accelerators. Compare guest
+    # results and trap records when either interface makes the CPU trace timing-dependent.
     reads_timer = any(f"mem[{TIMER:08x}]->" in line for line in emulator.trace)
     if args.compare == "trace" and reads_timer:
         sys.exit("this program reads the timer, so its traces differ by design; use --compare results")

@@ -61,10 +61,13 @@ int main(void)
     if (!simd4_load(bad_program, data) || !simd4_start(0) || simd4_wait(100) != SIMD4_FAULT) return fail(7);
     if (mmio_read32(RV32_SIMD4_BASE + 4) != 6) return fail(8);
     if (!run(vector_kernel)) return fail(9); /* relaunch clears sticky fault */
-    /* Bounded polling must abort, even if zero polls were requested. */
+    /* A nonzero bounded poll loop must abort work that is still busy. */
     bad_program[0] = 0x07ffffffu; /* SETLOOP 65535 */
     bad_program[1] = 0x08000001u; /* LOOP itself */
-    if (!simd4_load(bad_program, data) || !simd4_start(0) || simd4_wait(0) != SIMD4_TIMEOUT) return fail(10);
+    if (!simd4_load(bad_program, data) || !simd4_start(0)) return fail(10);
+    uint16_t busy_value;
+    if (simd4_load(vector_kernel, data) || simd4_start(0) || simd4_read(0, &busy_value)) return fail(12);
+    if (simd4_wait(8) != SIMD4_TIMEOUT) return fail(10);
     if (mmio_read32(RV32_SIMD4_BASE + 4) != 0 || !run(vector_kernel)) return fail(11);
     rv32_puts("recovery OK\nPASS A2\n");
     return 0;
