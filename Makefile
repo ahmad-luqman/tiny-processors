@@ -672,3 +672,13 @@ test-rv32-gfx-sanitize: test-rv32-gfx | build
 	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -DG1_NATIVE_MAIN tests/rv32_gpu_native.c tools/rv32_gpu.c programs/rv32/gpu_ref.c programs/rv32/gfx.c -o build/gfx/sanitize
 	build/gfx/sanitize build/gfx/commands.txt
 test-rv32: test-rv32-gfx-sanitize
+
+# N1: the vendored digit test set, the integer model, and its standard-library oracle.
+# tools/digit_train.py retrains the model; it needs numpy and the network and is
+# deliberately not a prerequisite of anything here.
+.PHONY: test-rv32-digit-model accuracy-rv32-digit
+test-rv32-digit-model:
+	$(PYTHON) -m unittest discover -s tests -p 'test_rv32_digit*.py' -v
+accuracy-rv32-digit:
+	$(PYTHON) -m tools.digit_ref --count 10000
+test-rv32: test-rv32-digit-model accuracy-rv32-digit
