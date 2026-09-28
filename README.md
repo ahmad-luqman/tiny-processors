@@ -97,7 +97,7 @@ and gates walkthrough](docs/rv32-gfx.md).
 ```sh
 make run-rv32-capstone                 # Select DIGIT: arrows move, SPACE draws, ENTER reads
 make test-rv32-digit                   # Model, kernels, engine and guest C against the oracle
-make accuracy-rv32-digit               # 96.16% on the vendored 10,000-image test set
+make accuracy-rv32-digit               # 96.53% on the vendored test set, then by drawn height
 make run-rv32-digit-emu                # The diagnostic: PASS N1
 make bench-rv32-digit waves-rv32-digit
 ```
