@@ -7,7 +7,8 @@ Two things live here so that every other part of N1 agrees by construction:
   `tools.fp32_vectors.verify_reference_sources` checks SoftFloat, including the
   inventory, so a new or deleted file fails instead of being ignored.
 * `prepare` is the *only* definition of how 784 canvas bytes become the 196 model
-  inputs: centre the ink by its bounding box, then average each 2x2 block. The
+  inputs: resize the ink's bounding box so its longer side is 20 pixels, centre
+  the result by its bounding box, then average each 2x2 block. The
   guest C in `programs/rv32/digit_model.c` reimplements exactly this, and the
   tests compare the 196 bytes directly rather than only the logits, because
   preprocessing that both inference paths skip would cancel out of a logit
@@ -19,6 +20,10 @@ calibration, evaluation and both runtime paths therefore all run through this sa
 function, so the model always sees one distribution. The source page asks that this
 substitution be reported; `third_party/mnist/README.md` and `docs/rv32-digit.md`
 report it.
+
+Why the resize: every distributed digit was fit to a 20x20 box, so the model has
+only seen digits about 20 pixels tall, while a drawing can be any size. Without
+the resize a 10-pixel drawing read correctly about one time in five.
 """
 
 import gzip
@@ -35,6 +40,7 @@ SIDE = 28                      # canvas is SIDE x SIDE bytes
 POOLED = SIDE // 2             # model input is POOLED x POOLED bytes
 INPUTS = POOLED * POOLED       # 196
 PIXELS = SIDE * SIDE           # 784
+TARGET = 20                    # MNIST fits every digit to a 20x20 box
 IMAGE_MAGIC, LABEL_MAGIC = 0x803, 0x801
 
 # Digests of the two files fetched but deliberately not vendored; the training
@@ -128,11 +134,68 @@ def pool(canvas):
     return bytes(out)
 
 
+def ink_box(canvas):
+    """(top, bottom, left, right) of the nonzero pixels, or None for a blank canvas."""
+    rows = [r for r in range(SIDE) if any(canvas[r * SIDE + c] for c in range(SIDE))]
+    if not rows:
+        return None
+    columns = [c for c in range(SIDE) if any(canvas[r * SIDE + c] for r in range(SIDE))]
+    return rows[0], rows[-1], columns[0], columns[-1]
+
+
+def resized_short_side(short, long, target=TARGET):
+    """The short side after scaling the long side to `target`, rounded half up, at least 1."""
+    return max(1, (short * target + long // 2) // long)
+
+
+def source_offset(d, long):
+    """Destination offset `d` of a 20-pixel side reads this source offset.
+
+    It is floor(d * long / 20), written as the multiply-and-shift the guest uses
+    because RV32I has no divide; the tests prove the two equal for every d below 20
+    and every long side up to 28.
+    """
+    return (d * long * 3277) >> 16
+
+
+def resize(canvas, target=TARGET):
+    """Nearest-neighbour resize of the ink box so its longer side is `target`, placed top left.
+
+    Both axes use the same scale, so the aspect ratio is kept. Values are copied,
+    never averaged, so a binary drawing stays binary. A blank canvas is returned
+    as zeros. With `target` 20 this is the contract step; other targets serve the
+    keyboard-style generator in `tools.digit_drawn`, which scales digits to a
+    chosen height with the same rule.
+    """
+    box = ink_box(canvas)
+    out = bytearray(PIXELS)
+    if box is None:
+        return bytes(out)
+    top, bottom, left, right = box
+    height, width = bottom - top + 1, right - left + 1
+    long = max(height, width)
+    if height >= width:
+        rows, columns = target, resized_short_side(width, long, target)
+    else:
+        rows, columns = resized_short_side(height, long, target), target
+    offset = source_offset if target == TARGET else (lambda d, s: d * s // target)
+    for r in range(rows):
+        source_row = (top + offset(r, long)) * SIDE + left
+        for c in range(columns):
+            out[r * SIDE + c] = canvas[source_row + offset(c, long)]
+    return bytes(out)
+
+
 def prepare(canvas):
-    """The preprocessing contract: centre, then pool. 784 bytes in, 196 bytes out."""
+    """The preprocessing contract: resize, centre, then pool. 784 bytes in, 196 bytes out.
+
+    Centring runs on the resized canvas rather than being folded into the resize:
+    shrinking can skip the last source row or column, so the resized ink box may
+    be smaller than the box the resize wrote.
+    """
     if len(canvas) != PIXELS:
         raise ValueError(f'canvas must be {PIXELS} bytes, got {len(canvas)}')
-    return pool(centre(canvas))
+    return pool(centre(resize(canvas)))
 
 
 def fetch_training_set(directory=BUILD, mirror=0):

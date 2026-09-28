@@ -14,9 +14,12 @@ build, the tests and the firmware need is the committed output,
 
 The network is a 196 -> 32 -> 10 multilayer perceptron with ReLU, trained on the
 MNIST training set after the same `tools.digit_data.prepare` preprocessing the
-guest applies to a drawn canvas. The last 5,000 training images are held out to
-calibrate the hidden shift `s1`; the vendored 10,000-image test set tunes nothing
-and is only measured at the end.
+guest applies to a drawn canvas. Each training image is used as distributed and
+also redrawn keyboard-style by `tools.digit_drawn.draw` (binary, one brush wide,
+at random heights from 8 to 28 pixels), because that is what the screen produces.
+The last 5,000 training images, with their drawings, are held out to calibrate
+the hidden shift `s1`; the vendored 10,000-image test set and the keyboard-style
+set built from it tune nothing and are only measured at the end.
 
 Quantization (the contract `docs/rv32-digit.md` states and the exporter proves):
 
@@ -39,7 +42,8 @@ from pathlib import Path
 
 import numpy as np
 
-from tools.digit_data import INPUTS, POOLED, SIDE, fetch_training_set, load_test_set, prepare
+from tools.digit_data import INPUTS, POOLED, fetch_training_set, load_test_set, prepare
+from tools.digit_drawn import HEIGHTS, draw, verified_test_set
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = ROOT / 'programs/rv32/digit_model.json'
@@ -55,34 +59,19 @@ EPOCHS = 30
 BATCH = 64
 RATE = 0.05
 HOLDOUT = 5000
+COPIES = 1              # keyboard-style drawings per training image
+DRAWN_HEIGHTS = (8, 28)  # inclusive range of their heights
 
 
 def prepare_many(images):
-    """Vectorized `tools.digit_data.prepare`, checked against the authoritative one."""
-    raw = np.frombuffer(b''.join(images), dtype=np.uint8).reshape(len(images), SIDE, SIDE)
-    rows, columns = raw.any(axis=2), raw.any(axis=1)
-    out = np.zeros_like(raw)
-    for index in range(len(images)):
-        where_rows, where_columns = np.flatnonzero(rows[index]), np.flatnonzero(columns[index])
-        if where_rows.size == 0:
-            continue
-        top, bottom = where_rows[0], where_rows[-1]
-        left, right = where_columns[0], where_columns[-1]
-        down = (SIDE - (bottom - top + 1)) // 2 - top
-        across = (SIDE - (right - left + 1)) // 2 - left
-        out[index, top + down:bottom + down + 1, left + across:right + across + 1] = \
-            raw[index, top:bottom + 1, left:right + 1]
-    pooled = (out[:, 0::2, 0::2].astype(np.uint16) + out[:, 0::2, 1::2] +
-              out[:, 1::2, 0::2] + out[:, 1::2, 1::2]) >> 2
-    return pooled.reshape(len(images), INPUTS).astype(np.uint8)
+    """`tools.digit_data.prepare` over a list, as a uint8 matrix. The stdlib contract
+    itself, not a vectorized copy, so there is no second definition to drift."""
+    return np.frombuffer(b''.join(prepare(image) for image in images), dtype=np.uint8).reshape(len(images), INPUTS)
 
 
-def check_preprocessing(images, prepared, sample=200, seed=SEED):
-    """The stdlib contract is authoritative; prove the fast path reproduces it exactly."""
-    rng = random.Random(seed)
-    for index in rng.sample(range(len(images)), min(sample, len(images))):
-        if bytes(prepared[index]) != prepare(images[index]):
-            raise ValueError(f'vectorized preprocessing differs from tools.digit_data.prepare at {index}')
+def drawings(images, rng):
+    """COPIES keyboard-style drawings of each image at random heights, in image order."""
+    return [draw(image, rng.randint(*DRAWN_HEIGHTS), rng) for image in images for _ in range(COPIES)]
 
 
 def train(x, y, rng):
@@ -160,14 +149,20 @@ def main():
     train_images, train_labels = fetch_training_set(mirror=arguments.mirror)
     test_images, test_labels = load_test_set()
     print(f'preprocessing {len(train_images)} training and {len(test_images)} test images')
-    x_all, y_all = prepare_many(train_images), np.array(train_labels)
+    draw_rng = random.Random(SEED)
+    fit_images, holdout_images = train_images[:-HOLDOUT], train_images[-HOLDOUT:]
+    fit_labels = train_labels[:-HOLDOUT]
+    fit_drawn = drawings(fit_images, draw_rng)
+    holdout_drawn = drawings(holdout_images, draw_rng)
+    x_fit = prepare_many(fit_images + fit_drawn) / 255.0
+    y_fit = np.array(fit_labels + [label for label in fit_labels for _ in range(COPIES)])
+    x_holdout = prepare_many(holdout_images + holdout_drawn) / 255.0
     x_test, y_test = prepare_many(test_images), np.array(test_labels)
-    check_preprocessing(train_images, x_all)
-    check_preprocessing(test_images, x_test)
+    keyboard = verified_test_set()
+    x_keyboard = {height: prepare_many(keyboard[height]) for height in HEIGHTS}
 
-    x_fit, y_fit = x_all[:-HOLDOUT] / 255.0, y_all[:-HOLDOUT]
-    x_holdout = x_all[-HOLDOUT:] / 255.0
-    print(f'training on {len(x_fit)} images, holding out {HOLDOUT} to calibrate the shift')
+    print(f'training on {len(x_fit)} inputs ({len(fit_images)} images and {COPIES} drawing each), '
+          f'holding out {len(x_holdout)} to calibrate the shift')
     rng = np.random.default_rng(SEED)
     w1, b1, w2, b2 = train(x_fit, y_fit, rng)
 
@@ -180,6 +175,12 @@ def main():
     predictions = np.argmax(logits, axis=1)
     int_test = float((predictions == y_test).mean())
     print(f'test accuracy: float {float_test:.4f}, integer {int_test:.4f}, gap {float_test - int_test:+.4f}')
+    keyboard_accuracy = {}
+    for height in HEIGHTS:
+        guesses = np.argmax(infer_int(x_keyboard[height], w1_int, b1_int, s1, w2_int, b2_int), axis=1)
+        keyboard_accuracy[str(height)] = round(float((guesses == y_test).mean()), 6)
+    print('keyboard-style test set, integer: ' +
+          ', '.join(f'{height} px {value:.4f}' for height, value in keyboard_accuracy.items()))
 
     if arguments.dry_run:
         print('dry run: nothing written')
@@ -192,6 +193,8 @@ def main():
         'w2': w2_int.T.tolist(), 'b2': b2_int.tolist(),
         'metadata': {
             'seed': SEED, 'epochs': EPOCHS, 'batch': BATCH, 'rate': RATE, 'holdout': HOLDOUT,
+            'drawn_copies': COPIES, 'drawn_heights': list(DRAWN_HEIGHTS),
+            'keyboard_int_accuracy': keyboard_accuracy,
             'trained': date.today().isoformat(), 'numpy': np.__version__,
             'float_test_accuracy': round(float_test, 6), 'int_test_accuracy': round(int_test, 6),
             'quantization_gap': round(float_test - int_test, 6),

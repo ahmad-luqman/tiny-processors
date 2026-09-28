@@ -172,7 +172,7 @@ def check_header(count=CHECK_IMAGES, model=None):
 
 
 def ensure_headers(directory=None):
-    """Regenerate the headers whose content is out of date, and return the directory.
+    """Regenerate the generated files whose content is out of date, and return the directory.
 
     The make rules are the primary path. This covers the other entry point: a test
     run directly with `python3 -m unittest` has no make step, so on a fresh
@@ -185,6 +185,9 @@ def ensure_headers(directory=None):
     directory.mkdir(parents=True, exist_ok=True)
     for name, produce in (('digit_shape.h', shape_header),
                           ('digit_weights.h', weights_header),
+                          # The tables themselves: the native builds compile this
+                          # file, so leaving it out tested stale weights after a retrain.
+                          ('digit_weights.c', weights_source),
                           ('digit_check.h', check_header),
                           ('digit_kernels.h', kernel_header)):
         target, wanted = directory / name, produce()

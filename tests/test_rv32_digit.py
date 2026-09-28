@@ -9,10 +9,11 @@ import tempfile
 import unittest
 
 from programs.simd4 import dense4
-from tools import digit_data, digit_ref
+from tools import digit_data, digit_drawn, digit_ref
 from tools.rv32_digit_kernels import LAYER1_DEPTH, LAYER2_DEPTH, kernels
+from tools import rv32_digit_model
 from tools.rv32_digit_model import launch_order_weights
-from tools.rv32_digit_native import Model, build
+from tools.rv32_digit_native import GENERATED, SOURCES, Model, build
 from tools.simd4_model import execute, signed
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,25 +89,99 @@ class DatasetTest(unittest.TestCase):
                 digit_data.read_labels(labels)
 
 
+def box_canvas(top, left, height, width, value=255):
+    """A solid rectangle of ink."""
+    return canvas({(r, c): value for r in range(top, top + height) for c in range(left, left + width)})
+
+
+def edge_canvases():
+    """Shapes that stress the resize: tall, wide, tiny, full, and boxes whose shrink skips ink."""
+    shapes = [bytes(digit_data.PIXELS), bytes([255] * digit_data.PIXELS)]
+    for position in ((0, 0), (27, 27), (0, 27), (13, 13), (5, 20)):
+        shapes.append(canvas({position: 255}))
+    shapes += [box_canvas(3, 7, 2, 2), box_canvas(0, 0, 28, 2), box_canvas(26, 0, 2, 28),
+               box_canvas(4, 9, 20, 11), box_canvas(1, 1, 9, 25), box_canvas(2, 3, 13, 1)]
+    shapes.append(canvas({(5, 1): 255, (5, 2): 200, (5, 3): 150, (6, 2): 100}))
+    shapes.append(canvas({(0, 0): 3, (27, 27): 1}))       # ink at both corners
+    # A full-height box whose ink is only in the last row and column besides the
+    # first: a 28 -> 20 shrink never reads row or column 27, so that ink vanishes
+    # and the resized box is smaller than the box the resize wrote.
+    ink = {(0, c): 255 for c in range(0, 28, 9)}
+    ink.update({(27, 27): 255, (27, 0): 255, (13, 27): 255})
+    shapes.append(canvas(ink))
+    rng = random.Random(29)
+    for _ in range(60):
+        density = rng.choice((0.02, 0.1, 0.5))
+        top, left = rng.randrange(28), rng.randrange(28)
+        height, width = rng.randrange(1, 29 - top), rng.randrange(1, 29 - left)
+        shapes.append(canvas({(r, c): rng.choice((255, rng.randrange(1, 256)))
+                              for r in range(top, top + height) for c in range(left, left + width)
+                              if rng.random() < density}))
+    return shapes
+
+
 class PreprocessingTest(unittest.TestCase):
-    """`prepare` is one contract: centre by bounding box, then average 2x2 blocks.
+    """`prepare` is one contract: resize the ink box to 20 pixels, centre it by its
+    bounding box, then average 2x2 blocks.
 
     These check the 196 output bytes directly. A logit comparison cannot see
     preprocessing that every inference path skipped alike.
     """
 
     def test_blank_canvas_is_all_zero(self):
+        self.assertEqual(digit_data.resize(bytes(digit_data.PIXELS)), bytes(digit_data.PIXELS))
         self.assertEqual(digit_data.prepare(bytes(digit_data.PIXELS)), bytes(digit_data.INPUTS))
 
-    def test_single_pixel_centres_regardless_of_where_it_started(self):
-        middle = (digit_data.SIDE - 1) // 2      # a 1-wide box leaves 27 columns, floor to 13
-        for position in ((0, 0), (27, 27), (0, 27), (13, 6)):
-            centred = digit_data.centre(canvas({position: 255}))
-            self.assertEqual(centred.index(255), middle * digit_data.SIDE + middle, position)
-            self.assertEqual(sum(centred), 255)
+    def test_shift_multiply_is_floor_division_for_every_offset(self):
+        """The guest has no divide; its multiply-and-shift must be exact everywhere it is used."""
+        for longer in range(1, digit_data.SIDE + 1):
+            for d in range(digit_data.TARGET):
+                self.assertEqual(digit_data.source_offset(d, longer), d * longer // 20, (d, longer))
+                self.assertLess(digit_data.source_offset(d, longer), longer)
 
-    def test_odd_bounding_box_floors_the_shift(self):
-        # A 3-wide, 2-tall box: columns floor to (28-3)//2 = 12, rows to (28-2)//2 = 13.
+    def test_short_side_rounds_half_up_and_is_never_zero(self):
+        for longer in range(1, digit_data.SIDE + 1):
+            for shorter in range(1, longer + 1):
+                n = digit_data.resized_short_side(shorter, longer)
+                exact = shorter * 20 / longer
+                self.assertEqual(n, max(1, int(exact + 0.5)), (shorter, longer))
+                self.assertTrue(1 <= n <= 20)
+                # Every short-side destination still reads inside the source box.
+                self.assertLess(digit_data.source_offset(n - 1, longer), shorter)
+
+    def test_resize_fits_the_long_side_to_twenty(self):
+        for top, left, height, width in ((3, 4, 10, 5), (0, 0, 28, 28), (6, 2, 7, 24), (20, 20, 1, 1)):
+            resized = digit_data.resize(box_canvas(top, left, height, width))
+            longer = max(height, width)
+            n = digit_data.resized_short_side(min(height, width), longer)
+            rows, columns = (20, n) if height >= width else (n, 20)
+            expected = box_canvas(0, 0, rows, columns)
+            self.assertEqual(resized, expected, (top, left, height, width))
+
+    def test_resize_copies_values_by_nearest_neighbour(self):
+        # A 1x10 run of distinct values doubles each one to fill 20 columns, and its
+        # one row becomes n = (1*20 + 5)//10 = 2 identical rows.
+        image = canvas({(4, 3 + c): 10 + c for c in range(10)})
+        resized = digit_data.resize(image)
+        row = [10 + c // 2 for c in range(20)]
+        side = digit_data.SIDE
+        self.assertEqual(list(resized[:20]), row)
+        self.assertEqual(list(resized[side:side + 20]), row)
+        self.assertEqual(sum(resized), 2 * sum(row))
+        # Shrinking 28 -> 20 reads floor(d * 28 / 20), so column 27 is never read.
+        row = canvas({(0, c): c + 1 for c in range(28)})
+        self.assertEqual(list(digit_data.resize(row)[:20]), [d * 28 // 20 + 1 for d in range(20)])
+
+    def test_a_single_pixel_becomes_a_centred_twenty_block(self):
+        """A dot has a 1x1 box, which scales to 20x20. MNIST never contains one; it is
+        the documented consequence of one rule for every size."""
+        for position in ((0, 0), (27, 27), (0, 27), (13, 6)):
+            prepared = digit_data.prepare(canvas({position: 255}))
+            expected = digit_data.pool(box_canvas(4, 4, 20, 20))
+            self.assertEqual(prepared, expected, position)
+
+    def test_centring_floors_an_odd_leftover(self):
+        # Centre alone: a 3-wide, 2-tall box floors to column 12 and row 13.
         ink = {(5, 1): 255, (5, 2): 200, (5, 3): 150, (6, 2): 100}
         centred = digit_data.centre(canvas(ink))
         self.assertEqual(centred[13 * digit_data.SIDE + 12], 255)
@@ -114,11 +189,24 @@ class PreprocessingTest(unittest.TestCase):
         self.assertEqual(centred[13 * digit_data.SIDE + 14], 150)
         self.assertEqual(centred[14 * digit_data.SIDE + 13], 100)
         self.assertEqual(sum(centred), 705)
+        # Through resize: 20 wide, n = (2*20 + 1)//3 = 13 tall, so 4 columns and 7 rows of margin.
+        resized_then_centred = digit_data.centre(digit_data.resize(canvas(ink)))
+        self.assertEqual(digit_data.ink_box(resized_then_centred), (7, 19, 4, 23))
 
-    def test_already_centred_canvas_is_unchanged(self):
-        ink = {(13, 13): 255, (13, 14): 255, (14, 13): 255, (14, 14): 255}
-        image = canvas(ink)
+    def test_already_centred_canvas_is_unchanged_by_centring(self):
+        image = box_canvas(4, 4, 20, 20)
         self.assertEqual(digit_data.centre(image), image)
+        self.assertEqual(digit_data.centre(digit_data.resize(image)), image)
+
+    def test_centring_runs_on_the_resized_ink_not_the_written_box(self):
+        """A shrink that skips the only ink in the last row leaves a shorter box, and
+        the contract centres what is left."""
+        ink = {(r, 0): 255 for r in range(27)}
+        ink[(27, 5)] = 255                          # the only ink in row 27, column 5
+        image = canvas(ink)
+        resized = digit_data.resize(image)
+        self.assertEqual(digit_data.ink_box(resized), (0, 19, 0, 0))   # row 27 was never read
+        self.assertEqual(digit_data.ink_box(digit_data.centre(resized)), (4, 23, 13, 13))
 
     def test_pooling_averages_each_block_with_truncation(self):
         # One 2x2 block at the top left: (255+254+1+0)>>2 = 127, everything else zero.
@@ -127,9 +215,10 @@ class PreprocessingTest(unittest.TestCase):
         self.assertEqual(pooled[0], (255 + 254 + 1) >> 2)
         self.assertEqual(sum(pooled), (255 + 254 + 1) >> 2)
 
-    def test_prepare_is_centre_then_pool_and_rejects_bad_sizes(self):
+    def test_prepare_is_resize_centre_pool_and_rejects_bad_sizes(self):
         image = canvas({(2, 3): 255, (4, 9): 128})
-        self.assertEqual(digit_data.prepare(image), digit_data.pool(digit_data.centre(image)))
+        self.assertEqual(digit_data.prepare(image),
+                         digit_data.pool(digit_data.centre(digit_data.resize(image))))
         with self.assertRaisesRegex(ValueError, 'must be 784 bytes'):
             digit_data.prepare(bytes(100))
 
@@ -139,13 +228,44 @@ class PreprocessingTest(unittest.TestCase):
         images, _ = digit_data.load_test_set()
         side, pooled = digit_data.SIDE, digit_data.POOLED
         for image in images[:50]:
-            centred = digit_data.centre(image)
+            centred = digit_data.centre(digit_data.resize(image))
             prepared = digit_data.prepare(image)
             for i in range(pooled):
                 for j in range(pooled):
                     block = (centred[(2 * i) * side + 2 * j], centred[(2 * i) * side + 2 * j + 1],
                              centred[(2 * i + 1) * side + 2 * j], centred[(2 * i + 1) * side + 2 * j + 1])
                     self.assertEqual(prepared[i * pooled + j], sum(block) // 4)
+
+
+class KeyboardDrawingTest(unittest.TestCase):
+    """The generator behind the keyboard-style set and the training augmentation."""
+
+    def test_brush_is_two_by_two_and_clips_at_the_edge(self):
+        self.assertEqual(digit_drawn.brush({(3, 4)}), box_canvas(3, 4, 2, 2))
+        self.assertEqual(digit_drawn.brush({(27, 27)}), canvas({(27, 27): 255}))
+        self.assertEqual(digit_drawn.brush({(1, 1)}, 26, 0), box_canvas(27, 1, 1, 2))
+
+    def test_thinning_leaves_a_one_pixel_line(self):
+        skeleton = digit_drawn.thin(box_canvas(4, 10, 16, 4))
+        self.assertTrue(skeleton)
+        self.assertLessEqual(len({c for _, c in skeleton}), 2)       # no wider than the bar's middle
+        rows = sorted({r for r, _ in skeleton})
+        self.assertEqual(rows, list(range(rows[0], rows[-1] + 1)))    # still connected top to bottom
+        self.assertEqual(digit_drawn.thin(bytes(digit_data.PIXELS)), set())
+
+    def test_drawings_are_binary_the_right_height_and_repeatable(self):
+        images, _ = digit_data.load_test_set()
+        for height in (8, 20, 28):
+            first = [digit_drawn.draw(image, height, random.Random(5)) for image in images[:20]]
+            again = [digit_drawn.draw(image, height, random.Random(5)) for image in images[:20]]
+            self.assertEqual(first, again)
+            for drawing in first:
+                self.assertLessEqual(set(drawing), {0, 255})
+                top, bottom, left, right = digit_data.ink_box(drawing)
+                # The skeleton fits in `height`, and the brush adds one row or column.
+                self.assertLessEqual(max(bottom - top, right - left), height)
+        self.assertEqual(digit_drawn.draw(bytes(digit_data.PIXELS), 20, random.Random(1)),
+                         bytes(digit_data.PIXELS))
 
 
 class ModelTest(unittest.TestCase):
@@ -268,11 +388,28 @@ class ModelTest(unittest.TestCase):
         self.assertGreater(margin, -1)
 
     def test_real_digits_stay_below_the_clamp(self):
-        """Recorded as a property of this model: saturation is a guard, not routine."""
+        """Recorded as a property of this model: saturation is a guard, not routine.
+        Drawings are binary, so they drive the hidden layer harder than MNIST does."""
         images, _ = digit_data.load_test_set()
+        rng = random.Random(3)
+        drawn = [digit_drawn.draw(image, height, rng) for image in images[:100] for height in (10, 28)]
         peak = max(max(digit_ref.hidden_layer(digit_data.prepare(image), self.model))
-                   for image in images[:500])
+                   for image in images[:500] + drawn)
         self.assertLess(peak, self.model['hidden_max'])
+
+    def test_keyboard_style_set_meets_its_target_at_every_height(self):
+        """Acceptance target 2: at least 85% on the pinned keyboard-style set, per height.
+        About 30 seconds: 50,000 drawings generated and classified by the oracle."""
+        test_set = digit_drawn.verified_test_set()
+        _, labels = digit_data.load_test_set()
+        pinned = self.model['metadata']['keyboard_int_accuracy']
+        self.assertEqual(sorted(map(int, pinned)), sorted(digit_drawn.HEIGHTS))
+        for height in digit_drawn.HEIGHTS:
+            correct = sum(digit_ref.predict(digit_data.prepare(drawing), self.model) == label
+                          for drawing, label in zip(test_set[height], labels))
+            with self.subTest(height=height):
+                self.assertEqual(round(correct / len(labels), 6), pinned[str(height)])
+                self.assertGreaterEqual(correct / len(labels), 0.85)
 
     def test_predictions_match_the_pinned_file(self):
         """The stdlib oracle reproduces the exporter's numpy arithmetic exactly."""
@@ -425,6 +562,18 @@ class NativeModelTest(unittest.TestCase):
             with self.subTest(level=level):
                 check(model)
 
+    def test_ensure_headers_refreshes_every_generated_file_the_build_compiles(self):
+        """A stale weights source compiled the old model into every native test after a
+        retrain, while the headers beside it were already current."""
+        with tempfile.TemporaryDirectory() as scratch:
+            directory = Path(scratch)
+            (directory / 'digit_weights.c').write_text('stale\n')
+            rv32_digit_model.ensure_headers(directory)
+            self.assertEqual((directory / 'digit_weights.c').read_text(), rv32_digit_model.weights_source())
+            for source in SOURCES:
+                if source.parent == GENERATED:
+                    self.assertTrue((directory / source.name).exists(), source.name)
+
     def test_constants_agree_with_the_python_side(self):
         def check(guest):
             self.assertEqual(guest.inputs, digit_data.INPUTS)
@@ -437,12 +586,7 @@ class NativeModelTest(unittest.TestCase):
 
     def test_preprocessing_is_byte_identical(self):
         """The 196 inputs themselves, not just the logits they lead to."""
-        canvases = [bytes(digit_data.PIXELS), bytes([255] * digit_data.PIXELS)]
-        for position in ((0, 0), (27, 27), (0, 27), (13, 13), (5, 20)):
-            canvases.append(canvas({position: 255}))
-        canvases.append(canvas({(5, 1): 255, (5, 2): 200, (5, 3): 150, (6, 2): 100}))
-        canvases.append(canvas({(0, 0): 3, (27, 27): 1}))       # ink at both corners
-        canvases += [self.images[index] for index in range(200)]
+        canvases = edge_canvases() + [self.images[index] for index in range(200)]
 
         def check(guest):
             for index, image in enumerate(canvases):
