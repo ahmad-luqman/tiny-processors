@@ -32,7 +32,7 @@ from tools.digit_data import PIXELS, SIDE, load_test_set, resize
 HEIGHTS = (10, 14, 20, 24, 28)          # the heights the acceptance targets name
 SEED = 20260929
 # SHA-256 of the test set's canvases concatenated in `keyboard_test_set` order.
-TEST_SET_DIGEST = '8d3d05333f8204c7541aebd2b4f72869ae5cd358ef4dc23cbf63977fd5b651a1'
+TEST_SET_DIGEST = 'a499728a360d315fd5507d77722bb8592cb476a384b76b1796bb5c0f7657f817'
 
 # Zhang-Suen neighbours P2..P9, clockwise from north, as (row, column) offsets.
 NEIGHBOURS = ((-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1))
@@ -111,11 +111,16 @@ def draw(image, height, rng):
 
 
 def keyboard_test_set(images=None, heights=HEIGHTS, seed=SEED):
-    """{height: [canvas per test image]} from the vendored test set, deterministically."""
+    """{height: [canvas per test image]} from the vendored test set, deterministically.
+
+    Each drawing's position comes from its own generator, seeded by the height and
+    the image's index, so the first N images at any height are exactly the first N
+    of the pinned set: a partial run measures a true subset of it.
+    """
     if images is None:
         images, _ = load_test_set()
-    rng = random.Random(seed)
-    return {height: [draw(image, height, rng) for image in images] for height in heights}
+    return {height: [draw(image, height, random.Random(f'{seed}:{height}:{index}'))
+                     for index, image in enumerate(images)] for height in heights}
 
 
 def digest(test_set):
@@ -127,13 +132,18 @@ def digest(test_set):
     return hasher.hexdigest()
 
 
+def check_digest(test_set, pinned=None):
+    """Return `test_set` if its digest is the pinned one, else refuse it."""
+    pinned = pinned or TEST_SET_DIGEST
+    found = digest(test_set)
+    if found != pinned:
+        raise ValueError(f'keyboard test set digest {found} differs from the pinned {pinned}')
+    return test_set
+
+
 def verified_test_set():
     """The full keyboard-style test set, refused unless it matches the pinned digest."""
-    test_set = keyboard_test_set()
-    found = digest(test_set)
-    if found != TEST_SET_DIGEST:
-        raise ValueError(f'keyboard test set digest {found} differs from the pinned {TEST_SET_DIGEST}')
-    return test_set
+    return check_digest(keyboard_test_set())
 
 
 if __name__ == '__main__':

@@ -144,26 +144,36 @@ def ink_box(canvas):
 
 
 def resized_short_side(short, long, target=TARGET):
-    """The short side after scaling the long side to `target`, rounded half up, at least 1."""
+    """The short side after scaling the long side to `target`: round(short * target / long),
+    halves up, at least 1."""
     return max(1, (short * target + long // 2) // long)
 
 
-def source_offset(d, long):
-    """Destination offset `d` of a 20-pixel side reads this source offset.
+def source_offset(d, extent, size):
+    """The source offset that destination offset `d` reads when an axis of `extent`
+    source pixels becomes `size` destination pixels: the source pixel under the
+    centre of destination pixel `d`, floor((2d + 1) * extent / (2 * size)).
 
-    It is floor(d * long / 20), written as the multiply-and-shift the guest uses
-    because RV32I has no divide; the tests prove the two equal for every d below 20
-    and every long side up to 28.
+    Each axis uses its own extent and size, so every sample lies inside the ink
+    box by construction: (2 * size - 1) * extent < 2 * size * extent.
+
+    Sampling centres rather than left edges matters when shrinking:
+    floor(d * extent / size) never reads the last offset, so a stroke along the
+    canvas's last row or column, where the screen's brush clips to one cell,
+    would vanish. Centre sampling reads the first and last offsets whenever
+    `size` is at least half of `extent`, and consecutive samples then differ by
+    at most two, so no stroke two cells wide is skipped.
     """
-    return (d * long * 3277) >> 16
+    return (2 * d + 1) * extent // (2 * size)
 
 
 def resize(canvas, target=TARGET):
     """Nearest-neighbour resize of the ink box so its longer side is `target`, placed top left.
 
-    Both axes use the same scale, so the aspect ratio is kept. Values are copied,
-    never averaged, so a binary drawing stays binary. A blank canvas is returned
-    as zeros. With `target` 20 this is the contract step; other targets serve the
+    The long side becomes `target` and the short side `resized_short_side`, so
+    the aspect ratio is kept to within rounding. Values are copied, never
+    averaged, so a binary drawing stays binary. A blank canvas is returned as
+    zeros. With `target` 20 this is the contract step; other targets serve the
     keyboard-style generator in `tools.digit_drawn`, which scales digits to a
     chosen height with the same rule.
     """
@@ -178,11 +188,12 @@ def resize(canvas, target=TARGET):
         rows, columns = target, resized_short_side(width, long, target)
     else:
         rows, columns = resized_short_side(height, long, target), target
-    offset = source_offset if target == TARGET else (lambda d, s: d * s // target)
-    for r in range(rows):
-        source_row = (top + offset(r, long)) * SIDE + left
-        for c in range(columns):
-            out[r * SIDE + c] = canvas[source_row + offset(c, long)]
+    row_offsets = [source_offset(r, height, rows) for r in range(rows)]
+    column_offsets = [source_offset(c, width, columns) for c in range(columns)]
+    for r, row_offset in enumerate(row_offsets):
+        source_row = (top + row_offset) * SIDE + left
+        for c, column_offset in enumerate(column_offsets):
+            out[r * SIDE + c] = canvas[source_row + column_offset]
     return bytes(out)
 
 

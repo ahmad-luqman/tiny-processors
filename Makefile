@@ -772,7 +772,7 @@ run-rv32-digit-rtl-verilator: check-rv32-digit-image $(RV32EMU) $(RV32_TB_VERILA
 # them. Results mode, because the classification touches accelerator registers.
 # The Icarus variant is available separately, as the G1 menu replay is.
 .PHONY: run-rv32-digit-menu-emu run-rv32-digit-menu-rtl run-rv32-digit-menu-rtl-verilator
-RV32_DIGIT_MENU_HEX := b6b8d0e1
+RV32_DIGIT_MENU_HEX := b20bf8ad
 RV32_DIGIT_MENU_ARGS = --image build/rv32/capstone.bin --input programs/rv32/digit.input \
                        --expect-checkpoints programs/rv32/digit.expected \
                        --expect-last-line "PASS $(RV32_DIGIT_MENU_HEX)" --compare results \
@@ -804,7 +804,7 @@ bench-rv32-digit: $(RV32_DIGIT_BENCH_BINS) $(RV32EMU) $(RV32_TB_VERILATOR)
 # class + its margin for canvas 0. Retraining changes it.
 waves-rv32-digit: build/rv32/digitbench_hw_1.bin $(RV32EMU) $(RV32_TB_VVP)
 	$(PYTHON) tools/rv32_rtl.py --image build/rv32/digitbench_hw_1.bin --compare results \
-	  --expect-last-line "bench 00001967" --emulator $(RV32EMU) --timeout 900 \
+	  --expect-last-line "bench 00001b54" --emulator $(RV32EMU) --timeout 900 \
 	  --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VVP) --mode waves --out build/digit/waves
 
 # G2: programmable 3D. The Python oracle, the guest C reference, the emulator
@@ -909,7 +909,7 @@ test-rv32: run-rv32-soc-emu run-rv32-soc-rtl-verilator
 # CPU memory, the shared engine port and the SIMD4 buffers at once. Re-pin with
 # tools/rv32_capstone_native.py --input programs/rv32/soc.input --write.
 .PHONY: run-rv32-soc-menu-emu run-rv32-soc-menu-rtl run-rv32-soc-menu-rtl-verilator
-RV32_SOC_MENU_HEX := 509bfa5f
+RV32_SOC_MENU_HEX := c76cd363
 RV32_SOC_MENU_ARGS = --image build/rv32/capstone.bin --input programs/rv32/soc.input --expect-checkpoints programs/rv32/soc.expected --expect-last-line "PASS $(RV32_SOC_MENU_HEX)" --compare results --emulator $(RV32EMU) --timeout 1800
 run-rv32-soc-menu-emu: check-rv32-image $(RV32EMU)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_SOC_MENU_ARGS) --backend emulator --out build/soc/menu-emu

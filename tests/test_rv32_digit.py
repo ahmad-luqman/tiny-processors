@@ -3,6 +3,7 @@ import gzip
 import hashlib
 import json
 import random
+import re
 from pathlib import Path
 import struct
 import tempfile
@@ -103,9 +104,8 @@ def edge_canvases():
                box_canvas(4, 9, 20, 11), box_canvas(1, 1, 9, 25), box_canvas(2, 3, 13, 1)]
     shapes.append(canvas({(5, 1): 255, (5, 2): 200, (5, 3): 150, (6, 2): 100}))
     shapes.append(canvas({(0, 0): 3, (27, 27): 1}))       # ink at both corners
-    # A full-height box whose ink is only in the last row and column besides the
-    # first: a 28 -> 20 shrink never reads row or column 27, so that ink vanishes
-    # and the resized box is smaller than the box the resize wrote.
+    # Full-canvas boxes whose ink sits on the far edges, where the brush clips to
+    # one cell: the shrink must read row and column 27.
     ink = {(0, c): 255 for c in range(0, 28, 9)}
     ink.update({(27, 27): 255, (27, 0): 255, (13, 27): 255})
     shapes.append(canvas(ink))
@@ -132,12 +132,26 @@ class PreprocessingTest(unittest.TestCase):
         self.assertEqual(digit_data.resize(bytes(digit_data.PIXELS)), bytes(digit_data.PIXELS))
         self.assertEqual(digit_data.prepare(bytes(digit_data.PIXELS)), bytes(digit_data.INPUTS))
 
-    def test_shift_multiply_is_floor_division_for_every_offset(self):
-        """The guest has no divide; its multiply-and-shift must be exact everywhere it is used."""
+    def test_every_sample_stays_inside_the_ink_box(self):
+        """For every box shape the resize can meet, both axes read only inside the box,
+        and the long axis always reads its first and last source offsets."""
         for longer in range(1, digit_data.SIDE + 1):
-            for d in range(digit_data.TARGET):
-                self.assertEqual(digit_data.source_offset(d, longer), d * longer // 20, (d, longer))
-                self.assertLess(digit_data.source_offset(d, longer), longer)
+            long_offsets = [digit_data.source_offset(d, longer, 20) for d in range(20)]
+            self.assertEqual(long_offsets[0], 0, longer)
+            self.assertEqual(long_offsets[-1], longer - 1, longer)
+            self.assertLessEqual(max(b - a for a, b in zip(long_offsets, long_offsets[1:])), 2, longer)
+            for shorter in range(1, longer + 1):
+                n = digit_data.resized_short_side(shorter, longer)
+                offsets = [digit_data.source_offset(d, shorter, n) for d in range(n)]
+                self.assertTrue(all(0 <= o < shorter for o in offsets), (shorter, longer))
+                self.assertEqual(offsets, sorted(offsets))
+
+    def test_centre_sampling_is_floor_division(self):
+        for extent in range(1, digit_data.SIDE + 1):
+            for size in range(1, digit_data.SIDE + 1):
+                for d in range(size):
+                    exact = (d + 0.5) * extent / size
+                    self.assertEqual(digit_data.source_offset(d, extent, size), int(exact), (d, extent, size))
 
     def test_short_side_rounds_half_up_and_is_never_zero(self):
         for longer in range(1, digit_data.SIDE + 1):
@@ -146,8 +160,6 @@ class PreprocessingTest(unittest.TestCase):
                 exact = shorter * 20 / longer
                 self.assertEqual(n, max(1, int(exact + 0.5)), (shorter, longer))
                 self.assertTrue(1 <= n <= 20)
-                # Every short-side destination still reads inside the source box.
-                self.assertLess(digit_data.source_offset(n - 1, longer), shorter)
 
     def test_resize_fits_the_long_side_to_twenty(self):
         for top, left, height, width in ((3, 4, 10, 5), (0, 0, 28, 28), (6, 2, 7, 24), (20, 20, 1, 1)):
@@ -168,9 +180,22 @@ class PreprocessingTest(unittest.TestCase):
         self.assertEqual(list(resized[:20]), row)
         self.assertEqual(list(resized[side:side + 20]), row)
         self.assertEqual(sum(resized), 2 * sum(row))
-        # Shrinking 28 -> 20 reads floor(d * 28 / 20), so column 27 is never read.
+        # Shrinking 28 -> 20 reads the source pixel under each destination centre,
+        # floor((2d + 1) * 28 / 40): 0, 2, 3, 4, 5, 7, ... 25, 27.
         row = canvas({(0, c): c + 1 for c in range(28)})
-        self.assertEqual(list(digit_data.resize(row)[:20]), [d * 28 // 20 + 1 for d in range(20)])
+        self.assertEqual(list(digit_data.resize(row)[:20]), [(2 * d + 1) * 28 // 40 + 1 for d in range(20)])
+
+    def test_a_stroke_on_the_clipped_edge_survives_a_shrink(self):
+        """The brush clips to one cell on row and column 27. A full-canvas digit whose
+        base runs along the bottom edge must keep that base: left-edge sampling
+        never read row 27, and a drawing with ink only on the far edges prepared
+        to 196 zeros."""
+        base = {(27, c): 255 for c in range(28)}
+        base.update({(r, 13): 255 for r in range(27)})
+        self.assertEqual(sum(digit_data.resize(canvas(base))[19 * digit_data.SIDE:20 * digit_data.SIDE]),
+                         255 * 20)
+        corners = canvas({(0, 27): 255, (1, 27): 255, (27, 0): 255, (27, 1): 255})
+        self.assertTrue(any(digit_data.prepare(corners)))
 
     def test_a_single_pixel_becomes_a_centred_twenty_block(self):
         """A dot has a 1x1 box, which scales to 20x20. MNIST never contains one; it is
@@ -189,7 +214,8 @@ class PreprocessingTest(unittest.TestCase):
         self.assertEqual(centred[13 * digit_data.SIDE + 14], 150)
         self.assertEqual(centred[14 * digit_data.SIDE + 13], 100)
         self.assertEqual(sum(centred), 705)
-        # Through resize: 20 wide, n = (2*20 + 1)//3 = 13 tall, so 4 columns and 7 rows of margin.
+        # Through resize: 20 wide, n = (2*20 + 1)//3 = 13 tall, so 4 columns and 7 rows
+        # of margin; both source rows have ink in the first column, so no row is lost.
         resized_then_centred = digit_data.centre(digit_data.resize(canvas(ink)))
         self.assertEqual(digit_data.ink_box(resized_then_centred), (7, 19, 4, 23))
 
@@ -199,13 +225,12 @@ class PreprocessingTest(unittest.TestCase):
         self.assertEqual(digit_data.centre(digit_data.resize(image)), image)
 
     def test_centring_runs_on_the_resized_ink_not_the_written_box(self):
-        """A shrink that skips the only ink in the last row leaves a shorter box, and
+        """A shrink that skips the only ink on a far column leaves a narrower box, and
         the contract centres what is left."""
-        ink = {(r, 0): 255 for r in range(27)}
-        ink[(27, 5)] = 255                          # the only ink in row 27, column 5
-        image = canvas(ink)
-        resized = digit_data.resize(image)
-        self.assertEqual(digit_data.ink_box(resized), (0, 19, 0, 0))   # row 27 was never read
+        ink = {(r, 0): 255 for r in range(28)}
+        ink[(1, 9)] = 255                           # a 28x10 box; 28 -> 20 never reads row 1
+        resized = digit_data.resize(canvas(ink))
+        self.assertEqual(digit_data.ink_box(resized), (0, 19, 0, 0))   # written 20x7, inked 20x1
         self.assertEqual(digit_data.ink_box(digit_data.centre(resized)), (4, 23, 13, 13))
 
     def test_pooling_averages_each_block_with_truncation(self):
@@ -263,9 +288,34 @@ class KeyboardDrawingTest(unittest.TestCase):
                 self.assertLessEqual(set(drawing), {0, 255})
                 top, bottom, left, right = digit_data.ink_box(drawing)
                 # The skeleton fits in `height`, and the brush adds one row or column.
+                # Thinning trims stroke ends, so the drawn size is only bounded above.
                 self.assertLessEqual(max(bottom - top, right - left), height)
+            # Before thinning, a digit scaled up from MNIST's 20-pixel box has a longer
+            # side of exactly `height` (a shrink may skip its outermost ink).
+            for image in images[:20] if height >= 20 else ():
+                top, bottom, left, right = digit_data.ink_box(
+                    digit_data.resize(digit_drawn.binarize(image), height))
+                self.assertEqual(max(bottom - top, right - left) + 1, height)
         self.assertEqual(digit_drawn.draw(bytes(digit_data.PIXELS), 20, random.Random(1)),
                          bytes(digit_data.PIXELS))
+
+    def test_a_set_that_differs_from_the_pinned_digest_is_refused(self):
+        images, _ = digit_data.load_test_set()
+        small = digit_drawn.keyboard_test_set(images[:5], (10,))
+        self.assertIs(digit_drawn.check_digest(small, digit_drawn.digest(small)), small)
+        with self.assertRaisesRegex(ValueError, 'differs from the pinned'):
+            digit_drawn.check_digest(small)                   # not the full pinned set
+        altered = {10: [bytes(digit_data.PIXELS)] + small[10][1:]}
+        with self.assertRaisesRegex(ValueError, 'differs from the pinned'):
+            digit_drawn.check_digest(altered, digit_drawn.digest(small))
+
+    def test_a_partial_set_is_a_prefix_of_the_full_one(self):
+        """So a --count run measures a true subset of the pinned set."""
+        images, _ = digit_data.load_test_set()
+        three = digit_drawn.keyboard_test_set(images[:3])
+        seven = digit_drawn.keyboard_test_set(images[:7])
+        for height in digit_drawn.HEIGHTS:
+            self.assertEqual(three[height], seven[height][:3])
 
 
 class ModelTest(unittest.TestCase):
@@ -573,6 +623,20 @@ class NativeModelTest(unittest.TestCase):
             for source in SOURCES:
                 if source.parent == GENERATED:
                     self.assertTrue((directory / source.name).exists(), source.name)
+            # Every file the Makefile lists as generated must be refreshed here too,
+            # or a file added there later brings the stale build back.
+            listed = re.search(r'^RV32_DIGIT_GENERATED := (.*)$', (ROOT / 'Makefile').read_text(), re.M)
+            for name in listed.group(1).split():
+                (directory / Path(name).name).write_text('stale\n')
+            rv32_digit_model.ensure_headers(directory)
+            for name in listed.group(1).split():
+                self.assertNotEqual((directory / Path(name).name).read_text(), 'stale\n', name)
+
+    def test_waves_expects_the_oracle_bench_sink(self):
+        """The bench sink for one inference is 1 + class + margin of check canvas 0."""
+        best, margin = digit_ref.classify_canvas(self.images[0], self.model)
+        want = f'bench {1 + best + margin:08x}'
+        self.assertIn(f'--expect-last-line "{want}"', (ROOT / 'Makefile').read_text())
 
     def test_constants_agree_with_the_python_side(self):
         def check(guest):
@@ -587,6 +651,11 @@ class NativeModelTest(unittest.TestCase):
     def test_preprocessing_is_byte_identical(self):
         """The 196 inputs themselves, not just the logits they lead to."""
         canvases = edge_canvases() + [self.images[index] for index in range(200)]
+        # Every box shape, so the guest's subtraction loop meets the Python rounding
+        # for every (short, long) pair, and drawings like the screen produces.
+        canvases += [box_canvas(0, 0, height, width) for height in range(1, 29) for width in range(1, 29)]
+        rng = random.Random(17)
+        canvases += [digit_drawn.draw(self.images[index], rng.randint(8, 28), rng) for index in range(50)]
 
         def check(guest):
             for index, image in enumerate(canvases):

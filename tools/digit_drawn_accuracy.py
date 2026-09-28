@@ -22,7 +22,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--count', type=int, default=None, help='test images to use, from the first')
     parser.add_argument('--heights', type=int, nargs='+', default=list(digit_drawn.HEIGHTS))
+    parser.add_argument('--floor', type=float, default=0.85,
+                        help='exit non-zero if any height scores below this (default: the acceptance target)')
     args = parser.parse_args()
+    if args.count is not None and not 1 <= args.count <= 10000:
+        parser.error('--count must be 1 to 10000')
     model = digit_ref.load_model()
     images, labels = digit_data.load_test_set()
     if args.count is not None:
@@ -33,9 +37,16 @@ def main():
         print('keyboard-style set matches its pinned digest')
     else:
         drawn = digit_drawn.keyboard_test_set(images, args.heights, digit_drawn.SEED)
+        print('UNVERIFIED: a subset or other heights, not the whole pinned set')
     print('height  accuracy')
+    missed = []
     for height in args.heights:
-        print(f'{height:6d}  {100 * accuracy(drawn[height], labels, model):6.2f}%')
+        score = accuracy(drawn[height], labels, model)
+        print(f'{height:6d}  {100 * score:6.2f}%')
+        if score < args.floor:
+            missed.append(height)
+    if missed:
+        raise SystemExit(f'below the {100 * args.floor:.0f}% floor at height(s) {missed}')
 
 
 if __name__ == '__main__':

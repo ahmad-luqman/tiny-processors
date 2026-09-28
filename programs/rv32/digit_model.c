@@ -20,10 +20,26 @@ static uint32_t ink_box(const uint8_t canvas[DIGIT_PIXELS], uint32_t *top, uint3
     return *top < DIGIT_SIDE;
 }
 
-/* Resize the ink box so its longer side is 20 pixels, keeping the aspect ratio,
- * into the top left of `out`. Every MNIST digit was fit to a 20x20 box, so this
- * is what lets a drawing of any size look like the training data. Nearest
- * neighbour copies values, so a binary drawing stays binary. */
+/* offset[d] = floor((2d + 1) * extent / (2 * size)) for d < size: the source pixel
+ * under the centre of destination pixel d. RV32I has no divide and both operands
+ * are runtime values, so the quotient is carried from one d to the next: the
+ * numerator grows by 2 * extent per step, and the quotient catches up by
+ * subtraction, at most `extent` times in all. */
+static void axis_offsets(uint8_t offset[DIGIT_TARGET], uint32_t extent, uint32_t size)
+{
+    uint32_t numerator = extent, quotient = 0, divisor = size << 1;
+    for (uint32_t d = 0; d < size; d++, numerator += extent << 1) {
+        while (numerator >= divisor) { numerator -= divisor; quotient++; }
+        offset[d] = (uint8_t)quotient;
+    }
+}
+
+/* Resize the ink box so its longer side is 20 pixels, keeping the aspect ratio
+ * to within rounding, into the top left of `out`. Every MNIST digit was fit to a
+ * 20x20 box, so this is what lets a drawing of any size look like the training
+ * data. Nearest neighbour copies values, so a binary drawing stays binary, and
+ * sampling pixel centres (not left edges) keeps a stroke on the last row or
+ * column, where the brush clips to one cell, from vanishing in a shrink. */
 static void resize(const uint8_t canvas[DIGIT_PIXELS], uint8_t out[DIGIT_PIXELS])
 {
     for (uint32_t i = 0; i < DIGIT_PIXELS; i++) out[i] = 0;
@@ -38,19 +54,13 @@ static void resize(const uint8_t canvas[DIGIT_PIXELS], uint8_t out[DIGIT_PIXELS]
     while (remainder >= longer) { remainder -= longer; n++; }
     if (n == 0) n = 1;
     uint32_t rows = tall ? DIGIT_TARGET : n, columns = tall ? n : DIGIT_TARGET;
-    /* One offset table serves both axes, since they share the scale. d * longer
-     * is accumulated rather than multiplied: both are runtime values, and that
-     * product would call the 32-step software multiply. (p * 3277) >> 16 is
-     * floor(p / 20) for every p = d * longer up to 19 * 28; RV32I has no divide,
-     * the constant multiplier compiles to shifts and adds, and the host tests
-     * prove the equality for every pair. */
-    uint8_t offset[DIGIT_TARGET];
-    for (uint32_t d = 0, product = 0; d < DIGIT_TARGET; d++, product += longer)
-        offset[d] = (uint8_t)((product * 3277u) >> 16);
+    uint8_t row_offset[DIGIT_TARGET], column_offset[DIGIT_TARGET];
+    axis_offsets(row_offset, height, rows);
+    axis_offsets(column_offset, width, columns);
     for (uint32_t r = 0, destination = 0; r < rows; r++, destination += DIGIT_SIDE) {
-        const uint8_t *source = canvas + (top + offset[r]) * DIGIT_SIDE + left;
+        const uint8_t *source = canvas + (top + row_offset[r]) * DIGIT_SIDE + left;
         for (uint32_t c = 0; c < columns; c++)
-            out[destination + c] = source[offset[c]];
+            out[destination + c] = source[column_offset[c]];
     }
 }
 

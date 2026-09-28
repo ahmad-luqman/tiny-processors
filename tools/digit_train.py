@@ -43,7 +43,7 @@ from pathlib import Path
 import numpy as np
 
 from tools.digit_data import INPUTS, POOLED, fetch_training_set, load_test_set, prepare
-from tools.digit_drawn import HEIGHTS, draw, verified_test_set
+from tools.digit_drawn import HEIGHTS, TEST_SET_DIGEST, draw, verified_test_set
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = ROOT / 'programs/rv32/digit_model.json'
@@ -69,9 +69,23 @@ def prepare_many(images):
     return np.frombuffer(b''.join(prepare(image) for image in images), dtype=np.uint8).reshape(len(images), INPUTS)
 
 
-def drawings(images, rng):
-    """COPIES keyboard-style drawings of each image at random heights, in image order."""
-    return [draw(image, rng.randint(*DRAWN_HEIGHTS), rng) for image in images for _ in range(COPIES)]
+def drawings(images, labels, rng):
+    """COPIES keyboard-style drawings of each image at random heights, in image order.
+
+    Returns the drawings, their labels and how many were dropped: thinning can
+    erase a very small drawing entirely (a 2x2 block has no skeleton), and a blank
+    canvas must not be taught as a digit. The count goes into the metadata.
+    """
+    kept, kept_labels, blank = [], [], 0
+    for image, label in zip(images, labels):
+        for _ in range(COPIES):
+            drawing = draw(image, rng.randint(*DRAWN_HEIGHTS), rng)
+            if any(drawing):
+                kept.append(drawing)
+                kept_labels.append(label)
+            else:
+                blank += 1
+    return kept, kept_labels, blank
 
 
 def train(x, y, rng):
@@ -151,17 +165,18 @@ def main():
     print(f'preprocessing {len(train_images)} training and {len(test_images)} test images')
     draw_rng = random.Random(SEED)
     fit_images, holdout_images = train_images[:-HOLDOUT], train_images[-HOLDOUT:]
-    fit_labels = train_labels[:-HOLDOUT]
-    fit_drawn = drawings(fit_images, draw_rng)
-    holdout_drawn = drawings(holdout_images, draw_rng)
+    fit_labels, holdout_labels = train_labels[:-HOLDOUT], train_labels[-HOLDOUT:]
+    fit_drawn, fit_drawn_labels, fit_blank = drawings(fit_images, fit_labels, draw_rng)
+    holdout_drawn, _, holdout_blank = drawings(holdout_images, holdout_labels, draw_rng)
+    print(f'dropped {fit_blank + holdout_blank} drawings that thinning erased')
     x_fit = prepare_many(fit_images + fit_drawn) / 255.0
-    y_fit = np.array(fit_labels + [label for label in fit_labels for _ in range(COPIES)])
+    y_fit = np.array(fit_labels + fit_drawn_labels)
     x_holdout = prepare_many(holdout_images + holdout_drawn) / 255.0
     x_test, y_test = prepare_many(test_images), np.array(test_labels)
     keyboard = verified_test_set()
     x_keyboard = {height: prepare_many(keyboard[height]) for height in HEIGHTS}
 
-    print(f'training on {len(x_fit)} inputs ({len(fit_images)} images and {COPIES} drawing each), '
+    print(f'training on {len(x_fit)} inputs ({len(fit_images)} images and {len(fit_drawn)} drawings), '
           f'holding out {len(x_holdout)} to calibrate the shift')
     rng = np.random.default_rng(SEED)
     w1, b1, w2, b2 = train(x_fit, y_fit, rng)
@@ -194,7 +209,8 @@ def main():
         'metadata': {
             'seed': SEED, 'epochs': EPOCHS, 'batch': BATCH, 'rate': RATE, 'holdout': HOLDOUT,
             'drawn_copies': COPIES, 'drawn_heights': list(DRAWN_HEIGHTS),
-            'keyboard_int_accuracy': keyboard_accuracy,
+            'drawn_blank_dropped': fit_blank + holdout_blank,
+            'keyboard_int_accuracy': keyboard_accuracy, 'keyboard_test_set_sha256': TEST_SET_DIGEST,
             'trained': date.today().isoformat(), 'numpy': np.__version__,
             'float_test_accuracy': round(float_test, 6), 'int_test_accuracy': round(int_test, 6),
             'quantization_gap': round(float_test - int_test, 6),
