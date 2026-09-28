@@ -107,7 +107,7 @@ GPU FP32/other formats and NPU integer/other formats remain independent choices.
 
 S1 completed the advanced SoC. One 185-frame menu session drives G1, G2 and
 SIMD4 from one boot, with every frame matching the C references on the emulator
-and on Verilator under seeded waits on all three memory paths. A ten-case
+and on Verilator under seeded waits on all three memory paths. An eleven-case
 diagnostic proves the overlap contract: G1 and G2 exclude each other, SIMD4
 runs alongside either, and a reset or fault in one engine leaves the others
 exact. No RTL changed; the SoC is 327,986 cells. See the

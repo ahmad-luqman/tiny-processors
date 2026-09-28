@@ -33,9 +33,9 @@ brush, committed model, no retrain:
 | 24 | 84.5% | 89.9% |
 | 28 | 58.1% | 89.2% |
 
-Method: binarize each test digit at 128, thin it to a one-pixel skeleton
-(Zhang-Suen), rescale it to the given height, and repaint it with the UI's 2x2
-brush. The resized column adds a nearest-neighbour resize of the bounding box to
+Method: binarize each test digit at 128, rescale it to the given height, thin it
+to a one-pixel skeleton (Zhang-Suen), and repaint it with the UI's 2x2 brush, so
+the stroke is one brush wide at every size, as the keyboard draws it. The resized column adds a nearest-neighbour resize of the bounding box to
 20 pixels on its longer side. `python3 -m tools.digit_drawn_accuracy --count 2000`
 reproduces the table (it needs numpy, like `tools/digit_train.py`). Clean MNIST digits drop from 94.95% to 91.70% under
 that prototype resize, which retraining should recover. At 8 pixels the prototype

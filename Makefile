@@ -886,7 +886,7 @@ test-rv32: test-rv32-3d-sanitize
 # so its image may use the CSR instructions and mret. Results mode, and no
 # --compare-stores: the counters it reads include device time.
 .PHONY: check-rv32-soc-image run-rv32-soc-emu run-rv32-soc-rtl run-rv32-soc-rtl-verilator
-RV32_SOC_ARGS = --image build/rv32/soccheck.bin --compare results --expect-last-line "PASS S1" --emulator $(RV32EMU) --timeout 1800
+RV32_SOC_ARGS = --image build/rv32/soccheck.bin --compare results --expect-last-line "PASS S1" --emulator $(RV32EMU) --timeout 3600
 RV32_SOC_MAX_CYCLES := 200000000
 build/rv32/soccheck.o: programs/rv32/soccheck.c $(RV32_DIGIT_GENERATED) $(RV32_G3D_GENERATED) $(RV32_HEADERS) | build/rv32
 	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@

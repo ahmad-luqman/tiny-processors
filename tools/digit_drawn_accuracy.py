@@ -3,10 +3,12 @@ keyboard screen draws them, at several heights, with and without a resize to
 MNIST's 20-pixel box. The numbers are the evidence in
 docs/planning/digit-size-fix.md.
 
-Each digit is binarized at 128, thinned to a one-pixel skeleton (Zhang-Suen),
-rescaled so its longer side is the given height, and repainted with the UI's
-2x2 brush. The "resized" column then scales the ink's bounding box back to 20
-pixels (nearest neighbour) before the unchanged preprocessing.
+Each digit is binarized at 128, rescaled so its longer side is the given
+height, thinned to a one-pixel skeleton (Zhang-Suen), and repainted with the
+UI's 2x2 brush. Thinning after the resize is deliberate: a drawn stroke is one
+brush wide whatever the digit's size, which is what the keyboard produces. The
+"resized" column then scales the ink's bounding box back to 20 pixels (nearest
+neighbour) before the unchanged preprocessing.
 
 Like tools/digit_train.py this needs numpy, and nothing depends on it.
 

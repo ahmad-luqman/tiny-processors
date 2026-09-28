@@ -275,42 +275,58 @@ int main(void)
     if (simd4_wait(0) != SIMD4_TIMEOUT) return fail(125);
     if (!blank_scene() || !start_long_simd() || !start_scene(scene) || !scene_done(scene)) return fail(126);
     if (!simd_busy()) return fail(127);              /* the overlap covered the whole scene */
-    if (simd4_wait(0) != SIMD4_TIMEOUT || simd_busy() || !scene_image(scene)) return fail(146);
-    if (!no_traps()) return fail(128);
+    if (simd4_wait(0) != SIMD4_TIMEOUT || simd_busy() || !scene_image(scene)) return fail(128);
+    if (!no_traps()) return fail(129);
     passed("g2-inside-simd4");
 
     /* 8. Resetting one engine leaves the others' work alone: G1 RESET and SIMD4
      *    RESET during a G2 scene, G2 RESET during a G1 fill and a SIMD4 launch. */
-    if (!begin_scene(scene) || !start_long_simd()) return fail(129);
+    if (!begin_scene(scene) || !start_long_simd()) return fail(130);
     gpu_reset();
     simd4_reset();
-    if (simd_busy() || g2_status() != G3D_BUSY) return fail(130);
-    if (!scene_finished(scene)) return fail(131);
+    if (simd_busy() || g2_status() != G3D_BUSY) return fail(131);
+    if (!scene_finished(scene)) return fail(132);
     prepare_fill(0x49);
-    if (!start_long_simd() || !gpu_submit(&fill) || g1_status() != GPU_BUSY) return fail(132);
+    if (!start_long_simd() || !gpu_submit(&fill) || g1_status() != GPU_BUSY) return fail(133);
     g3d_reset();
-    if (!simd_busy() || g1_status() != GPU_BUSY) return fail(133);
-    if (!fill_finished()) return fail(134);
-    if (simd4_wait(0) != SIMD4_TIMEOUT) return fail(135);
-    if (!no_traps()) return fail(136);
+    if (!simd_busy() || g1_status() != GPU_BUSY) return fail(134);
+    if (!fill_finished()) return fail(135);
+    if (simd4_wait(0) != SIMD4_TIMEOUT) return fail(136);
+    if (!no_traps()) return fail(137);
     passed("reset-isolation");
 
     /* 9. A fault in one engine leaves the others' work alone: a SIMD4 illegal
      *    opcode during a G2 scene, a G2 parameter fault during a SIMD4 launch. */
-    if (!begin_scene(scene) || !start_faulting_simd()) return fail(137);
-    if (simd4_wait(1000) != SIMD4_FAULT || !scene_finished(scene)) return fail(138);
-    if (!start_long_simd()) return fail(139);
+    if (!begin_scene(scene) || !start_faulting_simd()) return fail(138);
+    if (simd4_wait(1000) != SIMD4_FAULT || !scene_finished(scene)) return fail(139);
+    if (!start_long_simd()) return fail(140);
     if (!g3d_submit(G3D_START, G3D_VMAX + 1u, 1, ZBASE, 4096) || g3d_wait(100) != G3D_FAULT ||
-        g3d_last_result()->error != G3D_E_PARAM) return fail(140);
-    if (!simd_busy() || simd4_wait(0) != SIMD4_TIMEOUT) return fail(141);
-    if (!no_traps()) return fail(142);
+        g3d_last_result()->error != G3D_E_PARAM) return fail(141);
+    if (!simd_busy() || simd4_wait(0) != SIMD4_TIMEOUT) return fail(142);
+    if (!no_traps()) return fail(143);
     passed("fault-isolation");
 
-    /* 10. After all of that, each engine still produces its exact result. */
-    if (!infer_matches()) return fail(143);
-    if (!begin_scene(scene) || !scene_finished(scene)) return fail(144);
+    /* 10. RESET hands the shared port over: cancel a busy G2 and G1 starts at
+     *     once, cancel a busy G1 and G2 starts at once, both without a trap and
+     *     both exact. G1 fills the whole screen over G2's partial frame; G1's partial
+     *     fill is black, so G2 still starts from a blank screen. */
+    prepare_fill(0x6d);
+    if (!begin_scene(scene)) return fail(144);
+    g3d_reset();
+    if (g2_status() != G3D_IDLE || !gpu_submit(&fill) || g1_status() != GPU_BUSY) return fail(145);
+    if (!fill_finished()) return fail(146);
+    prepare_fill(0);                  /* black, so its partial frame is still a blank one */
+    if (!blank_scene() || !gpu_submit(&fill) || g1_status() != GPU_BUSY) return fail(147);
+    gpu_reset();
+    if (g1_status() != GPU_IDLE || !start_scene(scene) || g2_status() != G3D_BUSY) return fail(148);
+    if (!scene_finished(scene) || !no_traps()) return fail(149);
+    passed("reset-hands-over-port");
+
+    /* 11. After all of that, each engine still produces its exact result. */
+    if (!infer_matches()) return fail(150);
+    if (!begin_scene(scene) || !scene_finished(scene)) return fail(151);
     mmio_write32(RV32_DISPLAY_BASE, present_word++);
-    if (!no_traps()) return fail(145);
+    if (!no_traps()) return fail(152);
     passed("recovered");
     rv32_puts("PASS S1\n");
     return 0;
