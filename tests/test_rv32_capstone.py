@@ -132,6 +132,49 @@ class CapstoneTests(unittest.TestCase):
                          "the drawn strokes must read as a one and a seven")
         self.assertEqual([entry[2] for entry in seen], [0, 0])
 
+    def test_soc_menu_session(self):
+        """S1: one session through the 2D, 3D and digit screens and back to 2D.
+
+        The firmware drives G1, G2 and SIMD4 on the emulator and the RTL; natively
+        the C references draw, so the shared checkpoints hold the engines to them.
+        """
+        expected_hex = re.search(r"^RV32_SOC_MENU_HEX := ([0-9a-f]{8})$", (ROOT / "Makefile").read_text(), re.M)
+        self.assertIsNotNone(expected_hex)
+        script = parse_input_script((ROOT / "programs/rv32/soc.input").read_text())
+        for lib in self.libs:
+            checkpoints, checksum, frames = run_session(lib, script)
+            self.assertEqual(frames, 185)
+            self.assertEqual(f"{checksum:08x}", expected_hex[1])
+            self.assertEqual(checkpoints, (ROOT / "programs/rv32/soc.expected").read_text().splitlines())
+
+    def test_soc_session_visits_every_engine(self):
+        """Pinning a session proves it is repeatable, not that it went anywhere:
+        check the screens it drew, that every 3D frame rendered, and what the
+        stroke was read as."""
+        script = parse_input_script((ROOT / "programs/rv32/soc.input").read_text())
+        lib = self.libs[-1]
+        screens, g3d_status, readings = [], [], []
+
+        class Watched(Capstone):
+            def draw(self):
+                super().draw()
+                screen = self.lib.native_screen(self.state)
+                if not screens or screens[-1] != screen:
+                    screens.append(screen)
+                if screen == 4:                                    # RUNTIME_3D
+                    g3d_status.append(self.lib.native_g3d_status(self.state))
+                runs = self.lib.native_digit_runs(self.state)
+                if screen == 3 and runs > len(readings):           # RUNTIME_DIGIT
+                    readings.append((self.lib.native_digit_predicted(self.state),
+                                     self.lib.native_digit_status(self.state)))
+
+        run_script(lib, script, game_factory=Watched)
+        # menu, 2D, menu, 3D, menu, digit, menu, 2D, menu (runtime.h screen order)
+        self.assertEqual(screens, [0, 5, 0, 4, 0, 3, 0, 5, 0])
+        self.assertGreater(len(g3d_status), 3)
+        self.assertEqual(set(g3d_status), {0})
+        self.assertEqual(readings, [(1, 0)], "the stroke must read as a one, once")
+
     def test_bad_sessions_fail(self):
         lib = self.libs[-1]
         for script, message in (("", "no quit within"),

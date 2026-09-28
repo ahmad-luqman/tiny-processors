@@ -193,3 +193,35 @@ acceptance, and checks protected source writes byte by byte. The framebuffer mux
 selects graphics exclusively while BUSY; CPU framebuffer/PRESENT requests then
 return access faults. The [G1 record](rv32-gfx.md) documents reset priority,
 complete pixel checks and the new synthesis baseline.
+
+## Accelerator overlap
+
+Fixed in S1 ([record](rv32-s1.md)); the arbitration itself did not change. Three
+engines can run while the CPU keeps executing. Whether two of them may run at
+the same time depends on what they share:
+
+| Running | Then started | Allowed? | Why | Evidence in `soccheck` |
+| --- | --- | --- | --- | --- |
+| G2 | G1 START | No: the COMMAND store faults (cause 7), G1's status is unchanged | G1 and G2 share one engine memory port; `rv32_soc.v` refuses the second START | case `g1-refused-while-g2` |
+| G1 | G2 START or CLEAR_Z | No: the COMMAND store faults, G2's status is unchanged | the same port; G2 takes G1's BUSY as `other_busy` | case `g2-refused-while-g1` |
+| G1 or G2 | SIMD4 launch | Yes | SIMD4 has private program and data memories and no RAM port | cases `simd4-alongside-g1`, `simd4-alongside-g2` |
+| SIMD4 | G1 or G2 job | Yes | as above | case `g2-inside-simd4`: a whole scene inside one launch |
+
+Ownership follows the engine that holds the resource, not "any accelerator is
+busy". While G1 or G2 runs, the framebuffer (loads and stores), PRESENT and, for
+G2, the depth buffer belong to it and CPU accesses fault. A busy SIMD4 owns only
+its own windows: the CPU may draw and present while it runs.
+
+RESET and faults are local. RESET of G1 or SIMD4 during a G2 scene, and RESET of
+G2 during a G1 fill, leave the running engine's result exact, down to its
+counters and image hashes; so does a SIMD4 illegal-instruction fault during a G2
+scene and a G2 parameter fault during a SIMD4 launch.
+
+The CPU is the fourth master. Its instruction fetches and data accesses meet G1
+or G2 at the fair RAM arbiter described in the [G1 record](rv32-gfx.md). How long an engine waits
+there depends on what the CPU is doing, so the diagnostic checks G2's work cycles
+(CYCLES − STALLS) against the oracle, never CYCLES itself.
+
+Making G1 and G2 overlap would need a second engine port or a per-transfer
+arbiter between them, plus a rule for who owns the framebuffer. Nothing measured
+so far asks for it: the menu uses one engine per screen.
