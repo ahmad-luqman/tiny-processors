@@ -878,3 +878,40 @@ test-rv32-3d-sanitize: $(RV32_G3D_DEPS) tools/rv32_g3d_corpus.py tools/rv32_g3d_
 	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -DG3D_NATIVE_MAIN -Iprograms/rv32 tests/rv32_g3d_native.c tools/rv32_g3d.c programs/rv32/g3d_ref.c -o build/g3d/sanitize
 	build/g3d/sanitize build/g3d/corpus.txt
 test-rv32: test-rv32-3d-sanitize
+
+# S1: the three accelerators in one image. soccheck overlaps each pair the
+# contract allows (SIMD4 with G1, SIMD4 with G2), proves the pair it forbids
+# (G1 with G2) faults without side effects, and checks that a reset or a fault in
+# one engine leaves the others' exact results alone. It installs a trap handler,
+# so its image may use the CSR instructions and mret. Results mode, and no
+# --compare-stores: the counters it reads include device time.
+.PHONY: check-rv32-soc-image run-rv32-soc-emu run-rv32-soc-rtl run-rv32-soc-rtl-verilator
+RV32_SOC_ARGS = --image build/rv32/soccheck.bin --compare results --expect-last-line "PASS S1" --emulator $(RV32EMU) --timeout 1800
+RV32_SOC_MAX_CYCLES := 200000000
+build/rv32/soccheck.o: programs/rv32/soccheck.c $(RV32_DIGIT_GENERATED) $(RV32_G3D_GENERATED) $(RV32_HEADERS) | build/rv32
+	$(RV32_CC) $(RV32_CFLAGS) -Ibuild/rv32 -c $< -o $@
+build/rv32/soccheck.elf: build/rv32/soccheck.o build/rv32/trap.o build/rv32/gpu.o build/rv32/gpu_ref.o build/rv32/gfx.o build/rv32/g3d.o build/rv32/simd4.o build/rv32/digit_model.o build/rv32/digit_hw.o build/rv32/digit_weights.o $(RV32_COMMON_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(filter %.o,$^)
+check-rv32-soc-image: build/rv32/soccheck.bin build/rv32/soccheck.lst
+	$(PYTHON) tools/rv32_image.py build/rv32/soccheck.elf --listing build/rv32/soccheck.lst --bin build/rv32/soccheck.bin --hex build/rv32/soccheck.hex --allow-privileged
+run-rv32-soc-emu: check-rv32-soc-image $(RV32EMU)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_SOC_ARGS) --backend emulator --out build/soc/emu
+run-rv32-soc-rtl: check-rv32-soc-image $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_SOC_ARGS) --max-cycles $(RV32_SOC_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/soc/icarus
+# Both stall groups at once: CPU memory, the shared engine port and the SIMD4 buffers.
+run-rv32-soc-rtl-verilator: check-rv32-soc-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_SOC_ARGS) --max-cycles $(RV32_SOC_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --stall 1 --gpu-stall 2 --simd-stall 2 --out build/soc/verilator
+test-rv32: run-rv32-soc-emu run-rv32-soc-rtl-verilator
+# The S1 menu session: 2D, 3D, digit, then 2D again, in one boot. Seeded waits on
+# CPU memory, the shared engine port and the SIMD4 buffers at once. Re-pin with
+# tools/rv32_capstone_native.py --input programs/rv32/soc.input --write.
+.PHONY: run-rv32-soc-menu-emu run-rv32-soc-menu-rtl run-rv32-soc-menu-rtl-verilator
+RV32_SOC_MENU_HEX := bc4f7607
+RV32_SOC_MENU_ARGS = --image build/rv32/capstone.bin --input programs/rv32/soc.input --expect-checkpoints programs/rv32/soc.expected --expect-last-line "PASS $(RV32_SOC_MENU_HEX)" --compare results --emulator $(RV32EMU) --timeout 1800
+run-rv32-soc-menu-emu: check-rv32-image $(RV32EMU)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_SOC_MENU_ARGS) --backend emulator --out build/soc/menu-emu
+run-rv32-soc-menu-rtl: check-rv32-image $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_SOC_MENU_ARGS) --max-cycles $(RV32_SOC_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/soc/menu-icarus
+run-rv32-soc-menu-rtl-verilator: check-rv32-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) tools/rv32_rtl.py $(RV32_SOC_MENU_ARGS) --max-cycles $(RV32_SOC_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --seed 17 --gpu-seed 31 --simd-seed 43 --out build/soc/menu-verilator
+test-rv32: run-rv32-soc-menu-emu run-rv32-soc-menu-rtl-verilator

@@ -1,0 +1,51 @@
+# S1: one menu session through every accelerator. The 2D demo (UP wraps to the
+# last entry) runs on G1, is switched to the CPU path and back; the 3D demo (one
+# UP) runs on G2, changes shader and restarts; the digit screen (one more UP)
+# draws a 20-cell vertical stroke and classifies it on SIMD4; then the 2D demo
+# runs again after both other engines have been used. Every frame is checked
+# against the pinned references on the emulator and the RTL.
+frame 1 down UP
+frame 2 up UP
+frame 2 down ENTER
+frame 3 up ENTER
+frame 4 down SPACE
+frame 5 up SPACE
+frame 6 down SPACE
+frame 7 up SPACE
+frame 8 down ESCAPE
+frame 9 up ESCAPE
+frame 9 down UP
+frame 10 up UP
+frame 10 down ENTER
+frame 11 up ENTER
+frame 13 down SPACE
+frame 14 up SPACE
+frame 15 down R
+frame 16 up R
+frame 17 down ESCAPE
+frame 18 up ESCAPE
+frame 18 down UP
+frame 19 up UP
+frame 19 down ENTER
+frame 20 up ENTER
+# Ten cells up from the centre, then paint twenty cells down: a stroke about as
+# tall as the digits the model was trained on (docs/planning/digit-size-fix.md).
+frame 21 down UP
+frame 71 up UP
+frame 72 down SPACE
+frame 73 down DOWN
+frame 173 up DOWN
+frame 174 up SPACE
+frame 175 down ENTER
+frame 176 up ENTER
+frame 178 down ESCAPE
+frame 179 up ESCAPE
+frame 179 down DOWN
+frame 180 up DOWN
+frame 180 down DOWN
+frame 181 up DOWN
+frame 181 down ENTER
+frame 182 up ENTER
+frame 184 down ESCAPE
+frame 185 up ESCAPE
+frame 185 down Q

@@ -85,7 +85,7 @@ Each row is a bounded milestone, potentially split into several verified commits
 | G1 — completed 2026-09-22 ([record](../rv32-gfx.md)) | 2D accelerator: bounded fill/blit, line and triangle operations. Software reference and RTL agree on clipped/edge cases and framebuffer contents. Guest demo compares CPU drawing and acceleration. | Explain pixel address generation, clipping, datapath reuse, and when memory bandwidth limits speedup. | 2–4 |
 | N1 — completed 2026-09-22 ([record](../rv32-digit.md)) | Chose a 196-32-10 int8 digit model trained once off-line, a vendored test set with recorded provenance, and one preprocessing contract shared by training and both runtime paths. Software inference and measured accuracy came first, then dense SIMD4 kernels, block driver writers and fault/timeout recovery, all matching a standard-library integer oracle exactly. Reports 96.16% integer against 96.10% float, and classifies a keyboard-drawn digit from the boot menu. Saturation and rounding became CPU operations after an exact two-half accumulator read-back, so no RTL changed. | Trace one input through multiply/accumulate, bias, activation, scaling, and output selection. Separate numerical correctness from model accuracy. | 3–6 |
 | G2 — completed 2026-09-22 ([record](../rv32-3d.md)) | A programmable vertex stage on four SIMT lanes sharing one PC. It has divergent structured IF/ELSE and loops (BREAK on a typed mask stack, with overflow and runaway-loop faults), in Q16.16. A fixed-function pipeline follows: near-plane, guard-band and depth-range cull; an exact saturating divider; S12.4 projection; back-face cull; affine Gouraud; a 4×4 ordered dither; and a 16-bit Z buffer in RAM. The Python oracle, guest C reference, emulator device and RTL agree bit for bit on images, depth and every counter, including CYCLES. A double-precision pipeline justifies the formats: at most 2.5% of cube pixels differ, almost all by one dither level. The menu's rotating cube cycles diffuse, toon and wobble shaders. | Follow a vertex to a covered pixel and explain which work is programmable versus fixed-function. | 4–8 |
-| S1 — G2/N1 | Integrated advanced SoC demonstration: one guest menu drives 2D, programmable 3D, and digit inference on the same machine. End-to-end regressions cover commands, memory, reset, faults, and deterministic output checkpoints. Document cell counts and measured traffic/cycles separately from emulator wall time. | Explain the complete path from C driver to bus transaction to gates and back to a visible result. | 2–4 |
+| S1 — completed 2026-09-28 ([record](../rv32-s1.md)) | Integrated advanced SoC demonstration: one guest menu drives 2D, programmable 3D, and digit inference on the same machine. End-to-end regressions cover commands, memory, reset, faults, and deterministic output checkpoints. Document cell counts and measured traffic/cycles separately from emulator wall time. | Explain the complete path from C driver to bus transaction to gates and back to a visible result. | 2–4 |
 
 Recommended post-Tetris order is F1 → F2 → A1 → A2 → G1 → N1 → G2 → S1. A1 only technically depends on M7; F1/F2 come first in the recommended learning sequence, and F2 is an explicit prerequisite for G2. N1 and G2 are independently reorderable once their prerequisites pass; this does not require more scope questions now. CPU FP32 support is now a selected milestone. GPU arithmetic precision remains a separate decision; programmable 3D does not imply a modern shader compiler or Vulkan/OpenGL compatibility. Define one meaningful programmable stage before attempting multiple stages or GPU-style scheduling.
 
@@ -103,20 +103,24 @@ F2 selected and verified `-march=rv32if_zicsr -mabi=ilp32`, preserving the integ
 
 GPU FP32/other formats and NPU integer/other formats remain independent choices. The CPU FPU may help with reference computations or scene setup, but does not automatically create floating-point GPU lanes or change the digit model's quantization contract.
 
-## Next implementation session: S1
+## Next implementation session: digit size fix
 
-G2 completed programmable 3D. A vertex shader runs on four SIMT lanes with
-divergent IF/ELSE and loops on a typed mask stack. Fixed-function projection,
-culling, Gouraud raster, dither and a 16-bit depth test follow it. Four
-implementations agree bit for bit, and the boot menu draws a rotating cube
-through three shaders. G1 and G2 share one engine memory port and exclude each
-other. See the [G2 record](../rv32-3d.md).
+S1 completed the advanced SoC. One 185-frame menu session drives G1, G2 and
+SIMD4 from one boot, with every frame matching the C references on the emulator
+and on Verilator under seeded waits on all three memory paths. A ten-case
+diagnostic proves the overlap contract: G1 and G2 exclude each other, SIMD4
+runs alongside either, and a reset or fault in one engine leaves the others
+exact. No RTL changed; the SoC is 327,986 cells. See the
+[S1 record](../rv32-s1.md) and [Accelerator overlap](../rv32-soc.md#accelerator-overlap).
 
-1. Inspect Git status and merged work, preserve existing commands, start a branch, and end with one reviewed PR.
-2. Drive 2D, 3D and digit inference from one guest menu session with end-to-end regressions over commands, memory ownership, reset and faults, and deterministic output checkpoints.
-3. Decide whether accelerators may overlap (today G1 and G2 exclude each other; SIMD4 runs alongside either) and specify it before changing arbitration.
-4. Document cell counts and measured traffic and cycles separately from emulator wall time, and preserve every milestone's regressions.
-5. A programmable fragment stage reusing the G2 core (which only knows numbered input and output slots) is a candidate, not a requirement.
+1. Hand testing found the digit screen misreads digits not drawn about 20 cells
+   tall. Implement [digit-size-fix.md](digit-size-fix.md) on its own branch:
+   resize to MNIST's 20-pixel box in the one preprocessing contract, retrain with
+   keyboard-style strokes, lock both accuracy targets before measuring, and
+   re-pin every derived hash, including the S1 session.
+2. After that, choose among the optional tracks below. A programmable fragment
+   stage reusing the G2 core, and G1/G2 overlap, remain candidates, not
+   requirements.
 
 ## Verification and learning discipline
 
