@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.rv32_asm import PROGRAM_INPUTS, PROGRAMS, TIMER, SIMD_BASE, SIMD_COMMAND, SIMD_STATUS, SIMD_ENTRY, SIMD_CYCLES, SIMD_STALLS, SIMD_TRANSFERS, SIMD_INSTRUCTIONS, words_to_bytes, words_to_hex  # noqa: E402
 from tools.rv32_asm import GPU_BASE, GPU_COMMAND, GPU_STATUS, GPU_ERROR, GPU_CYCLES, GPU_STALLS, GPU_READS, GPU_WRITES
-from tools.rv32_image import to_hex_words  # noqa: E402
+from tools.rv32_image import write_hex  # noqa: E402
 from tools.rv32_run_emu import DEFAULT_EMULATOR, emulator_command, halt_line, last_halt_line, parse_halt_line  # noqa: E402
 
 RTL_SOURCES = [ROOT / "rtl" / "rv32" / name
@@ -138,9 +138,11 @@ def run_backend(command, trace, parse_halt, timeout, console=None, checkpoints=N
     With `console`, the guest transcript is read from that file and the process's
     stdout is the simulator's own noise; without it the transcript is stdout and
     there is no noise channel (the emulator). A malformed halt line becomes
-    `halt=None` with the reason appended to stderr.
+    `halt=None` with the reason appended to stderr. With `trace=None` the command
+    writes no trace and the run's trace is empty.
     """
-    Path(trace).write_text("")
+    if trace is not None:
+        Path(trace).write_text("")
     if console is not None:
         Path(console).write_text("")
     if checkpoints is not None:
@@ -148,8 +150,8 @@ def run_backend(command, trace, parse_halt, timeout, console=None, checkpoints=N
     try:
         completed = subprocess.run(command, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        sys.exit(f"{command[0]} did not finish within {timeout} s; raise --timeout or bound the run "
-                 f"(a partial trace is in {trace})")
+        partial = f" (a partial trace is in {trace})" if trace is not None else ""
+        sys.exit(f"{command[0]} did not finish within {timeout} s; raise --timeout or bound the run{partial}")
     stdout, stderr = decode(completed.stdout), decode(completed.stderr)
     try:
         halt = parse_halt(stderr)
@@ -160,13 +162,18 @@ def run_backend(command, trace, parse_halt, timeout, console=None, checkpoints=N
     else:
         transcript, noise = decode(Path(console).read_bytes()), simulator_noise(stdout)
     lines = Path(checkpoints).read_text().splitlines() if checkpoints is not None else []
-    return Run(completed.returncode, transcript, noise, stderr, Path(trace).read_text().splitlines(), halt, lines)
+    retired = Path(trace).read_text().splitlines() if trace is not None else []
+    return Run(completed.returncode, transcript, noise, stderr, retired, halt, lines)
 
 
 def run_rtl(simulator, image_hex, trace, stall=None, seed=None, wave=None, max_cycles=None, timeout=120,
             checkpoints=None, input_script=None, reset_at=None, allow_lost_events=False, simd_stall=None, simd_seed=None, gpu_stall=None, gpu_seed=None):
-    """Run the testbench on a hex image with the documented plusargs; the console goes next to the trace."""
-    console = Path(trace).with_name(Path(trace).name + ".console")
+    """Run the testbench on a hex image with the documented plusargs; the console goes next to the
+    trace, or next to the image (`<image>.console`) when `trace` is None and no trace is written."""
+    if trace is not None:
+        console = Path(trace).with_name(Path(trace).name + ".console")
+    else:
+        console = Path(image_hex).with_suffix(".console")
     command = simulator_command(simulator, image_hex, trace=trace, console=console, wave=wave,
                                 stall=stall, seed=seed, max_cycles=max_cycles, checkpoints=checkpoints,
                                 input_script=input_script, reset_at=reset_at, allow_lost_events=allow_lost_events,
@@ -176,7 +183,8 @@ def run_rtl(simulator, image_hex, trace, stall=None, seed=None, wave=None, max_c
 
 def run_emulator(emulator, image_bin, trace, limit=None, timeout=120, checkpoints=None, input_script=None,
                  frames=None, allow_lost_events=False):
-    """Run the emulator on a flat image with a trace, the same way tools/rv32_run_emu.py does."""
+    """Run the emulator on a flat image the same way tools/rv32_run_emu.py does, with a trace
+    unless `trace` is None."""
     command = emulator_command(emulator, image_bin, trace=trace, limit=limit, checkpoints=checkpoints,
                                input_script=input_script, frames=frames, allow_lost_events=allow_lost_events)
     return run_backend(command, trace, halt_line, timeout, checkpoints=checkpoints)
@@ -253,7 +261,7 @@ G3D_ACCESS = re.compile(r"mem\[(?:" + "|".join(f"{asm.G3D_BASE+offset:08x}" for 
 
 # The Zicntr counters that count device ticks: cycle, time and their high halves. `instret`
 # counts retirements, which agree on every backend, so reading it keeps trace comparison.
-DEVICE_TIME_CSRS = (0xC00, 0xC01, 0xC80, 0xC81)
+DEVICE_TIME_CSRS = (asm.CYCLE, asm.TIME, asm.CYCLEH, asm.TIMEH)
 
 
 def reads_device_time(trace):
@@ -452,7 +460,7 @@ def main():
             parser.error(f"{args.image} does not exist; run make check-rv32-image first")
         out.mkdir(parents=True, exist_ok=True)
         hex_path, bin_path = out / f"{name}.hex", args.image
-        hex_path.write_text("".join(f"{word}\n" for word in to_hex_words(bin_path.read_bytes())))
+        write_hex(hex_path, bin_path.read_bytes())
     else:
         hex_path, bin_path = write_image(PROGRAMS[name](), out, name)
         if args.input is None and name in PROGRAM_INPUTS:

@@ -11,7 +11,11 @@ from collections import namedtuple
 from pathlib import Path
 import re
 import struct
+import sys
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools.rv32_asm import CYCLE, CYCLEH, INSTRET, INSTRETH, TIME, TIMEH  # noqa: E402
 
 RAM_BASE = 0x80000000
 RAM_SLICE_SIZE = 0x00040000
@@ -38,7 +42,7 @@ M_MNEMONIC = re.compile(r"\A(mul|mulh|mulhsu|mulhu|div|divu|rem|remu)\Z")
 # The Zicntr counters (cycle, time, instret and their high halves). Only reads exist; objdump
 # prints them as rdcycle/rdtime/rdinstret, which no csr* pattern would catch, so the check is
 # on the instruction word.
-COUNTER_CSRS = (0xC00, 0xC01, 0xC02, 0xC80, 0xC81, 0xC82)
+COUNTER_CSRS = (CYCLE, TIME, INSTRET, CYCLEH, TIMEH, INSTRETH)
 LISTING_LINE = re.compile(r"\A\s*([0-9a-f]+):\s+([0-9a-f]{2}(?: [0-9a-f]{2})*|[0-9a-f]{4,8})\s+(\S+)")
 
 Elf = namedtuple("Elf", "etype machine flags entry segments sections symbols undefined")
@@ -278,6 +282,11 @@ def to_hex_words(image):
     return [f"{word:08x}" for (word,) in struct.iter_unpack("<I", padded)]
 
 
+def write_hex(path, image):
+    """Write `image` to `path` as the $readmemh file: to_hex_words, one word per line."""
+    Path(path).write_text("".join(f"{word}\n" for word in to_hex_words(image)))
+
+
 def summary(elf, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE):
     sizes = {section.name: section.size for section in elf.sections}
     image = flatten(elf, ram_base)
@@ -306,13 +315,12 @@ def main():
     parser.add_argument("--allow-m", action="store_true", help="admit the M extension's multiply and divide instructions")
     parser.add_argument("--allow-counters", action="store_true", help="admit reads of the Zicntr counters (cycle, time, instret)")
     parser.add_argument("--require-m", action="store_true",
-                        help="with --allow-m: the listing must use M instructions and the image must not contain the "
+                        help="implies --allow-m: the listing must use M instructions and the image must not contain the "
                              "software multiply/divide routines (an RV32IM build that really retired rt/muldiv.c)")
     args = parser.parse_args()
+    args.allow_m = args.allow_m or args.require_m
     if (args.allow_f or args.allow_privileged or args.allow_m or args.allow_counters) and args.listing is None:
         parser.error("--allow-f, --allow-m, --allow-counters and --allow-privileged require --listing")
-    if args.require_m and not args.allow_m:
-        parser.error("--require-m requires --allow-m")
     try:
         elf = parse_elf(args.elf.read_bytes())
         listing = args.listing.read_text() if args.listing else None
@@ -329,7 +337,7 @@ def main():
         parser.exit(1, "".join(f"{args.elf}: {problem}\n" for problem in problems))
     if args.hex:
         args.hex.parent.mkdir(parents=True, exist_ok=True)
-        args.hex.write_text("".join(f"{word}\n" for word in to_hex_words(image)))
+        write_hex(args.hex, image)
     print("\n".join(summary(elf, args.ram_base, args.ram_size)))
 
 

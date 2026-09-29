@@ -11,7 +11,7 @@ import unittest
 from tools.rv32_asm import CONSOLE, DISPLAY, DONE, FB, INPUT, RAM, TIMER
 from tools.rv32_devices import (DIAG_EXPECTED_VALUES, EVENT_PRESS, EVENT_VALID, FB_SIZE, KEYS, QUEUE_SIZE, diag_checksum,
                                 event_word, frame_hash, is_decimal, key_code, parse_input_script, render_diag_frame)
-from tools.rv32_image import (ImageError, check_image, check_listing, flatten, parse_elf,
+from tools.rv32_image import (ImageError, check_image, check_listing, check_m_build, flatten, parse_elf,
                               to_hex_words)
 from tools.rv32_run_qemu import classify, qemu_command
 
@@ -189,6 +189,40 @@ class ImageCheckerTests(unittest.TestCase):
         for write in ("80000004: c0029073     \tcsrw\tcycle, t0", "80000004: c022a573     \tcsrrs\ta0, instret, t0"):
             with self.subTest(write=write):
                 self.assertEqual(len(check_listing(base + write, allow_counters=True)), 1, "counters are read-only")
+
+    def test_require_m_needs_hardware_multiply_and_no_software_routines(self):
+        with_m = "80000000: 00040117     \tauipc\tsp, 0x40\n80000004: 02b50533     \tmul\ta0, a0, a1\n"
+        without_m = "80000000: 00040117     \tauipc\tsp, 0x40\n80000004: 00b50533     \tadd\ta0, a0, a1\n"
+        self.assertEqual(check_m_build(parse_elf(build_elf()), with_m), [])
+        for routine in ("__mulsi3", "__divsi3", "rv32_divu"):
+            with self.subTest(routine=routine):
+                still_linked = parse_elf(build_elf(symbols={**GOOD_SYMBOLS, routine: RAM + 0x20}))
+                self.assertEqual(check_m_build(still_linked, with_m), [f"RV32IM image still links {routine}"])
+        self.assertEqual(check_m_build(parse_elf(build_elf()), without_m), ["RV32IM image has no M-extension instruction"])
+        both = parse_elf(build_elf(symbols={**GOOD_SYMBOLS, "__mulsi3": RAM + 0x20, "__divsi3": RAM + 0x40}))
+        self.assertEqual(len(check_m_build(both, without_m)), 3)
+
+    def test_require_m_alone_implies_allow_m(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            good, soft, listing = path / "good.elf", path / "soft.elf", path / "good.lst"
+            good.write_bytes(build_elf())
+            soft.write_bytes(build_elf(symbols={**GOOD_SYMBOLS, "__mulsi3": RAM + 0x20}))
+            listing.write_text("80000000: 00040117     \tauipc\tsp, 0x40\n80000004: 02b50533     \tmul\ta0, a0, a1\n")
+
+            def check(elf, *options):
+                return subprocess.run([sys.executable, str(ROOT / "tools/rv32_image.py"), str(elf), *options],
+                                      capture_output=True, text=True)
+            result = check(good, "--listing", str(listing), "--require-m")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(check(good, "--listing", str(listing), "--allow-m", "--require-m").returncode, 0)
+            result = check(soft, "--listing", str(listing), "--require-m")
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("still links __mulsi3", result.stderr)
+            self.assertEqual(check(good, "--listing", str(listing)).returncode, 1, "without either flag mul is refused")
+            result = check(good, "--require-m")
+            self.assertEqual(result.returncode, 2, "--require-m needs a listing to inspect")
+            self.assertIn("--allow-m, --allow-counters and --allow-privileged require --listing", result.stderr)
 
     def test_selfcheck_expected_checksum_matches_source_and_makefile(self):
         checksum = 2166136261

@@ -12,6 +12,7 @@ The suite is fetched at a pinned commit by `make fetch-rv32-arch-test`; see
 docs/rv32-groundwork.md for the selection, the model and the acceptance record.
 """
 import argparse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import fnmatch
 import os
@@ -20,24 +21,31 @@ import shutil
 import subprocess
 import sys
 import time
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tools.rv32_image import parse_elf, flatten, to_hex_words  # noqa: E402
-from tools.rv32_rtl import diff_traces, run_emulator, run_rtl  # noqa: E402
-
-RAM_BASE = 0x80000000
+from tools.rv32_image import RAM_BASE, flatten, parse_elf, write_hex  # noqa: E402
+from tools.rv32_rtl import check_passed, diff_traces, run_emulator, run_rtl  # noqa: E402
+from tools.rv32_run_qemu import qemu_command  # noqa: E402
 # The pinned suite: riscv-arch-test tag 3.9.1.
 ARCH_TEST_URL = "https://github.com/riscv-non-isa/riscv-arch-test.git"
 ARCH_TEST_COMMIT = "eb66181dd27ff7847e2c3a010705b13490b0bf75"
 DEFAULT_ARCH_TEST = ROOT / "third_party" / "riscv-arch-test"
 MODEL = ROOT / "tests" / "arch"
-# Suite -> (-march for the assembler, whether the sources' expected values are asserted). Each
-# suite is assembled for exactly its own ISA, so a test cannot use an instruction outside it.
+
+
+class Suite(NamedTuple):
+    """How a suite is assembled: exactly its own ISA, so a test cannot use an instruction outside
+    it, and whether RVMODEL_ASSERT checks the expected values written into the sources."""
+    march: str
+    asserts: bool
+
+
 SUITES = {
-    "I": ("rv32i_zicsr", True),
-    "M": ("rv32im_zicsr", True),
-    "F": ("rv32if_zicsr", False),
+    "I": Suite("rv32i_zicsr", asserts=True),
+    "M": Suite("rv32im_zicsr", asserts=True),
+    "F": Suite("rv32if_zicsr", asserts=False),
 }
 # Suites in rv32i_m that are not selected, and why (docs/rv32-groundwork.md).
 EXCLUDED = {
@@ -70,14 +78,19 @@ class TestFailure(Exception):
     """One test's failure, with the backend and what differed."""
 
 
+def link_flags(march, ld):
+    """The compiler driver flags that assemble and link a source against the model: bare RV32
+    with `march`, soft-float ABI, no relaxation, tests/arch/link.ld, and model_test.h on the path."""
+    return ["--target=riscv32-unknown-elf", f"-march={march}", "-mabi=ilp32", "-mno-relax", "-nostdlib",
+            "-static", f"--ld-path={ld}", f"-Wl,-T,{MODEL / 'link.ld'}", f"-I{MODEL}"]
+
+
 def assemble(test, suite, work, arch_test, cc, ld):
     """Assemble and link one test; returns (elf, bin, hex) paths."""
-    march, asserts = SUITES[suite]
     elf = work / f"{test.stem}.elf"
-    flags = [f"--target=riscv32-unknown-elf", f"-march={march}", "-mabi=ilp32", "-mno-relax", "-nostdlib",
-             "-static", f"--ld-path={ld}", f"-Wl,-T,{MODEL / 'link.ld'}", "-DXLEN=32", "-DFLEN=32",
-             "-DTEST_CASE_1=True", f"-I{MODEL}", f"-I{arch_test / 'riscv-test-suite' / 'env'}"]
-    if asserts:
+    flags = [*link_flags(SUITES[suite].march, ld), "-DXLEN=32", "-DFLEN=32", "-DTEST_CASE_1=True",
+             f"-I{arch_test / 'riscv-test-suite' / 'env'}"]
+    if SUITES[suite].asserts:
         flags.append("-DRVMODEL_ASSERT")
     result = subprocess.run([cc, *flags, "-o", str(elf), str(test)], capture_output=True, text=True)
     if result.returncode != 0:
@@ -91,7 +104,7 @@ def assemble(test, suite, work, arch_test, cc, ld):
         raise TestFailure(f"the image is {len(image)} bytes; QEMU puts its device tree at {QEMU_FDT_OFFSET:#x} into RAM")
     bin_path, hex_path = elf.with_suffix(".bin"), elf.with_suffix(".hex")
     bin_path.write_bytes(image)
-    hex_path.write_text("".join(f"{word}\n" for word in to_hex_words(image)))
+    write_hex(hex_path, image)
     return elf, bin_path, hex_path
 
 
@@ -100,6 +113,17 @@ def signature_lines(console):
     if not lines or any(len(line) != 8 or line.strip("0123456789abcdef") for line in lines):
         raise TestFailure(f"the console is not a signature: {console[:200]!r}")
     return lines
+
+
+def run_qemu(args, elf):
+    """Run one test's ELF on QEMU's virt board and return its console, the reference signature."""
+    try:
+        qemu = subprocess.run(qemu_command(args.qemu, elf, cpu=args.qemu_cpu), capture_output=True, timeout=args.timeout)
+    except subprocess.TimeoutExpired:
+        raise TestFailure(f"QEMU did not finish within {args.timeout} s") from None
+    if qemu.returncode != 0:
+        raise TestFailure(f"QEMU exited {qemu.returncode}: {qemu.stderr.decode(errors='replace').strip()}")
+    return qemu.stdout.decode(errors="replace")
 
 
 def run_one(test, suite, args):
@@ -113,19 +137,10 @@ def run_one(test, suite, args):
     rtl_backends = [backend for backend in ("icarus", "verilator") if backend in args.backends]
     emulator_trace = work / "emu.trace"
     emulator = run_emulator(args.emulator, bin_path, emulator_trace, limit=args.limit, timeout=args.timeout)
-    if emulator.status != 0 or emulator.halt is None or (emulator.halt["halt"], emulator.halt["outcome"]) != ("done", "pass"):
-        raise TestFailure(f"emulator did not pass: {emulator.stderr.strip()}")
+    check_passed(emulator, "emulator")
     signature = signature_lines(emulator.console)
     if "qemu" in args.backends:
-        command = [args.qemu, "-M", "virt", "-cpu", args.qemu_cpu, "-bios", "none", "-kernel", str(elf), "-m", "4M",
-                   "-nographic", "-monitor", "none", "-no-reboot"]
-        try:
-            qemu = subprocess.run(command, capture_output=True, timeout=args.timeout)
-        except subprocess.TimeoutExpired:
-            raise TestFailure(f"QEMU did not finish within {args.timeout} s") from None
-        if qemu.returncode != 0:
-            raise TestFailure(f"QEMU exited {qemu.returncode}: {qemu.stderr.decode(errors='replace').strip()}")
-        reference = qemu.stdout.decode(errors="replace")
+        reference = run_qemu(args, elf)
         if reference != emulator.console:
             difference = next((i for i, (a, b) in enumerate(zip(reference.splitlines(), signature)) if a != b), None)
             raise TestFailure(f"signature differs from QEMU's at word {difference} "
@@ -135,8 +150,7 @@ def run_one(test, suite, args):
         # Generous: a floating-point instruction costs up to ~40 cycles, an M instruction 37.
         max_cycles = min(60 * emulator.halt["steps"] + 10000, 2147483647)
         rtl = run_rtl(simulator, hex_path, work / f"{backend}.trace", max_cycles=max_cycles, timeout=args.timeout)
-        if rtl.status != 0 or rtl.noise or rtl.halt is None or (rtl.halt["halt"], rtl.halt["outcome"]) != ("done", "pass"):
-            raise TestFailure(f"{backend} did not pass: {rtl.stderr.strip()[-400:]} {rtl.noise[:200]}")
+        check_passed(rtl, backend)
         if rtl.console != emulator.console:
             raise TestFailure(f"{backend} signature differs from the emulator's")
         difference = diff_traces(rtl.trace, emulator.trace)
@@ -148,14 +162,18 @@ def run_one(test, suite, args):
     return name, len(signature), emulator.halt["steps"], time.monotonic() - started
 
 
+def checkout_commit(arch_test):
+    """The commit a riscv-arch-test checkout is at, or "" when it has none."""
+    return subprocess.run(["git", "-C", str(arch_test), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+
 def fetch(arch_test):
     """Check out the pinned commit, only the files the selected suites need (the whole suite,
     D and Zfh included, is over 500 MB): the model headers, the licences, and I, M and F."""
     def git(*command):
         subprocess.run(["git", "-C", str(arch_test), *command], check=True)
     if (arch_test / ".git").exists():
-        current = subprocess.run(["git", "-C", str(arch_test), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-        if current == ARCH_TEST_COMMIT:
+        if checkout_commit(arch_test) == ARCH_TEST_COMMIT:
             print(f"{arch_test} is at the pinned {ARCH_TEST_COMMIT}")
             return
     shutil.rmtree(arch_test, ignore_errors=True)
@@ -208,10 +226,9 @@ def main():
     args.backends = sorted(set(args.backends or ["emulator", "qemu"]) | {"emulator"}, key=BACKENDS.index)
     if args.jobs < 1:
         parser.error("--jobs must be at least 1")
-    head = args.arch_test / ".git"
-    if not head.exists():
+    if not (args.arch_test / ".git").exists():
         parser.error(f"{args.arch_test} is not a checkout; run make fetch-rv32-arch-test")
-    commit = subprocess.run(["git", "-C", str(args.arch_test), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    commit = checkout_commit(args.arch_test)
     if commit != ARCH_TEST_COMMIT:
         parser.error(f"{args.arch_test} is at {commit or 'no commit'}, not the pinned {ARCH_TEST_COMMIT}")
     for backend, path in (("icarus", args.icarus), ("verilator", args.verilator)):
@@ -228,9 +245,7 @@ def main():
         test, suite = item
         try:
             return run_one(test, suite, args), None
-        except TestFailure as error:
-            return None, (f"{suite}/{test.stem}", str(error))
-        except SystemExit as error:  # the shared runners exit on a timeout
+        except (TestFailure, SystemExit) as error:  # check_passed and the shared runners exit
             return None, (f"{suite}/{test.stem}", str(error))
 
     started = time.monotonic()
@@ -244,9 +259,7 @@ def main():
                 passed += 1
                 steps += count
                 print(f"PASS {name}: {words} signature words, {count} instructions, {seconds:.1f} s", flush=True)
-    by_suite = {}
-    for test, suite in tests:
-        by_suite[suite] = by_suite.get(suite, 0) + 1
+    by_suite = Counter(suite for _, suite in tests)
     summary = ", ".join(f"{suite} {count}" for suite, count in sorted(by_suite.items()))
     print(f"{passed}/{len(tests)} passed ({summary}); {steps} instructions on the emulator; "
           f"{time.monotonic() - started:.0f} s on {', '.join(args.backends)}")

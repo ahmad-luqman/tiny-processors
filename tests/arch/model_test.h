@@ -13,8 +13,9 @@
  *   to trap. The handler has no scratch CSR, so it swaps t0 and t1 through
  *   mtval and mcause, which it has finished reading by then.
  * - Halt prints the signature (begin_signature to end_signature) on the
- *   console, one little-endian word per line as eight lowercase hex digits,
- *   the format the suite's reference signatures use, then writes the pass word.
+ *   console, one line per 32-bit word: the word's value as eight lowercase hex
+ *   digits, most significant first, the format the suite's reference
+ *   signatures use; then it writes the pass word.
  *   The same bytes come out of the emulator, both RTL simulators and QEMU, whose
  *   virt board has the same console and done register (docs/rv32.md).
  * - With RVMODEL_ASSERT defined (the I and M suites), every integer result is

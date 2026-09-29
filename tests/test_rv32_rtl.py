@@ -21,7 +21,7 @@ import unittest
 from tools.rv32_asm import *  # noqa: F401,F403
 from tools.rv32_devices import FB_SIZE, diag_checksum, event_word, frame_hash, render_diag_frame
 from tools.rv32_pong_native import EXPECTED as PONG_EXPECTED, INPUT as PONG_INPUT
-from tools.rv32_image import to_hex_words
+from tools.rv32_image import to_hex_words, write_hex
 from tools.rv32_rtl import (ROOT, Run, check_passed, compile_testbench, cycle_relation, diff_traces, has_value_changes,
                             rtl_halt_line, run_backend, run_emulator, run_rtl, simulator_command, simulator_noise, write_image)
 from tools.rv32_run_emu import build_emulator, emulator_command
@@ -499,7 +499,7 @@ class RtlTest(unittest.TestCase):
             # The hex is derived from the bin here so both backends run the same image even
             # when build/rv32/selfcheck.hex is stale.
             hex_path = Path(directory) / "selfcheck.hex"
-            hex_path.write_text("".join(f"{word}\n" for word in to_hex_words(bin_path.read_bytes())))
+            write_hex(hex_path, bin_path.read_bytes())
             emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace")
             self.assertEqual(emulator.status, 0, emulator.stderr)
             self.assertIsNotNone(emulator.halt, emulator.stderr)
@@ -1273,6 +1273,20 @@ class HelperTest(unittest.TestCase):
             self.assertNotEqual(result.status, 0)
             self.assertEqual(result.trace, [], "a crash cannot inherit an old passing trace")
             self.assertIsNone(result.halt)
+
+    def test_runs_without_a_trace_write_none_and_return_an_empty_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "img.hex"
+            result = run_rtl(Path(directory) / "missing.vvp", image, None)
+            self.assertNotEqual(result.status, 0)
+            self.assertEqual((result.trace, result.halt), ([], None))
+            self.assertTrue((Path(directory) / "img.console").exists(), "the console goes next to the image")
+            self.assertEqual(sorted(path.name for path in Path(directory).iterdir()), ["img.console"])
+            result = run_emulator("false", Path(directory) / "img.bin", None)  # exits 1, prints nothing
+            self.assertEqual((result.trace, result.halt), ([], None))
+        command = simulator_command("x.vvp", "i.hex", console="c")
+        self.assertFalse(any(part.startswith("+trace=") for part in command))
+        self.assertNotIn("--trace", emulator_command("e", "i.bin"))
 
     def test_encoder_bounds_and_program_helpers(self):
         for bad in (lambda: ADDI(32, 0, 0), lambda: ADDI(1, 0, 0x1000), lambda: ADDI(1, 0, -0x801),

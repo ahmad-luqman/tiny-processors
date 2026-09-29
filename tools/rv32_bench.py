@@ -13,14 +13,13 @@ docs/rv32-groundwork.md has the method and the recorded baseline.
 import argparse
 from pathlib import Path
 import re
-import subprocess
 import sys
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tools.rv32_image import to_hex_words  # noqa: E402
-from tools.rv32_rtl import decode, rtl_halt_line, simulator_command, simulator_noise  # noqa: E402
-from tools.rv32_run_emu import emulator_command, halt_line  # noqa: E402
+from tools.rv32_image import write_hex  # noqa: E402
+from tools.rv32_rtl import check_passed, run_emulator, run_rtl  # noqa: E402
 
 BENCH_LINE = re.compile(r"\Abench: (\w+)(?: iterations=(\d+))? cycles=(\d+) instret=(\d+)\Z")
 # Lines whose numbers are device time; everything else must match across backends.
@@ -35,52 +34,57 @@ class BenchError(Exception):
     pass
 
 
-def run(command, timeout):
-    try:
-        return subprocess.run(command, capture_output=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise BenchError(f"{command[0]} did not finish within {timeout} s") from None
+class Timing(NamedTuple):
+    """One `bench:` line; `iterations` is None when the line does not carry it (Dhrystone)."""
+    name: str
+    iterations: int | None
+    cycles: int
+    instret: int
 
 
-def run_emulator(emulator, image, timeout):
-    completed = run(emulator_command(emulator, image), timeout)
-    stderr = decode(completed.stderr)
-    halt = halt_line(stderr)
-    if completed.returncode != 0 or halt is None or (halt["halt"], halt["outcome"]) != ("done", "pass"):
-        raise BenchError(f"emulator did not pass: {stderr.strip()[-300:]}")
-    return decode(completed.stdout), halt
+class Row(NamedTuple):
+    """One line of the report: an image measured on one backend."""
+    image: str
+    backend: str
+    name: str
+    iterations: int
+    cycles: int
+    instret: int
+    halt: dict
 
 
-def run_rtl(simulator, image, out, max_cycles, timeout):
-    hex_path, console = out / f"{image.stem}.hex", out / f"{image.stem}.console"
-    hex_path.write_text("".join(f"{word}\n" for word in to_hex_words(image.read_bytes())))
-    console.write_text("")
-    completed = run(simulator_command(simulator, hex_path, console=console, max_cycles=max_cycles), timeout)
-    stderr = decode(completed.stderr)
-    halt = rtl_halt_line(stderr)
-    noise = simulator_noise(decode(completed.stdout))
-    if completed.returncode != 0 or noise or halt is None or (halt["halt"], halt["outcome"]) != ("done", "pass"):
-        raise BenchError(f"RTL did not pass: {stderr.strip()[-300:]} {noise[:200]}")
-    return decode(console.read_bytes()), halt
+def run_backend(backend, image, args):
+    """Run one image on one backend with no trace and return its console and halt line. A run that
+    did not pass exits through check_passed (SystemExit), as does a timeout."""
+    if backend == "emulator":
+        run = run_emulator(args.emulator, image, None, timeout=args.timeout)
+    else:
+        hex_path = args.out / f"{image.stem}.hex"
+        write_hex(hex_path, image.read_bytes())
+        simulator = args.icarus if backend == "icarus" else args.verilator
+        run = run_rtl(simulator, hex_path, None, max_cycles=args.max_cycles, timeout=args.timeout)
+    check_passed(run, backend)
+    return run.console, run.halt
 
 
 def timing_lines(console):
-    """The `bench:` lines as {name: (iterations, cycles, instret)}."""
-    found = {}
+    """The console's one `bench:` line as a Timing; none, two, or a malformed one is an error."""
+    found = []
     for line in console.splitlines():
         match = BENCH_LINE.match(line)
         if match:
             name, iterations, cycles, instret = match.groups()
-            found[name] = (int(iterations) if iterations else None, int(cycles), int(instret))
+            found.append(Timing(name, int(iterations) if iterations else None, int(cycles), int(instret)))
         elif line.startswith("bench: "):
             raise BenchError(f"malformed timing line {line!r}")
     if len(found) != 1:
-        raise BenchError(f"expected one timing line, found {sorted(found)}")
-    return found
+        raise BenchError(f"expected one timing line, found {[timing.name for timing in found]}")
+    return found[0]
 
 
 def check_coremark(console):
-    """CoreMark says so itself, and its CRCs must be the known ones for this run."""
+    """CoreMark says so itself, and its CRCs must be the known ones for this run. Returns the
+    iteration count CoreMark reports."""
     if "Correct operation validated." not in console or "ERROR" in console or "Errors detected" in console:
         raise BenchError("CoreMark did not validate:\n" + console)
     values = {key.strip(): value.strip() for key, value in
@@ -88,13 +92,19 @@ def check_coremark(console):
     for key, expected in COREMARK_KNOWN.items():
         if values.get(key) != expected:
             raise BenchError(f"CoreMark {key} is {values.get(key)!r}, not {expected}")
+    if not values.get("Iterations", "").isdigit():
+        raise BenchError(f"CoreMark reported no iteration count: {values.get('Iterations')!r}")
+    return int(values["Iterations"])
 
 
 def check_dhrystone(console):
     """Every printed value against the "should be" line after it: literal values, the run count
-    plus ten, and the two pointers that must agree with each other."""
+    plus ten, and the two pointers that must agree with each other. Returns the run count."""
     lines = console.splitlines()
-    runs = int(re.search(r"Trying (\d+) runs through Dhrystone", console).group(1))
+    trying = re.search(r"Trying (\d+) runs through Dhrystone", console)
+    if trying is None:
+        raise BenchError("Dhrystone printed no \"Trying N runs\" line")
+    runs = int(trying.group(1))
     checked, pointers = 0, []
     for value_line, expected_line in zip(lines, lines[1:]):
         if not expected_line.strip().startswith("should be:"):
@@ -111,13 +121,47 @@ def check_dhrystone(console):
         checked += 1
     if checked != 20 or len(pointers) != 2 or pointers[0] != pointers[1]:
         raise BenchError(f"Dhrystone printed {checked} checkable values and pointers {pointers}")
+    return runs
+
+
+# The benchmark a timing line names decides how its console is validated; each check returns the
+# number of iterations the measured region ran.
+CHECKS = {"coremark": check_coremark, "dhrystone": check_dhrystone}
+
+
+def measure(backend, console, halt, image):
+    """Validate one backend's console and return its Row."""
+    timing = timing_lines(console)
+    if timing.name not in CHECKS:
+        raise BenchError(f"{backend}: timing line for unknown benchmark {timing.name!r}")
+    iterations = CHECKS[timing.name](console)
+    if timing.iterations is not None and timing.iterations != iterations:
+        raise BenchError(f"{backend}: timing line says {timing.iterations} iterations, {timing.name} ran {iterations}")
+    if not (iterations > 0 and timing.cycles > 0 and timing.instret > 0):
+        raise BenchError(f"{backend}: nothing measured: {iterations} iterations, {timing}")
+    return Row(image.stem, backend, timing.name, iterations, timing.cycles, timing.instret, halt)
 
 
 def comparable(console):
     return [line for line in console.splitlines() if not line.startswith(TIMING_PREFIXES)]
 
 
-def main():
+def bench_image(image, backends, args):
+    """Run and check one image on every backend; returns its rows or raises BenchError/SystemExit."""
+    consoles, rows = {}, {}
+    for backend in backends:
+        console, halt = run_backend(backend, image, args)
+        consoles[backend], rows[backend] = console, measure(backend, console, halt, image)
+    reference = backends[0]
+    for backend in backends[1:]:
+        if comparable(consoles[backend]) != comparable(consoles[reference]):
+            raise BenchError(f"{backend} console differs from the {reference}'s outside the timing lines")
+        if rows[backend].instret != rows[reference].instret:
+            raise BenchError(f"instret differs: {backend} {rows[backend].instret}, {reference} {rows[reference].instret}")
+    return [rows[backend] for backend in backends]
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("images", nargs="+", type=Path, help="flat .bin images from make firmware-rv32-bench")
     parser.add_argument("--backend", action="append", choices=("emulator", "icarus", "verilator"), dest="backends",
@@ -128,53 +172,30 @@ def main():
     parser.add_argument("--out", type=Path, default=ROOT / "build/rv32bench/run")
     parser.add_argument("--max-cycles", type=int, default=1_000_000_000)
     parser.add_argument("--timeout", type=float, default=7200.0)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     backends = args.backends or ["emulator", "verilator"]
     args.out.mkdir(parents=True, exist_ok=True)
     rows, failures = [], []
     for image in args.images:
         try:
-            consoles, results = {}, {}
-            for backend in backends:
-                if backend == "emulator":
-                    console, halt = run_emulator(args.emulator, image, args.timeout)
-                else:
-                    simulator = args.icarus if backend == "icarus" else args.verilator
-                    console, halt = run_rtl(simulator, image, args.out, args.max_cycles, args.timeout)
-                if "Correct operation validated" in console or "CoreMark" in console:
-                    check_coremark(console)
-                elif "Dhrystone" in console:
-                    check_dhrystone(console)
-                else:
-                    raise BenchError(f"{backend}: neither CoreMark nor Dhrystone output:\n{console}")
-                consoles[backend], results[backend] = console, (timing_lines(console), halt)
-            reference = backends[0]
-            for backend in backends[1:]:
-                if comparable(consoles[backend]) != comparable(consoles[reference]):
-                    raise BenchError(f"{backend} console differs from the {reference}'s outside the timing lines")
-                ours, theirs = results[backend][0], results[reference][0]
-                if {name: value[2] for name, value in ours.items()} != {name: value[2] for name, value in theirs.items()}:
-                    raise BenchError(f"instret differs: {backend} {ours}, {reference} {theirs}")
-            for backend in backends:
-                (name, (iterations, cycles, instret)), = results[backend][0].items()
-                if name == "dhrystone":
-                    iterations = int(re.search(r"Trying (\d+) runs", consoles[backend]).group(1))
-                rows.append((image.stem, backend, name, iterations, cycles, instret, results[backend][1]))
-        except BenchError as error:
+            rows += bench_image(image, backends, args)
+        except (BenchError, SystemExit) as error:  # check_passed and the shared runners exit
             failures.append(image.stem)
             print(f"FAIL {image.stem}: {error}", file=sys.stderr)
     print(f"{'image':<14} {'backend':<10} {'iterations':>10} {'cycles':>12} {'instret':>12} {'CPI':>6} "
           f"{'cycles/iter':>12} {'instr/iter':>11} {'per MHz':>9}")
-    for image, backend, name, iterations, cycles, instret, halt in rows:
-        per_mhz = iterations * 1e6 / cycles
-        if name == "dhrystone":
+    for row in rows:
+        per_mhz = row.iterations * 1e6 / row.cycles
+        if row.name == "dhrystone":
             per_mhz /= DHRYSTONE_VAX_MIPS  # DMIPS/MHz
-        unit = "DMIPS" if name == "dhrystone" else "CM"
+        unit = "DMIPS" if row.name == "dhrystone" else "CM"
         # The emulator's cycles are instructions (device time): no clock, so no per-MHz figure.
-        rate = f"{'-':>6} {unit:<5}" if backend == "emulator" else f"{per_mhz:>6.3f} {unit:<5}"
-        print(f"{image:<14} {backend:<10} {iterations:>10} {cycles:>12} {instret:>12} {cycles / instret:>6.3f} "
-              f"{cycles / iterations:>12.1f} {instret / iterations:>11.1f} {rate}"
-              + (f"  (run: {halt['cycles']} cycles, md_waits {halt.get('md_waits', 0)})" if backend != "emulator" else ""))
+        rate = f"{'-':>6} {unit:<5}" if row.backend == "emulator" else f"{per_mhz:>6.3f} {unit:<5}"
+        print(f"{row.image:<14} {row.backend:<10} {row.iterations:>10} {row.cycles:>12} {row.instret:>12} "
+              f"{row.cycles / row.instret:>6.3f} {row.cycles / row.iterations:>12.1f} "
+              f"{row.instret / row.iterations:>11.1f} {rate}"
+              + (f"  (run: {row.halt['cycles']} cycles, md_waits {row.halt.get('md_waits', 0)})"
+                 if row.backend != "emulator" else ""))
     if failures:
         sys.exit(f"{len(failures)} image(s) failed: {', '.join(failures)}")
 

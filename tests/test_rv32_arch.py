@@ -3,19 +3,24 @@
 Tiny programs use the model's macros the way the suite's tests do: the halt prints the
 signature, the boot's trap handler skips exactly the suite's `csrs mstatus, a0` and fails any
 other trap, and the optional asserts fail a wrong result. Each runs on the emulator and, as the
-reference, on QEMU, whose virt board has the same console and done register.
+reference, on QEMU, whose virt board has the same console and done register. RunnerTest drives
+the runner's per-test comparison on stubbed backends, so each rejection is shown without a suite.
 """
+import argparse
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
-from tools.rv32_arch_test import DEFAULT_QEMU_CPU, MODEL, SUITES, EXCLUDED, TestFailure, signature_lines
+from tools import rv32_arch_test
+from tools.rv32_arch_test import (DEFAULT_QEMU_CPU, SUITES, EXCLUDED, TestFailure, link_flags, qemu_command, run_one,
+                                  signature_lines)
 from tools.rv32_image import flatten, parse_elf
 from tools.rv32_run_emu import emulator_command, halt_line
-from tools.rv32_rtl import ROOT, decode
+from tools.rv32_rtl import ROOT, Run, decode
 
 CC = os.environ.get("RV32_CC", "clang")
 LD = os.environ.get("RV32_LD", "ld.lld")
@@ -56,9 +61,8 @@ class ModelTest(unittest.TestCase):
         directory = Path(self.work.name)
         source, elf = directory / f"{name}.S", directory / f"{name}.elf"
         source.write_text(SOURCE.format(body=body))
-        subprocess.run([CC, "--target=riscv32-unknown-elf", "-march=rv32if_zicsr", "-mabi=ilp32", "-mno-relax",
-                        "-nostdlib", "-static", f"--ld-path={LD}", f"-Wl,-T,{MODEL / 'link.ld'}", f"-I{MODEL}",
-                        *(f"-D{define}" for define in defines), "-o", str(elf), str(source)], check=True)
+        subprocess.run([CC, *link_flags("rv32if_zicsr", LD), *(f"-D{define}" for define in defines),
+                        "-o", str(elf), str(source)], check=True)
         image = elf.with_suffix(".bin")
         image.write_bytes(flatten(parse_elf(elf.read_bytes())))
         return elf, image
@@ -68,8 +72,7 @@ class ModelTest(unittest.TestCase):
         return decode(result.stdout), halt_line(decode(result.stderr))
 
     def run_qemu(self, elf):
-        result = subprocess.run([QEMU, "-M", "virt", "-cpu", QEMU_CPU, "-bios", "none", "-kernel", str(elf), "-m", "4M",
-                                 "-nographic", "-monitor", "none", "-no-reboot"], capture_output=True, timeout=30)
+        result = subprocess.run(qemu_command(QEMU, elf, cpu=QEMU_CPU), capture_output=True, timeout=30)
         return decode(result.stdout), result.returncode
 
     def test_halt_prints_the_signature_on_both(self):
@@ -120,6 +123,65 @@ class ModelTest(unittest.TestCase):
                 signature_lines(bad)
         self.assertEqual(sorted(SUITES), ["F", "I", "M"])
         self.assertFalse(set(SUITES) & set(EXCLUDED), "a suite is either selected or excluded with a reason")
+
+
+SIGNATURE = "12345678\ndeadbeef\n"
+TRACE = ["1 80000000 00000013", "2 80000004 00000013"]
+
+
+def passing(console=SIGNATURE, trace=TRACE):
+    return Run(0, console, "", "", list(trace), {"halt": "done", "outcome": "pass", "steps": len(trace)})
+
+
+class RunnerTest(unittest.TestCase):
+    """run_one on stubbed backends: every disagreement with the emulator fails the test."""
+
+    def run_one(self, backends, emulator=None, qemu=SIGNATURE, rtl=None):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            args = argparse.Namespace(out=work / "out", backends=backends, emulator="emu", icarus="tb.vvp",
+                                      verilator="sim", qemu="qemu", qemu_cpu="cpu", arch_test=work, cc="cc", ld="ld",
+                                      limit=100, timeout=10, keep=False)
+            paths = (work / "t.elf", work / "t.bin", work / "t.hex")
+            with mock.patch.object(rv32_arch_test, "assemble", return_value=paths), \
+                    mock.patch.object(rv32_arch_test, "run_emulator", return_value=emulator or passing()), \
+                    mock.patch.object(rv32_arch_test, "run_qemu", return_value=qemu), \
+                    mock.patch.object(rv32_arch_test, "run_rtl", return_value=rtl or passing()):
+                return run_one(Path("add-01.S"), "I", args)
+
+    def test_agreement_passes(self):
+        self.assertEqual(self.run_one(["emulator", "qemu", "icarus", "verilator"])[:3], ("I/add-01", 2, 2))
+
+    def test_each_disagreement_fails(self):
+        cases = {
+            "signature differs from QEMU": dict(backends=["emulator", "qemu"], qemu="12345678\ndeadbeee\n"),
+            "QEMU prints fewer words": dict(backends=["emulator", "qemu"], qemu="12345678\n"),
+            "RTL console differs": dict(backends=["emulator", "verilator"], rtl=passing("12345678\n00000000\n")),
+            "RTL trace differs": dict(backends=["emulator", "icarus"], rtl=passing(trace=[TRACE[0], "2 80000004 00000093"])),
+            "RTL trace is short": dict(backends=["emulator", "icarus"], rtl=passing(trace=TRACE[:1])),
+            "emulator console is no signature": dict(backends=["emulator"], emulator=passing("PASS\n")),
+        }
+        for name, case in cases.items():
+            with self.subTest(name=name), self.assertRaises(TestFailure):
+                self.run_one(**case)
+
+    def test_a_run_that_did_not_pass_fails(self):
+        """check_passed decides for the emulator and each RTL run; it exits, which the runner records."""
+        for name, run in (("status", passing()._replace(status=1)), ("noise", passing()._replace(noise="%Error\n")),
+                          ("no halt", passing()._replace(halt=None)),
+                          ("assert failed", passing()._replace(halt={"halt": "done", "outcome": "fail=3", "steps": 2}))):
+            with self.subTest(backend="emulator", name=name), self.assertRaises(SystemExit):
+                self.run_one(["emulator"], emulator=run)
+            with self.subTest(backend="verilator", name=name), self.assertRaises(SystemExit):
+                self.run_one(["emulator", "verilator"], rtl=run)
+
+    def test_shared_command_lines(self):
+        flags = link_flags("rv32im_zicsr", "ld.lld")
+        self.assertIn("-march=rv32im_zicsr", flags)
+        self.assertIn("--ld-path=ld.lld", flags)
+        command = qemu_command("qemu", "t.elf", cpu=DEFAULT_QEMU_CPU)
+        self.assertEqual(command[command.index("-cpu") + 1], DEFAULT_QEMU_CPU)
+        self.assertEqual(command[command.index("-m") + 1], "4M", "the FDT offset check assumes 4 MiB")
 
 
 if __name__ == "__main__":
