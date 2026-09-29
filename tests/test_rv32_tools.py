@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 
-from tools.rv32_asm import CONSOLE, DISPLAY, DONE, FB, INPUT, RAM, TIMER
+from tools.rv32_asm import BOOTROM, CLINT, CONSOLE, DISPLAY, DONE, FB, INPUT, RAM
 from tools.rv32_devices import (DIAG_EXPECTED_VALUES, EVENT_PRESS, EVENT_VALID, FB_SIZE, KEYS, QUEUE_SIZE, diag_checksum,
                                 event_word, frame_hash, is_decimal, key_code, parse_input_script, render_diag_frame)
 from tools.rv32_image import (ImageError, check_image, check_listing, check_m_build, flatten, parse_elf,
@@ -398,7 +398,7 @@ class DeviceHelperTests(unittest.TestCase):
             self.assertIsNotNone(match,name)
             self.assertEqual(int(match[1],16),value,name)
         self.assertEqual((asm.SIMD_BASE,asm.SIMD_PROGRAM,asm.SIMD_DATA),
-                         (0x20004000,0x20005000,0x20006000))
+                         (0x11004000,0x11005000,0x11006000))
 
     def test_gpu_register_contract_constants(self):
         from tools import rv32_asm as asm
@@ -413,7 +413,7 @@ class DeviceHelperTests(unittest.TestCase):
             self.assertIsNotNone(match,name);self.assertEqual(int(match[1],0),value,name)
             match=re.search(rf"GPU_{name} = 32'h([0-9a-f]+);",rtl)
             self.assertIsNotNone(match,name);self.assertEqual(int(match[1],16),value,name)
-        self.assertEqual(asm.GPU_BASE,0x20007000)
+        self.assertEqual(asm.GPU_BASE,0x11007000)
 
     def test_key_table_and_windows_agree_across_languages(self):
         """The key table lives in board.h, the emulator, the window, the testbench, and this module's KEYS; the
@@ -435,23 +435,30 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertRegex(header, rf"#define RV32_EVENT_PRESS\s+{EVENT_PRESS:#010x}\b")
         self.assertIn(f"32'h{EVENT_VALID:08x} | ((token2 == \"down\") ? 32'h{EVENT_PRESS:x} : 32'h0)".replace("8000_0000", "80000000"),
                       testbench.replace("8000_0000", "80000000"))
-        bases = {"RAM": RAM, "CONSOLE": CONSOLE, "DONE": DONE, "TIMER": TIMER, "INPUT": INPUT, "DISPLAY": DISPLAY, "FB": FB,
-                 "SIMD4": 0x20004000, "SIMD4_PROGRAM": 0x20005000, "SIMD4_DATA": 0x20006000, "GPU": 0x20007000,
-                 "G3D": 0x20008000}
+        bases = {"RAM": RAM, "CONSOLE": CONSOLE, "DONE": DONE, "CLINT": CLINT, "BOOTROM": BOOTROM, "INPUT": INPUT, "DISPLAY": DISPLAY, "FB": FB,
+                 "SIMD4": 0x11004000, "SIMD4_PROGRAM": 0x11005000, "SIMD4_DATA": 0x11006000, "GPU": 0x11007000,
+                 "G3D": 0x11008000}
         header_bases = {name: int(value, 16) for name, value in re.findall(r"#define RV32_(\w+)_BASE\s+0x([0-9a-fA-F]+)", header)}
         self.assertEqual(header_bases, {name: bases[name] for name in header_bases}, "board.h")
-        self.assertEqual(set(header_bases) >= {"TIMER", "INPUT", "DISPLAY", "FB"}, True)
+        self.assertEqual(set(header_bases) >= {"CLINT", "BOOTROM", "INPUT", "DISPLAY", "FB"}, True)
         bus = (ROOT / "rtl/rv32/rv32_bus.v").read_text()
         bus_bases = {name.replace("_BASE", "").replace("_ADDR", ""): int(value.replace("_", ""), 16)
                      for name, value in re.findall(r"localparam \[31:0\] (\w+) = 32'h([0-9a-fA-F_]+);", bus)}
         self.assertEqual(bus_bases, bases, "rv32_bus.v")
-        self.assertRegex((ROOT/"programs/rv32/gpu.h").read_text(), r"#define GPU_BASE 0x20007000u\b")
+        self.assertRegex((ROOT/"programs/rv32/gpu.h").read_text(), r"#define GPU_BASE 0x11007000u\b")
         wrapper = (ROOT / "rtl/rv32/rv32_simd4.v").read_text()
         simd_header = (ROOT / "tools/rv32_simd4.h").read_text()
-        for name, value in (("BASE", 0x20004000), ("PROGRAM", 0x20005000), ("DATA", 0x20006000)):
+        for name, value in (("BASE", 0x11004000), ("PROGRAM", 0x11005000), ("DATA", 0x11006000)):
             self.assertRegex(header, rf"#define RV32_SIMD4_{name}\s+0x{value:08x}\b")
             self.assertRegex(simd_header, rf"#define SIMD_{name}\s+0x{value:08x}u\b")
-            self.assertIn(f"SIMD4_{name} = 32'h{value:08x}", wrapper.replace("2000_", "2000"))
+            self.assertIn(f"SIMD4_{name} = 32'h{value:08x}", wrapper.replace("1100_", "1100"))
+        from tools import rv32_dtb
+        tree = {"RAM": rv32_dtb.RAM_BASE, "CONSOLE": rv32_dtb.CONSOLE_BASE, "DONE": rv32_dtb.DONE_BASE,
+                "CLINT": rv32_dtb.CLINT_BASE, "BOOTROM": rv32_dtb.ROM_BASE, "INPUT": rv32_dtb.INPUT_BASE,
+                "DISPLAY": rv32_dtb.DISPLAY_BASE, "FB": rv32_dtb.FB_BASE, "SIMD4": rv32_dtb.SIMD4_BASE,
+                "SIMD4_PROGRAM": rv32_dtb.SIMD4_PROGRAM, "SIMD4_DATA": rv32_dtb.SIMD4_DATA,
+                "GPU": rv32_dtb.GPU_BASE, "G3D": rv32_dtb.G3D_BASE}
+        self.assertEqual(tree, bases, "rv32_dtb.py describes the same windows")
         machine = (ROOT / "rtl/rv32/rv32_soc.v").read_text()
         instances = re.findall(r"rv32_ram #\(\.WORDS\((\w+)\), \.BASE\(32'h([0-9a-fA-F_]+)\)\)", machine)
         self.assertEqual([(words, int(value.replace("_", ""), 16)) for words, value in instances],

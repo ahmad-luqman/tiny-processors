@@ -22,7 +22,7 @@
 #include "console.h"
 #include "mmio.h"
 
-#define DIAG_EXPECTED 0x8bd87e9au /* FNV-1a fold of 27 values: the 22 CHECKs, the frame-1 hash, four events; the Makefile's RV32_DIAG_HEX */
+#define DIAG_EXPECTED 0xefd4ec82u /* FNV-1a fold of 27 values: the 22 CHECKs, the frame-1 hash, four events; the Makefile's RV32_DIAG_HEX */
 #define DIAG_UNMAPPED 0x50000000u /* no window there (tools/rv32_asm.py UNMAPPED) */
 #define FB_WORDS (RV32_FB_SIZE / 4u)
 
@@ -145,16 +145,16 @@ static uint32_t input_word(uint32_t offset)
 int main(void)
 {
     /* 1. Timer: it advances, a write loads it, and it wraps. */
-    uint32_t t0 = mmio_read32(RV32_TIMER_BASE + RV32_TIMER_TICKS);
+    uint32_t t0 = mmio_read32(RV32_CLINT_BASE + RV32_CLINT_MTIME);
     for (uint32_t i = 0; i < 100; i++) {
         opaque(i);
     }
-    uint32_t t1 = mmio_read32(RV32_TIMER_BASE + RV32_TIMER_TICKS);
+    uint32_t t1 = mmio_read32(RV32_CLINT_BASE + RV32_CLINT_MTIME);
     CHECK(1, (t1 - t0) != 0 && (t1 - t0) < 0x80000000u, 1);
-    mmio_write32(RV32_TIMER_BASE + RV32_TIMER_TICKS, 0xFFFFFF00u);
+    mmio_write32(RV32_CLINT_BASE + RV32_CLINT_MTIME, 0xFFFFFF00u);
     uint32_t ticks, guard = 0;
     do {
-        ticks = mmio_read32(RV32_TIMER_BASE + RV32_TIMER_TICKS);
+        ticks = mmio_read32(RV32_CLINT_BASE + RV32_CLINT_MTIME);
     } while (ticks >= 0xFFFFFF00u && ++guard < 100000u);
     CHECK(2, ticks < 0x10000u, 1); /* wrapped through zero, not lost */
     rv32_puts("diag: timer ok\n");
@@ -162,14 +162,14 @@ int main(void)
     /* 2. Faults: one per device rule, each resumed after the faulting instruction. */
     set_mtvec(diag_trap_entry);
     (void)mmio_read32(DIAG_UNMAPPED);
-    (void)mmio_read8(RV32_TIMER_BASE + RV32_TIMER_TICKS);
+    (void)mmio_read8(RV32_CLINT_BASE + RV32_CLINT_MTIME);
     mmio_write32(RV32_INPUT_BASE + RV32_INPUT_KEYS, 1);
     mmio_write8(RV32_FB_BASE + RV32_FB_SIZE, 1);
     CHECK(3, trap_count, 4);
     CHECK(4, trap_cause[0], 5);
     CHECK(5, trap_tval[0], DIAG_UNMAPPED);
     CHECK(6, trap_cause[1], 5);
-    CHECK(7, trap_tval[1], RV32_TIMER_BASE);
+    CHECK(7, trap_tval[1], RV32_CLINT_BASE + RV32_CLINT_MTIME);
     CHECK(8, trap_cause[2], 7);
     CHECK(9, trap_tval[2], RV32_INPUT_BASE + RV32_INPUT_KEYS);
     CHECK(10, trap_cause[3], 7);

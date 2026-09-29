@@ -82,6 +82,10 @@ module rv32_soc #(
     wire fb_valid, fb_ready, fb_error;
     wire [31:0] fb_rdata;
 
+    wire [63:0] mtime;
+    wire rom_valid, rom_ready, rom_error;
+    wire [31:0] rom_rdata;
+
     rv32 core (
         .clk(clk), .reset(reset),
         .mem_valid(mem_valid), .mem_addr(mem_addr), .mem_we(mem_we), .mem_strb(mem_strb),
@@ -92,7 +96,7 @@ module rv32_soc #(
         .retire_fd_we(retire_fd_we), .retire_fd(retire_fd), .retire_fd_value(retire_fd_value),
         .retire_fcsr_we(retire_fcsr_we), .retire_fcsr(retire_fcsr),
         .trap_value(trap_value), .halted(halted), .state(state), .pc(pc),
-        .mtvec(mtvec), .mepc(mepc), .mcause(mcause), .mtval(mtval)
+        .mtvec(mtvec), .mepc(mepc), .mcause(mcause), .mtval(mtval), .time_now(mtime)
     );
 
     rv32_bus #(.RAM_WORDS(RAM_WORDS), .FB_WORDS(FB_WORDS)) bus (
@@ -101,7 +105,8 @@ module rv32_soc #(
         .ram_valid(ram_valid), .ram_ready(ram_ready), .ram_error(ram_error), .ram_rdata(ram_rdata),
         .console_valid(con_valid), .console_ready(con_ready), .console_error(con_error), .console_rdata(con_rdata),
         .done_valid(dn_valid), .done_ready(dn_ready), .done_error(dn_error), .done_rdata(dn_rdata),
-        .timer_valid(tm_valid), .timer_ready(tm_ready), .timer_error(tm_error), .timer_rdata(tm_rdata),
+        .clint_valid(tm_valid), .clint_ready(tm_ready), .clint_error(tm_error), .clint_rdata(tm_rdata),
+        .rom_valid(rom_valid), .rom_ready(rom_ready), .rom_error(rom_error), .rom_rdata(rom_rdata),
         .input_valid(in_valid), .input_ready(in_ready), .input_error(in_error), .input_rdata(in_rdata),
         .display_valid(dp_valid), .display_ready(dp_ready), .display_error(dp_error), .display_rdata(dp_rdata),
         .fb_valid(fb_valid), .fb_ready(fb_ready), .fb_error(fb_error), .fb_rdata(fb_rdata),
@@ -155,7 +160,7 @@ module rv32_soc #(
     // G1 reads RAM words and writes single framebuffer bytes.
     wire [3:0] em_strb = g3d_busy ? g3m_strb : gm_we ? 4'b0001 << gm_addr[1:0] : 4'b1111;
     wire gm_ram=em_valid && em_addr[31];
-    wire gm_fb=em_valid && em_addr>=32'h3000_0000 && em_addr<32'h3001_2c00;
+    wire gm_fb=em_valid && em_addr>=32'h1200_0000 && em_addr<32'h1201_2c00;
     // RAM is immediate once granted. A held graphics request retains its grant;
     // after an acceptance simultaneous requests alternate, so neither starves.
     reg prefer_gpu, gpu_grant_held;
@@ -204,9 +209,14 @@ module rv32_soc #(
         .done_valid(done_valid), .done_word(done_wdata)
     );
 
-    rv32_timer timer (
+    rv32_clint clint (
         .clk(clk), .reset(reset), .valid(tm_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
-        .wdata(mem_wdata), .rdata(tm_rdata), .ready(tm_ready), .error(tm_error)
+        .wdata(mem_wdata), .rdata(tm_rdata), .ready(tm_ready), .error(tm_error), .mtime(mtime)
+    );
+
+    // The boot ROM holds the machine's device tree; the core starts with its address in a1.
+    rv32_bootrom bootrom (
+        .valid(rom_valid), .we(mem_we), .addr(mem_addr), .rdata(rom_rdata), .ready(rom_ready), .error(rom_error)
     );
 
     rv32_input input_device (
@@ -237,9 +247,9 @@ module rv32_soc #(
     assign gm_ready=!g3d_busy && em_ready;
     assign em_read_word=gm_ram?ram_physical_rdata:fb_physical_rdata;
     assign gm_rdata=em_read_word[8*gm_addr[1:0]+:8];
-    rv32_ram #(.WORDS(FB_WORDS), .BASE(32'h3000_0000)) fb (
+    rv32_ram #(.WORDS(FB_WORDS), .BASE(32'h1200_0000)) fb (
         .clk(clk), .reset(reset), .valid(engine_busy?fb_engine_accept:fb_valid),
-        .we(engine_busy?em_we:mem_we), .addr(gm_fb?em_addr:(fb_valid?mem_addr:32'h3000_0000)),
+        .we(engine_busy?em_we:mem_we), .addr(gm_fb?em_addr:(fb_valid?mem_addr:32'h1200_0000)),
         .strb(engine_busy?em_strb:mem_strb),
         .wdata(engine_busy?em_wdata:mem_wdata),
         .rdata(fb_physical_rdata), .ready(fb_physical_ready), .error(fb_physical_error)

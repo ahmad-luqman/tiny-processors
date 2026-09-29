@@ -1,0 +1,18 @@
+platcheck: hart 0
+platcheck: model tiny-processors RV32 machine
+platcheck: memory 80000000 00400000
+platcheck: done 00100000
+platcheck: console 10000000
+platcheck: clint 02000000
+platcheck: mtime advances
+platcheck: time follows mtime
+platcheck: mtimecmp and msip hold
+platcheck: input 11001000 00000010
+platcheck: display 11002000 00000010
+platcheck: framebuffer 12000000 00012c00
+platcheck: simd4 11004000 00000020
+platcheck: simd4-program 11005000 00000400
+platcheck: simd4-data 11006000 00000400
+platcheck: g1 11007000 00000080
+platcheck: g2 11008000 00002000
+PASS b8a59113

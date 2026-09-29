@@ -22,14 +22,15 @@ flowchart LR
     BUS -->|"ram_valid, fb_valid"| MUX
     BUS -->|console_valid| CON["rv32_console 0x1000_0000"]
     BUS -->|done_valid| DONE["rv32_done 0x0010_0000"]
-    BUS -->|timer_valid| TIMER["rv32_timer 0x2000_0000"]
-    BUS -->|input_valid| IN["rv32_input 0x2000_1000"]
-    BUS -->|display_valid| DISP["rv32_display 0x2000_2000"]
+    BUS -->|clint_valid| TIMER["rv32_clint 0x0200_0000 (the M5 timer until Track 1)"]
+    BUS -->|rom_valid| ROM["rv32_bootrom 0x0000_1000 (Track 1)"]
+    BUS -->|input_valid| IN["rv32_input 0x1100_1000"]
+    BUS -->|display_valid| DISP["rv32_display 0x1100_2000"]
     BUS -->|simd_valid| SIMD["rv32_simd4: registers + program/data memories"]
     BUS -->|gpu_valid| GPU["rv32_gpu: integer rasterizer"]
     GPU --> MUX["SoC RAM arbiter and framebuffer mux"]
     MUX -->|"arbitrated reads"| RAM["rv32_ram 4 MiB at 0x8000_0000"]
-    MUX -->|"exclusive ownership"| FB["rv32_ram 76,800 B at 0x3000_0000"]
+    MUX -->|"exclusive ownership"| FB["rv32_ram 76,800 B at 0x1200_0000"]
     GPU_HOLD["testbench gpu_memory_hold"] --> MUX
     SIMD_HOLD["testbench simd_memory_hold"] --> SIMD
     CON -->|"console_valid, byte"| HOST["host: testbench or native window"]
@@ -54,10 +55,10 @@ Every slave has a common bus port: `clk`, `reset`, `valid`, `addr`, `we`, `strb`
 
 ### The devices
 
-- **RAM** ([rv32_ram.v](../rtl/rv32/rv32_ram.v)): `WORDS` words from `BASE`, an asynchronous read of the whole aligned word (a continuous assign, so the array never enters a sensitivity list) and a strobe-masked write at the accepting edge, exactly the testbench's old model. The word index is the offset from `BASE` (`addr - BASE`, which synthesis folds away because the bases are aligned), so the memory does not care where the bus placed its window; the machine passes the bus's base to each instance and a tools test pins the two spellings equal. There is no initial block: the testbench zero-fills and loads the image through the hierarchy, and synthesis never sees a file. The same module is the framebuffer with `WORDS = 19200` at `0x3000_0000`, behind its own window: a pixel store is data movement and nothing else.
+- **RAM** ([rv32_ram.v](../rtl/rv32/rv32_ram.v)): `WORDS` words from `BASE`, an asynchronous read of the whole aligned word (a continuous assign, so the array never enters a sensitivity list) and a strobe-masked write at the accepting edge, exactly the testbench's old model. The word index is the offset from `BASE` (`addr - BASE`, which synthesis folds away because the bases are aligned), so the memory does not care where the bus placed its window; the machine passes the bus's base to each instance and a tools test pins the two spellings equal. There is no initial block: the testbench zero-fills and loads the image through the hierarchy, and synthesis never sees a file. The same module is the framebuffer with `WORDS = 19200` at `0x1200_0000`, behind its own window: a pixel store is data movement and nothing else.
 - **Console** ([rv32_console.v](../rtl/rv32/rv32_console.v)): the M2 edges (a byte store to +0, a byte read of +5 with strobe `0010`, everything else refused), a `tx_valid` strobe in the accepting cycle, and `BUSY_CYCLES`, a parameter that holds `ready` low for that many cycles before each byte: the contract's permission for a device to wait, exercised by one test. Status reads and refused accesses are never delayed.
 - **Done register** ([rv32_done.v](../rtl/rv32/rv32_done.v)): stateless; a word store raises `done_valid` with the word, and the host still ends the run only after that instruction retires.
-- **Timer** ([rv32_timer.v](../rtl/rv32/rv32_timer.v)): `elapsed` counts completed cycles from reset release; a read returns `elapsed + 1`, the number of the cycle that accepts it, so the first cycle reads 1 and a `lw` accepted in cycle `k` reads `k`. A word write loads `elapsed`, so the write's own cycle counts as the written value and a read `n` cycles later returns value + n. Offsets +4 to +12 and every byte or halfword access are refused.
+- **Timer** (`rv32_timer.v`; since Track 1 the 64-bit `mtime` of [rv32_clint.v](../rtl/rv32/rv32_clint.v), same rule): `elapsed` counts completed cycles from reset release; a read returns `elapsed + 1`, the number of the cycle that accepts it, so the first cycle reads 1 and a `lw` accepted in cycle `k` reads `k`. A word write loads `elapsed`, so the write's own cycle counts as the written value and a read `n` cycles later returns value + n. Offsets +4 to +12 and every byte or halfword access are refused.
 - **Input** ([rv32_input.v](../rtl/rv32/rv32_input.v)): a 16-entry queue (`head`, `tail`, `count`) the host fills one event per cycle through `push`/`push_event`; EVENT pops at acceptance, COUNT reads `count`, KEYS is 32 flip-flops written by a variable bit-select as events arrive (`keys[code] <= press`). While `push` is high the device holds `ready` low for guest accesses, so a frame's burst lands whole before the guest's next load; the emulator queues the same burst in one step, and that is what keeps the sequence the guest reads identical. A push into a full queue is ignored and `full` lets the host report the drop.
 - **Display** ([rv32_display.v](../rtl/rv32/rv32_display.v)): PRESENT raises `present` for the accepting cycle and counts a frame; FRAMES, WIDTH, and HEIGHT are read-only words. The pixels are not here: the host snapshots the framebuffer memory when it sees `present`, which is all "presenting" means; the [native window](rv32-window.md) does the same on the emulator.
 
@@ -156,7 +157,7 @@ make disasm-rv32-diag           # the diagnostic's listing
 
 ## Exercises
 
-1. **Decode an address by hand.** Take `0x2000_1008` and `0x3001_2C00` through the comparators in `rv32_bus.v`: which selects are set, what do `mem_ready` and `mem_error` become, and in which cycle? Then move the input window to `0x2000_1010` in the bus, the emulator, and `board.h` and watch which tests notice.
+1. **Decode an address by hand.** Take `0x1100_1008` and `0x1201_2C00` through the comparators in `rv32_bus.v`: which selects are set, what do `mem_ready` and `mem_error` become, and in which cycle? Then move the input window to `0x1100_1010` in the bus, the emulator, and `board.h` and watch which tests notice.
 2. **A framebuffer store is ordinary data movement.** Write a program that fills the framebuffer and never presents; run it with `+checkpoints` and `--checkpoints`. Nothing is written, because nothing displayed it. Then present once and compare the line with `frame_hash` in Python over the bytes you expect.
 3. **Device time.** Change the emulator's tick to two per instruction (or the RTL's to one per two cycles) and run `make run-rv32-diag-rtl`: the diagnostic still passes, because it never relies on the rate. Then print a tick value in the diagnostic and watch the results comparison fail on the console.
 4. **A slower device.** Give the display a `BUSY_CYCLES` like the console's, so a present costs cycles, and extend `test_console_backpressure_holds_ready_per_byte` to it. The cycle formula's `stalls` term absorbs it; the trace does not change.

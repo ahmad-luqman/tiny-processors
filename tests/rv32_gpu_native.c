@@ -69,7 +69,7 @@ int main(int argc,char **argv)
                 if(++ticks>4000000)return 15;
             }
             if(g.status==GPU_DONE){
-                const uint8_t *source=c.p[GP_SRC]==0x30000000u?before:
+                const uint8_t *source=c.p[GP_SRC]==0x12000000u?before:
                     c.p[GP_OP]==GPU_BLIT?ram+(c.p[GP_SRC]-0x80000000u):0;
                 gpu_reference(before,source,&c);
                 for(unsigned i=0;i<76800;i++)if(before[i]!=fb[i])return 16;

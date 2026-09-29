@@ -2,7 +2,7 @@
 #ifndef RV32_GPU_H
 #define RV32_GPU_H
 #include <stdint.h>
-#define GPU_BASE 0x20007000u
+#define GPU_BASE 0x11007000u
 #define GPU_COMMAND 0x00u
 #define GPU_STATUS 0x04u
 #define GPU_ERROR 0x08u

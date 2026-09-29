@@ -109,8 +109,8 @@ def fnv_fold(values):
 # Every value programs/rv32/diag.c folds into its checksum, in order: the CHECK expectations and
 # the folded values (the frame-1 hash and the four events). Timer readings are never folded.
 DIAG_EXPECTED_VALUES = [
-    1, 1,                                            # timer advanced; wrapped after the write
-    4, 5, 0x50000000, 5, 0x20000000, 7, 0x20001008, 7, 0x30000000 + FB_SIZE,  # four faults
+    1, 1,                                            # mtime advanced; wrapped after the write
+    4, 5, 0x50000000, 5, 0x0200BFF8, 7, 0x11001008, 7, 0x12000000 + FB_SIZE,  # four faults
     320, 240, 0,                                     # WIDTH, HEIGHT, FRAMES before the first present
     "frame1",                                        # the readback hash of frame 1
     1,                                               # FRAMES after the first present

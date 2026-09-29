@@ -56,7 +56,7 @@ RV32_G3D_GENERATED := build/rv32/g3d_shaders.h build/rv32/g3d_scenes.h
 RV32_IMAGES := selfcheck diag pong capstone
 RV32_IMAGE_FILES := $(foreach image,$(RV32_IMAGES),$(foreach ext,elf lst bin readelf,build/rv32/$(image).$(ext)))
 RV32_SELFCHECK_HEX := 807d9fad
-RV32_DIAG_HEX := 8bd87e9a
+RV32_DIAG_HEX := efd4ec82
 RV32_DIAG_FRAME1_HEX := ae4eb605
 RV32_DIAG_FRAME2_HEX := 2acb5d85
 RV32_DIAG_INPUT := programs/rv32/diag.input
@@ -81,13 +81,13 @@ FP32_RANDOM ?= 100
 RV32_FP_OBJ := build/fp32/rv32_fp.o $(SOFTFLOAT_OBJ)
 RV32EMU := build/rv32/rv32emu
 RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
-RV32EMU_CORE := tools/rv32_gpu.c tools/rv32_gpu.h programs/rv32/gpu.h tools/rv32_g3d.c tools/rv32_g3d.h programs/rv32/g3d.h  tools/rv32emu_core.c tools/rv32emu_core.h tools/rv32_fp.h tools/rv32_simd4.c tools/rv32_simd4.h
+RV32EMU_CORE := tools/rv32_gpu.c tools/rv32_gpu.h programs/rv32/gpu.h tools/rv32_g3d.c tools/rv32_g3d.h programs/rv32/g3d.h  tools/rv32emu_core.c tools/rv32emu_core.h tools/rv32_dtb.h tools/rv32_fp.h tools/rv32_simd4.c tools/rv32_simd4.h
 RV32WIN := build/rv32/rv32win
 # Recursive `=`: pkg-config runs only where the window is built, so a machine without SDL3 still runs every test.
 SDL3_CFLAGS = $(shell pkg-config --cflags sdl3 2>/dev/null)
 SDL3_LIBS = $(shell pkg-config --libs sdl3 2>/dev/null)
 RV32_RTL := rtl/rv32/rv32_fregfile.v rtl/rv32/rv32_fdecode.v $(FP32_RTL) rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32_muldiv.v rtl/rv32/rv32.v
-RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_timer.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
+RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_clint.v rtl/rv32/rv32_bootrom.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
 RV32_TB := tests/rv32_tb.sv
 RV32_TB_VVP := build/rv32/rv32_tb.vvp
 RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
@@ -1109,3 +1109,46 @@ test-rv32-arch-verilator: toolchain-rv32 fetch-rv32-arch-test $(RV32EMU) $(RV32_
 test-rv32-arch-icarus: toolchain-rv32 fetch-rv32-arch-test $(RV32EMU) $(RV32_TB_VVP)
 	$(PYTHON) tools/rv32_arch_test.py $(RV32_ARCH_ARGS) --backend icarus --icarus $(RV32_TB_VVP) --out build/rv32/arch/icarus
 test-rv32: test-rv32-arch-model test-rv32-arch test-rv32-arch-verilator
+
+# Track 1: a virt-compatible platform (docs/rv32-platform.md). The machine's device tree comes
+# from tools/rv32_dtb.py, which also writes the committed C array and boot ROM; platcheck reads
+# whatever tree a1 points at and runs unmodified on QEMU virt, the emulator and the RTL.
+.PHONY: check-rv32-dtb check-rv32-virt-map check-rv32-platcheck-image test-rv32-platform
+.PHONY: run-rv32-platform-qemu run-rv32-platform-emu run-rv32-platform-rtl run-rv32-platform-rtl-verilator
+RV32_PLATCHECK_OBJS := build/rv32/platcheck.o build/rv32/fdt.o $(RV32_COMMON_OBJS)
+RV32_PLATCHECK_HEX := b8a59113
+# QEMU 8.2 has no bare `rv32i` model; the generic CPU runs the RV32I image as is.
+RV32_PLATFORM_QEMU_CPU ?= rv32
+RV32_PLATFORM_ARGS := --image build/rv32/platcheck.bin --compare results --expect-last-line "PASS $(RV32_PLATCHECK_HEX)" --expect-console-file programs/rv32/platcheck.expected
+
+build/rv32/fdt.o build/rv32/platcheck.o: programs/rv32/fdt.h
+
+build/rv32/platcheck.elf: $(RV32_PLATCHECK_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(RV32_PLATCHECK_OBJS)
+
+check-rv32-dtb:
+	$(PYTHON) tools/rv32_dtb.py --check --dtb build/rv32/machine.dtb
+
+check-rv32-virt-map:
+	$(PYTHON) tools/rv32_virt_map.py --qemu $(QEMU_RV32)
+
+check-rv32-platcheck-image: build/rv32/platcheck.elf build/rv32/platcheck.lst build/rv32/platcheck.bin
+	$(PYTHON) tools/rv32_image.py build/rv32/platcheck.elf --listing build/rv32/platcheck.lst --bin build/rv32/platcheck.bin --hex build/rv32/platcheck.hex --allow-privileged --allow-counters
+
+run-rv32-platform-qemu: check-rv32-platcheck-image
+	$(PYTHON) tools/rv32_run_qemu.py build/rv32/platcheck.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --last-line --timeout 20 --expect-hex $(RV32_PLATCHECK_HEX) --transcript build/rv32/platcheck.qemu.transcript --qemu-log build/rv32/platcheck.qemu.log
+	diff -u programs/rv32/platcheck.qemu.expected build/rv32/platcheck.qemu.transcript
+
+run-rv32-platform-emu: check-rv32-platcheck-image $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_PLATFORM_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32/platform-emu
+
+run-rv32-platform-rtl: check-rv32-platcheck-image $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_PLATFORM_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/platform-icarus
+
+run-rv32-platform-rtl-verilator: check-rv32-platcheck-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_PLATFORM_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/platform-verilator
+
+test-rv32-platform: check-rv32-platcheck-image
+	HOST_CC=$(HOST_CC) QEMU_RV32=$(QEMU_RV32) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_platform.py' -v
+
+test-rv32: check-rv32-dtb check-rv32-virt-map test-rv32-platform run-rv32-platform-qemu run-rv32-platform-emu run-rv32-platform-rtl run-rv32-platform-rtl-verilator

@@ -619,11 +619,11 @@ class RtlTest(unittest.TestCase):
             ("jal to a non-word target", [ADDI(1, 0, 1), JAL(0, 6)], 0, RAM + 4 + 6),
             ("taken branch to a non-word target", [ADDI(1, 0, 1), BEQ(1, 1, -2)], 0, RAM + 4 - 2),
             ("fetch outside RAM", [ADDI(1, 0, 1), JAL(0, -8)], 1, RAM - 4),
-            ("byte load of the timer", LI(1, TIMER) + [LBU(2, 1, 0)], 5, TIMER),
-            ("halfword store to the timer", LI(1, TIMER) + [SH(1, 1, 0)], 7, TIMER),
-            ("word load of an unimplemented timer offset", LI(1, TIMER) + [LW(2, 1, 4)], 5, TIMER + 4),
-            ("word store past the timer window", LI(1, TIMER) + [SW(1, 1, 16)], 7, TIMER + 16),
-            ("fetch from the timer", LI(1, TIMER) + [JALR(0, 1, 0)], 1, TIMER),
+            ("byte load of mtime", LI(1, TIMER) + [LBU(2, 1, 0)], 5, TIMER),
+            ("halfword store to mtime", LI(1, TIMER) + [SH(1, 1, 0)], 7, TIMER),
+            ("word load of an unimplemented CLINT offset", LI(1, TIMER) + [LW(2, 1, -4)], 5, TIMER - 4),
+            ("word store past mtime inside the CLINT window", LI(1, TIMER) + [SW(1, 1, 16)], 7, TIMER + 16),
+            ("fetch from mtime", LI(1, TIMER) + [JALR(0, 1, 0)], 1, TIMER),
             ("read of the present register", LI(1, DISPLAY) + [LW(2, 1, 0)], 5, DISPLAY),
             ("write to the frame count", LI(1, DISPLAY) + [SW(1, 1, 4)], 7, DISPLAY + 4),
             ("byte read of the width", LI(1, DISPLAY) + [LBU(2, 1, 8)], 5, DISPLAY + 8),
@@ -639,8 +639,8 @@ class RtlTest(unittest.TestCase):
             ("read of an unimplemented input offset", LI(1, INPUT) + [LW(2, 1, 12)], 5, INPUT + 12),
             ("misaligned load inside a device window", LI(1, TIMER + 2) + [LW(2, 1, 0)], 4, TIMER + 2),
             ("aligned halfword inside a device window", LI(1, TIMER + 2) + [LHU(2, 1, 0)], 5, TIMER + 2),
-            ("load from the palette window reserved for M6", LI(1, 0x20003000) + [LW(2, 1, 0)], 5, 0x20003000),
-            ("store to the palette window reserved for M6", LI(1, 0x20003000) + [SW(1, 1, 0)], 7, 0x20003000),
+            ("load from the palette window reserved for M6", LI(1, 0x11003000) + [LW(2, 1, 0)], 5, 0x11003000),
+            ("store to the palette window reserved for M6", LI(1, 0x11003000) + [SW(1, 1, 0)], 7, 0x11003000),
             ("fetch from the first word past RAM", LI(1, RAM + 0x400000) + [JALR(0, 1, 0)], 1, RAM + 0x400000),
         ]
         for name, words, cause, value in cases:
@@ -718,6 +718,31 @@ class RtlTest(unittest.TestCase):
                                  [f"x2={first:08x} mem[{TIMER:08x}]->{first:08x}/4", f"x4={second:08x} mem[{TIMER:08x}]->{second:08x}/4"])
                 self.assertEqual([effects(line) for line in emulator.trace[5:7]],
                                  [f"x2=ffffffff mem[{TIMER:08x}]->ffffffff/4", f"x4=00000000 mem[{TIMER:08x}]->00000000/4"])
+
+    def test_clint_boot_rom_and_boot_registers(self):
+        """Track 1 (docs/rv32.md, "Boot convention", "CLINT"): a0 and a1 hold the hart id and the
+        boot ROM's address at reset; the ROM reads the same bytes at every width on both backends;
+        mtimecmp and msip hold what is written and mtimecmp resets to all ones; `timeh` and mtime's
+        high word follow a write to it. None of these reads a count that differs, so the traces are
+        compared whole."""
+        words = [ADDI(20, 10, 0), ADDI(21, 11, 0), LW(22, 11, 0), LBU(23, 11, 1), LHU(24, 11, 6), LW(25, 11, 0x7FC)]
+        words += LI(1, CLINT) + LI(3, CLINT + 0x4000) + LI(2, CLINT + 0xBFF8)
+        words += [LW(4, 3, 0), LW(5, 3, 4)] + LI(6, 0x12345678) + [SW(6, 3, 4), LW(7, 3, 4), SW(6, 1, 0), LW(8, 1, 0)]
+        words += [SW(0, 2, 0)] + LI(6, 9) + [SW(6, 2, 4), LW(9, 2, 4), RDTIMEH(12)]
+        for stall in (0, 1):
+            with self.subTest(stall=stall):
+                emulator, rtl = self.assert_same_pass(words + FINISH(), stall=stall)
+                self.assertIn(f"x21={BOOTROM:08x}", effects(rtl.trace[1]))
+                self.assertEqual(effects(rtl.trace[2]), f"x22=edfe0dd0 mem[{BOOTROM:08x}]->edfe0dd0/4")
+        for name, body, cause, value in (
+                ("store to the boot ROM", [SW(0, 11, 0)], 7, BOOTROM),
+                ("fetch from the boot ROM", [JALR(0, 11, 0)], 1, BOOTROM),
+                ("byte load of mtime", LI(1, CLINT + 0xBFF8) + [LBU(2, 1, 0)], 5, CLINT + 0xBFF8),
+                ("word between CLINT registers", LI(1, CLINT + 0x4008) + [LW(2, 1, 0)], 5, CLINT + 0x4008),
+                ("virt's PLIC, reserved for O1", LI(1, 0x0C000000) + [LW(2, 1, 0)], 5, 0x0C000000),
+                ("virt's virtio-mmio, reserved for O3", LI(1, 0x10001000) + [SW(2, 1, 0)], 7, 0x10001000)):
+            with self.subTest(name):
+                self.assert_same_double_fault(body, cause, value)
 
     def test_display_and_framebuffer(self):
         """WIDTH and HEIGHT, byte/halfword/word stores into the framebuffer and reads back, two

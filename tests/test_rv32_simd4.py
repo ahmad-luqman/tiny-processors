@@ -318,7 +318,7 @@ class SimdIntegration(unittest.TestCase):
             traps = [line.split()[-2:] for line in result.trace if ' trap ' in line]
             self.assertEqual(traps, [['5',f'{PROGRAM:08x}'],['7',f'{PROGRAM:08x}'],
                 ['5',f'{DATA:08x}'],['7',f'{DATA:08x}'],['7',f'{BASE+ENTRY:08x}'],['7',f'{BASE:08x}']])
-            self.assertTrue(any('mem[20004004]->00000000/4' in line for line in result.trace))
+            self.assertTrue(any('mem[11004004]->00000000/4' in line for line in result.trace))
 
     def test_trap_advances_device(self):
         # HLT needs FETCH + EXECUTE. The trap must supply FETCH so that the
@@ -398,9 +398,9 @@ class SimdIntegration(unittest.TestCase):
             self.assertIn(message,result.stderr)
 
     def test_result_comparison_detection(self):
-        self.assertTrue(uses_accelerator(['1 80000000 00000000 x1=1 mem[20004004]->00000001/4']))
-        self.assertFalse(uses_accelerator(['1 80000000 00000000 trap 5 20004004']))
-        self.assertFalse(uses_accelerator(['1 80000000 00000000 mem[20005000]<-00000000/4']))
+        self.assertTrue(uses_accelerator(['1 80000000 00000000 x1=1 mem[11004004]->00000001/4']))
+        self.assertFalse(uses_accelerator(['1 80000000 00000000 trap 5 11004004']))
+        self.assertFalse(uses_accelerator(['1 80000000 00000000 mem[11005000]<-00000000/4']))
 
     def test_soc_fault_edges(self):
         # Each image deliberately double-faults (mtvec remains zero); compare

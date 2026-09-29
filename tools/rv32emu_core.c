@@ -8,6 +8,7 @@
 #endif
 #include "rv32emu_core.h"
 #include "rv32_fp.h"
+#include "rv32_dtb.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -116,25 +117,58 @@ static mem_access done_store(machine *m, uint32_t offset, int width, uint32_t va
     return ACC_FAULT; /* byte and halfword writes */
 }
 
-/* Device time (docs/rv32.md): a tick is one executed instruction. The load
- * runs before this instruction is counted, so instruction N reads N - 1
- * plus whatever a write added. */
-static mem_access timer_load(machine *m, uint32_t offset, int width, uint32_t *value)
+/* CLINT (docs/rv32.md, "CLINT"). Device time: a tick is one executed instruction, and a load
+ * runs before its instruction is counted, so instruction N reads mtime = N - 1 plus whatever a
+ * write added. A write to one half replaces that half of the current count. msip and mtimecmp
+ * are plain registers until the core takes interrupts (O1). */
+static uint64_t mtime_now(const machine *m)
 {
-    if (width == 4 && offset == TIMER_TICKS) {
-        *value = (uint32_t)m->steps + m->timer_offset;
-        return ACC_OK;
-    }
-    return ACC_FAULT;
+    return m->steps + m->mtime_offset;
 }
 
-static mem_access timer_store(machine *m, uint32_t offset, int width, uint32_t value)
+static mem_access clint_load(machine *m, uint32_t offset, int width, uint32_t *value)
 {
-    if (width == 4 && offset == TIMER_TICKS) {
-        m->timer_offset = value - (uint32_t)m->steps;
-        return ACC_OK;
+    if (width != 4) {
+        return ACC_FAULT;
     }
-    return ACC_FAULT;
+    switch (offset) {
+    case CLINT_MSIP: *value = m->msip; return ACC_OK;
+    case CLINT_MTIMECMP: *value = (uint32_t)m->mtimecmp; return ACC_OK;
+    case CLINT_MTIMECMP + 4: *value = (uint32_t)(m->mtimecmp >> 32); return ACC_OK;
+    case CLINT_MTIME: *value = (uint32_t)mtime_now(m); return ACC_OK;
+    case CLINT_MTIME + 4: *value = (uint32_t)(mtime_now(m) >> 32); return ACC_OK;
+    default: return ACC_FAULT;
+    }
+}
+
+static mem_access clint_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    if (width != 4) {
+        return ACC_FAULT;
+    }
+    uint64_t now = mtime_now(m);
+    switch (offset) {
+    case CLINT_MSIP: m->msip = value & 1u; return ACC_OK;
+    case CLINT_MTIMECMP: m->mtimecmp = (m->mtimecmp & ~0xffffffffull) | value; return ACC_OK;
+    case CLINT_MTIMECMP + 4: m->mtimecmp = (m->mtimecmp & 0xffffffffull) | (uint64_t)value << 32; return ACC_OK;
+    case CLINT_MTIME: m->mtime_offset = ((now & ~0xffffffffull) | value) - m->steps; return ACC_OK;
+    case CLINT_MTIME + 4: m->mtime_offset = ((now & 0xffffffffull) | (uint64_t)value << 32) - m->steps; return ACC_OK;
+    default: return ACC_FAULT;
+    }
+}
+
+/* Boot ROM: the device tree blob (tools/rv32_dtb.h), readable at every width; bytes past the
+ * blob read 0. It has no store handler, so every write faults. */
+static mem_access rom_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    (void)m;
+    uint32_t v = 0;
+    for (int i = 0; i < width; i++) {
+        uint32_t at = offset + (uint32_t)i;
+        v |= (uint32_t)(at < RV32_DTB_SIZE ? rv32_dtb[at] : 0) << (8 * i);
+    }
+    *value = v;
+    return ACC_OK;
 }
 
 /* Input (docs/rv32.md): the host queues an event when its frame is reached,
@@ -334,7 +368,8 @@ static const region REGIONS[] = {
     {"g3d", G3D_BASE, G3D_SIZE, g3d_mmio_load, g3d_mmio_store},
     {"done", DONE_ADDR, 4, NULL, done_store},
     {"console", CONSOLE_BASE, 8, console_load, console_store},
-    {"timer", TIMER_BASE, 16, timer_load, timer_store},
+    {"clint", CLINT_BASE, CLINT_SIZE, clint_load, clint_store},
+    {"bootrom", RV32_DTB_ROM_BASE, RV32_DTB_ROM_SIZE, rom_load, NULL},
     {"input", INPUT_BASE, 16, input_load, NULL},
     {"display", DISPLAY_BASE, 16, display_load, display_store},
     {"framebuffer", FB_BASE, FB_SIZE, fb_load, fb_store},
@@ -447,12 +482,14 @@ static bool csr_read(const machine *m, uint32_t number, uint32_t *value)
     case CSR_MEPC: *value = m->mepc; return true;
     case CSR_MCAUSE: *value = m->mcause; return true;
     case CSR_MTVAL: *value = m->mtval; return true;
-    /* Zicntr. `cycle` and `time` count device ticks (docs/rv32.md, "Device time"): on the
-     * emulator a tick is an executed instruction, so both read the steps before this one, the
-     * value the timer device would show. `instret` counts retired instructions before this one,
-     * which is the same number on every backend. */
-    case CSR_CYCLE: case CSR_TIME: *value = (uint32_t)m->steps; return true;
-    case CSR_CYCLEH: case CSR_TIMEH: *value = (uint32_t)(m->steps >> 32); return true;
+    /* Zicntr. `cycle` counts device ticks (docs/rv32.md, "Device time"): on the emulator a
+     * tick is an executed instruction, so it reads the steps before this one. `time` shadows
+     * the CLINT's mtime, so a write to mtime moves it. `instret` counts retired instructions
+     * before this one, which is the same number on every backend. */
+    case CSR_CYCLE: *value = (uint32_t)m->steps; return true;
+    case CSR_CYCLEH: *value = (uint32_t)(m->steps >> 32); return true;
+    case CSR_TIME: *value = (uint32_t)mtime_now(m); return true;
+    case CSR_TIMEH: *value = (uint32_t)(mtime_now(m) >> 32); return true;
     case CSR_INSTRET: *value = (uint32_t)m->retired; return true;
     case CSR_INSTRETH: *value = (uint32_t)(m->retired >> 32); return true;
     default: return false;
@@ -1115,6 +1152,10 @@ void emu_init(machine *m)
     simd_reset(&m->simd);
     gpu_device_reset(&m->gpu);
     g3d_device_reset(&m->g3d);
+    m->mtimecmp = ~0ull;
+    /* Boot convention (docs/rv32.md, "Reset"): the hart id in a0, the device tree in a1. */
+    m->x[10] = BOOT_HART;
+    m->x[11] = RV32_DTB_ROM_BASE;
     m->limit = 100000000ull;
 }
 

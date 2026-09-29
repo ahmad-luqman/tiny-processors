@@ -328,7 +328,7 @@ module rv32_g3d #(
     // ---------------------------------------------------------------- memory port
     wire [31:0] linear = {15'd0, y, 8'd0} + {17'd0, y, 6'd0} + {23'd0, x};
     wire [31:0] z_addr = zbase + {linear[30:0], 1'b0};
-    wire [31:0] fb_addr = 32'h3000_0000 + linear;
+    wire [31:0] fb_addr = 32'h1200_0000 + linear;
     wire [31:0] clear_addr = zbase + {14'd0, index, 2'b00};
     assign memory_valid = !cancel && (state == ZREAD || state == ZWRITE || state == PWRITE || state == CLEAR);
     assign memory_we = state != ZREAD;

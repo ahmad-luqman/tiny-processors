@@ -63,7 +63,7 @@ void gpu_reference(uint8_t *fb, const uint8_t *source, const struct gpu_command 
     } else {
         int32_t w=(int32_t)p[GP_W],h=(int32_t)p[GP_H];
         int32_t sx=(int32_t)p[GP_SX],sy=(int32_t)p[GP_SY];
-        int reverse=p[GP_OP]==GPU_BLIT && p[GP_SRC]==0x30000000u && y0*320+x0>sy*320+sx;
+        int reverse=p[GP_OP]==GPU_BLIT && p[GP_SRC]==0x12000000u && y0*320+x0>sy*320+sx;
         for(int32_t j=0;j<h;j++) for(int32_t i=0;i<w;i++) {
             int32_t xx=reverse?w-1-i:i,yy=reverse?h-1-j:j;
             int32_t x=x0+xx,y=y0+yy;

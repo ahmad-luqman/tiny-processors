@@ -13,15 +13,15 @@ side effects. Unlisted offsets and directions are invalid.
 
 | Address | Direction | Meaning |
 | --- | --- | --- |
-| `0x20004000` | write | COMMAND: exactly 1 START, exactly 2 RESET |
-| `0x20004004` | read | STATUS: bit 0 BUSY, bit 1 DONE, bit 2 FAULT; other bits zero |
-| `0x20004008` | read/write | ENTRY: program word index 0–255; larger writes fault |
-| `0x2000400c` | read | CYCLES: busy device ticks, including final halt/fault |
-| `0x20004010` | read | STALLS: ticks waiting on the engine's data port; always zero on the emulator |
-| `0x20004014` | read | TRANSFERS: accepted engine reads and writes |
-| `0x20004018` | read | INSTRUCTIONS: successful engine retirements, including HLT |
-| `0x20005000`–`0x200053ff` | read/write | 256 program words, four bytes per word |
-| `0x20006000`–`0x200063ff` | read/write | 256 data slots, four bytes per 16-bit word |
+| `0x11004000` | write | COMMAND: exactly 1 START, exactly 2 RESET |
+| `0x11004004` | read | STATUS: bit 0 BUSY, bit 1 DONE, bit 2 FAULT; other bits zero |
+| `0x11004008` | read/write | ENTRY: program word index 0–255; larger writes fault |
+| `0x1100400c` | read | CYCLES: busy device ticks, including final halt/fault |
+| `0x11004010` | read | STALLS: ticks waiting on the engine's data port; always zero on the emulator |
+| `0x11004014` | read | TRANSFERS: accepted engine reads and writes |
+| `0x11004018` | read | INSTRUCTIONS: successful engine retirements, including HLT |
+| `0x11005000`–`0x110053ff` | read/write | 256 program words, four bytes per word |
+| `0x11006000`–`0x110063ff` | read/write | 256 data slots, four bytes per 16-bit word |
 
 Data-slot reads zero-extend; writes discard the upper 16 bits. This CPU slot
 addressing does not change the SIMD4 engine's eight-bit word addresses.

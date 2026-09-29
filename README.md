@@ -126,6 +126,22 @@ and Dhrystone set the performance baseline a pipeline will have to beat, and the
 emulator speaks the GDB remote protocol. See [the Track 0 record](docs/rv32-groundwork.md)
 and [the GDB stub](docs/rv32-gdb.md).
 
+## Track 1: a `virt`-compatible platform
+
+```sh
+make check-rv32-virt-map               # Our memory map against the tree QEMU's virt board describes
+make run-rv32-platform-qemu            # platcheck on QEMU virt: shared devices found, ours reported absent
+make run-rv32-platform-rtl-verilator   # The same image on the emulator and the RTL: same PASS word
+make test-rv32-platform                # Device-tree generator, map checker, the firmware's FDT reader
+```
+
+Our devices moved out of the address ranges `virt` uses, the timer became a
+CLINT at `virt`'s address (and the `time` CSR now reads its `mtime`), and every
+backend starts a program the way QEMU does: hart id in `a0`, a device tree in
+`a1`, served on our machine by a boot ROM. `platcheck` reads the tree it is
+given and runs unmodified on QEMU, the emulator and the RTL. See
+[the Track 1 record](docs/rv32-platform.md).
+
 ## Start here
 
 The first lab is an eight-bit counter. Its reset and enable are sampled on the rising clock edge. Reset wins over enable; otherwise the counter increments when enabled and holds when disabled. The value wraps from 255 to 0.
@@ -231,7 +247,7 @@ The 78-instruction loop produces identical traces on both backends at every stal
 
 ## RV32 machine: bus, devices, and the diagnostic
 
-[rtl/rv32/rv32_soc.v](rtl/rv32/rv32_soc.v) wires the core to a bus decoder (one comparator per window, a one-hot read mux, fetches refused outside RAM) and to the machine's memories and devices: RAM, the console, the done register, a timer, a 16-event input queue with a held-key mask, a display controller, a 320×240 framebuffer of 8-bit pixels, the A2 SIMD4 accelerator, and the G1 integer rasterizer. [tools/rv32emu_core.c](tools/rv32emu_core.c) models the same windows with the same fault edges, schedules key events from a script by frame, hashes the framebuffer into a checkpoint at each present, and writes frames as PPM files. A tick is a clock cycle on the RTL and an executed instruction on the emulator, so the [device diagnostic](programs/rv32/diag.c), which exercises every device and reads the timer, is compared at the results level: five identical console lines ending `PASS 8bd87e9a` and identical checkpoints on the emulator, Icarus, and Verilator, with the frame hash and the checksum derived independently in Python. Programs that neither read the timer nor access asynchronous accelerator registers stay trace-identical.
+[rtl/rv32/rv32_soc.v](rtl/rv32/rv32_soc.v) wires the core to a bus decoder (one comparator per window, a one-hot read mux, fetches refused outside RAM) and to the machine's memories and devices: RAM, the console, the done register, a timer, a 16-event input queue with a held-key mask, a display controller, a 320×240 framebuffer of 8-bit pixels, the A2 SIMD4 accelerator, and the G1 integer rasterizer. [tools/rv32emu_core.c](tools/rv32emu_core.c) models the same windows with the same fault edges, schedules key events from a script by frame, hashes the framebuffer into a checkpoint at each present, and writes frames as PPM files. A tick is a clock cycle on the RTL and an executed instruction on the emulator, so the [device diagnostic](programs/rv32/diag.c), which exercises every device and reads the timer, is compared at the results level: five identical console lines ending `PASS efd4ec82` and identical checkpoints on the emulator, Icarus, and Verilator, with the frame hash and the checksum derived independently in Python. Programs that neither read the timer nor access asynchronous accelerator registers stay trace-identical.
 
 ```sh
 make run-rv32-diag-emu        # the diagnostic on the emulator: PASS, checkpoints, build/rv32/frames/*.ppm

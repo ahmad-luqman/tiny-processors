@@ -10,7 +10,7 @@ interrupt, transparency, scaling, depth, or programmable stage.
 
 ## Registers
 
-The non-executable 128-byte window at `0x20007000` accepts aligned word accesses.
+The non-executable 128-byte window at `0x11007000` accepts aligned word accesses.
 Unlisted offsets/directions, parameter writes while busy, and START while busy are
 side-effect-free CPU access faults. RESET is always legal.
 
@@ -35,7 +35,7 @@ fallback uses ERROR=2. Empty operations produce DONE without transfers.
 
 Blits additionally use signed SX/SY and source dimensions SW/SH (1…2048), with
 SW ≤ STRIDE ≤ 65535. SRC is a byte address in configured RAM, or exactly
-`0x30000000` with SW=320, SH=240, STRIDE=320 for framebuffer copies. The full
+`0x12000000` with SW=320, SH=240, STRIDE=320 for framebuffer copies. The full
 source extent `(SH-1)*STRIDE+SW` must fit RAM without address wrap. Source and
 destination are clipped together. Overlap has snapshot semantics, implemented
 by reverse traversal when destination follows source in the same framebuffer.
@@ -136,7 +136,7 @@ checkpoints. `--gpu-stall N` and `--gpu-seed N` add independent fixed or seeded
    still fetch instructions, poll registers and access unrelated memory.
 
 Address arithmetic is visible rather than hidden in host rendering: destination
-is `0x30000000 + 320*y + x`; source is `SRC + STRIDE*(SY+y-Y0) + SX+x-X0`.
+is `0x12000000 + 320*y + x`; source is `SRC + STRIDE*(SY+y-Y0) + SX+x-X0`.
 Byte enables select one lane of the existing 32-bit framebuffer word. No extra
 framebuffer or RAM read port is synthesized. This first implementation uses
 combinational integer products and byte transfers; incremental edge arithmetic
@@ -184,8 +184,8 @@ not hardware speed measurements. No wall-clock emulator speedup is claimed.
 The 10 ns test clock produces these observations in `build/gfx/`:
 
 - `fill.vcd`: START at 355 ns, first write request at 375 ns for byte
-  `0x30000141` (pixel 1,1), accepted at 385 ns. The third-to-fourth pixel address
-  jumps from `0x30000143` to `0x30000281`, preserving the 320-byte row stride.
+  `0x12000141` (pixel 1,1), accepted at 385 ns. The third-to-fourth pixel address
+  jumps from `0x12000143` to `0x12000281`, preserving the 320-byte row stride.
 - The sixth fill byte commits at 535 ns. DONE appears at 545 ns, after the write,
   with six transfers and 19 busy ticks (`1 + 3*6`).
 - `reset.vcd`: the third write is issued at 445 ns and held from 450 ns. RESET removes valid at

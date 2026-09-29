@@ -271,10 +271,12 @@ class CounterTest(Track0Harness, unittest.TestCase):
                 # steps before it, whatever the stalls.
                 self.assertEqual([read(emulator, i) for i in (0, 1, 2, 3, 4, 7)], [0, 1, 2, 0, 0, 7])
                 # The RTL: a tick is a clock cycle. Instruction k's EXECUTE is its third cycle, and
-                # every instruction here costs four cycles plus the stall of its fetch.
+                # every instruction here costs four cycles plus the stall of its fetch. Since Track 1
+                # `time` reads the CLINT's mtime, the count of the reading cycle itself, one more
+                # than `cycle`, which counts the cycles before it.
                 per = 4 + stall
                 self.assertEqual([read(rtl, i) for i in (0, 1, 2, 3, 4, 7)],
-                                 [2 + stall, 2 + stall + per, 2 + stall + 2 * per, 0, 0, 2 + stall + 7 * per])
+                                 [2 + stall, 2 + stall + per, 3 + stall + 2 * per, 0, 0, 2 + stall + 7 * per])
                 self.assertEqual(rtl.console, emulator.console)
                 self.assertIsNotNone(diff_traces(rtl.trace, emulator.trace), "device time differs by design")
 

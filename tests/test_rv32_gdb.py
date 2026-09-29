@@ -292,13 +292,14 @@ class GdbStubTest(unittest.TestCase):
         self.assert_exit(session, 2, "stopped", "error=host-stopped")
 
     def test_stopped_at_reset(self):
-        """The machine waits at the reset pc with zeroed registers; the thread queries have their
-        one-hart answers and an unknown packet gets the empty reply."""
+        """The machine waits at the reset pc with zeroed registers except a1, the boot convention's
+        device-tree address; the thread queries have their one-hart answers and an unknown packet
+        gets the empty reply."""
         session, client = self.start(self.tiny())
         self.assertEqual(client.ask("?"), "T05")
         regs = client.registers()
         self.assertEqual(regs[REG_PC], 0x80000000)
-        self.assertEqual(regs[:32], [0] * 32)
+        self.assertEqual(regs[:32], [0] * 11 + [0x1000] + [0] * 20)
         self.assertEqual(client.reg(REG_PC), 0x80000000)
         self.assertEqual(client.ask("qAttached"), "1")
         self.assertEqual(client.ask("qC"), "QC1")
