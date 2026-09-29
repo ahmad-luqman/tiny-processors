@@ -9,7 +9,7 @@ chosen; the entries below say what it would take and what "done" could mean.
 
 | Layer | Today | Gap |
 | --- | --- | --- |
-| CPU | Multicycle RV32I + F, 4 to 5 cycles per instruction; the four trap CSRs plus `fflags`/`frm`/`fcsr`; machine mode only | No M (multiply/divide is software in `programs/rv32/rt/muldiv.c`), no `mstatus`, no interrupts, no A, no C, no counters |
+| CPU | Multicycle RV32I + F: 4 to 5 cycles per integer instruction, plus FPU issue/wait cycles for floating-point arithmetic (see [F2](../rv32-f.md)); the four trap CSRs plus `fflags`/`frm`/`fcsr`; machine mode only | No M (multiply/divide is software in `programs/rv32/rt/muldiv.c`), no `mstatus`, no interrupts, no A, no C, no counters |
 | Memory and devices | 4 MiB RAM (images fit a 256 KiB slice); timer, 16-event input queue, 320×240 RGB332 framebuffer, SIMD4, G1, G2 | Everything polls; no storage device; the palette window at `0x2000_3000` is reserved but unbuilt |
 | OS | Polling runtime: one static image with every application compiled into the menu | No syscalls, separate programs, files, scheduling, or protection |
 | QEMU | Reference runner only: `selfcheck` and `floatsoft` run on the `virt` board because the console and done register match its 16550 UART and `sifive_test` | None of our other devices exist there, so the capstone cannot run on QEMU |
@@ -43,8 +43,17 @@ Small, low-risk steps that every later track leans on.
    console and done register already match. Result: the kernel runs unmodified
    on QEMU, the emulator and the RTL, and QEMU becomes an independent check of
    the kernel rather than of `selfcheck` alone. Our own devices (input,
-   display, accelerators) stay at their addresses and are simply absent on
-   QEMU; the kernel probes for them.
+   display, accelerators) are not simply absent on QEMU: as
+   [docs/rv32.md](../rv32.md#memory-map) records, their
+   windows overlap `virt`'s flash banks at `0x2000_0000`, its PCIe
+   configuration space at `0x3000_0000` and its PCI memory up to
+   `0x8000_0000`, so probing them would touch unrelated QEMU devices. This
+   track must first choose one of: remap our devices into a range `virt`
+   leaves unused (checked against `-M virt,dumpdtb=`), or have the kernel
+   discover the platform without touching those addresses, for example from
+   the device tree QEMU passes in `a1` (with our backends passing a
+   recognisable value or their own device tree) and never access a device
+   the platform does not describe.
 2. **A custom QEMU board for our machine (optional).** A QEMU fork with our
    timer, input queue, display and framebuffer, with device models wrapping the
    existing C models in `tools/rv32_simd4.c`, `tools/rv32_gpu.c` and
