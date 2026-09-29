@@ -3,12 +3,16 @@
  * Written for this project after EEMBC's barebones template (third_party/coremark,
  * Apache License 2.0); the benchmark files themselves are used unmodified.
  *
- * Timing: a tick is one `cycle` count (Zicntr). EE_TICKS_PER_SEC fixes a nominal
- * 1 MHz clock, which makes CoreMark's "Iterations/Sec" read directly as
- * CoreMark/MHz and gives its 10-second rule a meaning: at least ten million
- * cycles, which the iteration count is chosen to exceed (on the emulator a tick
- * is an instruction, so the count is chosen to exceed it there too). The
- * measured region is also printed as `bench: coremark cycles=C instret=I`.
+ * Timing: a tick is one `cycle` count (Zicntr), and the measured region is printed
+ * as `bench: coremark iterations=N cycles=C instret=I`, from which the runner
+ * (tools/rv32_bench.py) computes CoreMark/MHz as N x 10^6 / C. EE_TICKS_PER_SEC
+ * only feeds CoreMark's own "Total time" and "Iterations/Sec" lines and its rule
+ * that a valid run lasts ten seconds. It fixes a nominal 100 kHz clock, so that
+ * rule asks for one million ticks: a 1 MHz clock would ask for ten million, which
+ * the RV32IM build barely reaches in 30 iterations on the emulator (a tick is an
+ * instruction there) and a faster core would miss. At 100 kHz 4 iterations are
+ * the fewest that validate everywhere. The integer "Iterations/Sec" then reads 0;
+ * it was never the score.
  * No floating point (HAS_FLOAT 0): nothing here needs it, and double-precision
  * arithmetic would need a software library the firmware does not have.
  */

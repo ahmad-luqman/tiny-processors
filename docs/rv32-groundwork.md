@@ -22,7 +22,8 @@ The steps were taken in dependency order, each verified before the next.
 5. **GDB stub**, independent of the others, built alongside them.
 
 Done means: all selected architectural suites pass on the emulator, Icarus and
-Verilator; RV32IM firmware reproduces the RV32I results on every backend; the
+Verilator; RV32IM builds of the firmware reproduce the RV32I results on the
+emulator and Verilator (the self-check and the diagnostic on Icarus too); the
 benchmarks validate on the emulator and the RTL with a recorded cycle count; and
 a stock gdb can debug a guest. The [acceptance record](#acceptance-record-2026-09-29)
 has the evidence.
@@ -116,7 +117,8 @@ present, none of the routine symbols linked). The self-check is the exception
 that proves the rule: it calls `rv32_div` and friends by name to test them, so
 it keeps the routines and now also exercises the hardware through its
 operators. Each RV32IM image must reproduce the RV32I image's console line and
-checkpoints exactly, on the emulator and on both simulators:
+checkpoints exactly, on the emulator and on Verilator; Icarus, far slower, runs
+the self-check and the diagnostic, as the RV32I targets split them:
 
 | Image | RV32I instructions | RV32IM instructions | RV32IM result |
 | --- | ---: | ---: | --- |
@@ -138,7 +140,11 @@ acceptance record.)
 The counters are read-only: a write (`csrrw`, or `csrrs`/`csrrc` with a nonzero
 rs1 field or immediate) is an illegal instruction, and so is every other
 counter number, including the machine-mode `mcycle`/`minstret` and the
-`hpmcounter`s. A read returns the count before the reading instruction.
+`hpmcounter`s. A read of `instret` returns the instructions retired before the
+reading one, on every backend; so does a read of `cycle` or `time` on the
+emulator, counting executed instructions. On the RTL a `cycle` or `time` read
+returns the clock cycles up to the reading instruction's `EXECUTE` state,
+which include its own `FETCH` and `DECODE` (below).
 
 What a "cycle" is follows the [device-time contract](rv32.md#device-time): on
 the RTL a clock cycle, on the emulator an executed instruction (retired or
@@ -231,12 +237,19 @@ has no routine for), the string and memory routines the benchmarks and the
 compiler's struct copies need, and freestanding stand-ins for the headers
 riscv-tests' Dhrystone expects. Two details are worth knowing:
 
-- **The clock.** A CoreMark tick is one `cycle` count, and `EE_TICKS_PER_SEC`
-  fixes a nominal 1 MHz clock. That makes CoreMark's "Iterations/Sec" read as
-  CoreMark/MHz and gives its rule that a valid run lasts ten seconds a
-  concrete meaning, ten million cycles, which 30 iterations exceed on every
-  backend (the emulator's "cycles" being instructions, 11.1 million for the
-  RV32IM build). Dhrystone's riscv-tests build already assumes `HZ` = 1 MHz.
+- **The clock.** A CoreMark tick is one `cycle` count. The score does not
+  depend on the tick rate: the port prints the measured region as
+  `bench: coremark iterations=N cycles=C instret=I` and the runner computes
+  CoreMark/MHz as N × 10⁶ / C. `EE_TICKS_PER_SEC` only sets how CoreMark itself
+  converts ticks to seconds, for its "Total time" line and its rule that a
+  valid run lasts ten seconds. It fixes a nominal 100 kHz clock, so the rule
+  asks for one million ticks. At 1 MHz it would ask for ten million, which the
+  RV32IM build falls short of on the emulator (a tick is an instruction there:
+  about 300,000 per iteration with clang 22, 9.0 million for 30 iterations),
+  and which a faster core would miss on the RTL too. At 100 kHz the fewest
+  iterations that validate are 4 (3 with the record's clang 18); CoreMark's integer "Iterations/Sec" line
+  reads 0 and is not the score. Dhrystone's riscv-tests build already assumes
+  `HZ` = 1 MHz.
 - **Dhrystone's silence.** riscv-tests defines `debug_printf` as an empty
   function in `dhrystone.c`, which hides the final values Dhrystone prints to
   show it computed correctly. The link passes `--wrap=debug_printf` so the
@@ -291,7 +304,9 @@ must beat.
 Commands: `make bench-rv32-emu` (emulator only, validation and instret, one
 second), `make bench-rv32` (emulator and Verilator, the recorded baseline),
 `make test-rv32-bench` (the runner's checks on recorded consoles).
-`RV32_COREMARK_ITERATIONS` changes the iteration count.
+`RV32_COREMARK_ITERATIONS` changes the iteration count (4 at least, above);
+the benchmark objects are rebuilt whenever it, the optimisation level or any
+other benchmark flag changes.
 
 ## GDB stub
 
@@ -309,13 +324,14 @@ own acceptance record.
 
 | Command | What it checks |
 | --- | --- |
-| `make test-rv32-m`, `make test-rv32-m-verilator` | M and Zicntr: hand-computed anchors, 364 seeded vectors against a Python reference, x0 and aliasing, fixed cost, reset mid-divide, counter semantics and illegal writes (9 tests per simulator) |
-| `make check-rv32m-image`, `run-rv32m-emu`, `run-rv32m-rtl`, `run-rv32m-rtl-verilator` | the RV32IM builds of the four images on every backend |
+| `make test-rv32-m`, `make test-rv32-m-verilator` | M and Zicntr on each simulator: hand-computed anchors, 812 vectors (a 512-case edge grid and 300 seeded) against a Python reference, x0 and aliasing, fixed cost, reset mid-divide, counter semantics and illegal writes |
+| `make check-rv32m-image`, `run-rv32m-emu`, `run-rv32m-rtl`, `run-rv32m-rtl-verilator` | the RV32IM builds of the four images on the emulator and Verilator, the self-check and the diagnostic on Icarus |
 | `make test-rv32-arch-model`, `test-rv32-arch`, `test-rv32-arch-verilator`, `test-rv32-arch-icarus` | the architectural-test model, then the suite on each backend |
 | `make bench-rv32-emu`, `bench-rv32`, `test-rv32-bench` | the benchmarks and the runner's checks |
-| `make test-rv32-gdb`, `debug-rv32-gdb` | the GDB stub |
+| `make test-rv32-gdb` | the GDB stub |
+| `make debug-rv32-gdb` | an interactive session: the emulator waits for gdb on port 3333 |
 
-All of them are prerequisites of `make test-rv32` except the two long measurements, `make bench-rv32` and `make test-rv32-arch-icarus`, which are run for a record like the other `bench-*` targets.
+All of them are prerequisites of `make test-rv32` except `debug-rv32-gdb`, which is interactive, and the two long measurements, `make bench-rv32` and `make test-rv32-arch-icarus`, which are run for a record like the other `bench-*` targets.
 
 ## Exercises
 
@@ -346,17 +362,21 @@ QEMU 8.2.2, gdb-multiarch 15.1, Python 3.11. Instruction counts differ from the
 Mac records because clang 18 and clang 22 generate different code; results,
 PASS words and checkpoints do not.
 
-- **M and Zicntr:** `test-rv32-m` 9 tests pass on Icarus and on Verilator:
-  hand-computed anchors, 364 seeded vectors, x0 and aliasing, the fixed 33-cycle
+- **M and Zicntr:** `test-rv32-m` passes on Icarus and on Verilator (9 tests
+  at the time): hand-computed anchors, 812 vectors, x0 and aliasing, the fixed 33-cycle
   wait, reset at five points of a divide, `instret` trace-comparable, `cycle`
   reading 4k + 2 (plus stalls) on the RTL and k on the emulator, ten illegal
   counter accesses. The decode sweep, the illegal-encoding and trap tests in
   `test_rv32_rtl.py` pass with `funct7 = 2` as their unused OP word.
-- **RV32IM firmware:** the four images pass `check-rv32m-image --require-m` and
-  reproduce `PASS 807d9fad`, `PASS 8bd87e9a` with its two checkpoints,
-  `PASS 8fef54bc` with 200 checkpoints and `PASS ea60197e` with 68 checkpoints on
-  the emulator and Verilator (stall 1, traces identical, cycle formula exact with
-  `md_waits`), and the self-check and diagnostic on Icarus.
+- **RV32IM firmware:** the four images pass `check-rv32m-image` (the
+  diagnostic, Pong and the capstone with `--require-m`; the self-check, which
+  keeps the software routines, with `--allow-m`) and reproduce `PASS 807d9fad`,
+  `PASS 8bd87e9a` with its two checkpoints, `PASS 8fef54bc` with 200
+  checkpoints and `PASS ea60197e` with 68 checkpoints on the emulator and
+  Verilator, and the self-check and diagnostic on Icarus. On Verilator the
+  self-check, Pong and the capstone ran with one stall cycle per request,
+  traces identical and the cycle formula exact with `md_waits`; the diagnostic,
+  which reads the timer, ran unstalled and was compared at the results level.
 - **Architectural tests:** `test-rv32-arch-model` 5 tests. All 189 selected
   tests (I 39, M 8, F 142) pass on the emulator against QEMU and on Verilator
   with identical traces, 3 minutes on four cores. On Icarus I and M pass

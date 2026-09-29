@@ -20,7 +20,7 @@ volatile ee_s32 seed3_volatile = 0x8;
 volatile ee_s32 seed4_volatile = ITERATIONS;
 volatile ee_s32 seed5_volatile = 0;
 
-#define EE_TICKS_PER_SEC 1000000u /* the nominal 1 MHz clock (core_portme.h) */
+#define EE_TICKS_PER_SEC 100000u /* a nominal 100 kHz clock; core_portme.h says why */
 
 ee_u32 default_num_contexts = 1;
 static bench_mark start_mark;
