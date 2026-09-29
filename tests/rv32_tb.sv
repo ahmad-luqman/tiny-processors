@@ -126,7 +126,7 @@ module rv32_tb;
                 // An internal-error response traps instead of retiring.
                 fp_completed = !dut.core.fp_error;
             end
-            if (state == 4'd4 && dut.core.fp_valid && dut.core.fp_direct == dut.core.DIRECT_NONE) begin
+            if (state == dut.core.WRITEBACK && dut.core.fp_valid && dut.core.fp_direct == dut.core.DIRECT_NONE) begin
                 if (!fp_completed) $fatal(1, "FPU retirement without completion");
                 fp_completed = 0;
             end
@@ -307,8 +307,12 @@ module rv32_tb;
             $fatal(1, "Request on the bus during reset");
         if (!reset) begin
             cycles = cycles + 1;
-            if (state == 4'd6 || state == 4'd7) fp_waits = fp_waits + 1;
-            if (state == 4'd8) md_waits = md_waits + 1;
+            if (state == dut.core.FP_ISSUE || state == dut.core.FP_WAIT) fp_waits = fp_waits + 1;
+            if (state == dut.core.MD_WAIT) md_waits = md_waits + 1;
+            // The M unit restarts on a start while busy (rtl/rv32/rv32_muldiv.v);
+            // the core must never ask it to.
+            if (dut.core.muldiv.start && dut.core.muldiv.busy)
+                $fatal(1, "M unit started while busy at cycle %0d", cycles);
             // The contract: nothing about a request changes while it waits,
             // including on the edge that finally accepts it.
             if (stalled_request && (mem_valid !== 1'b1 || request !== held_request))

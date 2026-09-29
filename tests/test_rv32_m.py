@@ -11,6 +11,7 @@ import unittest
 
 import test_rv32_rtl as integer_tests
 from tools.rv32_asm import *  # noqa: F401,F403
+from tools.rv32_f_asm import arithmetic, fli
 from tools.rv32_rtl import cycle_relation, diff_traces, reads_device_time
 
 effects = integer_tests.effects
@@ -45,21 +46,31 @@ def reference(funct3, a, b):
 
 EDGES = (0, 1, 2, 3, 7, 0x7FFFFFFF, 0x80000000, 0x80000001, 0xFFFFFFFF, 0xFFFFFFFE, 0xFFFFFFF9,
          0x0000B505, 0xFFFF4AFB, 0x55555555, 0xAAAAAAAA, 0x00010000)
+DATA = RAM + 0x1000  # a scratch word past every image here
 
 
-class MultiplyDivideTest(unittest.TestCase):
+def last_restart(trace):
+    """The index of the last trace line at the reset vector: where the run after a reset begins."""
+    return [i for i, line in enumerate(trace) if line.split()[1] == "80000000"][-1]
+
+
+class Track0Harness:
+    """test_rv32_rtl's emulator-and-RTL harness, borrowed without its tests."""
     setUpClass = classmethod(integer_tests.RtlTest.setUpClass.__func__)
     tearDownClass = classmethod(integer_tests.RtlTest.tearDownClass.__func__)
     run_both = integer_tests.RtlTest.run_both
     assert_same_pass = integer_tests.RtlTest.assert_same_pass
     assert_same_double_fault = integer_tests.RtlTest.assert_same_double_fault
 
+
+class MultiplyDivideTest(Track0Harness, unittest.TestCase):
     def check_cases(self, cases, **kwargs):
         """Each case loads rs1/rs2, runs one M instruction and must retire `expected` in rd on both
-        backends; rd rotates over every register and aliases a source in some cases."""
+        backends; rd rotates over every register, unless a case gives it as a fourth element, and
+        aliases a source in some cases."""
         words, checks = [], []
-        for i, (funct3, a, b) in enumerate(cases):
-            rd = i % 32
+        for i, (funct3, a, b, *given_rd) in enumerate(cases):
+            rd = given_rd[0] if given_rd else i % 32
             rs1, rs2 = (rd, rd) if i % 7 == 3 else ((rd, 5) if i % 7 == 5 else (6, 7))
             if rs1 == rs2 and a != b:
                 rs1, rs2 = 6, 7
@@ -121,7 +132,52 @@ class MultiplyDivideTest(unittest.TestCase):
 
     def test_every_operation_writes_x0_as_a_no_op_and_aliases_its_sources(self):
         cases = [(funct3, a, b) for funct3 in range(8) for a, b in ((0xFFFFFFF9, 0xFFFFFFF9), (6, 0), (0x80000000, 0xFFFFFFFF))]
-        self.check_cases(cases, stall=1)
+        cases += [(funct3, 0xFFFFFFF9, 0x80000003, 0) for funct3 in range(8)]  # rd = x0 for every operation
+        _, rtl = self.check_cases(cases, stall=1)
+        x0_words = {f"{M_OPS[funct3](0, 6, 7):08x}" for funct3 in range(8)}
+        self.assertEqual({line.split()[2] for line in rtl.trace} & x0_words, x0_words, "each x0 case retired")
+
+    def test_back_to_back_dependent_operations(self):
+        # Each operation reads the one before it with nothing in between, and one writes its own
+        # source; the expected values chain through the Python reference.
+        a, b = 0x0012D687, 0xFFFFFFF3  # 1234567 and -13
+        chain = [(MUL, 8, 6, 7), (DIV, 9, 8, 7), (REM, 10, 9, 7), (DIV, 8, 8, 7), (MULHU, 11, 10, 8),
+                 (REMU, 12, 11, 7), (MULH, 13, 12, 12), (DIVU, 14, 13, 6), (MULHSU, 15, 14, 9)]
+        registers = {6: a, 7: b}
+        words, checks = LI(6, a) + LI(7, b), []
+        for op, rd, rs1, rs2 in chain:
+            registers[rd] = reference(M_OPS.index(op), registers[rs1], registers[rs2])
+            words.append(op(rd, rs1, rs2))
+            checks.append((len(words) - 1, f"x{rd}={registers[rd]:08x}"))
+        self.assertEqual(registers[9], a)  # 1234567 * -13 / -13: the product fits 32 bits
+        for stall in (0, 2):
+            with self.subTest(stall=stall):
+                _, rtl = self.assert_same_pass(words + FINISH(), stall=stall)
+                for index, effect in checks:
+                    self.assertEqual(effects(rtl.trace[index]), effect, rtl.trace[index])
+                self.assertEqual(rtl.halt["md_waits"], MD_WAITS * len(chain))
+                self.assertTrue(cycle_relation(rtl)[1], cycle_relation(rtl)[0])
+
+    def test_operation_directly_after_a_load_and_after_a_floating_operation(self):
+        # The M operation reads the register the load or the FPU conversion just wrote. fli
+        # clobbers x6, so the operands live elsewhere.
+        value, divisor = 0x07654321, 0xFFFFFFFB
+        words = LI(9, DATA) + LI(10, value) + [SW(10, 9, 0)] + LI(7, divisor)
+        words += [LW(8, 9, 0), MUL(11, 8, 7)]
+        after_load = len(words) - 1
+        words += fli(1, 0x40490FDB) + [arithmetic(11, 0, rd=13, rs1=1), DIV(14, 10, 13)]  # fcvt.w.s x13 = 3
+        after_fp = len(words) - 1
+        words += [arithmetic(0, 0, rd=2, rs1=1, rs2=1), REM(15, 10, 7)]  # fadd.s, then an M op
+        after_fadd = len(words) - 1
+        for kwargs in ({"stall": 3}, {"seed": 11}):
+            with self.subTest(**kwargs):
+                _, rtl = self.assert_same_pass(words + FINISH(), **kwargs)
+                self.assertEqual(effects(rtl.trace[after_load]), f"x11={reference(0, value, divisor):08x}")
+                self.assertTrue(effects(rtl.trace[after_fp - 1]).startswith("x13=00000003"), rtl.trace[after_fp - 1])
+                self.assertEqual(effects(rtl.trace[after_fp]), f"x14={reference(4, value, 3):08x}")
+                self.assertEqual(effects(rtl.trace[after_fadd]), f"x15={reference(6, value, divisor):08x}")
+                self.assertEqual(rtl.halt["md_waits"], MD_WAITS * 3)
+                self.assertTrue(cycle_relation(rtl)[1], cycle_relation(rtl)[0])
 
     def test_cost_is_fixed_and_independent_of_the_operands(self):
         # 33 wait cycles for every operation and every operand, including division by zero:
@@ -142,7 +198,7 @@ class MultiplyDivideTest(unittest.TestCase):
         for reset_at in (start_cycle + 1, start_cycle + 2, start_cycle + 17, start_cycle + MD_WAITS, start_cycle + MD_WAITS + 1):
             with self.subTest(reset_at=reset_at):
                 _, rtl = self.run_both(words, reset_at=reset_at)
-                restart = [i for i, line in enumerate(rtl.trace) if line.split()[1] == "80000000"][-1]
+                restart = last_restart(rtl.trace)
                 self.assertGreater(restart, 0, "the reset landed inside the program")
                 self.assertEqual([" ".join(line.split()[1:]) for line in rtl.trace[restart:]],
                                  [" ".join(line.split()[1:]) for line in emulator.trace])
@@ -152,12 +208,7 @@ class MultiplyDivideTest(unittest.TestCase):
         self.assertEqual(effects(baseline.trace[5]), "x8=fffffffd")
 
 
-class CounterTest(unittest.TestCase):
-    setUpClass = classmethod(integer_tests.RtlTest.setUpClass.__func__)
-    tearDownClass = classmethod(integer_tests.RtlTest.tearDownClass.__func__)
-    run_both = integer_tests.RtlTest.run_both
-    assert_same_pass = integer_tests.RtlTest.assert_same_pass
-    assert_same_double_fault = integer_tests.RtlTest.assert_same_double_fault
+class CounterTest(Track0Harness, unittest.TestCase):
 
     def test_instret_counts_retirements_and_is_trace_comparable(self):
         # Each read sees the instructions retired before it; a trapped instruction does not
@@ -178,6 +229,33 @@ class CounterTest(unittest.TestCase):
                 self.assertIn(" trap 11 ", rtl.trace[7])
                 self.assertEqual(effects(rtl.trace[8]), "x12=00000007", "the ecall did not retire")
                 self.assertEqual(effects(rtl.trace[13]), "x4=0000000c", "seven, the handler's five, then the read")
+
+    def test_instret_after_each_kind_of_instruction(self):
+        # With no trap, a read at trace line i has i retirements before it, whatever came before
+        # it: an M op, a store, a load, a taken branch (whose skipped word never retires), a
+        # branch not taken, and FPU operations.
+        words = LI(9, DATA) + LI(6, 100) + LI(7, 7)
+        words += [DIV(8, 6, 7), RDINSTRET(20), SW(8, 9, 0), RDINSTRET(21), LW(10, 9, 0), RDINSTRET(22),
+                  BEQ(8, 10, 8), ADDI(0, 0, 1), RDINSTRET(23), BNE(8, 10, 8), RDINSTRET(24)]
+        words += fli(1, 0x3F800000) + [arithmetic(0, 0, rd=2, rs1=1, rs2=1), RDINSTRET(25),
+                                        arithmetic(11, 1, rd=16, rs1=2), RDINSTRET(26), RDINSTRETH(27)]
+        skipped = f"{ADDI(0, 0, 1):08x}"
+        reads = {f"{RDINSTRET(rd):08x}": rd for rd in range(20, 27)}
+        self.assertFalse(reads_device_time([f"1 80000000 {word:08x}" for word in words]))
+        for stall in (0, 3):
+            with self.subTest(stall=stall):
+                _, rtl = self.assert_same_pass(words + FINISH(), stall=stall)
+                seen = []
+                for i, line in enumerate(rtl.trace):
+                    word = line.split()[2]
+                    self.assertNotEqual(word, skipped, "the taken branch's shadow retired")
+                    if word in reads:
+                        self.assertEqual(effects(line), f"x{reads[word]}={i:08x}", line)
+                        seen.append(reads[word])
+                    if word == f"{RDINSTRETH(27):08x}":
+                        self.assertEqual(effects(line), "x27=00000000")
+                self.assertEqual(seen, list(range(20, 27)))
+                self.assertEqual(effects(rtl.trace[len(LI(9, DATA) + LI(6, 100) + LI(7, 7))]), "x8=0000000e")
 
     def test_cycle_and_time_read_device_ticks(self):
         words = [RDCYCLE(1), RDCYCLE(2), RDTIME(3), RDCYCLEH(4), RDTIMEH(5), ADDI(0, 0, 0), ADDI(0, 0, 0),
@@ -219,7 +297,7 @@ class CounterTest(unittest.TestCase):
     def test_counters_restart_at_reset(self):
         words = [ADDI(0, 0, 0)] * 6 + [RDINSTRET(1), RDCYCLE(2)] + FINISH()
         _, rtl = self.run_both(words, reset_at=15)
-        restart = [i for i, line in enumerate(rtl.trace) if line.split()[1] == "80000000"][-1]
+        restart = last_restart(rtl.trace)
         self.assertGreater(restart, 0)
         self.assertEqual(effects(rtl.trace[restart + 6]), "x1=00000006")
         self.assertEqual(effects(rtl.trace[restart + 7]), f"x2={4 * 7 + 2:08x}")

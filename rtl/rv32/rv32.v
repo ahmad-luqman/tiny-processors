@@ -107,11 +107,14 @@ module rv32 (
         .result(fp_result), .flags(fp_result_flags), .error(fp_error));
 
     // The M extension: started from EXECUTE with the operands read in DECODE,
-    // finished 33 MD_WAIT cycles later (rtl/rv32/rv32_muldiv.v).
-    wire md_done;
+    // finished 33 MD_WAIT cycles later (rtl/rv32/rv32_muldiv.v). md_start is
+    // also the EXECUTE arm that enters MD_WAIT: an M instruction is never a
+    // load, store, jump, branch or FP operation, so no earlier arm can take it.
+    wire md_start = (state == EXECUTE) && is_muldiv;
+    wire md_valid;
     wire [31:0] md_result;
-    rv32_muldiv muldiv (.clk(clk), .reset(reset), .start(state == EXECUTE && is_muldiv),
-        .funct3(funct3), .a(a), .b(b), .done(md_done), .result(md_result));
+    rv32_muldiv muldiv (.clk(clk), .reset(reset), .start(md_start),
+        .funct3(funct3), .a(a), .b(b), .valid(md_valid), .result(md_result));
 
     // Classification uses exponent/fraction detectors, never arithmetic.
     wire f_zero_exp = fa[30:23] == 8'd0;
@@ -153,14 +156,21 @@ module rv32 (
     // the new value is written in WRITEBACK. The operand is rs1 or its
     // five-bit field (funct3[2]); csrrs/csrrc with a zero field write nothing.
     wire [11:0] csr_addr = ir[31:20];
-    wire [31:0] csr_old = csr_addr == CSR_FFLAGS ? {27'd0, fcsr[4:0]} :
-                          csr_addr == CSR_FRM ? {29'd0, fcsr[7:5]} :
-                          csr_addr == CSR_FCSR ? {24'd0, fcsr} : (csr_addr == CSR_MTVEC) ? mtvec : (csr_addr == CSR_MEPC) ? mepc :
-                          (csr_addr == CSR_MCAUSE) ? mcause :
-                          (csr_addr == CSR_CYCLE || csr_addr == CSR_TIME) ? cycle_count[31:0] :
-                          (csr_addr == CSR_CYCLEH || csr_addr == CSR_TIMEH) ? cycle_count[63:32] :
-                          (csr_addr == CSR_INSTRET) ? instret_count[31:0] :
-                          (csr_addr == CSR_INSTRETH) ? instret_count[63:32] : mtval;
+    // One arm per CSR; decode makes every other number illegal, so the last
+    // arm is mtval. (An `always @* case` form of this reads the same but
+    // synthesizes to a parallel mux about 150 generic cells larger.)
+    wire [31:0] csr_old =
+        (csr_addr == CSR_FFLAGS) ? {27'd0, fcsr[4:0]} :
+        (csr_addr == CSR_FRM) ? {29'd0, fcsr[7:5]} :
+        (csr_addr == CSR_FCSR) ? {24'd0, fcsr} :
+        (csr_addr == CSR_MTVEC) ? mtvec :
+        (csr_addr == CSR_MEPC) ? mepc :
+        (csr_addr == CSR_MCAUSE) ? mcause :
+        (csr_addr == CSR_CYCLE || csr_addr == CSR_TIME) ? cycle_count[31:0] :
+        (csr_addr == CSR_CYCLEH || csr_addr == CSR_TIMEH) ? cycle_count[63:32] :
+        (csr_addr == CSR_INSTRET) ? instret_count[31:0] :
+        (csr_addr == CSR_INSTRETH) ? instret_count[63:32] :
+        mtval; // CSR_MTVAL
     wire [31:0] csr_operand = funct3[2] ? {27'd0, rs1} : a;
     wire [31:0] csr_new = (funct3[1:0] == 2'd1) ? csr_operand :
                           (funct3[1:0] == 2'd2) ? (csr_old | csr_operand) : (csr_old & ~csr_operand);
@@ -321,7 +331,7 @@ module rv32 (
                             state <= WRITEBACK;
                         end else state <= FP_ISSUE;
                     end
-                    else if (is_muldiv)
+                    else if (md_start)
                         state <= MD_WAIT;
                     else if (is_load || is_store)
                         state <= MEM;
@@ -338,7 +348,7 @@ module rv32 (
                         state <= WRITEBACK;
                     end
                 end
-                MD_WAIT: if (md_done) begin
+                MD_WAIT: if (md_valid) begin
                     alu_out <= md_result;
                     state <= WRITEBACK;
                 end
@@ -376,7 +386,14 @@ module rv32 (
                     retire_rd_value <= rd_value;
                     state <= FETCH;
                 end
-                default: begin end // HALT: hold until reset.
+                HALT: begin end // hold until reset
+                // Encodings 9-15 are never entered; should the state register
+                // ever hold one, stop the way a double fault does rather than
+                // hang with `halted` low.
+                default: begin
+                    state <= HALT;
+                    halted <= 1'b1;
+                end
             endcase
         end
     end

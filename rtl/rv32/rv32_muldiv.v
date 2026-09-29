@@ -5,7 +5,8 @@
 // least significant first) and division is restoring division (one quotient
 // bit per cycle, most significant first): the same two algorithms that
 // programs/rv32/rt/muldiv.c runs in software for RV32I builds, here as one
-// 64-bit shift register and one 33-bit adder/subtractor.
+// 64-bit shift register, a 33-bit adder for the multiply step and a 33-bit
+// subtractor for the divide step.
 //
 // Both run on magnitudes. Each operand's sign is taken off at `start` (by its
 // own signedness: mulhsu reads rs1 as signed and rs2 as unsigned) and put
@@ -16,17 +17,24 @@
 // INT32_MIN with a zero remainder, both as the spec defines them. Only the
 // quotient's sign fix is suppressed for a zero divisor, so -7 / 0 is -1.
 //
-// Timing is fixed: `start` loads the operands, 32 cycles step, and `done`
-// holds from the 33rd cycle until the next start. The core waits in MD_WAIT
-// for it (docs/rv32-groundwork.md).
+// Timing is fixed: `start` loads the operands, 32 cycles step, and `valid`
+// rises with the last step, so it holds from the 33rd cycle until the next
+// start or reset. The core waits in MD_WAIT for it (docs/rv32-groundwork.md).
 module rv32_muldiv (
     input  wire        clk,
     input  wire        reset,
-    input  wire        start,   // one cycle: latch funct3 and the operands, begin
+    // One cycle: latch funct3, a and b and begin. They are sampled on this
+    // edge only, so they need not be held stable while the unit steps. A start
+    // while an operation is still stepping abandons it and begins the new one;
+    // the core never does that, and the testbench stops the run if it does.
+    input  wire        start,
     input  wire [2:0]  funct3,  // 0 mul, 1 mulh, 2 mulhsu, 3 mulhu, 4 div, 5 divu, 6 rem, 7 remu
     input  wire [31:0] a,       // rs1
     input  wire [31:0] b,       // rs2
-    output wire        done,
+    // `valid`: `result` holds the finished operation's value. Cleared by reset
+    // and by start, set by the 32nd step; while it is low `result` is
+    // meaningless (a stale or partial value).
+    output reg         valid,
     output reg  [31:0] result
 );
     reg [2:0] op;
@@ -60,11 +68,12 @@ module rv32_muldiv (
     wire [32:0] trial = shifted - {1'b0, operand};
     wire fits = !trial[32];
 
-    assign done = (count == 6'd0);
+    wire busy = (count != 6'd0);  // stepping; read by the testbench's start-while-busy check
 
     always @(posedge clk) begin
         if (reset) begin
             count <= 6'd0;
+            valid <= 1'b0;
             op <= 3'd0;
             hi <= 32'd0;
             lo <= 32'd0;
@@ -74,13 +83,15 @@ module rv32_muldiv (
         end else if (start) begin
             op <= funct3;
             count <= 6'd32;
+            valid <= 1'b0;
             hi <= 32'd0;
             lo <= is_div ? a_magnitude : b_magnitude;
             operand <= is_div ? b_magnitude : a_magnitude;
             negate <= (a_negative ^ b_negative) && !(is_div && b == 32'd0);
             negate_remainder <= a_negative;
-        end else if (count != 6'd0) begin
+        end else if (busy) begin
             count <= count - 6'd1;
+            valid <= (count == 6'd1);
             if (op[2]) begin
                 // Whichever is kept is below the divisor, so it fits 32 bits.
                 hi <= fits ? trial[31:0] : shifted[31:0];
