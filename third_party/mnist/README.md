@@ -62,7 +62,10 @@ What the authors do ask for is documented on the archived page: if digits are
 pre-processed by bounding-box centring rather than the centre-of-mass centring
 used to build the distributed images, "you should report it in your
 publications." N1 centres a guest-drawn canvas before pooling and records that in
-`docs/rv32-digit.md`.
+`docs/rv32-digit.md`. Since the digit size fix it also resizes the canvas's ink box
+to 20 pixels on its longer side first, by integer nearest neighbour rather than the
+anti-aliased normalisation the distributed images received; that is recorded in
+the same place.
 
 MNIST is itself derived from NIST Special Database 1 and Special Database 3, works
 produced by a United States federal agency.

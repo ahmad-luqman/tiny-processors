@@ -20,9 +20,11 @@
 #include <stdint.h>
 #include "digit_shape.h"
 
-/* Centre the ink by its bounding box, then average each 2x2 block: 784 -> 196.
- * A blank canvas produces 196 zeros. This is the only preprocessing there is;
- * tools/digit_data.py defines the same function for the oracle. */
+/* Resize the ink's bounding box so its longer side is 20 pixels (integer nearest
+ * neighbour, sampling pixel centres), centre the result by its bounding box, then
+ * average each 2x2 block: 784 -> 196. A blank canvas produces 196 zeros. This is
+ * the only preprocessing there is; tools/digit_data.py defines the same function
+ * for the oracle and for training, and docs/rv32-digit.md states the exact rule. */
 void digit_prepare(const uint8_t canvas[DIGIT_PIXELS], uint8_t x[DIGIT_INPUTS]);
 
 /* Bias, round half up, ReLU and saturate every layer-1 accumulator. The

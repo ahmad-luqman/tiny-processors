@@ -103,7 +103,7 @@ F2 selected and verified `-march=rv32if_zicsr -mabi=ilp32`, preserving the integ
 
 GPU FP32/other formats and NPU integer/other formats remain independent choices. The CPU FPU may help with reference computations or scene setup, but does not automatically create floating-point GPU lanes or change the digit model's quantization contract.
 
-## Next implementation session: digit size fix
+## Next implementation session: optional tracks
 
 S1 completed the advanced SoC. One 185-frame menu session drives G1, G2 and
 SIMD4 from one boot, with every frame matching the C references on the emulator
@@ -113,12 +113,11 @@ runs alongside either, and a reset or fault in one engine leaves the others
 exact. No RTL changed; the SoC is 327,986 cells. See the
 [S1 record](../rv32-s1.md) and [Accelerator overlap](../rv32-soc.md#accelerator-overlap).
 
-1. Hand testing found the digit screen misreads digits not drawn about 20 cells
-   tall. Implement [digit-size-fix.md](digit-size-fix.md) on its own branch:
-   resize to MNIST's 20-pixel box in the one preprocessing contract, retrain with
-   keyboard-style strokes, lock both accuracy targets before measuring, and
-   re-pin every derived hash, including the S1 session.
-2. After that, choose among the optional tracks below. A programmable fragment
+1. Done: hand testing found the digit screen misread digits not drawn about 20
+   cells tall. [The digit size fix](digit-size-fix.md#outcome) resizes to MNIST's
+   20-pixel box in the one preprocessing contract and retrains with keyboard-style
+   strokes; both accuracy targets were locked before measuring and are met.
+2. Next, choose among the optional tracks below. A programmable fragment
    stage reusing the G2 core, and G1/G2 overlap, remain candidates, not
    requirements.
 
@@ -145,7 +144,7 @@ Complete milestones autonomously, then explain what changed, why it works, how i
 | FPU microarchitecture and independent reference | Decided in F1 ([record](../fp32.md)) | Multicycle hardware with exact 576-bit accumulation, iterative divide/square root, shared rounding; pinned SoftFloat RISCV oracle, exact bits/flags |
 | Floating-point compiler flags, ABI, and CSR contract | F2, before linking float firmware | Explicit compatible objects/libraries; retain integer firmware regression |
 | Matrix/NPU precision, saturation, rounding, accumulator width | Widths decided in A1 ([record](../simd4.md#a1-acceptance-record-2026-09-22)): 16×16→32 products, 32-bit wrapping accumulator, truncating shifted read-back; saturation and rounding decided in N1: both are CPU operations after the exact 32-bit accumulator is read back through two RDA reads, so the engine is unchanged and the exporter proves no launch can wrap | Integer arithmetic with explicit bounds and independently checked conversion |
-| Pretrained model/dataset, weight license, accuracy target | Decided in N1 ([record](../rv32-digit.md)): a 196-32-10 int8 classifier trained once off-line, the MNIST test set vendored with a SHA-256 manifest and a provenance note recording that the source states no license, and a 95% target locked before testing, met at 96.16% and asserted in `tests/test_rv32_digit.py` | Small classifier whose operations fit the planned engine; lock a test set and accuracy target before acceptance testing |
+| Pretrained model/dataset, weight license, accuracy target | Decided in N1 ([record](../rv32-digit.md)): a 196-32-10 int8 classifier trained once off-line, the MNIST test set vendored with a SHA-256 manifest and a provenance note recording that the source states no license, and a 95% target locked before testing, met at 96.16% (96.53% after the [digit size fix](digit-size-fix.md#outcome)) and asserted in `tests/test_rv32_digit.py` | Small classifier whose operations fit the planned engine; lock a test set and accuracy target before acceptance testing |
 | GPU programmable stage/ISA, clipping and depth rules | Decided in G2 ([record](../rv32-3d.md)): a vertex stage on four SIMT lanes with a structured ISA (IF/ELSE, divergent loops with BREAK, mask stack of 8); Q16.16 lanes, S12.4 screen, 16-bit depth, exact divider; whole-triangle cull at w < 1/16, outside the 4w guard band or outside 0 ≤ z ≤ w; strict-less depth; affine Gouraud; zero tolerance among the integer implementations and a measured bound against doubles | Fragment shading and near-plane clipping remain open |
 | Interrupts, DMA, concurrent accelerators, caching | A2 onward, only when polling/ownership or bandwidth limits justify complexity | Polling, simple transfers, no caches/coherence initially |
 | Shell, files, multiple programs, protection | After M7 as a separate OS expansion track | One feature at a time; Linux is a separate platform project if later desired |

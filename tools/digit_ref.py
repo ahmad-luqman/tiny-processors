@@ -27,6 +27,8 @@ from tools.digit_data import INPUTS, POOLED, load_test_set, prepare
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = ROOT / 'programs/rv32/digit_model.json'
 PREDICTIONS = ROOT / 'programs/rv32/digit_model.predictions'
+TEST_IMAGES = 10000        # the vendored test set the accuracy target is defined on
+FLOOR = 0.95              # acceptance target 1: integer accuracy on all of it
 _CACHE = {}
 
 
@@ -135,6 +137,8 @@ def main():
     parser.add_argument('--count', type=int, default=None, help='how many test images to measure')
     parser.add_argument('--image', type=int, default=None, help='report one image instead of accuracy')
     parser.add_argument('--write-predictions', action='store_true', help='regenerate the pinned prediction file')
+    parser.add_argument('--floor', type=float, default=FLOOR,
+                        help='exit non-zero if the whole test set scores below this (default: the 95%% target)')
     arguments = parser.parse_args()
     model = load_model()
     if arguments.image is not None:
@@ -147,6 +151,11 @@ def main():
         return
     correct, total, predictions = accuracy(arguments.count, model)
     print(f'{correct}/{total} = {correct / total:.4f} on the vendored MNIST test set')
+    # The target is defined on the whole set, so a prefix only reports. Matching the
+    # pinned predictions is not enough on its own: a retrain that missed the target
+    # re-pins its own predictions and would pass that comparison.
+    if total == TEST_IMAGES and correct / total < arguments.floor:
+        raise SystemExit(f'accuracy {correct / total:.4f} is below the {arguments.floor:.2f} floor')
     if arguments.write_predictions:
         PREDICTIONS.write_text(''.join(f'{p}\n' for p in predictions))
         print(f'wrote {PREDICTIONS.relative_to(ROOT)}')

@@ -13,7 +13,8 @@ what A1 and A2 built.
 ## Model and data
 
 The classifier is a 196 -> 32 -> 10 multilayer perceptron with ReLU. Its input is
-a 14x14 image obtained by centring a 28x28 canvas and averaging each 2x2 block.
+a 14x14 image obtained by resizing the ink on a 28x28 canvas to 20 pixels, centring
+it and averaging each 2x2 block.
 `tools/digit_train.py` trains it once with numpy and writes the integer weights to
 `programs/rv32/digit_model.json`. That script is the only file in the repository
 that imports a third-party package or reaches the network, and no make target runs
@@ -31,10 +32,22 @@ script into an ignored directory and is not committed.
 
 | Measurement | Value |
 | --- | --- |
-| Integer accuracy, 10,000 vendored test images | 96.16% (asserted against a 95% floor in `tests/test_rv32_digit.py`) |
-| Float accuracy, same images | 96.10% |
+| Integer accuracy, 10,000 vendored test images | 96.53% (asserted against a 95% floor in `tests/test_rv32_digit.py`) |
+| Float accuracy, same images | 96.47% |
 | Effect of quantization | the integer model scores 0.06 points **higher** than the float one, so quantization is not what limits this model; at this size the difference is noise, not an improvement to claim |
-| Hidden shift `s1` | 11, calibrated on a 5,000-image holdout of the training set |
+| Integer accuracy, keyboard-style set, by drawn height | 87.75% at 10 px, 91.45% at 14, 94.44% at 20, 93.73% at 24, 93.75% at 28 (each asserted against an 85% floor) |
+| Hidden shift `s1` | 10, calibrated on a 5,000-image holdout of the training set and its drawings |
+
+The keyboard-style set is the same 10,000 test digits redrawn the way the arrow
+keys draw: binarized, scaled so the longer side is the given height, thinned to a
+one-pixel skeleton and repainted with the screen's 2x2 brush. The height is the
+nominal one before thinning, which trims stroke ends, so a drawing is usually a
+pixel or two shorter
+(`tools/digit_drawn.py`, standard library, pinned by SHA-256). It exists because
+the clean test set hid a real failure: before preprocessing resized drawings, the
+first model scored 96.16% on clean digits and 19% on 10-pixel drawings
+([the fix](planning/digit-size-fix.md)). The model is trained on each training
+image and one such drawing of it at a random height from 8 to 28 pixels.
 
 Every number in this document describes the committed model. Retraining replaces
 `digit_model.json` and its pinned predictions, and the accuracy assertions follow
@@ -43,14 +56,43 @@ true by themselves.
 
 The committed test set tunes nothing: the shift and every other calibration use a
 training holdout, and the test set is measured once at the end.
-`make accuracy-rv32-digit` reproduces the number in about three seconds with the
-standard library alone.
+`make accuracy-rv32-digit` reproduces both measurements in under a minute with
+the standard library alone.
 
 ## Preprocessing is one contract
 
-`digit_prepare` centres the ink by its bounding box and then pools, and it is the
-only definition of how a canvas becomes model inputs. Training, calibration,
-accuracy measurement, the diagnostic's inputs and both runtime paths all use it.
+`digit_prepare` resizes the ink's bounding box so its longer side is 20 pixels,
+centres the result by its bounding box, and then pools. It is the only definition
+of how a canvas becomes model inputs. Training, calibration, accuracy measurement,
+the diagnostic's inputs and both runtime paths all use it.
+
+Resizing matters because every distributed digit was fit to a 20x20 box, so the
+model has only seen digits about 20 pixels tall, while a drawing can be any size.
+The resize is integer nearest neighbour, specified so every implementation writes
+the same bytes:
+
+- `s` is the longer side of the ink box and `t` the shorter; the long side
+  becomes 20 and the short side `n = (t * 20 + s / 2) / s`, at least 1.
+- Along an axis of `e` source pixels that becomes `m` destination pixels,
+  destination offset `d` reads the source pixel under its centre,
+  `floor((2d + 1) * e / (2m))`. Each axis uses its own `e` and `m`, so every sample
+  lies inside the ink box, which the tests check for every box shape.
+- Centres, not left edges, because of the brush: on row and column 27 it clips to
+  one cell, and `floor(d * s / 20)` never reads offset `s - 1`, so the base of a
+  digit drawn along the bottom edge vanished in the shrink. Centre sampling reads
+  both end offsets of the long side for every `s` up to 28, and consecutive
+  samples are at most two apart, so no two-cell stroke is skipped.
+- RV32I has no divide, so the guest finds `n` with a subtraction loop of at most
+  20 steps and builds each axis's offset table by carrying the quotient from one
+  `d` to the next, at most `e` subtractions in all, with no software multiply.
+- Values are copied, never averaged, so a drawn canvas stays 0 or 255 and a
+  grayscale MNIST digit keeps its grey levels. MNIST digits already have a
+  20-pixel box, so for them the resize is almost always the identity.
+
+Centring runs on the resized canvas rather than being folded into the resize:
+shrinking can skip the last source row or column, so the resized ink may be
+smaller than the box the resize wrote. A one-pixel dot has a 1x1 box and becomes a
+20x20 block, the consequence of one rule for every size; MNIST contains no dots.
 
 Centring matters because the distributed images were centred by their centre of
 mass in a 20x20 box, while a digit drawn with the arrow keys sits wherever the
@@ -99,35 +141,38 @@ otherwise, and the tests recompute the bound from the committed weights:
 
 | Layer | Worst case | Limit |
 | --- | --- | --- |
-| 1 | 6,415,798 | 2,147,483,648 |
-| 2 | 1,045,102 | 2,147,483,648 |
+| 1 | 6,417,622 | 2,147,483,648 |
+| 2 | 1,045,517 | 2,147,483,648 |
 
 The hidden cap is 255 rather than 127. Any value up to 32,767 is a legal operand,
-and 255 doubles the hidden precision for nothing. Real digits peak near half that
-cap, so the clamp is a guard rather than a routine event; a test constructs the
+and 255 doubles the hidden precision for nothing. Real digits stay below it
+(the peak is 164 on clean digits and 217 on drawings, which are binary and so
+drive the layer harder), so the clamp is a guard rather than a routine event; a test constructs the
 input that does reach it, by driving every positively weighted input of one neuron
 to 255, so the clamp is not dead code.
 
 ## One input, traced
 
-Test image 0, whose label is 7. After centring and pooling, 39 of its 196 inputs
-are non-zero and the largest is 254. Hidden neuron 0:
+Test image 0, whose label is 7. Its ink box is already 20 pixels tall, so the
+resize copies it unchanged to the top left and centring puts it back; after
+pooling, 39 of its 196 inputs are non-zero and the largest is 254. Hidden neuron 0:
 
 | Step | Value |
 | --- | --- |
-| `acc1[0]`, the accelerator's answer | −11,187 |
-| plus bias 17,334 and round term 1,024 | 7,171 |
-| shifted right by 11 | 3 |
-| clamped to 0..255 | `h[0] = 3` |
+| `acc1[0]`, the accelerator's answer | −37,898 |
+| plus bias 14,632 and round term 512 | −22,754 |
+| negative, so ReLU gives | `h[0] = 0` |
 
-That neuron reaches the winning logit as `W2[7][0] * h[0] = 41 * 3 = 123`. The ten
-logits come out as −837, −2081, 3631, 3880, −5887, −429, −7564, **7663**, 222 and
-−1340, so the prediction is 7 with a margin of 3,783 over the runner-up.
+The sign bit is tested before any shift, so the negative total is never shifted.
+Neuron 0 is silent for this image and contributes nothing to any logit. The ten
+logits come out as −4365, −2548, 5042, 6577, −7397, −2786, −13271, **13565**, −519
+and −2423, so the prediction is 7 with a margin of 6,988 over the runner-up.
 
 Input 0 belongs to the first of four chunks, so it is covered by launch 0, and
 neuron 0 is lane 0 of the first output group. That launch leaves lane 0's
-accumulator holding −7,402, or `0xffffe316`, which the CPU reads back as
-`lo = 0xe316` and `hi = 0xffff`. The waveform section below shows the hardware
+accumulator holding the chunk's partial sum, 9,683, or `0x000025d3`, which the CPU
+reads back as `lo = 0x25d3` and `hi = 0x0000`; the other three chunks bring it
+down to −37,898. The waveform section below shows the hardware
 storing exactly those two halves.
 
 ## The dense kernel
@@ -219,7 +264,7 @@ every backend. Cycles and stalls are never printed, drawn or checksummed.
 ```sh
 make test-rv32-digit                  # model, kernels, engine and native C against the oracle
 make test-rv32-digit-verilator        # the same, plus the RTL that actually runs N1
-make accuracy-rv32-digit              # 96.16% on the 10,000 vendored images
+make accuracy-rv32-digit              # 96.53% on the 10,000 vendored images, then by drawn height
 make run-rv32-digit-emu               # the diagnostic: PASS N1
 make run-rv32-digit-rtl               # the same on Icarus
 make run-rv32-digit-rtl-verilator     # and with CPU and engine stalls
@@ -273,11 +318,16 @@ figure. The sink is printed as fixed-width hex now, which always costs the same.
 
 | Path | Emulator instructions | RTL cycles |
 | --- | --- | --- |
-| CPU only | 133,607 | 546,288 |
-| Accelerated | 92,302 | 285,906 |
+| CPU only | 145,552 | 596,593 |
+| Accelerated | 104,040 | 335,395 |
 
-The accelerator roughly halves the RTL cycles and removes about a third of the CPU
-instructions. It does not remove more because the work is memory-bound by
+Both figures include preprocessing. The resize added about 11,800 emulator
+instructions and 50,000 RTL cycles to each path (the first model measured 133,607
+and 92,302 instructions, 546,288 and 285,906 cycles): a second ink-box scan,
+one more 784-byte clear and the copy of up to 400 pixels.
+
+The accelerator cuts the RTL cycles by about 44% and the CPU instructions by about
+29%. It does not remove more because the work is memory-bound by
 construction: each product needs two loads, every lane transfers separately, and
 streaming the weights through the bus costs more than the arithmetic saved. That
 is the serialized-memory lesson A1 measured, now visible at the application level.
@@ -290,19 +340,19 @@ would be meaningless, so the two columns are never divided into one another.
 
 | Run | Backend | Instructions | Cycles |
 | --- | --- | --- | --- |
-| `digitcheck` | emulator | 1,365,251 | — |
-| `digitcheck` | Icarus | 1,051,211 | 4,479,094 |
-| `digitcheck` | Verilator, CPU stall 1, engine stall 2 | 1,089,851 | 6,013,211 |
-| 199-frame drawing session | emulator | 3,865,757 | — |
-| 199-frame drawing session | Verilator, stalls as above | 3,819,857 | 20,335,815 |
+| `digitcheck` | emulator | 1,471,913 | — |
+| `digitcheck` | Icarus | 1,157,873 | 4,928,599 |
+| `digitcheck` | Verilator, CPU stall 1, engine stall 2 | 1,196,513 | 6,592,235 |
+| 199-frame drawing session | emulator | 4,010,639 | — |
+| 199-frame drawing session | Verilator, stalls as above | 3,964,739 | 21,089,349 |
 
 RTL runs fewer CPU instructions than the emulator because the poll loop spins
 fewer times, which is the device-time contract doing its job.
 
-The diagnostic image is 23,496 bytes: 7,932 of text, 15,052 of read-only data
+The diagnostic image is 24,080 bytes: 8,508 of text, 15,060 of read-only data
 (mostly the weights and the eight embedded canvases) and 512 of data. Its 1,048
 bytes of bss are allocated at load rather than stored, so they are not part of
-that total. The capstone image is 39,776 bytes. Both sit well inside the 256 KiB
+that total. The capstone image, which has since gained G2 and S1, is 59,180 bytes. Both sit well inside the 256 KiB
 slice.
 
 Those numbers are smaller than they first were. The weight tables began as
@@ -335,8 +385,8 @@ launch, 10 ns clock:
    to 3: the weight layout, visible in the address sequence.
 3. **The last eight transfers are the two accumulator halves.** Lanes write their
    low halves to slots 245 to 248 and their high halves to 249 to 252. Lane 0
-   stores `0xe316` then `0xffff`, which recombines to `0xffffe316`, or −7,402 —
-   the same value the worked example above computes for neuron 0 of image 0.
+   stores `0x25d3` then `0x0000`, which recombines to `0x000025d3`, or 9,683 —
+   the same partial sum the worked example above computes for neuron 0 of image 0.
 
 ## Exercises
 
@@ -355,7 +405,7 @@ launch, 10 ns clock:
 ## Acceptance evidence
 
 The dataset manifest, the model shape, the wrap bound, the preprocessing edge
-cases, hand-computed requantization, tie-breaking, the saturating input and the
+cases (including exhaustive checks that every resize sample stays inside the ink box), hand-computed requantization, tie-breaking, the saturating input and the
 pinned predictions are checked in Python. The kernel's counts, guards, packing and
 arithmetic are checked against the instruction-level interpreter, including an
 entire inference reassembled launch by launch, and the dense kernels joined the A2
@@ -364,7 +414,7 @@ C is compiled for the host at -O0 and -O2 and compared with the oracle on the 19
 preprocessed bytes, the hidden vector, the logits and the argmax, including int32
 extremes. On the machine itself, `digitcheck` passes on the emulator, Icarus and
 Verilator with identical console output, and the 199-frame drawing session
-reproduces 199 identical checkpoints and `PASS badb5523` on the native model, the
+reproduces 199 identical checkpoints and `PASS b20bf8ad` on the native model, the
 emulator and Verilator.
 
 The session is worth replaying because it reads: it draws a vertical stroke and

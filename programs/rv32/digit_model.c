@@ -1,9 +1,75 @@
 #include "digit_model.h"
 #include "digit_weights.h"
 
-/* Centring runs on the canvas before pooling because a digit drawn with the
- * arrow keys sits wherever the cursor happened to be, while the training images
- * were centred. Both go through this function, so the model sees one distribution.
+#define DIGIT_TARGET 20u                  /* MNIST fits every digit to a 20x20 box */
+
+/* The ink's bounding box. Returns 0 for a blank canvas. */
+static uint32_t ink_box(const uint8_t canvas[DIGIT_PIXELS], uint32_t *top, uint32_t *bottom,
+                        uint32_t *left, uint32_t *right)
+{
+    *top = DIGIT_SIDE; *bottom = 0; *left = DIGIT_SIDE; *right = 0;
+    for (uint32_t r = 0, row = 0; r < DIGIT_SIDE; r++, row += DIGIT_SIDE) {
+        for (uint32_t c = 0; c < DIGIT_SIDE; c++) {
+            if (!canvas[row + c]) continue;
+            if (r < *top) *top = r;
+            if (r > *bottom) *bottom = r;
+            if (c < *left) *left = c;
+            if (c > *right) *right = c;
+        }
+    }
+    return *top < DIGIT_SIDE;
+}
+
+/* offset[d] = floor((2d + 1) * extent / (2 * size)) for d < size: the source pixel
+ * under the centre of destination pixel d. RV32I has no divide and both operands
+ * are runtime values, so the quotient is carried from one d to the next: the
+ * numerator grows by 2 * extent per step, and the quotient catches up by
+ * subtraction, at most `extent` times in all. */
+static void axis_offsets(uint8_t offset[DIGIT_TARGET], uint32_t extent, uint32_t size)
+{
+    uint32_t numerator = extent, quotient = 0, divisor = size << 1;
+    for (uint32_t d = 0; d < size; d++, numerator += extent << 1) {
+        while (numerator >= divisor) { numerator -= divisor; quotient++; }
+        offset[d] = (uint8_t)quotient;
+    }
+}
+
+/* Resize the ink box so its longer side is 20 pixels, keeping the aspect ratio
+ * to within rounding, into the top left of `out`. Every MNIST digit was fit to a
+ * 20x20 box, so this is what lets a drawing of any size look like the training
+ * data. Nearest neighbour copies values, so a binary drawing stays binary, and
+ * sampling pixel centres (not left edges) keeps a stroke on the last row or
+ * column, where the brush clips to one cell, from vanishing in a shrink. */
+static void resize(const uint8_t canvas[DIGIT_PIXELS], uint8_t out[DIGIT_PIXELS])
+{
+    for (uint32_t i = 0; i < DIGIT_PIXELS; i++) out[i] = 0;
+    uint32_t top, bottom, left, right;
+    if (!ink_box(canvas, &top, &bottom, &left, &right)) return;
+    uint32_t height = bottom - top + 1, width = right - left + 1;
+    uint32_t tall = height >= width;
+    uint32_t longer = tall ? height : width, shorter = tall ? width : height;
+    /* n = (shorter * 20 + longer / 2) / longer, by subtraction: the quotient is
+     * at most 20, so the loop is short and needs no divide. */
+    uint32_t remainder = shorter * DIGIT_TARGET + (longer >> 1), n = 0;
+    while (remainder >= longer) { remainder -= longer; n++; }
+    if (n == 0) n = 1;
+    uint32_t rows = tall ? DIGIT_TARGET : n, columns = tall ? n : DIGIT_TARGET;
+    uint8_t row_offset[DIGIT_TARGET], column_offset[DIGIT_TARGET];
+    axis_offsets(row_offset, height, rows);
+    axis_offsets(column_offset, width, columns);
+    for (uint32_t r = 0, destination = 0; r < rows; r++, destination += DIGIT_SIDE) {
+        const uint8_t *source = canvas + (top + row_offset[r]) * DIGIT_SIDE + left;
+        for (uint32_t c = 0; c < columns; c++)
+            out[destination + c] = source[column_offset[c]];
+    }
+}
+
+/* Resize, then centre, then pool. Centring runs on the resized canvas rather than
+ * being folded into the resize because shrinking can skip the last source row or
+ * column, leaving the resized ink box smaller than the box the resize wrote.
+ * Centring matters because a digit drawn with the arrow keys sits wherever the
+ * cursor happened to be, while the training images were centred. Training and
+ * both runtime paths go through this contract, so the model sees one distribution.
  *
  * Multiplying by DIGIT_SIDE is fine here: it is a compile-time constant, so the
  * compiler turns it into a pair of shifts rather than calling the runtime's
@@ -11,19 +77,12 @@
  * digit_mac does. */
 void digit_prepare(const uint8_t canvas[DIGIT_PIXELS], uint8_t x[DIGIT_INPUTS])
 {
-    uint32_t top = DIGIT_SIDE, bottom = 0, left = DIGIT_SIDE, right = 0, row = 0;
-    for (uint32_t r = 0; r < DIGIT_SIDE; r++, row += DIGIT_SIDE) {
-        for (uint32_t c = 0; c < DIGIT_SIDE; c++) {
-            if (!canvas[row + c]) continue;
-            if (r < top) top = r;
-            if (r > bottom) bottom = r;
-            if (c < left) left = c;
-            if (c > right) right = c;
-        }
-    }
+    uint8_t resized[DIGIT_PIXELS];
+    resize(canvas, resized);
+    uint32_t top, bottom, left, right;
     uint8_t centred[DIGIT_PIXELS];
     for (uint32_t i = 0; i < DIGIT_PIXELS; i++) centred[i] = 0;
-    if (top < DIGIT_SIDE) {                       /* there is ink to centre */
+    if (ink_box(resized, &top, &bottom, &left, &right)) {
         uint32_t down = ((DIGIT_SIDE - (bottom - top + 1)) >> 1) - top;
         uint32_t across = ((DIGIT_SIDE - (right - left + 1)) >> 1) - left;
         /* The halved leftovers are never negative, but subtracting `top` and `left`
@@ -33,7 +92,7 @@ void digit_prepare(const uint8_t canvas[DIGIT_PIXELS], uint8_t x[DIGIT_INPUTS])
         uint32_t source = top * DIGIT_SIDE, destination = (top + down) * DIGIT_SIDE;
         for (uint32_t r = top; r <= bottom; r++, source += DIGIT_SIDE, destination += DIGIT_SIDE)
             for (uint32_t c = left; c <= right; c++)
-                centred[destination + c + across] = canvas[source + c];
+                centred[destination + c + across] = resized[source + c];
     }
     uint32_t upper = 0, out = 0;
     for (uint32_t i = 0; i < DIGIT_POOLED; i++, upper += 2 * DIGIT_SIDE) {
