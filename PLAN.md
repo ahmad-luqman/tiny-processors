@@ -71,3 +71,5 @@ The digit size fix followed: preprocessing now resizes a drawing to MNIST's
 ## Later optional tracks
 
 Expand the OS with shell/files/program loading and eventually scheduling/protection; build a small language/compiler/software VM; explore pipelining, GPU scheduling/masks, deeper NPU designs, a browser frontend, or an FPGA. Each track gets its own contract and completion checks when chosen. No fabricated chip or Linux-compatible platform is required by the current plan.
+
+[Next tracks](docs/planning/next-tracks.md) surveys the current capabilities and lays out candidate tracks with a recommended order: groundwork (compliance suite, M extension, counters, CoreMark, GDB stub), `virt`-compatible interrupts and QEMU support, a step-by-step OS, running more software (a C library, Lua, Doom, Linux without an MMU), Nand2Tetris beyond (NAND count, a Jack compiler and OS), and hardware performance.
