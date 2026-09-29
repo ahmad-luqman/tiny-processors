@@ -8,9 +8,10 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
+from unittest import mock
 
 from programs.simd4 import dense4
-from tools import digit_data, digit_drawn, digit_ref
+from tools import digit_data, digit_drawn, digit_drawn_accuracy, digit_ref
 from tools.rv32_digit_kernels import LAYER1_DEPTH, LAYER2_DEPTH, kernels
 from tools import rv32_digit_model
 from tools.rv32_digit_model import launch_order_weights
@@ -309,6 +310,21 @@ class KeyboardDrawingTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'differs from the pinned'):
             digit_drawn.check_digest(altered, digit_drawn.digest(small))
 
+    def test_heights_outside_the_canvas_are_refused(self):
+        """A 29-pixel target wrote past the 784-byte canvas; zero drew nothing."""
+        images, _ = digit_data.load_test_set()
+        for height in (0, -3, 29):
+            with self.subTest(height=height):
+                with self.assertRaisesRegex(ValueError, 'must be 1 to 28'):
+                    digit_drawn.draw(images[0], height, random.Random(1))
+        for argv in (['--heights', '29'], ['--heights', '10', '0']):
+            with self.subTest(argv=argv), \
+                    mock.patch('sys.argv', ['digit_drawn_accuracy', '--count', '5', *argv]), \
+                    mock.patch('sys.stderr'):
+                with self.assertRaises(SystemExit) as caught:
+                    digit_drawn_accuracy.main()
+                self.assertEqual(caught.exception.code, 2)            # argparse's usage error
+
     def test_a_partial_set_is_a_prefix_of_the_full_one(self):
         """So a --count run measures a true subset of the pinned set."""
         images, _ = digit_data.load_test_set()
@@ -450,7 +466,6 @@ class ModelTest(unittest.TestCase):
     def test_accuracy_command_fails_below_the_clean_floor(self):
         """`make accuracy-rv32-digit` must fail on a missed target even when the
         predictions were re-pinned, which the pinned-file comparison cannot see."""
-        from unittest import mock
         real = digit_ref.accuracy
 
         def scored(fraction):

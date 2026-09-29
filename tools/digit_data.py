@@ -177,6 +177,8 @@ def resize(canvas, target=TARGET):
     keyboard-style generator in `tools.digit_drawn`, which scales digits to a
     chosen height with the same rule.
     """
+    if not 1 <= target <= SIDE:
+        raise ValueError(f'resize target must be 1 to {SIDE} pixels, got {target}')
     box = ink_box(canvas)
     out = bytearray(PIXELS)
     if box is None:

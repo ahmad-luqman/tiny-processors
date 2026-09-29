@@ -27,6 +27,8 @@ def main():
     args = parser.parse_args()
     if args.count is not None and not 1 <= args.count <= 10000:
         parser.error('--count must be 1 to 10000')
+    if any(not 1 <= height <= digit_data.SIDE for height in args.heights):
+        parser.error(f'--heights must each be 1 to {digit_data.SIDE}, the canvas size')
     model = digit_ref.load_model()
     images, labels = digit_data.load_test_set()
     if args.count is not None:
