@@ -165,6 +165,31 @@ class ImageCheckerTests(unittest.TestCase):
                 self.assertEqual(check_listing(empty), ["listing has no instruction lines"])
                 self.assertEqual(check_listing(empty, allow_privileged=True), ["listing has no instruction lines"])
 
+    def test_m_and_counter_gates_admit_exactly_their_instructions(self):
+        base = "80000000: 00040117     \tauipc\tsp, 0x40\n"
+        m_lines = ["80000004: 02b50533     \tmul\ta0, a0, a1", "80000004: 02b51533     \tmulh\ta0, a0, a1",
+                   "80000004: 02b52533     \tmulhsu\ta0, a0, a1", "80000004: 02b53533     \tmulhu\ta0, a0, a1",
+                   "80000004: 02c5c533     \tdiv\ta0, a1, a2", "80000004: 02c5d533     \tdivu\ta0, a1, a2",
+                   "80000004: 02c5e533     \trem\ta0, a1, a2", "80000004: 02c5f533     \tremu\ta0, a1, a2"]
+        for line in m_lines:
+            with self.subTest(line=line):
+                self.assertEqual(len(check_listing(base + line)), 1, "RV32I listings still reject M")
+                self.assertEqual(check_listing(base + line, allow_m=True), [])
+        # The gate reads the word too: a mnemonic that says mul on a word that is not M is refused.
+        self.assertEqual(len(check_listing(base + "80000004: 00b50533     \tmul\ta0, a0, a1", allow_m=True)), 1)
+        self.assertEqual(len(check_listing(base + "80000004: 30047073     \tcsrci\tmstatus, 8", allow_m=True)), 1)
+        # Counter reads print as rdcycle/rdtime/rdinstret, which no csr* rule matches: the word decides.
+        reads = ["80000004: c0002573     \trdcycle\ta0", "80000004: c0102573     \trdtime\ta0",
+                 "80000004: c0202573     \trdinstret\ta0", "80000004: c8002573     \trdcycleh\ta0",
+                 "80000004: c0206573     \tcsrrsi\ta0, instret, 0"]
+        for line in reads:
+            with self.subTest(line=line):
+                self.assertEqual(len(check_listing(base + line)), 1, "without the gate a counter read is refused")
+                self.assertEqual(check_listing(base + line, allow_counters=True), [])
+        for write in ("80000004: c0029073     \tcsrw\tcycle, t0", "80000004: c022a573     \tcsrrs\ta0, instret, t0"):
+            with self.subTest(write=write):
+                self.assertEqual(len(check_listing(base + write, allow_counters=True)), 1, "counters are read-only")
+
     def test_selfcheck_expected_checksum_matches_source_and_makefile(self):
         checksum = 2166136261
         for value in SELFCHECK_EXPECTED_VALUES:

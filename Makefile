@@ -86,7 +86,7 @@ RV32WIN := build/rv32/rv32win
 # Recursive `=`: pkg-config runs only where the window is built, so a machine without SDL3 still runs every test.
 SDL3_CFLAGS = $(shell pkg-config --cflags sdl3 2>/dev/null)
 SDL3_LIBS = $(shell pkg-config --libs sdl3 2>/dev/null)
-RV32_RTL := rtl/rv32/rv32_fregfile.v rtl/rv32/rv32_fdecode.v $(FP32_RTL) rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32.v
+RV32_RTL := rtl/rv32/rv32_fregfile.v rtl/rv32/rv32_fdecode.v $(FP32_RTL) rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32_muldiv.v rtl/rv32/rv32.v
 RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_timer.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
 RV32_TB := tests/rv32_tb.sv
 RV32_TB_VVP := build/rv32/rv32_tb.vvp
@@ -919,3 +919,70 @@ run-rv32-soc-menu-rtl: check-rv32-image $(RV32EMU) $(RV32_TB_VVP)
 run-rv32-soc-menu-rtl-verilator: check-rv32-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_SOC_MENU_ARGS) --max-cycles $(RV32_SOC_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --seed 17 --gpu-seed 31 --simd-seed 43 --out build/soc/menu-verilator
 test-rv32: run-rv32-soc-menu-emu run-rv32-soc-menu-rtl-verilator
+
+# Track 0: the M extension. The same sources built for RV32IM: the compiler emits
+# mul/div/rem, and every image except the self-check (which calls the software
+# routines by name to test them) links without programs/rv32/rt/muldiv.c. Each
+# image must reproduce the RV32I build's results exactly: the same console line,
+# the same checkpoints, on the emulator and on both simulators.
+.PHONY: firmware-rv32m check-rv32m-image run-rv32m-emu run-rv32m-rtl run-rv32m-rtl-verilator test-rv32-m test-rv32-m-verilator
+RV32M_CFLAGS := $(subst -march=rv32i ,-march=rv32im ,$(RV32_CFLAGS)) -Ibuild/rv32
+RV32M_LDFLAGS := $(subst -march=rv32i ,-march=rv32im ,$(RV32_LDFLAGS))
+RV32M_IMAGES := selfcheck diag pong capstone
+RV32M_COMMON_OBJS := build/rv32m/start.o build/rv32m/console.o
+RV32M_OBJS_selfcheck := build/rv32m/selfcheck.o build/rv32m/muldiv.o
+RV32M_OBJS_diag := build/rv32m/diag.o build/rv32m/trap.o
+RV32M_OBJS_pong := build/rv32m/pong.o build/rv32m/pong_game.o build/rv32m/gfx.o
+RV32M_OBJS_capstone := $(patsubst build/rv32/%,build/rv32m/%,$(filter-out $(RV32_COMMON_OBJS),$(RV32_CAPSTONE_OBJS)))
+build/rv32m:
+	mkdir -p $@
+build/rv32m/%.o: programs/rv32/%.c $(RV32_HEADERS) $(RV32_DIGIT_GENERATED) $(RV32_G3D_GENERATED) | build/rv32m
+	$(RV32_CC) $(RV32M_CFLAGS) -c -o $@ $<
+build/rv32m/%.o: programs/rv32/%.S programs/rv32/board.h | build/rv32m
+	$(RV32_CC) $(RV32M_CFLAGS) -c -o $@ $<
+build/rv32m/muldiv.o: programs/rv32/rt/muldiv.c programs/rv32/rt/muldiv.h | build/rv32m
+	$(RV32_CC) $(RV32M_CFLAGS) -c -o $@ $<
+build/rv32m/digit_weights.o: build/rv32/digit_weights.c build/rv32/digit_weights.h | build/rv32m
+	$(RV32_CC) $(RV32M_CFLAGS) -c -o $@ $<
+.SECONDEXPANSION:
+build/rv32m/%.elf: $$(RV32M_OBJS_$$*) $(RV32M_COMMON_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32M_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(filter %.o,$^)
+build/rv32m/%.lst: build/rv32m/%.elf
+	$(RV32_OBJDUMP) -d -S $< > $@
+build/rv32m/%.bin: build/rv32m/%.elf
+	$(RV32_OBJCOPY) -O binary $< $@
+# Kept after the build (not intermediates to delete): the ELF is what gdb and the checker read.
+.SECONDARY: $(foreach image,$(RV32M_IMAGES),build/rv32m/$(image).elf $(RV32M_OBJS_$(image))) $(RV32M_COMMON_OBJS)
+firmware-rv32m: toolchain-rv32 $(foreach image,$(RV32M_IMAGES),build/rv32m/$(image).elf build/rv32m/$(image).bin build/rv32m/$(image).lst)
+# --require-m: the listing multiplies or divides in hardware and, apart from the self-check,
+# no software routine is linked (the self-check keeps it to test it by name).
+check-rv32m-image: firmware-rv32m
+	$(PYTHON) tools/rv32_image.py build/rv32m/selfcheck.elf --listing build/rv32m/selfcheck.lst --bin build/rv32m/selfcheck.bin --hex build/rv32m/selfcheck.hex --allow-m
+	$(PYTHON) tools/rv32_image.py build/rv32m/diag.elf --listing build/rv32m/diag.lst --bin build/rv32m/diag.bin --hex build/rv32m/diag.hex --allow-privileged --allow-m --require-m
+	$(PYTHON) tools/rv32_image.py build/rv32m/pong.elf --listing build/rv32m/pong.lst --bin build/rv32m/pong.bin --hex build/rv32m/pong.hex --allow-m --require-m
+	$(PYTHON) tools/rv32_image.py build/rv32m/capstone.elf --listing build/rv32m/capstone.lst --bin build/rv32m/capstone.bin --hex build/rv32m/capstone.hex --allow-m --require-m
+RV32M_SELFCHECK_ARGS := --image build/rv32m/selfcheck.bin --expect-console "PASS $(RV32_SELFCHECK_HEX)"
+RV32M_DIAG_ARGS := $(subst build/rv32/diag.bin,build/rv32m/diag.bin,$(RV32_DIAG_ARGS))
+RV32M_PONG_ARGS := $(subst build/rv32/pong.bin,build/rv32m/pong.bin,$(RV32_PONG_ARGS))
+RV32M_CAPSTONE_ARGS := $(subst build/rv32/capstone.bin,build/rv32m/capstone.bin,$(RV32_CAPSTONE_ARGS))
+run-rv32m-emu: check-rv32m-image $(RV32EMU)
+	$(PYTHON) tools/rv32_run_emu.py build/rv32m/selfcheck.bin --emulator $(RV32EMU) --transcript build/rv32m/selfcheck.emu.transcript --trace build/rv32m/selfcheck.trace --state build/rv32m/selfcheck.state --expect-hex $(RV32_SELFCHECK_HEX)
+	$(PYTHON) -m tools.rv32_rtl $(RV32M_DIAG_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32m/emu
+	$(PYTHON) -m tools.rv32_rtl $(RV32M_PONG_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32m/emu
+	$(PYTHON) -m tools.rv32_rtl $(RV32M_CAPSTONE_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32m/emu
+# Icarus runs the self-check and the diagnostic, Verilator all four (Pong and the capstone
+# with a stalled bus), as the RV32I targets split them.
+run-rv32m-rtl: check-rv32m-image $(RV32_TB_VVP) $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32M_SELFCHECK_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32m/rtl
+	$(PYTHON) -m tools.rv32_rtl $(RV32M_DIAG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32m/rtl
+run-rv32m-rtl-verilator: check-rv32m-image $(RV32_TB_VERILATOR) $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32M_SELFCHECK_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32m/rtl-verilator
+	$(PYTHON) -m tools.rv32_rtl $(RV32M_DIAG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --out build/rv32m/rtl-verilator
+	$(PYTHON) -m tools.rv32_rtl $(RV32M_PONG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32m/rtl-verilator
+	$(PYTHON) -m tools.rv32_rtl $(RV32M_CAPSTONE_ARGS) --max-cycles 20000000 --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32m/rtl-verilator
+# The directed M and Zicntr tests (tests/test_rv32_m.py) on each simulator.
+test-rv32-m: $(RV32EMU)
+	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_m.py' -v
+test-rv32-m-verilator: $(RV32EMU) $(RV32_TB_VERILATOR)
+	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_m.py' -v
+test-rv32: test-rv32-m test-rv32-m-verilator run-rv32m-emu run-rv32m-rtl run-rv32m-rtl-verilator

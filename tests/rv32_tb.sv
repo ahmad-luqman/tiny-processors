@@ -23,7 +23,7 @@ module rv32_tb;
     wire retire_fd_we, retire_fcsr_we;
     wire [31:0] retire_fd_value;
     wire [7:0] retire_fcsr;
-    wire [2:0] state;
+    wire [3:0] state;
     wire console_valid, done_valid, display_present, in_full;
     wire [7:0] console_byte;
     wire [31:0] done_wdata, display_frames;
@@ -107,6 +107,7 @@ module rv32_tb;
     wire [69:0] request = {mem_fetch, mem_we, mem_strb, mem_addr, mem_wdata};
     reg [69:0] held_request;    // the request as it was on the first stalled edge
     integer fp_waits = 0;
+    integer md_waits = 0;       // cycles in MD_WAIT: 33 per M-extension instruction
     reg fp_inflight = 0, fp_completed = 0;
     // Integration protocol: each arithmetic retirement consumes one completion.
     // Reset cancels both tokens, even if a response was accepted before writeback.
@@ -125,7 +126,7 @@ module rv32_tb;
                 // An internal-error response traps instead of retiring.
                 fp_completed = !dut.core.fp_error;
             end
-            if (state == 3'd4 && dut.core.fp_valid && dut.core.fp_direct == dut.core.DIRECT_NONE) begin
+            if (state == 4'd4 && dut.core.fp_valid && dut.core.fp_direct == dut.core.DIRECT_NONE) begin
                 if (!fp_completed) $fatal(1, "FPU retirement without completion");
                 fp_completed = 0;
             end
@@ -248,6 +249,7 @@ module rv32_tb;
             $fwrite(STDERR, "rv32_tb: halt=%0s cycles=%0d steps=%0d stalls=%0d transfers=%0d",
                     halt_name, cycles, steps, stalls, transfers);
             if (fp_waits != 0) $fwrite(STDERR, " fp_waits=%0d", fp_waits);
+            if (md_waits != 0) $fwrite(STDERR, " md_waits=%0d", md_waits);
             if (halt_name == "done") begin
                 $fwrite(STDERR, " done=%h", done_word);
                 if (done_word == 32'h5555)
@@ -305,7 +307,8 @@ module rv32_tb;
             $fatal(1, "Request on the bus during reset");
         if (!reset) begin
             cycles = cycles + 1;
-            if (state == 3'd6 || state == 3'd7) fp_waits = fp_waits + 1;
+            if (state == 4'd6 || state == 4'd7) fp_waits = fp_waits + 1;
+            if (state == 4'd8) md_waits = md_waits + 1;
             // The contract: nothing about a request changes while it waits,
             // including on the edge that finally accepts it.
             if (stalled_request && (mem_valid !== 1'b1 || request !== held_request))

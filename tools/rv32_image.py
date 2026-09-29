@@ -33,6 +33,12 @@ FORBIDDEN_MNEMONIC = re.compile(r"\A(mul\w*|div\w*|rem\w*|csr\w*|fence\.i|c\.\w+
 # four trap CSRs (the operand is checked below), and mret.
 PRIVILEGED_MNEMONIC = re.compile(r"\A(csr\w*|mret)\Z")
 TRAP_CSR = re.compile(r"\b(mtvec|mepc|mcause|mtval)\b")
+# What an RV32IM image may use in addition (Track 0): exactly the eight M-extension instructions.
+M_MNEMONIC = re.compile(r"\A(mul|mulh|mulhsu|mulhu|div|divu|rem|remu)\Z")
+# The Zicntr counters (cycle, time, instret and their high halves). Only reads exist; objdump
+# prints them as rdcycle/rdtime/rdinstret, which no csr* pattern would catch, so the check is
+# on the instruction word.
+COUNTER_CSRS = (0xC00, 0xC01, 0xC02, 0xC80, 0xC81, 0xC82)
 LISTING_LINE = re.compile(r"\A\s*([0-9a-f]+):\s+([0-9a-f]{2}(?: [0-9a-f]{2})*|[0-9a-f]{4,8})\s+(\S+)")
 
 Elf = namedtuple("Elf", "etype machine flags entry segments sections symbols undefined")
@@ -119,10 +125,12 @@ def listing_word(encoded):
     return int(encoded, 16) if len(encoded) == 8 else None
 
 
-def check_listing(text, allow_privileged=False, allow_f=False):
+def check_listing(text, allow_privileged=False, allow_f=False, allow_m=False, allow_counters=False):
     """Return problems found in an objdump disassembly listing; `allow_privileged` admits the CSR
     instructions and mret that a trap handler needs; `allow_f` admits only valid RV32F
-    encodings and floating CSR accesses. Both gates require a listing to inspect."""
+    encodings and floating CSR accesses; `allow_m` admits the M extension's eight instructions;
+    `allow_counters` admits reads (never writes) of the Zicntr counters. Every gate requires a
+    listing to inspect."""
     problems = []
     instructions = 0
     for number, line in enumerate(text.splitlines(), 1):
@@ -143,6 +151,14 @@ def check_listing(text, allow_privileged=False, allow_f=False):
                 if not allow_f or (word >> 12) & 7 == 4:
                     problems.append(f"listing line {number}: floating CSR outside selected ISA: {line.strip()}")
                 continue
+            if csr in COUNTER_CSRS:
+                reads_only = (word >> 12) & 3 != 1 and (word >> 15) & 31 == 0  # csrrs/csrrc with x0 or uimm 0
+                if not allow_counters or not reads_only:
+                    problems.append(f"listing line {number}: counter access outside selected ISA: {line.strip()}")
+                continue
+        if allow_m and match and M_MNEMONIC.match(match.group(3)) and word is not None \
+                and word & 127 == 0x33 and word >> 25 == 1:
+            continue
         if match and FORBIDDEN_MNEMONIC.match(match.group(3)):
             if allow_privileged and PRIVILEGED_MNEMONIC.match(match.group(3)):
                 if match.group(3) == "mret" or TRAP_CSR.search(line):
@@ -157,7 +173,21 @@ def check_listing(text, allow_privileged=False, allow_f=False):
     return problems
 
 
-def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, entry=None, allow_privileged=False, allow_f=False):
+SOFTWARE_MULDIV = ("rv32_mul", "rv32_divu", "rv32_remu", "rv32_div", "rv32_rem",
+                   "__mulsi3", "__udivsi3", "__umodsi3", "__divsi3", "__modsi3")
+
+
+def check_m_build(elf, listing):
+    """An RV32IM build retires the software routines: the listing multiplies or divides in
+    hardware, and none of programs/rv32/rt/muldiv.c's symbols is linked in."""
+    problems = [f"RV32IM image still links {name}" for name in SOFTWARE_MULDIV if name in elf.symbols]
+    if not any((match := LISTING_LINE.match(line)) and M_MNEMONIC.match(match.group(3)) for line in listing.splitlines()):
+        problems.append("RV32IM image has no M-extension instruction")
+    return problems
+
+
+def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, entry=None, allow_privileged=False, allow_f=False,
+                allow_m=False, allow_counters=False):
     """Return a list of contract violations; an empty list means the image is acceptable."""
     entry = ram_base if entry is None else entry
     ram_end = ram_base + ram_size
@@ -226,7 +256,7 @@ def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, e
     if elf.undefined:
         problems.append("undefined symbols: " + ", ".join(sorted(elf.undefined)))
     if listing is not None:
-        problems.extend(check_listing(listing, allow_privileged, allow_f))
+        problems.extend(check_listing(listing, allow_privileged, allow_f, allow_m, allow_counters))
     return problems
 
 
@@ -273,13 +303,23 @@ def main():
     parser.add_argument("--allow-privileged", action="store_true",
                         help="admit csr* and mret in the listing (an image with a trap handler)")
     parser.add_argument("--allow-f", action="store_true", help="admit RV32F and floating CSRs, retaining ILP32")
+    parser.add_argument("--allow-m", action="store_true", help="admit the M extension's multiply and divide instructions")
+    parser.add_argument("--allow-counters", action="store_true", help="admit reads of the Zicntr counters (cycle, time, instret)")
+    parser.add_argument("--require-m", action="store_true",
+                        help="with --allow-m: the listing must use M instructions and the image must not contain the "
+                             "software multiply/divide routines (an RV32IM build that really retired rt/muldiv.c)")
     args = parser.parse_args()
-    if (args.allow_f or args.allow_privileged) and args.listing is None:
-        parser.error("--allow-f and --allow-privileged require --listing")
+    if (args.allow_f or args.allow_privileged or args.allow_m or args.allow_counters) and args.listing is None:
+        parser.error("--allow-f, --allow-m, --allow-counters and --allow-privileged require --listing")
+    if args.require_m and not args.allow_m:
+        parser.error("--require-m requires --allow-m")
     try:
         elf = parse_elf(args.elf.read_bytes())
         listing = args.listing.read_text() if args.listing else None
-        problems = check_image(elf, listing, args.ram_base, args.ram_size, allow_privileged=args.allow_privileged, allow_f=args.allow_f)
+        problems = check_image(elf, listing, args.ram_base, args.ram_size, allow_privileged=args.allow_privileged, allow_f=args.allow_f,
+                               allow_m=args.allow_m, allow_counters=args.allow_counters)
+        if args.require_m:
+            problems.extend(check_m_build(elf, listing))
         image = flatten(elf, args.ram_base)
         if args.bin and args.bin.read_bytes() != image:
             problems.append(f"{args.bin} differs from the flattened PT_LOAD contents ({len(image)} bytes)")

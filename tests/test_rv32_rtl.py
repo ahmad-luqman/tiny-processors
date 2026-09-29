@@ -238,10 +238,10 @@ class RtlTest(unittest.TestCase):
                          ["80000000", "80000004", "80000008", "8000000c", "80000014"])
 
     def test_illegal_encodings_and_ecall_ebreak_fault(self):
-        mul = r_type(0x33, 1, 0, 2, 3, 1)
+        unused_op = r_type(0x33, 1, 0, 2, 3, 2)  # funct7 2 is unused (funct7 1 is the M extension)
         fence_i = i_type(0x0F, 0, 1, 0, 0)
         bad_srai = SRAI(1, 1, 0x20 | 0x400 | 1)  # a funct7 bit set that neither srli nor srai allows
-        illegal = [mul, fence_i, 0xFFFFFFFF, CSRRW(0, MSTATUS, 1), bad_srai]
+        illegal = [unused_op, fence_i, 0xFFFFFFFF, CSRRW(0, MSTATUS, 1), bad_srai]
         cases = [(word, 2, word) for word in illegal] + [(ECALL(), 11, 0), (EBREAK(), 3, RAM + 4)]
         for word, cause, value in cases:
             with self.subTest(word=f"{word:08x}"):
@@ -370,11 +370,11 @@ class RtlTest(unittest.TestCase):
         # The handler records the CSRs, counts the trap, steps mepc past the instruction, and returns.
         handler = [CSRRS(10, MCAUSE, 0), CSRRS(11, MTVAL, 0), CSRRS(12, MEPC, 0), ADDI(20, 20, 1),
                    ADDI(12, 12, 4), CSRRW(0, MEPC, 12), MRET()]
-        mul = r_type(0x33, 1, 0, 2, 3, 1)
+        unused_op = r_type(0x33, 1, 0, 2, 3, 2)  # funct7 2 is unused (funct7 1 is the M extension)
         body = LI(1, UNMAPPED) + LI(2, RAM + 0x102) + [
             ECALL(),                 # cause 11, mtval 0
             EBREAK(),                # cause 3, mtval its PC
-            mul,                     # cause 2, mtval the word
+            unused_op,               # cause 2, mtval the word
             LW(3, 1, 0),             # cause 5: refused at acceptance, then the next data access is fine
             SW(3, 2, 0),             # cause 6: misaligned, never reaches the bus
             LW(22, 2, -2),           # the word it would have hit is still zero
@@ -390,7 +390,7 @@ class RtlTest(unittest.TestCase):
                 emulator, rtl = self.assert_same_pass(words, stall=stall)
         traps = [line for line in rtl.trace if " trap " in line]
         self.assertEqual([effects(line) for line in traps],
-                         ["trap 11 00000000", f"trap 3 {RAM + 8 * 4:08x}", f"trap 2 {mul:08x}", f"trap 5 {UNMAPPED:08x}",
+                         ["trap 11 00000000", f"trap 3 {RAM + 8 * 4:08x}", f"trap 2 {unused_op:08x}", f"trap 5 {UNMAPPED:08x}",
                           f"trap 6 {RAM + 0x102:08x}", f"trap 4 {RAM + 0x103:08x}", f"trap 0 {RAM + 14 * 4 + 2:08x}",
                           f"trap 0 {RAM + 15 * 4 + 6:08x}"])
         self.assertEqual(len(traps), 8)
@@ -1062,7 +1062,7 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("never did", result.stderr)
         result = self.run_results(self.emulator, compare="trace")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("reads the timer, so its traces differ by design", result.stderr)
+        self.assertIn("reads the timer or the cycle/time counters, so its traces differ by design", result.stderr)
         # A byte more on the emulator's console: the RTL's console no longer matches.
         noisy = self.wrapper("noisy", "printf x")
         result = self.run_results(noisy)

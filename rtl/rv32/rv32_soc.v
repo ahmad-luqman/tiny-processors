@@ -44,7 +44,7 @@ module rv32_soc #(
     output wire [3:0]  trap_cause,
     output wire [31:0] trap_value,
     output wire        halted,
-    output wire [2:0]  state,
+    output wire [3:0]  state,
     output wire [31:0] pc,
     output wire [31:0] mtvec,
     output wire [31:0] mepc,

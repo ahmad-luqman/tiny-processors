@@ -25,7 +25,7 @@ from tools.rv32_image import to_hex_words  # noqa: E402
 from tools.rv32_run_emu import DEFAULT_EMULATOR, emulator_command, halt_line, last_halt_line, parse_halt_line  # noqa: E402
 
 RTL_SOURCES = [ROOT / "rtl" / "rv32" / name
-               for name in ("rv32_fregfile.v", "rv32_fdecode.v", "rv32_regfile.v", "rv32_alu.v", "rv32_decode.v", "rv32.v",
+               for name in ("rv32_fregfile.v", "rv32_fdecode.v", "rv32_regfile.v", "rv32_alu.v", "rv32_decode.v", "rv32_muldiv.v", "rv32.v",
                             "rv32_bus.v", "rv32_ram.v", "rv32_console.v", "rv32_done.v", "rv32_timer.v", "rv32_input.v", "rv32_display.v", "rv32_soc.v", "rv32_gpu.v", "rv32_g3d.v", "rv32_g3d_core.v", "rv32_simd4.v")]
 RTL_SOURCES.extend([ROOT / "rtl/fp32/fp32.v", ROOT / "rtl/simd4/simd4.v"])
 TESTBENCH = ROOT / "tests" / "rv32_tb.sv"
@@ -33,7 +33,7 @@ DEFAULT_SIMULATOR = "build/rv32/rv32_tb.vvp"
 DEFAULT_OUT = "build/rv32/rtl"
 BENCH_SEED = 7
 COUNTERS = ("cycles", "steps", "stalls", "transfers")
-DECIMAL = COUNTERS + ("cause", "fp_waits")
+DECIMAL = COUNTERS + ("cause", "fp_waits", "md_waits")
 HEX = ("done", "tval", "pc", "word")
 # The keys each halt reason carries besides the counters and the outcome (docs/rv32-rtl.md).
 REQUIRED = {"done": ("done",), "double-fault": ("cause", "tval"), "limit": ()}
@@ -107,9 +107,10 @@ def rtl_halt_line(stderr):
     if reason not in REQUIRED:
         raise ValueError(f"unknown halt reason {reason!r} in {line!r}")
     expected = {"halt", "outcome", *COUNTERS, *REQUIRED[reason]}
-    if "fp_waits" in fields:
-        expected.add("fp_waits")
-        if fields["fp_waits"] < 0: raise ValueError("negative FPU wait count")
+    for waits, unit in (("fp_waits", "FPU"), ("md_waits", "multiply/divide")):
+        if waits in fields:
+            expected.add(waits)
+            if fields[waits] < 0: raise ValueError(f"negative {unit} wait count")
     if set(fields) != expected:
         raise ValueError(f"halt line keys {sorted(fields)} do not match {sorted(expected)} in {line!r}")
     return fields
@@ -250,6 +251,25 @@ G3D_ACCESS = re.compile(r"mem\[(?:" + "|".join(f"{asm.G3D_BASE+offset:08x}" for 
      asm.G3D_INSTRUCTIONS, asm.G3D_TRANSFERS, asm.G3D_DIVIDES, asm.G3D_PIXELS, asm.G3D_ZFAIL, asm.G3D_CULLED))
     + r")\](?:->|<-)")
 
+# The Zicntr counters that count device ticks: cycle, time and their high halves. `instret`
+# counts retirements, which agree on every backend, so reading it keeps trace comparison.
+DEVICE_TIME_CSRS = (0xC00, 0xC01, 0xC80, 0xC81)
+
+
+def reads_device_time(trace):
+    """Whether a trace reads device time: a load from the timer, or a CSR instruction on the
+    cycle or time counter (docs/rv32.md, "Device time")."""
+    for line in trace:
+        if f"mem[{TIMER:08x}]->" in line:
+            return True
+        parts = line.split(" ", 3)
+        if len(parts) >= 3 and " trap " not in line:  # a trapped counter access read nothing
+            word = int(parts[2], 16)
+            if word & 0x7F == 0x73 and (word >> 12) & 3 and word >> 20 in DEVICE_TIME_CSRS:
+                return True
+    return False
+
+
 def uses_accelerator(trace):
     """Only successful register accesses justify asynchronous result comparison."""
     return any(SIMD_ACCESS.search(line) or GPU_ACCESS.search(line) or G3D_ACCESS.search(line) for line in trace)
@@ -335,11 +355,13 @@ def cycle_relation(rtl):
     memory = sum("mem[" in line for line in rtl.trace)
     traps = sum(" trap " in line for line in rtl.trace)
     halt = rtl.halt
-    expected = 4 * (steps - memory) + 5 * memory + halt["stalls"] + halt.get("fp_waits", 0)
+    expected = 4 * (steps - memory) + 5 * memory + halt["stalls"] + halt.get("fp_waits", 0) + halt.get("md_waits", 0)
     text = (f"cycles {halt['cycles']} = 4 x {steps - memory} + 5 x {memory} + {halt['stalls']} stalls; "
             f"transfers {halt['transfers']} = {steps} fetches + {memory} data")
     if halt.get("fp_waits", 0):
         text += f"; plus {halt['fp_waits']} FPU issue/wait cycles"
+    if halt.get("md_waits", 0):
+        text += f"; plus {halt['md_waits']} multiply/divide wait cycles"
     if traps:
         return f"{text} (not exact: {traps} trap lines)", None
     return text, halt["cycles"] == expected and halt["transfers"] == steps + memory
@@ -375,7 +397,7 @@ def main():
     simd_delay.add_argument("--simd-seed", type=int, help="seeded 0..3 waits per accelerator data transfer")
     parser.add_argument("--compare", choices=("trace", "results"), default="trace",
                         help="`trace`: identical retirement traces and the cycle formula; `results`: identical "
-                             "console, outcome, and checkpoints, for a program that reads the timer or accesses accelerator registers (device time)")
+                             "console, outcome, and checkpoints, for a program that reads the timer, the cycle/time counters or accelerator registers (device time)")
     parser.add_argument("--compare-stores", action="store_true",
                         help="also compare ordered stores in results mode; firmware must have timing-independent stores")
     parser.add_argument("--backend", choices=("both", "emulator"), default="both",
@@ -446,14 +468,14 @@ def main():
     check_passed(emulator, "emulator")
     # Device time differs for timers and asynchronous accelerators. Compare guest
     # results and trap records when either interface makes the CPU trace timing-dependent.
-    reads_timer = any(f"mem[{TIMER:08x}]->" in line for line in emulator.trace)
+    reads_timer = reads_device_time(emulator.trace)
     if args.compare == "trace" and reads_timer:
-        sys.exit("this program reads the timer, so its traces differ by design; use --compare results")
+        sys.exit("this program reads the timer or the cycle/time counters, so its traces differ by design; use --compare results")
     uses_simd = uses_accelerator(emulator.trace)
     if args.compare == "trace" and uses_simd:
         sys.exit("this program accesses accelerator registers; use --compare results")
     if args.compare == "results" and not (reads_timer or uses_simd):
-        sys.exit("--compare results is for a program that reads the timer or accesses accelerator registers; this one never did, use --compare trace")
+        sys.exit("--compare results is for a program that reads the timer, the cycle/time counters or accelerator registers; this one never did, use --compare trace")
     if args.expect_console is not None and emulator.console.rstrip("\n") != args.expect_console:
         sys.exit(f"emulator console {emulator.console!r} is not {args.expect_console!r}")
     last_line = emulator.console.rstrip("\n").rsplit("\n", 1)[-1]
