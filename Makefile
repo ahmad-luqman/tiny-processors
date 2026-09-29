@@ -756,8 +756,9 @@ test-rv32-digit: $(RV32_DIGIT_GENERATED)
 # Verilator machine.
 .PHONY: test-rv32-digit-verilator
 test-rv32-digit-verilator: test-rv32-digit test-rv32-simd4-verilator run-rv32-digit-rtl-verilator
-# Both acceptance measurements: clean MNIST, then the pinned keyboard-style set
-# (MNIST test digits redrawn one brush wide at 10 to 28 pixels tall).
+# Both acceptance measurements, each failing below its floor: clean MNIST (95%),
+# then the pinned keyboard-style set (85% at every height; MNIST test digits
+# redrawn one brush wide at nominal heights 10 to 28 pixels).
 accuracy-rv32-digit:
 	$(PYTHON) -m tools.digit_ref --count 10000
 	$(PYTHON) -m tools.digit_drawn_accuracy

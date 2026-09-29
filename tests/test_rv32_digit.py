@@ -447,6 +447,26 @@ class ModelTest(unittest.TestCase):
                    for image in images[:500] + drawn)
         self.assertLess(peak, self.model['hidden_max'])
 
+    def test_accuracy_command_fails_below_the_clean_floor(self):
+        """`make accuracy-rv32-digit` must fail on a missed target even when the
+        predictions were re-pinned, which the pinned-file comparison cannot see."""
+        from unittest import mock
+        real = digit_ref.accuracy
+
+        def scored(fraction):
+            def accuracy(count=None, model=None):
+                _, total, predictions = real(count, model)
+                return int(fraction * total), total, predictions
+            return accuracy
+        with mock.patch('sys.argv', ['digit_ref', '--count', '10000']), \
+                mock.patch.object(digit_ref, 'accuracy', scored(0.90)):
+            with self.assertRaisesRegex(SystemExit, 'below the 0.95 floor'):
+                digit_ref.main()
+        with mock.patch('sys.argv', ['digit_ref', '--count', '10000']), \
+                mock.patch.object(digit_ref, 'accuracy', scored(0.96)):
+            digit_ref.main()                                   # at or above the floor: exit 0
+        self.assertEqual(digit_ref.FLOOR, 0.95)
+
     def test_keyboard_style_set_meets_its_target_at_every_height(self):
         """Acceptance target 2: at least 85% on the pinned keyboard-style set, per height.
         About 30 seconds: 50,000 drawings generated and classified by the oracle."""
