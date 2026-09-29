@@ -119,7 +119,8 @@ exact. No RTL changed; the SoC is 327,986 cells. See the
    strokes; both accuracy targets were locked before measuring and are met.
 2. Next, choose among the optional tracks below. A programmable fragment
    stage reusing the G2 core, and G1/G2 overlap, remain candidates, not
-   requirements.
+   requirements. [Next tracks](next-tracks.md) lays out the platform, OS,
+   software and Nand2Tetris candidates with a recommended order.
 
 ## Verification and learning discipline
 
