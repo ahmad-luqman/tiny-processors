@@ -64,6 +64,8 @@ typedef struct {
     bool ack;       /* acknowledgement mode: each packet is answered with + or - (until QStartNoAckMode) */
     bool gone;      /* the connection closed or failed */
     bool swbreak;   /* the client asked for swbreak/hwbreak stop reasons in qSupported */
+    bool at_break;  /* the last stop was a breakpoint at break_pc: the next continue steps past it */
+    uint32_t break_pc;
     uint8_t in[4096];
     size_t in_len, in_pos;
     breakpoint bp[MAX_BREAKPOINTS];
@@ -475,23 +477,25 @@ static bool interrupted(gdb_state *g)
 }
 
 /* One instruction step of the machine (a trap counts: pc is then at mtvec), or a continue: run
- * until a breakpoint address is about to execute, Ctrl-C, or a halt. The first instruction of a
- * continue is never checked, so continuing from a breakpoint makes progress. Without
+ * until a breakpoint address is about to execute, Ctrl-C, or a halt. Every pc is checked before
+ * it executes, the first one included: a breakpoint at the reset pc, or at a pc the client wrote,
+ * stops the continue at once. The one exception is `from_break`, a continue from the breakpoint
+ * that caused the last stop, which executes that instruction first so it makes progress. Without
  * breakpoints the guest runs in POLL_INTERVAL batches through emu_run_until at full speed;
  * with them it runs one step at a time so each pc can be checked before it executes. */
-static stop_reason resume(gdb_state *g, bool stepping, const breakpoint **hit)
+static stop_reason resume(gdb_state *g, bool stepping, bool from_break, const breakpoint **hit)
 {
     machine *m = g->m;
     if (stepping) {
         return emu_run_until(m, 1) == EMU_STOP_HALTED ? STOP_HALTED : STOP_STEP;
     }
     uint64_t next_poll = m->steps + POLL_INTERVAL;
-    bool first = true;
+    bool check = !from_break;
     for (;;) {
-        if (!first && (*hit = find_breakpoint(g, m->pc)) != NULL) {
+        if (check && (*hit = find_breakpoint(g, m->pc)) != NULL) {
             return STOP_BREAK;
         }
-        first = false;
+        check = true;
         if (emu_run_until(m, g->bps ? 1 : POLL_INTERVAL) == EMU_STOP_HALTED) {
             return STOP_HALTED;
         }
@@ -722,8 +726,13 @@ static bool handle_resume(gdb_state *g, gdb_end *end)
     if (has_addr) {
         g->m->pc = addr;
     }
+    /* Only a breakpoint stop at this very pc is stepped over; a pc moved since (by P, G, or
+     * a resume address) is checked like any other. */
+    bool from_break = g->at_break && g->m->pc == g->break_pc;
     const breakpoint *hit = NULL;
-    stop_reason reason = resume(g, stepping, &hit);
+    stop_reason reason = resume(g, stepping, from_break, &hit);
+    g->at_break = reason == STOP_BREAK;
+    g->break_pc = g->m->pc;
     if (reason == STOP_HALTED) {
         *end = GDB_HALTED; /* main sends W with the exit status once it is known */
         return false;

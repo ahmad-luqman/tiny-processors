@@ -389,7 +389,7 @@ PASS words and checkpoints do not.
 - **Benchmarks:** the table above (`make bench-rv32`, 7 minutes); CoreMark
   validates with its known CRCs and Dhrystone's 20 checked values match on the
   emulator and Verilator, with identical instret. `test-rv32-bench` 5 tests.
-- **GDB stub:** `test-rv32-gdb` 26 tests at the time (31 after review), including a real gdb-multiarch session
+- **GDB stub:** `test-rv32-gdb` 26 tests at the time (33 after review), including a real gdb-multiarch session
   ([record](rv32-gdb.md#acceptance-record-2026-09-29)).
 - **Hardware cost:** `make synth-rv32` is 50,532 generic cells (47,885 before
   Track 0 with the same Yosys), latch-free: the M unit 1,690 cells with 107

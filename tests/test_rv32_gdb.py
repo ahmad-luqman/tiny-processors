@@ -398,6 +398,50 @@ class GdbStubTest(unittest.TestCase):
         self.assertEqual(client.ask("c"), "W00")
         self.assert_exit(session, 0, "done", "pass")
 
+    def test_breakpoint_at_the_stopped_pc_stops_before_executing(self):
+        """A breakpoint where the machine already stands, and was not stopped by, is reported
+        before anything executes: at reset, at a pc written with P, at a c ADDR target, and after
+        a step. Only the continue from the breakpoint's own stop steps over it, and a loop through
+        the breakpoint stops there again on each pass."""
+        words = [ADDI(5, 0, 1), ADDI(5, 5, 1), ADDI(5, 5, 1), ADDI(5, 5, 1)] + FINISH()
+        session, client = self.start(self.image(words))
+        self.assertEqual(client.ask(f"Z0,{RAM:x},4"), "OK")
+        self.assertEqual(client.ask("c"), "T05", "the breakpoint at reset stops the first continue")
+        self.assertEqual((client.reg(REG_PC), client.reg(5)), (RAM, 0), "nothing executed")
+        self.assertEqual(client.ask(f"Z0,{RAM + 8:x},4"), "OK")
+        self.assertEqual(client.ask("c"), "T05", "stepped over the reset breakpoint, stopped at the next")
+        self.assertEqual((client.reg(REG_PC), client.reg(5)), (RAM + 8, 2))
+        # A pc written with P is not the breakpoint that stopped the machine: it is checked.
+        self.assertEqual(client.ask(f"P{REG_PC:x}={reg_hex(RAM)}"), "OK")
+        self.assertEqual(client.ask("c"), "T05")
+        self.assertEqual((client.reg(REG_PC), client.reg(5)), (RAM, 2), "stopped at reset again, nothing ran")
+        # So is a resume address, even the one the machine already stands on after a step.
+        self.assertEqual(client.ask("s"), "T05")
+        self.assertEqual(client.ask(f"c{RAM + 8:x}"), "T05")
+        self.assertEqual((client.reg(REG_PC), client.reg(5)), (RAM + 8, 1))
+        self.assertEqual(client.ask(f"z0,{RAM:x},4"), "OK")
+        self.assertEqual(client.ask(f"Z0,{RAM + 12:x},4"), "OK")
+        self.assertEqual(client.ask("s"), "T05", "a step always executes, breakpoint or not")
+        self.assertEqual(client.ask("c"), "T05", "after a step the breakpoint at the new pc is checked")
+        self.assertEqual((client.reg(REG_PC), client.reg(5)), (RAM + 12, 2))
+        self.assertEqual(client.ask(f"z0,{RAM + 8:x},4"), "OK")
+        self.assertEqual(client.ask(f"z0,{RAM + 12:x},4"), "OK")
+        self.assertEqual(client.ask("c"), "W00")
+        self.assert_exit(session, 0, "done", "pass")
+
+    def test_breakpoint_in_a_loop_hits_every_pass(self):
+        """Continuing from a breakpoint steps over it once; the next pass stops there again."""
+        words = [ADDI(6, 0, 3), ADDI(6, 6, -1), BNE(6, 0, -4)] + FINISH()
+        session, client = self.start(self.image(words))
+        self.assertEqual(client.ask(f"Z0,{RAM + 4:x},4"), "OK")
+        counts = []
+        for _ in range(3):
+            self.assertEqual(client.ask("c"), "T05")
+            counts.append(client.reg(6))
+        self.assertEqual(counts, [3, 2, 1])
+        self.assertEqual(client.ask("c"), "W00")
+        self.assert_exit(session, 0, "done", "pass")
+
     def test_breakpoint_table_full(self):
         """64 breakpoints fit; the 65th is refused with E01, re-inserting one already there is
         still OK, and removing one makes room again."""
