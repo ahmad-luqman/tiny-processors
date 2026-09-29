@@ -92,7 +92,7 @@ A write takes effect exactly once, at acceptance, on the strobed lanes. The core
 
 ## Controller
 
-Eight states fit the 3-bit register. Integer instructions visit four or five; F arithmetic additionally visits `FP_ISSUE` and `FP_WAIT`:
+Eight states fit the 3-bit register. Integer instructions visit four or five; F arithmetic additionally visits `FP_ISSUE` and `FP_WAIT`. Track 0 widens the register to four bits for a ninth state, `MD_WAIT`, which M instructions visit between `EXECUTE` and `WRITEBACK` ([Track 0](rv32-groundwork.md#the-m-extension)); the seven unused encodings go to `HALT` with `halted` set, which no reachable path produces:
 
 | State | On this rising edge | Port | Next |
 | --- | --- | --- | --- |
@@ -119,8 +119,8 @@ An RVFI-style sideband for the testbench, separate from the memory port:
 | `retire_fd_we`, `retire_fd[4:0]`, `retire_fd_value[31:0]` | Floating destination/value, valid only with `retire && retire_fd_we`. f0 is writable. |
 | `retire_fcsr_we`, `retire_fcsr[7:0]` | Post-write floating CSR state, valid only with `retire && retire_fcsr_we`. |
 | `trap`, `trap_cause[3:0]`, `trap_value[31:0]` | High for the one cycle after the edge that took a trap, with its `mcause` and `mtval`. |
-| `halted` | The core is in `HALT`: a double fault. |
-| `state[2:0]`, `pc[31:0]`, `mtvec`, `mepc`, `mcause`, `mtval` | For waveforms. |
+| `halted` | The core is in `HALT`: a double fault (or an unused state encoding, which cannot occur). |
+| `state[3:0]`, `pc[31:0]`, `mtvec`, `mepc`, `mcause`, `mtval` | For waveforms. |
 
 Memory effects are not duplicated here. The testbench observes the machine's memory port, so it records the last accepted data transaction (address, strobe, write data, read data) and prints it after the register field at the next `retire`: a store shows the address, the value narrowed to the strobed lanes, and the width in bytes; a load shows the strobed lanes of the word read, before extension, and the same width. That is the same information the emulator prints, produced from the bus rather than from inside the core.
 
@@ -150,7 +150,7 @@ With a fixed stall of `N` cycles per request and no traps, `cycles = 4 × (retir
 rv32_tb: halt=<done|double-fault|limit> cycles=N steps=N stalls=N transfers=N [fp_waits=N] [md_waits=N] [done=WORD] [cause=C tval=V] <pass|fail=<code>|error=<reason>>
 ```
 
-`steps` is the number of trace lines written, so it counts trap lines as the emulator's `steps` does; `cause` and `tval` on a double fault are the trap that could not be delivered, and the first trap is in the core's CSRs. Guest outcomes stop the clock after this line. `$fatal` is reserved for harness violations: a request on the bus during reset, a request changing while stalled, a plusarg that is not a decimal (`+stall=abc`, `+max-cycles=0`, `+stall` together with `+stall-seed`), an unwritable `+wave`, `+trace`, or `+checkpoints` path, a missing image or one with a token that is not an eight-digit hex word, an input script line that is not `frame N down|up KEY` with frames in order, a script that cannot be read, a scripted event that was dropped or never delivered on a run that passed (reported after the halt line, unless `+allow-lost-events`), two data transactions with no retirement or trap between them, or a trap after a write the machine accepted without `error` (the instruction would have had an effect). Both simulators print those diagnostics on stdout, where a guest could print anything, so the runner sends the console to a file with `+console` and treats any stdout output as a failed run, whatever the exit status; the one line it ignores is Icarus's `VCD info:` notice, which no guest can produce on that channel.
+`steps` is the number of trace lines written, so it counts trap lines as the emulator's `steps` does; `cause` and `tval` on a double fault are the trap that could not be delivered, and the first trap is in the core's CSRs. Guest outcomes stop the clock after this line. `$fatal` is reserved for harness violations: a request on the bus during reset, a request changing while stalled, a plusarg that is not a decimal (`+stall=abc`, `+max-cycles=0`, `+stall` together with `+stall-seed`), an unwritable `+wave`, `+trace`, or `+checkpoints` path, a missing image or one with a token that is not an eight-digit hex word, an input script line that is not `frame N down|up KEY` with frames in order, a script that cannot be read, a scripted event that was dropped or never delivered on a run that passed (reported after the halt line, unless `+allow-lost-events`), two data transactions with no retirement or trap between them, the M unit started while it is still stepping, or a trap after a write the machine accepted without `error` (the instruction would have had an effect). Both simulators print those diagnostics on stdout, where a guest could print anything, so the runner sends the console to a file with `+console` and treats any stdout output as a failed run, whatever the exit status; the one line it ignores is Icarus's `VCD info:` notice, which no guest can produce on that channel.
 
 ## Run and verify
 

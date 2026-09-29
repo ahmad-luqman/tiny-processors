@@ -64,8 +64,12 @@ As gates: the 64 register bits are 64 flip-flops, each behind a small mux
 (load, shift-and-add, shift-and-subtract); one 33-bit adder serves the
 multiply step and one 33-bit subtractor the divide step, whose bit 32 is the
 borrow that decides "fits" (the shifted remainder is always below twice the
-divisor, so 33 bits suffice). A 6-bit down-counter and its zero detector are
-the whole controller: `done` is `count == 0`. Around the loop sit the sign
+divisor, so 33 bits suffice). A 6-bit down-counter and one `valid` flip-flop
+are the whole controller: `start` loads the counter and clears `valid`, and the
+last step sets it, so `valid` never shows a stale or reset-time result. The
+operands and `funct3` are latched at `start`, so the core need not hold them
+stable; a `start` while the unit is stepping would abandon the old operation,
+which the core never does and the testbench stops on. Around the loop sit the sign
 logic: at `start` each operand's sign is removed by a conditional negator (a
 two's-complement negate is an inverter row and an incrementer), chosen by the
 operation's signedness, and at the end one more conditional negator puts the
@@ -78,7 +82,7 @@ so `-7 / 0` is -1 rather than +1. `INT32_MIN / -1` divides the magnitudes
 0x80000000 by 1 and negates the result back to 0x80000000.
 
 The core starts the unit from `EXECUTE` with the operands it read in `DECODE`
-and waits in a new state, `MD_WAIT`, until `done`, then latches the result and
+and waits in a new state, `MD_WAIT`, until `valid`, then latches the result and
 retires it in `WRITEBACK` like any ALU result. The state register grew from
 three bits to four for it. The latency is fixed: 32 step cycles plus the one
 that reads the result, so an M instruction costs 4 + 33 = 37 cycles whatever
@@ -93,7 +97,7 @@ instruction never retires.
 
 Why iterative: it is the smallest unit that does the job, it is the algorithm
 the course already explained in software, and its cost is one number. The
-whole unit synthesizes to 1,690 generic cells with 107 flip-flops; a
+whole unit synthesizes to about 1,550 generic cells with 108 flip-flops; a
 single-cycle unsigned 32×32 multiplier alone is 6,405 cells in the same flow
 (`assign p = a * b`), before signed variants or any divider. Early termination (skip leading zero bits) or a radix-4 step
 would shorten the wait at the cost of a variable latency, which would break
@@ -385,12 +389,15 @@ PASS words and checkpoints do not.
 - **Benchmarks:** the table above (`make bench-rv32`, 7 minutes); CoreMark
   validates with its known CRCs and Dhrystone's 20 checked values match on the
   emulator and Verilator, with identical instret. `test-rv32-bench` 5 tests.
-- **GDB stub:** `test-rv32-gdb` 26 tests, including a real gdb-multiarch session
+- **GDB stub:** `test-rv32-gdb` 26 tests at the time (31 after review), including a real gdb-multiarch session
   ([record](rv32-gdb.md#acceptance-record-2026-09-29)).
 - **Hardware cost:** `make synth-rv32` is 50,532 generic cells (47,885 before
   Track 0 with the same Yosys), latch-free: the M unit 1,690 cells with 107
   flip-flops, the `rv32` module 4,715 cells against 3,704 (the two 64-bit
-  counters and their CSR mux). `lint-rv32` and `lint-rv32-soc` are clean.
+  counters and their CSR mux). Cell counts depend on the Yosys version: after
+  review, Yosys 0.69 on macOS gives 44,381 in total, the M unit 1,540 cells
+  with 108 flip-flops (the registered `valid`) and `rv32` 4,159; per-module
+  counts there move by about ±100 cells between runs of unrelated edits. `lint-rv32` and `lint-rv32-soc` are clean.
 - **Regression:** `test-rv32-tools` 22, `test-rv32-rt` 6, `test-rv32-emu` 33,
   `test-rv32-f-verilator` 11, SIMD4 14 and G1 8 tests pass; the self-check, Pong,
   the capstone and the three F images are trace-identical on Verilator, and the

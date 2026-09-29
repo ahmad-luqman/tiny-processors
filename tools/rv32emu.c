@@ -157,6 +157,8 @@ int main(int argc, char **argv)
     if (state_path) {
         FILE *out = emu_open_output(state_path, "state file");
         if (!out) {
+            emu_free(&m);
+            gdb_report_exit(EXIT_EMULATOR_ERROR);
             return EXIT_EMULATOR_ERROR;
         }
         emu_dump_state(&m, out);

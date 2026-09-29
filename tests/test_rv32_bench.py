@@ -18,8 +18,8 @@ COREMARK = """\
 2K performance run parameters for coremark.
 CoreMark Size    : 666
 Total ticks      : 11144930
-Total time (secs): 11
-Iterations/Sec   : 2
+Total time (secs): 111
+Iterations/Sec   : 0
 Iterations       : 30
 Compiler version : clang 18.1.3 (1ubuntu1)
 Compiler flags   : -O2
@@ -155,7 +155,7 @@ class BenchCheckTest(unittest.TestCase):
 
     def test_comparison_sets_aside_only_device_time(self):
         other = COREMARK.replace("Total ticks      : 11144930", "Total ticks      : 55000000").replace(
-            "cycles=11144930", "cycles=55000000").replace("Total time (secs): 11", "Total time (secs): 55")
+            "cycles=11144930", "cycles=55000000").replace("Total time (secs): 111", "Total time (secs): 550")
         self.assertEqual(comparable(other), comparable(COREMARK))
         self.assertNotEqual(comparable(COREMARK.replace("0xf8b3", "0xf8b4")), comparable(COREMARK))
 
