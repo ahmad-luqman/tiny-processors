@@ -33,8 +33,11 @@ enum cause {
     CAUSE_ECALL_M = 11,
 };
 
-/* The only CSRs that exist; every other number is an illegal instruction. */
-enum csr { CSR_FFLAGS = 0x001, CSR_FRM = 0x002, CSR_FCSR = 0x003, CSR_MTVEC = 0x305, CSR_MEPC = 0x341, CSR_MCAUSE = 0x342, CSR_MTVAL = 0x343 };
+/* The only CSRs that exist; every other number is an illegal instruction. The six Zicntr
+ * counters (0xc00-0xc02 and their high halves at 0xc80-0xc82) are read-only: numbers with
+ * bits [11:10] set are, by the CSR address convention, and a write to one is illegal. */
+enum csr { CSR_FFLAGS = 0x001, CSR_FRM = 0x002, CSR_FCSR = 0x003, CSR_MTVEC = 0x305, CSR_MEPC = 0x341, CSR_MCAUSE = 0x342, CSR_MTVAL = 0x343,
+           CSR_CYCLE = 0xc00, CSR_TIME = 0xc01, CSR_INSTRET = 0xc02, CSR_CYCLEH = 0xc80, CSR_TIMEH = 0xc81, CSR_INSTRETH = 0xc82 };
 typedef enum { ACC_OK, ACC_FAULT, ACC_MISALIGNED } mem_access; /* not `access`: unistd.h owns that name */
 
 /* Every window of the memory map is a region with a load and a store
@@ -444,8 +447,22 @@ static bool csr_read(const machine *m, uint32_t number, uint32_t *value)
     case CSR_MEPC: *value = m->mepc; return true;
     case CSR_MCAUSE: *value = m->mcause; return true;
     case CSR_MTVAL: *value = m->mtval; return true;
+    /* Zicntr. `cycle` and `time` count device ticks (docs/rv32.md, "Device time"): on the
+     * emulator a tick is an executed instruction, so both read the steps before this one, the
+     * value the timer device would show. `instret` counts retired instructions before this one,
+     * which is the same number on every backend. */
+    case CSR_CYCLE: case CSR_TIME: *value = (uint32_t)m->steps; return true;
+    case CSR_CYCLEH: case CSR_TIMEH: *value = (uint32_t)(m->steps >> 32); return true;
+    case CSR_INSTRET: *value = (uint32_t)m->retired; return true;
+    case CSR_INSTRETH: *value = (uint32_t)(m->retired >> 32); return true;
     default: return false;
     }
+}
+
+/* CSR numbers 0xc00-0xfff (bits 11:10 set) are read-only: a write traps. */
+static bool csr_read_only(uint32_t number)
+{
+    return (number >> 10) == 3;
 }
 
 static void csr_write(machine *m, uint32_t number, uint32_t value)
@@ -472,6 +489,41 @@ static bool jump(machine *m, uint32_t word, uint32_t target, uint32_t *next)
     }
     *next = target;
     return true;
+}
+
+/* The M extension (unprivileged spec, chapter "M" Extension): the three high-half products
+ * come from 64-bit arithmetic with each operand extended by its own signedness; division by
+ * zero returns all ones (quotient) and the dividend (remainder), and the one signed overflow,
+ * INT32_MIN / -1, returns the dividend and a zero remainder. Neither case traps. These are the
+ * same definitions programs/rv32/rt/muldiv.c implements in software for RV32I builds. */
+static uint32_t muldiv(uint32_t funct3, uint32_t a, uint32_t b)
+{
+    int64_t sa = (int32_t)a, sb = (int32_t)b;
+    bool overflow = a == 0x80000000u && b == 0xffffffffu;
+    switch (funct3) {
+    case 0: return a * b;                                               /* MUL */
+    case 1: return (uint32_t)((uint64_t)(sa * sb) >> 32);                 /* MULH */
+    case 2: return (uint32_t)((uint64_t)(sa * (int64_t)b) >> 32);         /* MULHSU */
+    case 3: return (uint32_t)(((uint64_t)a * b) >> 32);                   /* MULHU */
+    case 4:                                                               /* DIV */
+        if (b == 0) {
+            return 0xffffffffu;
+        }
+        if (overflow) {
+            return a;
+        }
+        return (uint32_t)((int32_t)a / (int32_t)b);
+    case 5: return b == 0 ? 0xffffffffu : a / b;                          /* DIVU */
+    case 6:                                                               /* REM */
+        if (b == 0) {
+            return a;
+        }
+        if (overflow) {
+            return 0;
+        }
+        return (uint32_t)((int32_t)a % (int32_t)b);
+    default: return b == 0 ? a : a % b;                                   /* REMU */
+    }
 }
 
 static int width_of(uint32_t funct3)
@@ -624,6 +676,11 @@ static void step(machine *m)
         break;
     }
     case 0x33: { /* OP */
+        if (funct7 == 1) { /* M extension: every funct3 is defined, and none of them traps */
+            result = muldiv(funct3, a, b);
+            writes_rd = true;
+            break;
+        }
         if (funct7 != 0 && !(funct7 == 0x20 && (funct3 == 0 || funct3 == 5))) {
             goto illegal;
         }
@@ -729,7 +786,8 @@ static void step(machine *m)
             goto illegal;
         }
         uint32_t number = word >> 20, old, operand = (funct3 & 4u) ? rs1 : a;
-        if (!csr_read(m, number, &old)) {
+        bool writes = (funct3 & 3u) == 1 || rs1 != 0; /* csrrs/csrrc with a zero field only read */
+        if (!csr_read(m, number, &old) || (writes && csr_read_only(number))) {
             goto illegal;
         }
         switch (funct3 & 3u) {
@@ -1216,4 +1274,61 @@ int emu_exit_status(const machine *m, int status, bool outputs_ok, bool allow_lo
         return EXIT_EMULATOR_ERROR;
     }
     return status;
+}
+
+/* Debugger access (docs/rv32-gdb.md). A debugger looks at the machine without being part of
+ * it: reads and writes go straight to the RAM and framebuffer arrays, never through the bus
+ * handlers, so reading a device cannot pop the input queue, print a console byte, present a
+ * frame, or disturb an accelerator, and no G1 source or G2 depth lock refuses the debugger.
+ * Device windows and unmapped addresses are refused as a whole: the access must lie entirely
+ * inside RAM or entirely inside the framebuffer. The arithmetic is 64-bit so a range that
+ * wraps past 0xffffffff is refused instead of aliasing low memory. */
+static uint8_t *debug_bytes(const machine *m, uint32_t addr, size_t n)
+{
+    uint64_t end = (uint64_t)addr + n;
+    if (addr >= RAM_BASE && end <= (uint64_t)RAM_BASE + RAM_SIZE) {
+        return m->ram + (addr - RAM_BASE);
+    }
+    if (addr >= FB_BASE && end <= (uint64_t)FB_BASE + FB_SIZE) {
+        return m->fb + (addr - FB_BASE);
+    }
+    return NULL;
+}
+
+bool emu_debug_read(const machine *m, uint32_t addr, uint8_t *out, size_t n)
+{
+    const uint8_t *p = debug_bytes(m, addr, n);
+    if (!p) {
+        return false;
+    }
+    memcpy(out, p, n);
+    return true;
+}
+
+bool emu_debug_write(machine *m, uint32_t addr, const uint8_t *in, size_t n)
+{
+    uint8_t *p = debug_bytes(m, addr, n);
+    if (!p) {
+        return false;
+    }
+    memcpy(p, in, n);
+    return true;
+}
+
+/* CSRs by number with the instructions' own rules: a number csr_read does not know is refused,
+ * and a write applies the same WARL masks a CSRRW would (mtvec/mepc low bits clear, fcsr eight
+ * bits, fflags five, frm three). The read-only Zicntr counters refuse writes, as a CSRRW traps. */
+bool emu_csr_read(const machine *m, uint32_t number, uint32_t *value)
+{
+    return csr_read(m, number, value);
+}
+
+bool emu_csr_write(machine *m, uint32_t number, uint32_t value)
+{
+    uint32_t old;
+    if (!csr_read(m, number, &old) || csr_read_only(number)) { /* absent, or a read-only counter */
+        return false;
+    }
+    csr_write(m, number, value);
+    return true;
 }

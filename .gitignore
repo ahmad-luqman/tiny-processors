@@ -6,3 +6,6 @@ __pycache__/
 *.swp
 *.swo
 *~
+
+# Fetched at a pinned commit by make fetch-rv32-arch-test
+third_party/riscv-arch-test/

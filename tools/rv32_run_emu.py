@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 from tools.rv32_run_qemu import classify  # noqa: E402
 
 DEFAULT_EMULATOR = "build/rv32/rv32emu"
-EMULATOR_SOURCES = (ROOT / "tools" / "rv32emu.c", ROOT / "tools" / "rv32emu_core.c", ROOT / "tools" / "rv32_simd4.c", ROOT / "tools" / "rv32_gpu.c", ROOT / "tools" / "rv32_g3d.c")
+EMULATOR_SOURCES = (ROOT / "tools" / "rv32emu.c", ROOT / "tools" / "rv32_gdb.c", ROOT / "tools" / "rv32emu_core.c", ROOT / "tools" / "rv32_simd4.c", ROOT / "tools" / "rv32_gpu.c", ROOT / "tools" / "rv32_g3d.c")
 EMULATOR_CFLAGS = ("-std=c11", "-O2", "-Wall", "-Wextra", "-Werror")  # the Makefile's RV32EMU_CFLAGS
 COUNTERS = ("steps", "retired", "traps", "loaded")
 

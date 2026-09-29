@@ -21,7 +21,7 @@ import unittest
 from tools.rv32_asm import *  # noqa: F401,F403
 from tools.rv32_devices import FB_SIZE, diag_checksum, event_word, frame_hash, render_diag_frame
 from tools.rv32_pong_native import EXPECTED as PONG_EXPECTED, INPUT as PONG_INPUT
-from tools.rv32_image import to_hex_words
+from tools.rv32_image import to_hex_words, write_hex
 from tools.rv32_rtl import (ROOT, Run, check_passed, compile_testbench, cycle_relation, diff_traces, has_value_changes,
                             rtl_halt_line, run_backend, run_emulator, run_rtl, simulator_command, simulator_noise, write_image)
 from tools.rv32_run_emu import build_emulator, emulator_command
@@ -238,10 +238,10 @@ class RtlTest(unittest.TestCase):
                          ["80000000", "80000004", "80000008", "8000000c", "80000014"])
 
     def test_illegal_encodings_and_ecall_ebreak_fault(self):
-        mul = r_type(0x33, 1, 0, 2, 3, 1)
+        unused_op = r_type(0x33, 1, 0, 2, 3, 2)  # funct7 2 is unused (funct7 1 is the M extension)
         fence_i = i_type(0x0F, 0, 1, 0, 0)
         bad_srai = SRAI(1, 1, 0x20 | 0x400 | 1)  # a funct7 bit set that neither srli nor srai allows
-        illegal = [mul, fence_i, 0xFFFFFFFF, CSRRW(0, MSTATUS, 1), bad_srai]
+        illegal = [unused_op, fence_i, 0xFFFFFFFF, CSRRW(0, MSTATUS, 1), bad_srai]
         cases = [(word, 2, word) for word in illegal] + [(ECALL(), 11, 0), (EBREAK(), 3, RAM + 4)]
         for word, cause, value in cases:
             with self.subTest(word=f"{word:08x}"):
@@ -370,11 +370,11 @@ class RtlTest(unittest.TestCase):
         # The handler records the CSRs, counts the trap, steps mepc past the instruction, and returns.
         handler = [CSRRS(10, MCAUSE, 0), CSRRS(11, MTVAL, 0), CSRRS(12, MEPC, 0), ADDI(20, 20, 1),
                    ADDI(12, 12, 4), CSRRW(0, MEPC, 12), MRET()]
-        mul = r_type(0x33, 1, 0, 2, 3, 1)
+        unused_op = r_type(0x33, 1, 0, 2, 3, 2)  # funct7 2 is unused (funct7 1 is the M extension)
         body = LI(1, UNMAPPED) + LI(2, RAM + 0x102) + [
             ECALL(),                 # cause 11, mtval 0
             EBREAK(),                # cause 3, mtval its PC
-            mul,                     # cause 2, mtval the word
+            unused_op,               # cause 2, mtval the word
             LW(3, 1, 0),             # cause 5: refused at acceptance, then the next data access is fine
             SW(3, 2, 0),             # cause 6: misaligned, never reaches the bus
             LW(22, 2, -2),           # the word it would have hit is still zero
@@ -390,7 +390,7 @@ class RtlTest(unittest.TestCase):
                 emulator, rtl = self.assert_same_pass(words, stall=stall)
         traps = [line for line in rtl.trace if " trap " in line]
         self.assertEqual([effects(line) for line in traps],
-                         ["trap 11 00000000", f"trap 3 {RAM + 8 * 4:08x}", f"trap 2 {mul:08x}", f"trap 5 {UNMAPPED:08x}",
+                         ["trap 11 00000000", f"trap 3 {RAM + 8 * 4:08x}", f"trap 2 {unused_op:08x}", f"trap 5 {UNMAPPED:08x}",
                           f"trap 6 {RAM + 0x102:08x}", f"trap 4 {RAM + 0x103:08x}", f"trap 0 {RAM + 14 * 4 + 2:08x}",
                           f"trap 0 {RAM + 15 * 4 + 6:08x}"])
         self.assertEqual(len(traps), 8)
@@ -499,7 +499,7 @@ class RtlTest(unittest.TestCase):
             # The hex is derived from the bin here so both backends run the same image even
             # when build/rv32/selfcheck.hex is stale.
             hex_path = Path(directory) / "selfcheck.hex"
-            hex_path.write_text("".join(f"{word}\n" for word in to_hex_words(bin_path.read_bytes())))
+            write_hex(hex_path, bin_path.read_bytes())
             emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace")
             self.assertEqual(emulator.status, 0, emulator.stderr)
             self.assertIsNotNone(emulator.halt, emulator.stderr)
@@ -1062,7 +1062,7 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("never did", result.stderr)
         result = self.run_results(self.emulator, compare="trace")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("reads the timer, so its traces differ by design", result.stderr)
+        self.assertIn("reads the timer or the cycle/time counters, so its traces differ by design", result.stderr)
         # A byte more on the emulator's console: the RTL's console no longer matches.
         noisy = self.wrapper("noisy", "printf x")
         result = self.run_results(noisy)
@@ -1273,6 +1273,20 @@ class HelperTest(unittest.TestCase):
             self.assertNotEqual(result.status, 0)
             self.assertEqual(result.trace, [], "a crash cannot inherit an old passing trace")
             self.assertIsNone(result.halt)
+
+    def test_runs_without_a_trace_write_none_and_return_an_empty_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "img.hex"
+            result = run_rtl(Path(directory) / "missing.vvp", image, None)
+            self.assertNotEqual(result.status, 0)
+            self.assertEqual((result.trace, result.halt), ([], None))
+            self.assertTrue((Path(directory) / "img.console").exists(), "the console goes next to the image")
+            self.assertEqual(sorted(path.name for path in Path(directory).iterdir()), ["img.console"])
+            result = run_emulator("false", Path(directory) / "img.bin", None)  # exits 1, prints nothing
+            self.assertEqual((result.trace, result.halt), ([], None))
+        command = simulator_command("x.vvp", "i.hex", console="c")
+        self.assertFalse(any(part.startswith("+trace=") for part in command))
+        self.assertNotIn("--trace", emulator_command("e", "i.bin"))
 
     def test_encoder_bounds_and_program_helpers(self):
         for bad in (lambda: ADDI(32, 0, 0), lambda: ADDI(1, 0, 0x1000), lambda: ADDI(1, 0, -0x801),

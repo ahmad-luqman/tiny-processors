@@ -259,7 +259,7 @@ class EmulatorTest(unittest.TestCase):
         for body, cause, tval in [
                 ([EBREAK()], 3, RAM + 12),
                 ([0x00000000], 2, 0),
-                ([r_type(0x33, 1, 0, 2, 3, 1)], 2, r_type(0x33, 1, 0, 2, 3, 1)),   # mul: M extension
+                ([r_type(0x33, 1, 0, 2, 3, 2)], 2, r_type(0x33, 1, 0, 2, 3, 2)),   # OP with an unused funct7
                 ([i_type(0x0F, 0, 1, 0, 0)], 2, i_type(0x0F, 0, 1, 0, 0)),         # fence.i
                 ([CSRRS(1, MSTATUS, 0)], 2, CSRRS(1, MSTATUS, 0)),                 # unimplemented CSR
                 ([i_type(0x13, 1, 1, 0, 0x420)], 2, i_type(0x13, 1, 1, 0, 0x420)),  # slli with funct7 set

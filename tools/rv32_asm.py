@@ -178,6 +178,16 @@ def SRL(rd, a, b): return r_type(0x33, rd, 5, a, b, 0)
 def SRA(rd, a, b): return r_type(0x33, rd, 5, a, b, 0x20)
 def OR(rd, a, b): return r_type(0x33, rd, 6, a, b, 0)
 def AND(rd, a, b): return r_type(0x33, rd, 7, a, b, 0)
+# The M extension: funct7 1 on the OP opcode, the operation in funct3.
+def MUL(rd, a, b): return r_type(0x33, rd, 0, a, b, 1)
+def MULH(rd, a, b): return r_type(0x33, rd, 1, a, b, 1)
+def MULHSU(rd, a, b): return r_type(0x33, rd, 2, a, b, 1)
+def MULHU(rd, a, b): return r_type(0x33, rd, 3, a, b, 1)
+def DIV(rd, a, b): return r_type(0x33, rd, 4, a, b, 1)
+def DIVU(rd, a, b): return r_type(0x33, rd, 5, a, b, 1)
+def REM(rd, a, b): return r_type(0x33, rd, 6, a, b, 1)
+def REMU(rd, a, b): return r_type(0x33, rd, 7, a, b, 1)
+M_OPS = (MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU)
 def FENCE(): return i_type(0x0F, 0, 0, 0, 0x0FF)
 def ECALL(): return 0x00000073
 def EBREAK(): return 0x00100073
@@ -189,6 +199,14 @@ def CSRRWI(rd, csr, uimm): return i_type(0x73, rd, 5, uimm, csr)
 def CSRRSI(rd, csr, uimm): return i_type(0x73, rd, 6, uimm, csr)
 def CSRRCI(rd, csr, uimm): return i_type(0x73, rd, 7, uimm, csr)
 MTVEC, MEPC, MCAUSE, MTVAL, MSTATUS = 0x305, 0x341, 0x342, 0x343, 0x300
+# Zicntr: read-only counters; `rdcycle rd` is `csrrs rd, cycle, x0`.
+CYCLE, TIME, INSTRET, CYCLEH, TIMEH, INSTRETH = 0xC00, 0xC01, 0xC02, 0xC80, 0xC81, 0xC82
+def RDCYCLE(rd): return CSRRS(rd, CYCLE, 0)
+def RDTIME(rd): return CSRRS(rd, TIME, 0)
+def RDINSTRET(rd): return CSRRS(rd, INSTRET, 0)
+def RDCYCLEH(rd): return CSRRS(rd, CYCLEH, 0)
+def RDTIMEH(rd): return CSRRS(rd, TIMEH, 0)
+def RDINSTRETH(rd): return CSRRS(rd, INSTRETH, 0)
 
 
 def LI(rd, value):

@@ -40,11 +40,11 @@ class FloatingToolsTest(unittest.TestCase):
         self.assertTrue(check_listing('80000000: 00200073  <unknown>\n', allow_f=True))
 
     def test_isa_flags_require_a_listing(self):
-        for option in ('--allow-f', '--allow-privileged'):
+        for option in ('--allow-f', '--allow-privileged', '--allow-m', '--allow-counters'):
             run = subprocess.run([sys.executable, str(ROOT/'tools/rv32_image.py'),
                                   '/unused/image.elf', option], capture_output=True, text=True)
             self.assertEqual(run.returncode, 2)
-            self.assertIn('--allow-f and --allow-privileged require --listing', run.stderr)
+            self.assertIn('--allow-f, --allow-m, --allow-counters and --allow-privileged require --listing', run.stderr)
 
     def test_compiled_images_abi_and_real_instructions(self):
         expectations = {'floatcheck': ('fmul.s', 'fadd.s', 'fdiv.s', 'fsub.s', 'fmv.w.x', 'fmv.x.w'),

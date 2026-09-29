@@ -1,8 +1,9 @@
 `timescale 1ns/1ps
 
-// Multicycle RV32IF core: the integer path plus FP_ISSUE/FP_WAIT. One
-// ready/valid memory port, four trap CSRs, floating CSRs, and atomic
-// register/flag retirement in WRITEBACK. See docs/rv32-f.md. A trap vectors to mtvec; a
+// Multicycle RV32IMF core: the integer path plus FP_ISSUE/FP_WAIT and the
+// M extension's MD_WAIT. One ready/valid memory port, four trap CSRs,
+// floating CSRs, the Zicntr counters, and atomic register/flag retirement in
+// WRITEBACK. See docs/rv32-f.md and docs/rv32-groundwork.md. A trap vectors to mtvec; a
 // second trap before the handler retires an instruction halts the core
 // (the emulator's double-fault rule). The contract is docs/rv32-rtl.md;
 // the datapath and controller are explained in docs/rv32-to-gates.md.
@@ -35,22 +36,25 @@ module rv32 (
     output reg  [3:0]  trap_cause,
     output reg  [31:0] trap_value,
     output reg         halted,
-    output reg  [2:0]  state,
+    output reg  [3:0]  state,
     output reg  [31:0] pc,
     output reg  [31:0] mtvec,
     output reg  [31:0] mepc,
     output reg  [31:0] mcause,
     output reg  [31:0] mtval
 );
-    localparam [2:0] FETCH = 3'd0, DECODE = 3'd1, EXECUTE = 3'd2,
-                     MEM = 3'd3, WRITEBACK = 3'd4, HALT = 3'd5, FP_ISSUE = 3'd6, FP_WAIT = 3'd7;
+    localparam [3:0] FETCH = 4'd0, DECODE = 4'd1, EXECUTE = 4'd2,
+                     MEM = 4'd3, WRITEBACK = 4'd4, HALT = 4'd5, FP_ISSUE = 4'd6, FP_WAIT = 4'd7,
+                     MD_WAIT = 4'd8;
     localparam [3:0] CAUSE_TARGET_MISALIGNED = 4'd0, CAUSE_FETCH_FAULT = 4'd1,
                      CAUSE_ILLEGAL = 4'd2, CAUSE_BREAKPOINT = 4'd3,
                      CAUSE_LOAD_MISALIGNED = 4'd4, CAUSE_LOAD_FAULT = 4'd5,
                      CAUSE_STORE_MISALIGNED = 4'd6, CAUSE_STORE_FAULT = 4'd7,
                      CAUSE_ECALL = 4'd11;
     localparam [11:0] CSR_MTVEC = 12'h305, CSR_MEPC = 12'h341, CSR_MCAUSE = 12'h342,
-                      CSR_MTVAL = 12'h343, CSR_FFLAGS = 12'h001, CSR_FRM = 12'h002, CSR_FCSR = 12'h003;
+                      CSR_MTVAL = 12'h343, CSR_FFLAGS = 12'h001, CSR_FRM = 12'h002, CSR_FCSR = 12'h003,
+                      CSR_CYCLE = 12'hc00, CSR_TIME = 12'hc01, CSR_INSTRET = 12'hc02,
+                      CSR_CYCLEH = 12'hc80, CSR_TIMEH = 12'hc81, CSR_INSTRETH = 12'hc82;
     localparam [2:0] DIRECT_NONE=3'd0, DIRECT_SIGN=3'd1, DIRECT_CLASS=3'd3;
     localparam [31:0] RESET_PC = 32'h8000_0000;
 
@@ -61,17 +65,21 @@ module rv32 (
     reg [4:0] fp_flags;
     reg taken;
     reg in_trap; // a trap was taken and its handler has not retired an instruction yet
+    // Zicntr: clock cycles since reset and instructions retired since reset.
+    // `time` reads the cycle count, because a device tick is a clock cycle on
+    // the RTL (docs/rv32.md, "Device time").
+    reg [63:0] cycle_count, instret_count;
 
     // Decoded fields, combinational from ir.
     wire [4:0] rd, rs1, rs2;
     wire [2:0] funct3;
     wire [31:0] imm;
-    wire is_lui, is_auipc, is_alu_imm, is_alu_reg, alu_alt, is_load, is_store;
+    wire is_lui, is_auipc, is_alu_imm, is_alu_reg, is_muldiv, alu_alt, is_load, is_store;
     wire is_branch, is_jal, is_jalr, is_csr, is_mret, is_ecall, is_ebreak, writes_rd, illegal;
 
     rv32_decode decode (
         .insn(ir), .rd(rd), .rs1(rs1), .rs2(rs2), .funct3(funct3), .imm(imm),
-        .is_lui(is_lui), .is_auipc(is_auipc), .is_alu_imm(is_alu_imm), .is_alu_reg(is_alu_reg),
+        .is_lui(is_lui), .is_auipc(is_auipc), .is_alu_imm(is_alu_imm), .is_alu_reg(is_alu_reg), .is_muldiv(is_muldiv),
         .alu_alt(alu_alt), .is_load(is_load), .is_store(is_store), .is_branch(is_branch),
         .is_jal(is_jal), .is_jalr(is_jalr), .is_csr(is_csr), .is_mret(is_mret),
         .is_ecall(is_ecall), .is_ebreak(is_ebreak), .writes_rd(writes_rd), .illegal(illegal));
@@ -97,6 +105,16 @@ module rv32 (
         .req_ready(fp_ready), .op(fp_op), .rm(fp_rm), .a(fa), .b(fb), .c(fc),
         .resp_valid(fp_done), .resp_ready(!reset && state == FP_WAIT),
         .result(fp_result), .flags(fp_result_flags), .error(fp_error));
+
+    // The M extension: started from EXECUTE with the operands read in DECODE,
+    // finished 33 MD_WAIT cycles later (rtl/rv32/rv32_muldiv.v). md_start is
+    // also the EXECUTE arm that enters MD_WAIT: an M instruction is never a
+    // load, store, jump, branch or FP operation, so no earlier arm can take it.
+    wire md_start = (state == EXECUTE) && is_muldiv;
+    wire md_valid;
+    wire [31:0] md_result;
+    rv32_muldiv muldiv (.clk(clk), .reset(reset), .start(md_start),
+        .funct3(funct3), .a(a), .b(b), .valid(md_valid), .result(md_result));
 
     // Classification uses exponent/fraction detectors, never arithmetic.
     wire f_zero_exp = fa[30:23] == 8'd0;
@@ -138,10 +156,21 @@ module rv32 (
     // the new value is written in WRITEBACK. The operand is rs1 or its
     // five-bit field (funct3[2]); csrrs/csrrc with a zero field write nothing.
     wire [11:0] csr_addr = ir[31:20];
-    wire [31:0] csr_old = csr_addr == CSR_FFLAGS ? {27'd0, fcsr[4:0]} :
-                          csr_addr == CSR_FRM ? {29'd0, fcsr[7:5]} :
-                          csr_addr == CSR_FCSR ? {24'd0, fcsr} : (csr_addr == CSR_MTVEC) ? mtvec : (csr_addr == CSR_MEPC) ? mepc :
-                          (csr_addr == CSR_MCAUSE) ? mcause : mtval;
+    // One arm per CSR; decode makes every other number illegal, so the last
+    // arm is mtval. (An `always @* case` form of this reads the same but
+    // synthesizes to a parallel mux about 150 generic cells larger.)
+    wire [31:0] csr_old =
+        (csr_addr == CSR_FFLAGS) ? {27'd0, fcsr[4:0]} :
+        (csr_addr == CSR_FRM) ? {29'd0, fcsr[7:5]} :
+        (csr_addr == CSR_FCSR) ? {24'd0, fcsr} :
+        (csr_addr == CSR_MTVEC) ? mtvec :
+        (csr_addr == CSR_MEPC) ? mepc :
+        (csr_addr == CSR_MCAUSE) ? mcause :
+        (csr_addr == CSR_CYCLE || csr_addr == CSR_TIME) ? cycle_count[31:0] :
+        (csr_addr == CSR_CYCLEH || csr_addr == CSR_TIMEH) ? cycle_count[63:32] :
+        (csr_addr == CSR_INSTRET) ? instret_count[31:0] :
+        (csr_addr == CSR_INSTRETH) ? instret_count[63:32] :
+        mtval; // CSR_MTVAL
     wire [31:0] csr_operand = funct3[2] ? {27'd0, rs1} : a;
     wire [31:0] csr_new = (funct3[1:0] == 2'd1) ? csr_operand :
                           (funct3[1:0] == 2'd2) ? (csr_old | csr_operand) : (csr_old & ~csr_operand);
@@ -244,6 +273,8 @@ module rv32 (
             retire_fd_we <= 1'b0; retire_fd <= 5'd0; retire_fd_value <= 32'd0;
             retire_fcsr_we <= 1'b0; retire_fcsr <= 8'd0;
             in_trap <= 1'b0;
+            cycle_count <= 64'd0;
+            instret_count <= 64'd0;
             mtvec <= 32'd0;
             mepc <= 32'd0;
             mcause <= 32'd0;
@@ -261,6 +292,7 @@ module rv32 (
         end else begin
             retire <= 1'b0;
             trap <= 1'b0;
+            cycle_count <= cycle_count + 64'd1;
             case (state)
                 FETCH: if (mem_ready) begin
                     ir <= mem_rdata;
@@ -299,6 +331,8 @@ module rv32 (
                             state <= WRITEBACK;
                         end else state <= FP_ISSUE;
                     end
+                    else if (md_start)
+                        state <= MD_WAIT;
                     else if (is_load || is_store)
                         state <= MEM;
                     else
@@ -313,6 +347,10 @@ module rv32 (
                         fp_flags <= fp_result_flags;
                         state <= WRITEBACK;
                     end
+                end
+                MD_WAIT: if (md_valid) begin
+                    alu_out <= md_result;
+                    state <= WRITEBACK;
                 end
                 MEM: if (mem_ready) begin
                     mdr <= mem_rdata;
@@ -341,13 +379,21 @@ module rv32 (
                         endcase
                     end
                     in_trap <= 1'b0;
+                    instret_count <= instret_count + 64'd1;
                     retire <= 1'b1;
                     retire_rd_we <= rd_written;
                     retire_rd <= rd;
                     retire_rd_value <= rd_value;
                     state <= FETCH;
                 end
-                default: begin end // HALT: hold until reset.
+                HALT: begin end // hold until reset
+                // Encodings 9-15 are never entered; should the state register
+                // ever hold one, stop the way a double fault does rather than
+                // hang with `halted` low.
+                default: begin
+                    state <= HALT;
+                    halted <= 1'b1;
+                end
             endcase
         end
     end

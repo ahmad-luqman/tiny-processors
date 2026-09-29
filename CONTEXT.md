@@ -30,7 +30,7 @@ _Avoid_: guest renderer, guest operating system.
 The point where an executed instruction commits its architectural effects, used to compare CPU behavior across implementations.
 
 **Device time**:
-A device tick is a clock cycle on RTL and an executed instruction (retired or trapped) on the emulator. Timer reads and A2/G1 accelerator completion/status/counters can differ between backends. Programs using those interfaces are compared at the results level (console, outcome, checkpoints and ordered trap records); programs using neither retain trace comparison. Deterministic diagnostics can additionally opt into ordered-store comparison.
+A device tick is a clock cycle on RTL and an executed instruction (retired or trapped) on the emulator. Timer reads, the Zicntr `cycle` and `time` counters, and A2/G1 accelerator completion/status/counters can differ between backends; `instret` cannot. Programs using those interfaces are compared at the results level (console, outcome, checkpoints and ordered trap records); programs using neither retain trace comparison. Deterministic diagnostics can additionally opt into ordered-store comparison.
 _Avoid_: wall-clock time, a claim that the backends run at the same speed.
 
 **Session recording**:
@@ -46,7 +46,7 @@ The combinational logic in rv32_bus.v that turns an address into one peripheral 
 _Avoid_: a cache, an interconnect with arbitration.
 
 **RV32 machine**:
-Our RISC-V computer as defined by the machine contract in docs/rv32.md: an RV32IF CPU with Zicsr, RAM at 0x8000_0000, and memory-mapped devices, implemented by our emulator and RTL.
+Our RISC-V computer as defined by the machine contract in docs/rv32.md: an RV32IMF CPU with Zicsr and Zicntr (since Track 0), RAM at 0x8000_0000, and memory-mapped devices, implemented by our emulator and RTL.
 _Avoid_: SAP8, the QEMU virt board, a Linux-capable platform.
 
 **Reference runner**:
@@ -70,6 +70,10 @@ whose bias, rounding, saturation and output selection the CPU performs. See
 [the contract](docs/rv32-digit.md).
 _Avoid_: training on the machine, a convolutional network, floating-point
 inference, a general neural accelerator.
+
+**Architectural test model**:
+The macros in tests/arch/model_test.h that make riscv-arch-test's tests run on our machine: boot, the signature dump on the console, and the handler that skips the suite's one `mstatus` write. The suite's term is "model"; see [Track 0](docs/rv32-groundwork.md#architectural-compliance).
+_Avoid_: a golden model, a reference simulator (QEMU is the reference here).
 
 **Learning milestone**:
 A bounded working artifact with verified behavior, an explanation connecting its source to the hardware or software it represents, and exercises for understanding it.

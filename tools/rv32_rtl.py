@@ -21,11 +21,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.rv32_asm import PROGRAM_INPUTS, PROGRAMS, TIMER, SIMD_BASE, SIMD_COMMAND, SIMD_STATUS, SIMD_ENTRY, SIMD_CYCLES, SIMD_STALLS, SIMD_TRANSFERS, SIMD_INSTRUCTIONS, words_to_bytes, words_to_hex  # noqa: E402
 from tools.rv32_asm import GPU_BASE, GPU_COMMAND, GPU_STATUS, GPU_ERROR, GPU_CYCLES, GPU_STALLS, GPU_READS, GPU_WRITES
-from tools.rv32_image import to_hex_words  # noqa: E402
+from tools.rv32_image import write_hex  # noqa: E402
 from tools.rv32_run_emu import DEFAULT_EMULATOR, emulator_command, halt_line, last_halt_line, parse_halt_line  # noqa: E402
 
 RTL_SOURCES = [ROOT / "rtl" / "rv32" / name
-               for name in ("rv32_fregfile.v", "rv32_fdecode.v", "rv32_regfile.v", "rv32_alu.v", "rv32_decode.v", "rv32.v",
+               for name in ("rv32_fregfile.v", "rv32_fdecode.v", "rv32_regfile.v", "rv32_alu.v", "rv32_decode.v", "rv32_muldiv.v", "rv32.v",
                             "rv32_bus.v", "rv32_ram.v", "rv32_console.v", "rv32_done.v", "rv32_timer.v", "rv32_input.v", "rv32_display.v", "rv32_soc.v", "rv32_gpu.v", "rv32_g3d.v", "rv32_g3d_core.v", "rv32_simd4.v")]
 RTL_SOURCES.extend([ROOT / "rtl/fp32/fp32.v", ROOT / "rtl/simd4/simd4.v"])
 TESTBENCH = ROOT / "tests" / "rv32_tb.sv"
@@ -33,7 +33,7 @@ DEFAULT_SIMULATOR = "build/rv32/rv32_tb.vvp"
 DEFAULT_OUT = "build/rv32/rtl"
 BENCH_SEED = 7
 COUNTERS = ("cycles", "steps", "stalls", "transfers")
-DECIMAL = COUNTERS + ("cause", "fp_waits")
+DECIMAL = COUNTERS + ("cause", "fp_waits", "md_waits")
 HEX = ("done", "tval", "pc", "word")
 # The keys each halt reason carries besides the counters and the outcome (docs/rv32-rtl.md).
 REQUIRED = {"done": ("done",), "double-fault": ("cause", "tval"), "limit": ()}
@@ -107,9 +107,10 @@ def rtl_halt_line(stderr):
     if reason not in REQUIRED:
         raise ValueError(f"unknown halt reason {reason!r} in {line!r}")
     expected = {"halt", "outcome", *COUNTERS, *REQUIRED[reason]}
-    if "fp_waits" in fields:
-        expected.add("fp_waits")
-        if fields["fp_waits"] < 0: raise ValueError("negative FPU wait count")
+    for waits, unit in (("fp_waits", "FPU"), ("md_waits", "multiply/divide")):
+        if waits in fields:
+            expected.add(waits)
+            if fields[waits] < 0: raise ValueError(f"negative {unit} wait count")
     if set(fields) != expected:
         raise ValueError(f"halt line keys {sorted(fields)} do not match {sorted(expected)} in {line!r}")
     return fields
@@ -137,9 +138,11 @@ def run_backend(command, trace, parse_halt, timeout, console=None, checkpoints=N
     With `console`, the guest transcript is read from that file and the process's
     stdout is the simulator's own noise; without it the transcript is stdout and
     there is no noise channel (the emulator). A malformed halt line becomes
-    `halt=None` with the reason appended to stderr.
+    `halt=None` with the reason appended to stderr. With `trace=None` the command
+    writes no trace and the run's trace is empty.
     """
-    Path(trace).write_text("")
+    if trace is not None:
+        Path(trace).write_text("")
     if console is not None:
         Path(console).write_text("")
     if checkpoints is not None:
@@ -147,8 +150,8 @@ def run_backend(command, trace, parse_halt, timeout, console=None, checkpoints=N
     try:
         completed = subprocess.run(command, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        sys.exit(f"{command[0]} did not finish within {timeout} s; raise --timeout or bound the run "
-                 f"(a partial trace is in {trace})")
+        partial = f" (a partial trace is in {trace})" if trace is not None else ""
+        sys.exit(f"{command[0]} did not finish within {timeout} s; raise --timeout or bound the run{partial}")
     stdout, stderr = decode(completed.stdout), decode(completed.stderr)
     try:
         halt = parse_halt(stderr)
@@ -159,13 +162,18 @@ def run_backend(command, trace, parse_halt, timeout, console=None, checkpoints=N
     else:
         transcript, noise = decode(Path(console).read_bytes()), simulator_noise(stdout)
     lines = Path(checkpoints).read_text().splitlines() if checkpoints is not None else []
-    return Run(completed.returncode, transcript, noise, stderr, Path(trace).read_text().splitlines(), halt, lines)
+    retired = Path(trace).read_text().splitlines() if trace is not None else []
+    return Run(completed.returncode, transcript, noise, stderr, retired, halt, lines)
 
 
 def run_rtl(simulator, image_hex, trace, stall=None, seed=None, wave=None, max_cycles=None, timeout=120,
             checkpoints=None, input_script=None, reset_at=None, allow_lost_events=False, simd_stall=None, simd_seed=None, gpu_stall=None, gpu_seed=None):
-    """Run the testbench on a hex image with the documented plusargs; the console goes next to the trace."""
-    console = Path(trace).with_name(Path(trace).name + ".console")
+    """Run the testbench on a hex image with the documented plusargs; the console goes next to the
+    trace, or next to the image (`<image>.console`) when `trace` is None and no trace is written."""
+    if trace is not None:
+        console = Path(trace).with_name(Path(trace).name + ".console")
+    else:
+        console = Path(image_hex).with_suffix(".console")
     command = simulator_command(simulator, image_hex, trace=trace, console=console, wave=wave,
                                 stall=stall, seed=seed, max_cycles=max_cycles, checkpoints=checkpoints,
                                 input_script=input_script, reset_at=reset_at, allow_lost_events=allow_lost_events,
@@ -175,7 +183,8 @@ def run_rtl(simulator, image_hex, trace, stall=None, seed=None, wave=None, max_c
 
 def run_emulator(emulator, image_bin, trace, limit=None, timeout=120, checkpoints=None, input_script=None,
                  frames=None, allow_lost_events=False):
-    """Run the emulator on a flat image with a trace, the same way tools/rv32_run_emu.py does."""
+    """Run the emulator on a flat image the same way tools/rv32_run_emu.py does, with a trace
+    unless `trace` is None."""
     command = emulator_command(emulator, image_bin, trace=trace, limit=limit, checkpoints=checkpoints,
                                input_script=input_script, frames=frames, allow_lost_events=allow_lost_events)
     return run_backend(command, trace, halt_line, timeout, checkpoints=checkpoints)
@@ -249,6 +258,25 @@ G3D_ACCESS = re.compile(r"mem\[(?:" + "|".join(f"{asm.G3D_BASE+offset:08x}" for 
     (asm.G3D_COMMAND, asm.G3D_STATUS, asm.G3D_ERROR, asm.G3D_FAULT_PC, asm.G3D_CYCLES, asm.G3D_STALLS,
      asm.G3D_INSTRUCTIONS, asm.G3D_TRANSFERS, asm.G3D_DIVIDES, asm.G3D_PIXELS, asm.G3D_ZFAIL, asm.G3D_CULLED))
     + r")\](?:->|<-)")
+
+# The Zicntr counters that count device ticks: cycle, time and their high halves. `instret`
+# counts retirements, which agree on every backend, so reading it keeps trace comparison.
+DEVICE_TIME_CSRS = (asm.CYCLE, asm.TIME, asm.CYCLEH, asm.TIMEH)
+
+
+def reads_device_time(trace):
+    """Whether a trace reads device time: a load from the timer, or a CSR instruction on the
+    cycle or time counter (docs/rv32.md, "Device time")."""
+    for line in trace:
+        if f"mem[{TIMER:08x}]->" in line:
+            return True
+        parts = line.split(" ", 3)
+        if len(parts) >= 3 and " trap " not in line:  # a trapped counter access read nothing
+            word = int(parts[2], 16)
+            if word & 0x7F == 0x73 and (word >> 12) & 3 and word >> 20 in DEVICE_TIME_CSRS:
+                return True
+    return False
+
 
 def uses_accelerator(trace):
     """Only successful register accesses justify asynchronous result comparison."""
@@ -335,11 +363,13 @@ def cycle_relation(rtl):
     memory = sum("mem[" in line for line in rtl.trace)
     traps = sum(" trap " in line for line in rtl.trace)
     halt = rtl.halt
-    expected = 4 * (steps - memory) + 5 * memory + halt["stalls"] + halt.get("fp_waits", 0)
+    expected = 4 * (steps - memory) + 5 * memory + halt["stalls"] + halt.get("fp_waits", 0) + halt.get("md_waits", 0)
     text = (f"cycles {halt['cycles']} = 4 x {steps - memory} + 5 x {memory} + {halt['stalls']} stalls; "
             f"transfers {halt['transfers']} = {steps} fetches + {memory} data")
     if halt.get("fp_waits", 0):
         text += f"; plus {halt['fp_waits']} FPU issue/wait cycles"
+    if halt.get("md_waits", 0):
+        text += f"; plus {halt['md_waits']} multiply/divide wait cycles"
     if traps:
         return f"{text} (not exact: {traps} trap lines)", None
     return text, halt["cycles"] == expected and halt["transfers"] == steps + memory
@@ -375,7 +405,7 @@ def main():
     simd_delay.add_argument("--simd-seed", type=int, help="seeded 0..3 waits per accelerator data transfer")
     parser.add_argument("--compare", choices=("trace", "results"), default="trace",
                         help="`trace`: identical retirement traces and the cycle formula; `results`: identical "
-                             "console, outcome, and checkpoints, for a program that reads the timer or accesses accelerator registers (device time)")
+                             "console, outcome, and checkpoints, for a program that reads the timer, the cycle/time counters or accelerator registers (device time)")
     parser.add_argument("--compare-stores", action="store_true",
                         help="also compare ordered stores in results mode; firmware must have timing-independent stores")
     parser.add_argument("--backend", choices=("both", "emulator"), default="both",
@@ -430,7 +460,7 @@ def main():
             parser.error(f"{args.image} does not exist; run make check-rv32-image first")
         out.mkdir(parents=True, exist_ok=True)
         hex_path, bin_path = out / f"{name}.hex", args.image
-        hex_path.write_text("".join(f"{word}\n" for word in to_hex_words(bin_path.read_bytes())))
+        write_hex(hex_path, bin_path.read_bytes())
     else:
         hex_path, bin_path = write_image(PROGRAMS[name](), out, name)
         if args.input is None and name in PROGRAM_INPUTS:
@@ -446,14 +476,14 @@ def main():
     check_passed(emulator, "emulator")
     # Device time differs for timers and asynchronous accelerators. Compare guest
     # results and trap records when either interface makes the CPU trace timing-dependent.
-    reads_timer = any(f"mem[{TIMER:08x}]->" in line for line in emulator.trace)
+    reads_timer = reads_device_time(emulator.trace)
     if args.compare == "trace" and reads_timer:
-        sys.exit("this program reads the timer, so its traces differ by design; use --compare results")
+        sys.exit("this program reads the timer or the cycle/time counters, so its traces differ by design; use --compare results")
     uses_simd = uses_accelerator(emulator.trace)
     if args.compare == "trace" and uses_simd:
         sys.exit("this program accesses accelerator registers; use --compare results")
     if args.compare == "results" and not (reads_timer or uses_simd):
-        sys.exit("--compare results is for a program that reads the timer or accesses accelerator registers; this one never did, use --compare trace")
+        sys.exit("--compare results is for a program that reads the timer, the cycle/time counters or accelerator registers; this one never did, use --compare trace")
     if args.expect_console is not None and emulator.console.rstrip("\n") != args.expect_console:
         sys.exit(f"emulator console {emulator.console!r} is not {args.expect_console!r}")
     last_line = emulator.console.rstrip("\n").rsplit("\n", 1)[-1]

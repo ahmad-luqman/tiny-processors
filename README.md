@@ -1,6 +1,6 @@
 # Tiny Processors
 
-Learning Verilog by building small CPUs, parallel compute hardware, and an end-to-end computer. Our RV32IF CPU and native Mac emulator run C, a small OS/runtime, Pong, and Tetris; complete CPU floating-point integration is verified; GPU/NPU integration also follows the playable machine. See [the roadmap](PLAN.md) and the [detailed full-stack plan](docs/planning/roadmap.md).
+Learning Verilog by building small CPUs, parallel compute hardware, and an end-to-end computer. Our RV32IMF CPU and native Mac emulator run C, a small OS/runtime, Pong, and Tetris; complete CPU floating-point integration is verified; GPU/NPU integration also follows the playable machine. See [the roadmap](PLAN.md) and the [detailed full-stack plan](docs/planning/roadmap.md).
 
 ## Play the complete computer (M7)
 
@@ -108,6 +108,23 @@ bias, rounds, saturates and picks the answer, which is how N1 settles the
 saturation and rounding question A1 deferred without changing any RTL. The guest
 runs both paths and stops if they disagree. See [the N1 numeric contract, kernel
 layout, waves and measured costs](docs/rv32-digit.md).
+
+## Track 0: groundwork
+
+```sh
+make test-rv32-m                       # M extension and Zicntr counters: emulator against RTL and a Python reference
+make run-rv32m-rtl-verilator           # The four images rebuilt for RV32IM reproduce the RV32I results
+make test-rv32-arch-verilator          # riscv-arch-test I, M and F (189 tests) against QEMU and trace for trace
+make bench-rv32                        # CoreMark and Dhrystone, RV32I and RV32IM, cycles on the RTL
+make debug-rv32-gdb                    # rv32emu --gdb 3333; connect with gdb and `target remote :3333`
+```
+
+The core gains an iterative multiply/divide unit (37 cycles per M instruction),
+the read-only `cycle`, `time` and `instret` counters, and passes the official
+architectural tests for I, M and F on the emulator, Icarus and Verilator. CoreMark
+and Dhrystone set the performance baseline a pipeline will have to beat, and the
+emulator speaks the GDB remote protocol. See [the Track 0 record](docs/rv32-groundwork.md)
+and [the GDB stub](docs/rv32-gdb.md).
 
 ## Start here
 
@@ -263,12 +280,16 @@ Read the [window record](docs/rv32-window.md): the decisions, the core split, th
 Apple Silicon macOS, Icarus 13.0, Verilator 5.052, Yosys 0.69+post, Apple Clang 21.0.0, Homebrew LLVM 22.1.8 (`llvm@22`, keg-only), lld 23.1.1, QEMU 11.1.1, SDL 3.4.16, Python 3.14.2. These are the tested versions, not enforced minimums.
 
 Every build target and every test uses only Python's standard library and works
-offline. The single exception is `tools/digit_train.py`, which retrains the N1
-model: it needs numpy and downloads the MNIST training set, and nothing depends on
-it, because the model it produces is committed. The RV32 targets find the keg-only LLVM and lld by absolute path; nothing has to be on `PATH`.
+offline, with two exceptions. `tools/digit_train.py`, which retrains the N1
+model, needs numpy and downloads the MNIST training set; nothing depends on it,
+because the model it produces is committed. `make fetch-rv32-arch-test` (a
+prerequisite of the architectural-test targets) downloads riscv-arch-test once, at
+a pinned commit, into the ignored `third_party/riscv-arch-test/`; after that they
+run offline too. The RV32 targets find the keg-only LLVM and lld by absolute path; nothing has to be on `PATH`.
 
 ```sh
 brew install icarus-verilog verilator yosys llvm@22 lld qemu
+brew install riscv64-elf-gdb   # optional: a gdb for the emulator's GDB stub (Track 0)
 ```
 
 An accepted Xcode license and working command-line compiler are required for the Verilator C++ build. Generated files stay in the ignored `build/` directory.

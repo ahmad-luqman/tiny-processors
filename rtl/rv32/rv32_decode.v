@@ -15,6 +15,7 @@ module rv32_decode (
     output wire        is_auipc,
     output wire        is_alu_imm,   // addi slti sltiu xori ori andi slli srli srai
     output wire        is_alu_reg,   // add sub sll slt sltu xor srl sra or and
+    output wire        is_muldiv,    // mul mulh mulhsu mulhu div divu rem remu (funct7 1)
     output wire        alu_alt,      // funct7[5] where it selects sub or sra
     output wire        is_load,      // lb lh lw lbu lhu
     output wire        is_store,     // sb sh sw
@@ -41,14 +42,20 @@ module rv32_decode (
     assign rs2 = insn[24:20];
     assign funct3 = insn[14:12];
 
-    // Four trap CSRs and the three floating aliases; other numbers are illegal.
-    wire csr_exists = (csr == 12'h001) || (csr == 12'h002) || (csr == 12'h003) || (csr == 12'h305) || (csr == 12'h341) || (csr == 12'h342) || (csr == 12'h343);
+    // Four trap CSRs, the three floating aliases, and the six Zicntr counters
+    // (cycle, time, instret and their high halves); other numbers are illegal.
+    wire csr_exists = (csr == 12'h001) || (csr == 12'h002) || (csr == 12'h003) || (csr == 12'h305) || (csr == 12'h341) || (csr == 12'h342) || (csr == 12'h343) ||
+                      (csr == 12'hc00) || (csr == 12'hc01) || (csr == 12'hc02) || (csr == 12'hc80) || (csr == 12'hc81) || (csr == 12'hc82);
+    // CSR numbers with bits [11:10] set are read-only; csrrw always writes, and
+    // csrrs/csrrc (and the immediate forms) write when the rs1 field is nonzero.
+    wire csr_write_to_read_only = (csr[11:10] == 2'b11) && ((funct3[1:0] == 2'd1) || (rs1 != 5'd0));
     assign is_mret = (insn == 32'h30200073);
 
     assign is_lui = (opcode == OP_LUI);
     assign is_auipc = (opcode == OP_AUIPC);
     assign is_alu_imm = (opcode == OP_IMM) && !illegal;
-    assign is_alu_reg = (opcode == OP_REG) && !illegal;
+    assign is_muldiv = (opcode == OP_REG) && (funct7 == 7'd1);
+    assign is_alu_reg = (opcode == OP_REG) && !illegal && !is_muldiv;
     assign alu_alt = funct7[5] && (is_alu_reg || (is_alu_imm && funct3 == 3'd5));
     assign is_load = (opcode == OP_LOAD || opcode == 7'h07) && !illegal;
     assign is_store = (opcode == OP_STORE || opcode == 7'h27) && !illegal;
@@ -58,7 +65,7 @@ module rv32_decode (
     assign is_csr = (opcode == OP_SYSTEM) && (funct3 != 3'd0) && !illegal;
     assign is_ecall = (insn == 32'h00000073);
     assign is_ebreak = (insn == 32'h00100073);
-    assign writes_rd = is_lui || is_auipc || is_alu_imm || is_alu_reg || (is_load && opcode == OP_LOAD) || is_jal || is_jalr || is_csr;
+    assign writes_rd = is_lui || is_auipc || is_alu_imm || is_alu_reg || is_muldiv || (is_load && opcode == OP_LOAD) || is_jal || is_jalr || is_csr;
 
     // Immediates: each format places the sign bit at insn[31], so every
     // extension replicates that one bit (RV32I chapter 2.3).
@@ -84,10 +91,12 @@ module rv32_decode (
             OP_STORE: illegal = (funct3 > 3'd2);
             OP_IMM: illegal = (funct3 == 3'd1 && funct7 != 7'd0) ||                    // slli with bits above the shift amount set
                               (funct3 == 3'd5 && funct7 != 7'd0 && funct7 != 7'h20);   // neither srli nor srai
-            OP_REG: illegal = !(funct7 == 7'd0 || (funct7 == 7'h20 && (funct3 == 3'd0 || funct3 == 3'd5))); // every M word
+            OP_REG: illegal = !(funct7 == 7'd0 || funct7 == 7'd1 ||                      // funct7 1 is the M extension
+                                (funct7 == 7'h20 && (funct3 == 3'd0 || funct3 == 3'd5)));
             OP_FENCE: illegal = (funct3 != 3'd0);                                      // fence.i and the rest
             OP_SYSTEM: illegal = (funct3 == 3'd0) ? !(is_ecall || is_ebreak || is_mret) // wfi, sret, odd fields
-                                                   : (funct3 == 3'd4 || !csr_exists);  // CSR ops on missing CSRs
+                                                   : (funct3 == 3'd4 || !csr_exists ||  // CSR ops on missing CSRs
+                                                      csr_write_to_read_only);          // and writes to the counters
             default: illegal = 1'b1;
         endcase
     end
