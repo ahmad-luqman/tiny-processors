@@ -40,8 +40,8 @@ int main(int argc, char **argv)
     const char *image_path = NULL, *trace_path = NULL, *state_path = NULL, *checkpoints_path = NULL;
     const char *input_path = NULL, *record_path = NULL, *frames_dir = NULL;
     uint32_t base = RAM_BASE, start = 0;
-    bool start_given = false, allow_lost_events = false, gdb = false;
-    uint16_t gdb_port = 0;
+    bool start_given = false, allow_lost_events = false;
+    int gdb_port = -1; /* --gdb: serve a debugger on this port (0 picks one) */
     machine m;
     emu_init(&m);
     for (int i = 1; i < argc; i++) {
@@ -76,8 +76,7 @@ int main(int argc, char **argv)
         } else if (!strcmp(arg, "--record")) {
             record_path = value;
         } else if (!strcmp(arg, "--gdb")) {
-            gdb_port = (uint16_t)emu_parse_u64(value, 65535, "gdb port");
-            gdb = true;
+            gdb_port = (int)emu_parse_u64(value, 65535, "gdb port");
         } else {
             usage();
         }
@@ -144,14 +143,12 @@ int main(int argc, char **argv)
     /* Under --gdb the client drives the machine until the guest halts, the client kills the run
      * (HALT_STOPPED), or it detaches, in which case the run continues as if it had never been
      * attached. Everything after the halt is the same as for a plain run. */
-    int gdb_fd = -1;
-    gdb_end session = GDB_DETACHED;
-    if (gdb) {
-        gdb_fd = gdb_accept(gdb_port);
-        if (gdb_fd < 0) {
+    if (gdb_port >= 0) {
+        int fd = gdb_accept((uint16_t)gdb_port);
+        if (fd < 0) {
             return EXIT_EMULATOR_ERROR;
         }
-        session = gdb_serve(gdb_fd, &m);
+        gdb_serve(fd, &m); /* owns fd from here */
     }
     while (emu_run_until(&m, UINT64_MAX) != EMU_STOP_HALTED) {
         /* the headless emulator has nothing to do at a present */
@@ -169,8 +166,6 @@ int main(int argc, char **argv)
     }
     int status = emu_exit_status(&m, emu_report_halt(&m, loaded), outputs_ok, allow_lost_events);
     emu_free(&m);
-    if (session == GDB_HALTED) {
-        gdb_report_exit(gdb_fd, status); /* the client learns the same status the process returns */
-    }
+    gdb_report_exit(status); /* after a halt under gdb, the client learns the same status the process returns */
     return status;
 }

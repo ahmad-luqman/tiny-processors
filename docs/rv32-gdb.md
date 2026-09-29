@@ -22,7 +22,7 @@ In a second terminal, with the ELF that the flat image came from:
 
 ```
 gdb-multiarch build/rv32/selfcheck.elf -ex 'set architecture riscv:rv32' -ex 'target remote :3333'   # Linux
-riscv64-elf-gdb build/rv32/selfcheck.elf -ex 'set architecture riscv:rv32' -ex 'target remote :3333' # macOS (brew install riscv64-elf-gdb)
+riscv64-elf-gdb build/rv32/selfcheck.elf -ex 'set architecture riscv:rv32' -ex 'target remote :3333' # macOS (brew install riscv64-elf-gdb; Homebrew's multi-target gdb works too)
 ```
 
 The machine is stopped at the reset pc, `0x8000_0000` (or `--pc`). Then the usual commands work: `break main`, `continue`, `stepi`, `info registers`, `info registers mtvec fcsr`, `p $ft0`, `x/8wx 0x80000000`, `set $a0 = 5`, `set {int}0x80001000 = 1`, Ctrl-C, `detach`, `kill`. A session with the self-check:
@@ -62,7 +62,7 @@ The socket is bound to `127.0.0.1` only. The stub reads and writes the whole mac
 | `QStartNoAckMode` | `OK` | Acks stop after this reply |
 | anything else | empty | The protocol's "unsupported" |
 
-Framing: every packet's checksum is verified. A bad checksum, a non-hex checksum digit, or a payload longer than `PacketSize` (16,384 bytes) is answered with `-` and dropped, and gdb retransmits. In acknowledgement mode the stub resends a reply on `-` (up to 16 times, then gives up on the client). Stray `+`/`-` and late Ctrl-C bytes between packets are ignored. A request that is well framed but malformed (a missing length, a nine-digit number, non-hex data, a data length that disagrees with the header) gets `E01`. Binary replies escape `$`, `#`, `}`, and `*` (gdb reads a bare `*` as run-length encoding).
+Framing: in acknowledgement mode every packet's checksum is verified. A bad checksum, a non-hex checksum digit, or a payload longer than `PacketSize` (16,384 bytes) is answered with `-` and dropped, and gdb retransmits; the stub resends a reply on `-` (up to 16 times, then gives up on the client). After `QStartNoAckMode` nothing is retransmitted, so a dropped packet would leave gdb waiting forever: the stub no longer verifies checksums (the protocol lets the receiver ignore them in no-ack mode, and the transport is TCP), and answers an oversized packet with `E01`. An oversized packet is a client bug in either mode and also prints `rv32emu: gdb: dropped a packet longer than PacketSize` on stderr. A read (`m`, `qXfer`) longer than a reply can carry is answered with its first 8,184 bytes (0x1ff8, room for hex or worst-case escaping), a short reply the protocol allows; gdb asks again for the rest. Stray `+`/`-` and late Ctrl-C bytes between packets are ignored. A request that is well framed but malformed (a missing length, a nine-digit number, non-hex data, a data length that disagrees with the header) gets `E01`. Binary replies escape `$`, `#`, `}`, and `*` (gdb reads a bare `*` as run-length encoding).
 
 ## Registers and the target description
 
@@ -85,7 +85,7 @@ Writes follow the machine's rules, not the debugger's convenience: a write to x0
 - **Ctrl-C** (a raw `0x03` byte while the guest runs) stops it with `T02` (SIGINT) between two instructions.
 - **Halt.** When the guest halts (done register, double fault, instruction limit) the stub leaves the session, main flushes the outputs, writes the state file and the halt line exactly as a plain run does, computes the exit status with `emu_exit_status`, and only then sends `W` with that status: `W00` for the pass word, `W01`…`Wff` for a fail word's code, `W02` for an emulator error (double fault, limit, a pass rejected for lost events or incomplete outputs). gdb shows "exited normally" or "exited with code NN", and the process exits with the same status. Because `emu_run_until` checks the instruction limit before its budget, the step that executes the last allowed instruction already ends the session with `W02`.
 - **Detach** (`D`): `OK`, the socket closes, and the run continues to its halt as if no debugger had been attached (same outputs, same status). gdb detaches this way when a batch script ends or on `detach`/`quit`.
-- **Kill** (`k`, `vKill`) or **hang-up** (the client disconnects): the machine halts as `stopped`, the halt line reads `halt=stopped ... error=host-stopped pc=...`, and the process exits 2. This reuses the halt reason the window uses when it is closed; no new halt kind was needed.
+- **Kill** (`k`, `vKill`) or **hang-up** (the client disconnects): the machine halts as `stopped`, the halt line reads `halt=stopped ... error=host-stopped pc=...`, and the process exits 2. This reuses the halt reason the window uses when it is closed; no new halt kind was needed. A kill is quiet; a lost connection says so first with one stderr line, `rv32emu: gdb: connection closed by client` for an orderly close or `rv32emu: gdb: connection lost: <error>` (for example `Connection reset by peer`) for a socket error, so a crashed client is not mistaken for a deliberate kill.
 
 ## Why breakpoints are a table and not patched `ebreak`s
 
@@ -104,13 +104,13 @@ A continue without breakpoints runs `emu_run_until` in batches of 65,536 instruc
 Appended to [rv32emu_core.c](../tools/rv32emu_core.c) and declared in [rv32emu_core.h](../tools/rv32emu_core.h):
 
 ```c
-bool emu_debug_read(machine *m, uint32_t addr, uint8_t *out, size_t n);        /* RAM or framebuffer only */
+bool emu_debug_read(const machine *m, uint32_t addr, uint8_t *out, size_t n);  /* RAM or framebuffer only */
 bool emu_debug_write(machine *m, uint32_t addr, const uint8_t *in, size_t n);
 bool emu_csr_read(const machine *m, uint32_t number, uint32_t *value);         /* csr_read, by number */
-bool emu_csr_write(machine *m, uint32_t number, uint32_t value);               /* csr_write's WARL masks */
+bool emu_csr_write(machine *m, uint32_t number, uint32_t value);               /* csr_write's WARL masks; false for read-only */
 ```
 
-The stub's own API is three calls that `rv32emu.c` makes around its run loop: `gdb_accept(port)`, `gdb_serve(fd, m)` (returns `GDB_HALTED`, `GDB_DETACHED`, or `GDB_KILLED`), and `gdb_report_exit(fd, status)`.
+The stub's own API is three calls that `rv32emu.c` makes around its run loop: `gdb_accept(port)`, `gdb_serve(fd, m)` (takes ownership of the socket; once per process; returns `GDB_HALTED`, `GDB_DETACHED`, or `GDB_KILLED`), and `gdb_report_exit(status)`, which sends `W` and closes the socket only when the session ended `GDB_HALTED` and does nothing otherwise, so `main` calls it unconditionally. The stub runs the guest only through `emu_run_until` and touches memory only through the debugger path; like `rv32emu.c` and `rv32win.c` it reads and sets `x`, `f`, `pc`, and (on a kill) `halt` in the machine struct directly.
 
 ## Limitations
 
@@ -123,7 +123,7 @@ The stub's own API is three calls that `rv32emu.c` makes around its run loop: `g
 
 ## Verification
 
-`make test-rv32-gdb` (part of `make test-rv32`) builds the emulator from source and runs 26 tests in [tests/test_rv32_gdb.py](../tests/test_rv32_gdb.py). A client written in the test (framing, checksums, acks, binary escapes, strict about every byte the stub sends) drives `rv32emu --gdb 0`, which reports its chosen port on stderr:
+`make test-rv32-gdb` (part of `make test-rv32`) builds the emulator from source and runs 31 tests in [tests/test_rv32_gdb.py](../tests/test_rv32_gdb.py). A client written in the test (framing, checksums, acks, binary escapes, strict about every byte the stub sends) drives `rv32emu --gdb 0`, which reports its chosen port on stderr. Protocol and framing tests run on small programs assembled in the test, so only the tests that need the self-check's own trace, symbols, or console skip when it is not built:
 
 - the target description, fetched in 256-byte chunks, parses as XML with 33 cpu registers numbered 0–32, 32 `ieee_single` registers at 33–64, `fflags`/`frm`/`fcsr` at 66–68, and the four trap CSRs and six counters at 65 + number; `qSupported` advertises it;
 - the initial stop at `0x8000_0000` with zero registers; the thread queries; empty replies for unknown packets and watchpoints;
@@ -131,12 +131,13 @@ The stub's own API is three calls that `rv32emu.c` makes around its run loop: `g
 - a run under the stub with `--trace` (ten steps, a breakpoint stop, a continue to the end) writes a trace identical to the plain run's;
 - a breakpoint on `fib` (from `llvm-nm`) stops exactly as many times as the trace executes `fib`'s first instruction, with `swbreak`; `z0` removes it and the run ends `W00`; breakpoints by instruction index in an assembled program, `Z1` reported as `hwbreak`;
 - Ctrl-C stops a self-loop with `T02` at the loop, twice, with and without a breakpoint set;
-- exits: the self-check continues to `W00`, exit 0, `PASS 807d9fad` and the plain run's halt line; a fail word gives `W01` and exit 1; the instruction limit `W02`; detach runs to a pass; kill, `vKill`, and hang-up give `halt=stopped`, exit 2;
-- memory: the image read back byte for byte, zeros in the framebuffer, `E01` for unmapped, device, crossing, and wrapping ranges; `M` and `X` (with all four escaped bytes) written and read back; patching the next instruction changes what executes; reads of the input window's EVENT/COUNT/KEYS are refused and the guest still sees both scripted events;
+- exits: the self-check continues to `W00`, exit 0, `PASS 807d9fad` (the Makefile's `RV32_SELFCHECK_HEX`) and the plain run's halt line; a fail word gives `W01` and exit 1; the instruction limit `W02`; detach runs to a pass; kill, `vKill`, hang-up, and a reset connection give `halt=stopped`, exit 2, with the connection-lost line for the last two and none for a kill;
+- memory: the image read back byte for byte, zeros in the framebuffer, `E01` for unmapped, device, crossing, and wrapping ranges; `m80000000,4000` clamped to 0x1ff8 bytes; `M` and `X` (with all four escaped bytes) written and read back, `X` with fewer or more bytes than its length refused; patching the next instruction changes what executes; reads of the input window's EVENT/COUNT/KEYS are refused and the guest still sees both scripted events;
 - counters: `cycle`, `time` and `instret` read the steps taken, their high halves zero, and a write is refused (added with Track 0's Zicntr);
 - registers: x0 writes discarded, `mtvec`/`mepc`/`fcsr`/`fflags`/`frm` WARL masks, `mstatus` refused, `G` round trip, pc writes and `c ADDR`/`s ADDR`, and a debugger write of x31 turning a fail word into a pass;
-- framing: bad and non-hex checksums get `-`, a rejected reply is resent, stray acks are ignored, malformed requests get `E01`, no-ack mode works; a taken port and an out-of-range port are refused with exit 2;
-- one end-to-end run of a real gdb (`gdb-multiarch` or `riscv64-elf-gdb` from PATH; skipped with the reason when neither exists): `target remote`, `break *main`, `continue`, `info registers pc`, `stepi`, `x/4wx 0x80000000`, `continue` to "exited normally", with the emulator exiting 0 and printing the pass line.
+- breakpoints: 64 fit, the 65th (`Z0` or `Z1`) is `E01`, re-inserting one is still `OK`, removing one makes room;
+- framing: bad and non-hex checksums get `-`, an oversized packet gets `-` and a stderr line and the next packet works, a rejected reply is resent, stray acks are ignored, malformed requests get `E01`, no-ack mode works, and in it an oversized packet gets `E01` and bad or non-hex checksums are not verified; a taken port and an out-of-range port are refused with exit 2;
+- one end-to-end run of a real gdb (`gdb-multiarch`, `riscv64-elf-gdb`, or a plain `gdb` that accepts `set architecture riscv:rv32`, such as Homebrew's, from PATH; skipped with the reason when none exists): `target remote`, `break *main`, `continue`, `info registers pc`, `stepi`, `x/4wx 0x80000000`, `continue` to "exited normally", with the emulator exiting 0 and printing the pass line.
 
 ## Exercises
 
@@ -155,3 +156,5 @@ Run in the Linux container (Ubuntu clang/lld 18 for the firmware, gcc for the ho
 - Speed as measured [above](#the-cost-of-ctrl-c-polling): no measurable cost without breakpoints, about 20% with one set.
 
 Not run here: the Mac toolchain (`riscv64-elf-gdb` from Homebrew, Apple clang). The stub uses only POSIX sockets and `poll`, with `_DARWIN_C_SOURCE` set on macOS as the core does.
+
+Review fixes (2026-09-29, macOS, Apple clang 21, Homebrew GDB 17.2): `make test-rv32-gdb` 31 tests, 0 skipped, the real-gdb test running Homebrew's `gdb`; `make test-rv32-emu` 33 tests; `run-rv32-emu` and `run-rv32m-emu` pass; the self-check, diagnostic, Pong, and capstone (RV32I and RV32IM builds) give traces, state files, checkpoints, stdout, and stderr byte-identical to the emulator before the fixes.

@@ -13,6 +13,7 @@
 #endif
 #include "rv32_gdb.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <poll.h>
@@ -31,9 +32,13 @@
 /* The largest packet payload either side sends, advertised as PacketSize (hex 4000). The g
  * reply is 520 characters, so this only bounds memory transfers and the target description. */
 #define PACKET_SIZE 0x4000u
+/* The longest m or qXfer reply payload: hex doubles each byte, and escaping at worst doubles a
+ * binary one, with room left for the m/l prefix. A longer request gets this much; gdb asks
+ * again for the rest. */
+#define MAX_READ ((PACKET_SIZE - 16u) / 2u)
 /* A running guest checks the socket for Ctrl-C once per this many instructions: one poll()
- * system call per 65,536 instructions costs well under 1% at 400 M instructions/s, and still
- * answers an interrupt in a fraction of a millisecond. */
+ * system call per batch has no measurable cost, and an interrupt still lands within about a
+ * millisecond (docs/rv32-gdb.md, "The cost of Ctrl-C polling"). */
 #define POLL_INTERVAL 65536u
 #define MAX_BREAKPOINTS 64u
 /* gdb's RISC-V register numbers: x0-x31 are 0-31, pc 32, f0-f31 33-64, and CSR n is 65 + n.
@@ -45,9 +50,12 @@
 
 typedef enum { STOP_STEP, STOP_BREAK, STOP_INTERRUPT, STOP_HALTED, STOP_GONE } stop_reason;
 
+/* Z0 and Z1: one table, each entry reported under its own stop reason. */
+typedef enum { BP_SW, BP_HW } breakpoint_kind;
+
 typedef struct {
     uint32_t addr;
-    char type; /* '0' software, '1' hardware: the same table, reported under its own name */
+    breakpoint_kind kind;
 } breakpoint;
 
 typedef struct {
@@ -64,7 +72,10 @@ typedef struct {
     size_t packet_len;
     char out[2 * PACKET_SIZE + 8]; /* the reply payload; binary escapes can double it */
     size_t out_len;
+    gdb_end end;    /* how the session ended, for gdb_report_exit */
 } gdb_state;
+
+static const char HEX[] = "0123456789abcdef";
 
 /* ---- the target description ------------------------------------------------------------ */
 
@@ -166,6 +177,21 @@ static bool reg_write(machine *m, uint32_t regnum, uint32_t value)
 
 /* ---- the connection ---------------------------------------------------------------------- */
 
+/* The first failure ends the connection and says why on stderr (error is its errno, 0 when the
+ * client closed the connection); later calls only see gone. */
+static void connection_lost(gdb_state *g, int error)
+{
+    if (g->gone) {
+        return;
+    }
+    g->gone = true;
+    if (error) {
+        fprintf(stderr, "%s: gdb: connection lost: %s\n", emu_prog, strerror(error));
+    } else {
+        fprintf(stderr, "%s: gdb: connection closed by client\n", emu_prog);
+    }
+}
+
 static bool send_all(gdb_state *g, const void *data, size_t len)
 {
     const char *p = data;
@@ -175,7 +201,7 @@ static bool send_all(gdb_state *g, const void *data, size_t len)
             continue;
         }
         if (n <= 0) {
-            g->gone = true;
+            connection_lost(g, n < 0 ? errno : EPIPE);
             break;
         }
         p += n;
@@ -196,7 +222,7 @@ static int next_byte(gdb_state *g)
             continue;
         }
         if (n <= 0) {
-            g->gone = true;
+            connection_lost(g, n < 0 ? errno : 0);
             return -1;
         }
         g->in_len = (size_t)n;
@@ -227,11 +253,18 @@ static int hex_digit(int c)
     return -1;
 }
 
+/* Two hex digits at p as a byte, or -1 (p[1] is not read when p[0] is not a digit). */
+static int hex_byte(const char *p)
+{
+    int hi = hex_digit((unsigned char)p[0]);
+    int lo = hi < 0 ? -1 : hex_digit((unsigned char)p[1]);
+    return hi < 0 || lo < 0 ? -1 : hi * 16 + lo;
+}
+
 /* Send the reply in g->out, framed and checksummed; in ack mode resend on `-`. A client that
  * answers anything else (a stray Ctrl-C) is ignored until it acknowledges. */
 static void send_reply(gdb_state *g)
 {
-    static const char HEX[] = "0123456789abcdef";
     char frame[sizeof g->out + 4];
     uint8_t sum = 0;
     frame[0] = '$';
@@ -257,13 +290,20 @@ static void send_reply(gdb_state *g)
             }
         }
     }
-    fprintf(stderr, "%s: gdb client rejected a reply 16 times; closing\n", emu_prog);
-    g->gone = true;
+    fprintf(stderr, "%s: gdb: client rejected a reply 16 times; closing\n", emu_prog);
+    g->gone = true; /* already said why */
 }
 
-/* Wait for the next request whose checksum is right; false once the connection is gone. A bad
- * checksum, a non-hex checksum digit, or an oversized packet is answered with `-` and dropped,
- * and gdb retransmits. Bytes outside a packet (acks, a late Ctrl-C) are ignored while stopped. */
+static void reply(gdb_state *g, const char *text);
+
+/* Wait for the next request; false once the connection is gone. Bytes outside a packet (acks,
+ * a late Ctrl-C) are ignored while stopped.
+ * In acknowledgement mode a bad checksum, a non-hex checksum digit, or a payload longer than
+ * PACKET_SIZE is answered with `-` and dropped, and gdb retransmits.
+ * In no-ack mode nothing would be retransmitted, so a dropped packet would leave gdb waiting
+ * for a reply forever: the checksum is not verified (the protocol lets the receiver ignore it
+ * there; the transport is a reliable TCP stream), and an oversized packet is answered with
+ * E01 and logged. */
 static bool read_packet(gdb_state *g)
 {
     for (;;) {
@@ -288,14 +328,23 @@ static bool read_packet(gdb_state *g)
         if (c < 0) {
             return false;
         }
-        int hi = hex_digit(next_byte(g)), lo = hex_digit(next_byte(g));
+        char digits[2];
+        digits[0] = (char)next_byte(g); /* -1 once gone: not a hex digit, and gone is checked */
+        digits[1] = (char)next_byte(g);
         if (g->gone) {
             return false;
         }
-        if (overflow || hi < 0 || lo < 0 || (uint8_t)(hi * 16 + lo) != sum) {
-            if (g->ack) {
-                send_all(g, "-", 1);
-            }
+        if (overflow) {
+            fprintf(stderr, "%s: gdb: dropped a packet longer than PacketSize (%u bytes)\n", emu_prog,
+                    (unsigned)PACKET_SIZE);
+        }
+        if (g->ack && (overflow || hex_byte(digits) != sum)) {
+            send_all(g, "-", 1);
+            continue;
+        }
+        if (overflow) { /* no-ack mode */
+            reply(g, "E01");
+            send_reply(g);
             continue;
         }
         if (g->ack && !send_all(g, "+", 1)) {
@@ -316,9 +365,17 @@ static void reply(gdb_state *g, const char *text)
     g->out_len = n;
 }
 
+static void reply_format(gdb_state *g, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int n = vsnprintf(g->out, sizeof g->out, format, args);
+    va_end(args);
+    g->out_len = n < 0 ? 0 : (size_t)n; /* every format here is a short constant shape */
+}
+
 static void reply_add_hex_byte(gdb_state *g, uint8_t byte)
 {
-    static const char HEX[] = "0123456789abcdef";
     g->out[g->out_len++] = HEX[byte >> 4];
     g->out[g->out_len++] = HEX[byte & 15];
 }
@@ -381,11 +438,11 @@ static bool parse_reg(const char *p, uint32_t *value)
 {
     uint32_t v = 0;
     for (int i = 0; i < 4; i++) {
-        int hi = hex_digit((unsigned char)p[2 * i]), lo = hi < 0 ? -1 : hex_digit((unsigned char)p[2 * i + 1]);
-        if (hi < 0 || lo < 0) {
+        int byte = hex_byte(p + 2 * i);
+        if (byte < 0) {
             return false;
         }
-        v |= (uint32_t)(hi * 16 + lo) << (8 * i);
+        v |= (uint32_t)byte << (8 * i);
     }
     *value = v;
     return true;
@@ -458,9 +515,8 @@ static void handle_query(gdb_state *g)
     const char *p = g->packet;
     if (!strncmp(p, "qSupported", 10)) {
         g->swbreak = strstr(p, "swbreak+") != NULL;
-        snprintf(g->out, sizeof g->out,
-                 "PacketSize=%x;qXfer:features:read+;swbreak+;hwbreak+;QStartNoAckMode+;vContSupported+", PACKET_SIZE);
-        g->out_len = strlen(g->out);
+        reply_format(g, "PacketSize=%x;qXfer:features:read+;swbreak+;hwbreak+;QStartNoAckMode+;vContSupported+",
+                     PACKET_SIZE);
     } else if (!strncmp(p, XFER, sizeof XFER - 1)) {
         const char *q = p + sizeof XFER - 1;
         uint32_t offset, length;
@@ -479,8 +535,8 @@ static void handle_query(gdb_state *g)
             return;
         }
         size_t n = tdesc_len - offset;
-        if (length > (PACKET_SIZE - 16) / 2) {
-            length = (PACKET_SIZE - 16) / 2; /* room for the worst-case escaping */
+        if (length > MAX_READ) {
+            length = MAX_READ;
         }
         if (n > length) {
             n = length;
@@ -516,9 +572,9 @@ static void handle_memory(gdb_state *g)
         return;
     }
     if (kind == 'm') {
-        uint8_t data[PACKET_SIZE / 2];
-        if (length > (PACKET_SIZE - 16) / 2) {
-            length = (PACKET_SIZE - 16) / 2; /* a shorter reply is allowed; gdb asks for the rest */
+        uint8_t data[MAX_READ];
+        if (length > MAX_READ) {
+            length = MAX_READ; /* a shorter reply is allowed; gdb asks for the rest */
         }
         if (!emu_debug_read(g->m, addr, data, length)) {
             reply(g, "E01");
@@ -544,12 +600,12 @@ static void handle_memory(gdb_state *g)
             return;
         }
         for (; n < length; n++) {
-            int hi = hex_digit((unsigned char)p[2 * n]), lo = hex_digit((unsigned char)p[2 * n + 1]);
-            if (hi < 0 || lo < 0) {
+            int byte = hex_byte(p + 2 * n);
+            if (byte < 0) {
                 reply(g, "E01");
                 return;
             }
-            data[n] = (uint8_t)(hi * 16 + lo);
+            data[n] = (uint8_t)byte;
         }
     } else { /* X: binary, `}` escapes the next byte xor 0x20 */
         while (p < end && n < sizeof data) {
@@ -578,19 +634,19 @@ static void handle_memory(gdb_state *g)
 static void handle_breakpoint(gdb_state *g)
 {
     const char *p = g->packet + 2;
-    char type = g->packet[1];
     bool insert = g->packet[0] == 'Z';
-    uint32_t addr, kind;
-    if (type != '0' && type != '1') {
+    uint32_t addr, size;
+    if (g->packet[1] != '0' && g->packet[1] != '1') {
         reply(g, ""); /* watchpoints (2-4) are not supported */
         return;
     }
-    if (*p++ != ',' || !parse_hex(&p, &addr) || *p++ != ',' || !parse_hex(&p, &kind) || (*p != '\0' && *p != ';')) {
+    breakpoint_kind kind = g->packet[1] == '0' ? BP_SW : BP_HW;
+    if (*p++ != ',' || !parse_hex(&p, &addr) || *p++ != ',' || !parse_hex(&p, &size) || (*p != '\0' && *p != ';')) {
         reply(g, "E01");
         return;
     }
     for (size_t i = 0; i < g->bps; i++) {
-        if (g->bp[i].addr == addr && g->bp[i].type == type) {
+        if (g->bp[i].addr == addr && g->bp[i].kind == kind) {
             if (!insert) {
                 g->bp[i] = g->bp[--g->bps];
             }
@@ -602,7 +658,7 @@ static void handle_breakpoint(gdb_state *g)
         reply(g, "E01"); /* removing one that is not there, or the table is full */
         return;
     }
-    g->bp[g->bps++] = (breakpoint){addr, type};
+    g->bp[g->bps++] = (breakpoint){addr, kind};
     reply(g, "OK");
 }
 
@@ -647,7 +703,7 @@ static void stop_reply(gdb_state *g, stop_reason reason, const breakpoint *hit)
     if (reason == STOP_INTERRUPT) {
         reply(g, "T02");
     } else if (reason == STOP_BREAK && g->swbreak) {
-        reply(g, hit->type == '0' ? "T05swbreak:;" : "T05hwbreak:;");
+        reply(g, hit->kind == BP_SW ? "T05swbreak:;" : "T05hwbreak:;");
     } else {
         reply(g, "T05");
     }
@@ -680,11 +736,14 @@ static bool handle_resume(gdb_state *g, gdb_end *end)
     return true;
 }
 
-/* One session per process, so the state is static: gdb_report_exit needs its ack mode. */
+/* One session per process, so the state is static: gdb_report_exit needs its socket and ack mode. */
 static gdb_state session;
+static bool session_used;
 
 gdb_end gdb_serve(int fd, machine *m)
 {
+    assert(!session_used && "gdb_serve runs once per process");
+    session_used = true;
     gdb_state *g = &session;
     memset(g, 0, sizeof *g);
     g->fd = fd;
@@ -801,21 +860,26 @@ gdb_end gdb_serve(int fd, machine *m)
         }
         send_reply(g);
     }
+    g->end = end;
     if (end == GDB_HALTED) {
         return end; /* the socket stays open for the W packet */
     }
-    if (end == GDB_KILLED) { /* killed, or the client hung up */
+    if (end == GDB_KILLED) { /* killed (quietly), or the connection was lost (said on stderr) */
         m->halt = HALT_STOPPED;
     }
     close(fd);
+    g->fd = -1;
     return end;
 }
 
-void gdb_report_exit(int fd, int status)
+void gdb_report_exit(int status)
 {
     gdb_state *g = &session;
-    snprintf(g->out, sizeof g->out, "W%02x", (unsigned)status & 0xffu);
-    g->out_len = strlen(g->out);
+    if (!session_used || g->end != GDB_HALTED || g->fd < 0) {
+        return;
+    }
+    int fd = g->fd;
+    reply_format(g, "W%02x", (unsigned)status & 0xffu);
     send_reply(g);
     /* gdb closes its end after an exit; wait for that (briefly) before closing ours, so the
      * reply is not lost to a reset caused by closing with unread bytes. */
@@ -825,6 +889,7 @@ void gdb_report_exit(int fd, int status)
     while (poll(&p, 1, 1000) > 0 && recv(fd, drain, sizeof drain, 0) > 0) {
     }
     close(fd);
+    g->fd = -1;
 }
 
 int gdb_accept(uint16_t port)

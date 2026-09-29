@@ -459,6 +459,12 @@ static bool csr_read(const machine *m, uint32_t number, uint32_t *value)
     }
 }
 
+/* CSR numbers 0xc00-0xfff (bits 11:10 set) are read-only: a write traps. */
+static bool csr_read_only(uint32_t number)
+{
+    return (number >> 10) == 3;
+}
+
 static void csr_write(machine *m, uint32_t number, uint32_t value)
 {
     switch (number) {
@@ -499,9 +505,23 @@ static uint32_t muldiv(uint32_t funct3, uint32_t a, uint32_t b)
     case 1: return (uint32_t)((uint64_t)(sa * sb) >> 32);                 /* MULH */
     case 2: return (uint32_t)((uint64_t)(sa * (int64_t)b) >> 32);         /* MULHSU */
     case 3: return (uint32_t)(((uint64_t)a * b) >> 32);                   /* MULHU */
-    case 4: return b == 0 ? 0xffffffffu : overflow ? a : (uint32_t)((int32_t)a / (int32_t)b); /* DIV */
+    case 4:                                                               /* DIV */
+        if (b == 0) {
+            return 0xffffffffu;
+        }
+        if (overflow) {
+            return a;
+        }
+        return (uint32_t)((int32_t)a / (int32_t)b);
     case 5: return b == 0 ? 0xffffffffu : a / b;                          /* DIVU */
-    case 6: return b == 0 ? a : overflow ? 0 : (uint32_t)((int32_t)a % (int32_t)b);            /* REM */
+    case 6:                                                               /* REM */
+        if (b == 0) {
+            return a;
+        }
+        if (overflow) {
+            return 0;
+        }
+        return (uint32_t)((int32_t)a % (int32_t)b);
     default: return b == 0 ? a : a % b;                                   /* REMU */
     }
 }
@@ -767,7 +787,7 @@ static void step(machine *m)
         }
         uint32_t number = word >> 20, old, operand = (funct3 & 4u) ? rs1 : a;
         bool writes = (funct3 & 3u) == 1 || rs1 != 0; /* csrrs/csrrc with a zero field only read */
-        if (!csr_read(m, number, &old) || (writes && (number >> 10) == 3)) {
+        if (!csr_read(m, number, &old) || (writes && csr_read_only(number))) {
             goto illegal;
         }
         switch (funct3 & 3u) {
@@ -1263,7 +1283,7 @@ int emu_exit_status(const machine *m, int status, bool outputs_ok, bool allow_lo
  * Device windows and unmapped addresses are refused as a whole: the access must lie entirely
  * inside RAM or entirely inside the framebuffer. The arithmetic is 64-bit so a range that
  * wraps past 0xffffffff is refused instead of aliasing low memory. */
-static uint8_t *debug_bytes(machine *m, uint32_t addr, size_t n)
+static uint8_t *debug_bytes(const machine *m, uint32_t addr, size_t n)
 {
     uint64_t end = (uint64_t)addr + n;
     if (addr >= RAM_BASE && end <= (uint64_t)RAM_BASE + RAM_SIZE) {
@@ -1275,7 +1295,7 @@ static uint8_t *debug_bytes(machine *m, uint32_t addr, size_t n)
     return NULL;
 }
 
-bool emu_debug_read(machine *m, uint32_t addr, uint8_t *out, size_t n)
+bool emu_debug_read(const machine *m, uint32_t addr, uint8_t *out, size_t n)
 {
     const uint8_t *p = debug_bytes(m, addr, n);
     if (!p) {
@@ -1306,7 +1326,7 @@ bool emu_csr_read(const machine *m, uint32_t number, uint32_t *value)
 bool emu_csr_write(machine *m, uint32_t number, uint32_t value)
 {
     uint32_t old;
-    if (!csr_read(m, number, &old) || (number >> 10) == 3) { /* absent, or a read-only counter */
+    if (!csr_read(m, number, &old) || csr_read_only(number)) { /* absent, or a read-only counter */
         return false;
     }
     csr_write(m, number, value);

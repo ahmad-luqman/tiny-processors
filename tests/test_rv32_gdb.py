@@ -4,8 +4,9 @@ No gdb and no network beyond loopback: a small RSP client below (framing, checks
 binary escapes) drives `rv32emu --gdb 0` against the self-check image and against programs
 assembled with tools/rv32_asm.py. Expected values come from the emulator's own --trace of the
 same image run without the stub, from the image file, and from hand-computed constants. One
-optional test runs a real gdb (gdb-multiarch or riscv64-elf-gdb) in batch mode and skips,
-saying why, when neither is on PATH.
+optional test runs a real gdb (gdb-multiarch, riscv64-elf-gdb, or a plain gdb that knows
+riscv:rv32) in batch mode and skips, saying why, when none is on PATH. Only the tests that need
+the self-check's own program (its trace, symbols, or console) skip when it is not built.
 """
 
 import os
@@ -14,6 +15,7 @@ import re
 import select
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -25,12 +27,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.rv32_asm import (  # noqa: E402
     ADDI, BNE, CSRRW, ECALL, FB, FINISH, INPUT, JAL, LI, LW, MCAUSE, MTVEC, RAM, SW, UNMAPPED, words_to_bytes)
-from tools.rv32_run_emu import build_emulator, halt_line  # noqa: E402
+from tools.rv32_run_emu import build_emulator, emulator_command, halt_line  # noqa: E402
 
 SELFCHECK = ROOT / "build/rv32/selfcheck.bin"
 SELFCHECK_ELF = ROOT / "build/rv32/selfcheck.elf"
-SELFCHECK_CONSOLE = "PASS 807d9fad"
+# The pass word the Makefile pins for the self-check (as test_rv32_emu.py reads RV32_PONG_HEX).
+SELFCHECK_CONSOLE = "PASS " + re.search(r"^RV32_SELFCHECK_HEX := ([0-9a-f]{8})$",
+                                        (ROOT / "Makefile").read_text(), re.M).group(1)
 REG_PC, REG_F0, REG_CSR0 = 32, 33, 65
+PACKET_SIZE = 0x4000
+MAX_READ = (PACKET_SIZE - 16) // 2  # the stub's longest m reply, in bytes
+MAX_BREAKPOINTS = 64
 LISTENING = re.compile(r"^rv32emu: gdb listening on 127\.0\.0\.1:(\d+)$")
 TIMEOUT = 30
 
@@ -65,6 +72,21 @@ def reg_value(text):
     return int.from_bytes(bytes.fromhex(text), "little")
 
 
+def riscv_capable_gdb():
+    """A plain `gdb` on PATH built with the RISC-V target (Homebrew's is multi-target), or None."""
+    gdb = shutil.which("gdb")
+    if gdb is None:
+        return None
+    try:
+        probe = subprocess.run([gdb, "-nx", "-batch", "-ex", "set architecture riscv:rv32"],
+                               capture_output=True, text=True, timeout=TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    output = probe.stdout + probe.stderr
+    ok = probe.returncode == 0 and 'architecture is set to "riscv:rv32"' in output
+    return gdb if ok else None
+
+
 class Client:
     """The debugger side of the remote serial protocol, strict about what the stub sends."""
 
@@ -97,7 +119,7 @@ class Client:
 
     def receive(self):
         """Read one reply, check its checksum, acknowledge it, and return the payload bytes."""
-        while (c := self.byte()) != ord("$"):
+        if (c := self.byte()) != ord("$"):
             raise AssertionError(f"unexpected byte {bytes([c])!r} before a reply")
         payload = bytearray()
         while (c := self.byte()) != ord("#"):
@@ -132,7 +154,7 @@ class Session:
     """One `rv32emu --gdb 0` process and a connected client."""
 
     def __init__(self, emulator, image, *extra):
-        self.process = subprocess.Popen([str(emulator), "--image", str(image), "--gdb", "0", *map(str, extra)],
+        self.process = subprocess.Popen(emulator_command(emulator, image) + ["--gdb", "0", *map(str, extra)],
                                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         line = self._stderr_line()
         match = LISTENING.match(line)
@@ -202,11 +224,16 @@ class GdbStubTest(unittest.TestCase):
         path.write_bytes(words_to_bytes(words))
         return path
 
+    def tiny(self):
+        """A few instructions and the pass finish: for protocol tests that need no real program,
+        so they never skip for a missing self-check build."""
+        return self.image([ADDI(5, 0, 1), ADDI(5, 5, 1), ADDI(5, 5, 1), ADDI(5, 5, 1)] + FINISH())
+
     def plain_run(self):
         """The self-check without the stub: console, stderr, status, and the trace lines."""
         if GdbStubTest.plain is None:
             trace = self.dir / "plain.trace"
-            completed = subprocess.run([str(self.emulator), "--image", str(SELFCHECK), "--trace", str(trace)],
+            completed = subprocess.run(emulator_command(self.emulator, SELFCHECK, trace=trace),
                                        capture_output=True, text=True, timeout=TIMEOUT)
             GdbStubTest.plain = (completed.returncode, completed.stdout, completed.stderr,
                                  trace.read_text().splitlines())
@@ -227,8 +254,7 @@ class GdbStubTest(unittest.TestCase):
     def test_target_description(self):
         """qSupported advertises what the stub serves, and target.xml, read in small chunks to
         exercise the m/l continuation, is XML with gdb's RISC-V features and register numbers."""
-        self.need_selfcheck()
-        session, client = self.start(SELFCHECK)
+        session, client = self.start(self.tiny())
         features = client.ask("qSupported:multiprocess+;swbreak+;hwbreak+;xmlRegisters=i386").split(";")
         self.assertIn("qXfer:features:read+", features)
         self.assertIn("swbreak+", features)
@@ -268,8 +294,7 @@ class GdbStubTest(unittest.TestCase):
     def test_stopped_at_reset(self):
         """The machine waits at the reset pc with zeroed registers; the thread queries have their
         one-hart answers and an unknown packet gets the empty reply."""
-        self.need_selfcheck()
-        session, client = self.start(SELFCHECK)
+        session, client = self.start(self.tiny())
         self.assertEqual(client.ask("?"), "T05")
         regs = client.registers()
         self.assertEqual(regs[REG_PC], 0x80000000)
@@ -373,6 +398,20 @@ class GdbStubTest(unittest.TestCase):
         self.assertEqual(client.ask("c"), "W00")
         self.assert_exit(session, 0, "done", "pass")
 
+    def test_breakpoint_table_full(self):
+        """64 breakpoints fit; the 65th is refused with E01, re-inserting one already there is
+        still OK, and removing one makes room again."""
+        session, client = self.start(self.tiny())
+        for i in range(MAX_BREAKPOINTS):
+            self.assertEqual(client.ask(f"Z0,{RAM + 0x1000 + 4 * i:x},4"), "OK")
+        self.assertEqual(client.ask(f"Z0,{RAM + 0x2000:x},4"), "E01", "the table is full")
+        self.assertEqual(client.ask(f"Z1,{RAM + 0x1000:x},4"), "E01", "Z1 shares the table")
+        self.assertEqual(client.ask(f"Z0,{RAM + 0x1000:x},4"), "OK", "already there")
+        self.assertEqual(client.ask(f"z0,{RAM + 0x1000:x},4"), "OK")
+        self.assertEqual(client.ask(f"Z0,{RAM + 0x2000:x},4"), "OK")
+        self.assertEqual(client.ask("c"), "W00")
+        self.assert_exit(session, 0, "done", "pass")
+
     def test_step_into_a_trap(self):
         """A trapping instruction is one step: pc lands on mtvec, and mcause reads through p."""
         handler = RAM + 0x100
@@ -453,16 +492,25 @@ class GdbStubTest(unittest.TestCase):
         self.assertEqual(stdout.strip(), SELFCHECK_CONSOLE)
 
     def test_hang_up_stops_the_run(self):
-        self.need_selfcheck()
-        session, client = self.start(SELFCHECK)
+        session, client = self.start(self.tiny())
         self.assertEqual(client.ask("s"), "T05")
-        self.assert_exit(session, 2, "stopped", "error=host-stopped")
+        _, stderr = self.assert_exit(session, 2, "stopped", "error=host-stopped")
+        self.assertIn("rv32emu: gdb: connection closed by client\n", stderr, "a hang-up says so, unlike k")
+
+    def test_reset_connection_says_why(self):
+        """A connection that fails (here a reset) ends the run as a hang-up does, with the error
+        on stderr, so it is not mistaken for a deliberate kill."""
+        session, client = self.start(self.tiny())
+        self.assertEqual(client.ask("s"), "T05")
+        session.sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        _, stderr = self.assert_exit(session, 2, "stopped", "error=host-stopped")
+        self.assertRegex(stderr, r"rv32emu: gdb: connection (lost: .+|closed by client)\n")
 
     def test_vkill(self):
-        self.need_selfcheck()
-        session, client = self.start(SELFCHECK)
+        session, client = self.start(self.tiny())
         self.assertEqual(client.ask("vKill;1"), "OK")
-        self.assert_exit(session, 2, "stopped")
+        _, stderr = self.assert_exit(session, 2, "stopped")
+        self.assertNotIn("gdb: connection", stderr, "a kill is not a lost connection")
 
     # Memory.
 
@@ -487,6 +535,18 @@ class GdbStubTest(unittest.TestCase):
         client.send("k")
         self.assert_exit(session, 2, "stopped")
 
+    def test_long_read_is_clamped(self):
+        """A read longer than a reply can carry returns the first MAX_READ bytes, a short reply
+        the protocol allows (gdb asks again for the rest)."""
+        words = [ADDI(5, 0, 1)] + FINISH()
+        session, client = self.start(self.image(words))
+        data = bytes.fromhex(client.read(RAM, PACKET_SIZE))
+        self.assertEqual(len(data), MAX_READ)
+        image = words_to_bytes(words)
+        self.assertEqual(data, image + bytes(MAX_READ - len(image)))
+        client.send("k")
+        self.assert_exit(session, 2, "stopped")
+
     def test_memory_writes(self):
         """M and X (with every escaped byte) write RAM and the framebuffer; device windows and
         malformed writes are refused and leave no trace on the console."""
@@ -506,6 +566,8 @@ class GdbStubTest(unittest.TestCase):
         self.assertEqual(client.ask(f"M{UNMAPPED:x},1:41"), "E01")
         self.assertEqual(client.ask(f"M{RAM:x},2:41"), "E01", "too few bytes")
         self.assertEqual(client.ask(f"M{RAM:x},1:4g"), "E01")
+        self.assertEqual(client.ask(f"X{RAM:x},4:ab"), "E01", "X with fewer bytes than its length")
+        self.assertEqual(client.ask(f"X{RAM:x},1:abc"), "E01", "X with more bytes than its length")
         self.assertEqual(client.ask("c"), "W00")
         stdout, _ = self.assert_exit(session, 0, "done")
         self.assertEqual(stdout, "")
@@ -598,8 +660,7 @@ class GdbStubTest(unittest.TestCase):
     def test_bad_checksum_and_malformed_packets(self):
         """A bad checksum or a non-hex one gets `-` and no reply; the next good packet works. A
         well-framed but malformed request gets E01."""
-        self.need_selfcheck()
-        session, client = self.start(SELFCHECK)
+        session, client = self.start(self.tiny())
         client.send_raw(b"$g#00")
         self.assertEqual(client.byte(), ord("-"))
         client.send_raw(b"$g#zz")
@@ -623,8 +684,7 @@ class GdbStubTest(unittest.TestCase):
         self.assert_exit(session, 2, "stopped")
 
     def test_no_ack_mode(self):
-        self.need_selfcheck()
-        session, client = self.start(SELFCHECK)
+        session, client = self.start(self.tiny())
         self.assertEqual(client.ask("QStartNoAckMode"), "OK")
         client.ack = False
         self.assertEqual(client.ask("s"), "T05")
@@ -632,20 +692,47 @@ class GdbStubTest(unittest.TestCase):
         self.assertEqual(client.ask("c"), "W00")
         self.assert_exit(session, 0, "done", "pass")
 
+    def test_oversize_packet(self):
+        """A payload longer than PacketSize gets `-` in ack mode, like a bad checksum, and a line on
+        stderr; the next packet works."""
+        session, client = self.start(self.tiny())
+        client.send_raw(frame(b"m" * (PACKET_SIZE + 1)))
+        self.assertEqual(client.byte(), ord("-"))
+        self.assertEqual(client.ask("?"), "T05")
+        client.send("k")
+        _, stderr = self.assert_exit(session, 2, "stopped")
+        self.assertIn("packet longer than PacketSize", stderr)
+
+    def test_no_ack_mode_framing_errors(self):
+        """In no-ack mode nothing is retransmitted, so nothing is dropped silently: an oversized
+        packet gets E01 (and a stderr line), and a bad checksum is not verified, as the protocol
+        allows there."""
+        session, client = self.start(self.tiny())
+        self.assertEqual(client.ask("QStartNoAckMode"), "OK")
+        client.ack = False
+        client.send_raw(frame(b"m" * (PACKET_SIZE + 1)))
+        self.assertEqual(client.receive(), b"E01")
+        client.send_raw(b"$?#00")
+        self.assertEqual(client.receive(), b"T05")
+        client.send_raw(b"$qC#zz")
+        self.assertEqual(client.receive(), b"QC1")
+        self.assertEqual(client.ask("c"), "W00")
+        _, stderr = self.assert_exit(session, 0, "done", "pass")
+        self.assertIn("packet longer than PacketSize", stderr)
+
     def test_listen_errors(self):
         """A port that is taken is an emulator error before the run; a bad port is refused."""
-        self.need_selfcheck()
+        image = self.tiny()
         taken = socket.socket()
         taken.bind(("127.0.0.1", 0))
         taken.listen(1)
         try:
-            completed = subprocess.run([str(self.emulator), "--image", str(SELFCHECK), "--gdb",
-                                        str(taken.getsockname()[1])], capture_output=True, text=True, timeout=TIMEOUT)
+            completed = subprocess.run(emulator_command(self.emulator, image) + ["--gdb", str(taken.getsockname()[1])], capture_output=True, text=True, timeout=TIMEOUT)
         finally:
             taken.close()
         self.assertEqual(completed.returncode, 2)
         self.assertIn("cannot listen", completed.stderr)
-        completed = subprocess.run([str(self.emulator), "--image", str(SELFCHECK), "--gdb", "65536"],
+        completed = subprocess.run(emulator_command(self.emulator, image) + ["--gdb", "65536"],
                                    capture_output=True, text=True, timeout=TIMEOUT)
         self.assertEqual(completed.returncode, 2)
         self.assertIn("bad gdb port", completed.stderr)
@@ -653,15 +740,15 @@ class GdbStubTest(unittest.TestCase):
     # A real gdb, when there is one.
 
     def test_real_gdb_session(self):
-        """gdb-multiarch or riscv64-elf-gdb in batch mode: break on main, continue, read pc,
+        """gdb-multiarch, riscv64-elf-gdb, or a multi-target gdb in batch mode: break on main, continue, read pc,
         stepi, examine the image's first words, and continue to the exit code."""
         self.need_selfcheck()
-        gdb = shutil.which("gdb-multiarch") or shutil.which("riscv64-elf-gdb")
+        gdb = shutil.which("gdb-multiarch") or shutil.which("riscv64-elf-gdb") or riscv_capable_gdb()
         if gdb is None:
-            self.skipTest("neither gdb-multiarch nor riscv64-elf-gdb is on PATH")
+            self.skipTest("neither gdb-multiarch, riscv64-elf-gdb, nor a gdb that knows riscv:rv32 is on PATH")
         if not SELFCHECK_ELF.exists():
             self.skipTest("build/rv32/selfcheck.elf is missing")
-        process = subprocess.Popen([str(self.emulator), "--image", str(SELFCHECK), "--gdb", "0"],
+        process = subprocess.Popen(emulator_command(self.emulator, SELFCHECK) + ["--gdb", "0"],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             line = process.stderr.readline().decode()

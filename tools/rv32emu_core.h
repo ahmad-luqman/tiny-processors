@@ -160,8 +160,9 @@ bool emu_close_output(FILE *stream, const char *path);
 
 /* Debugger access (docs/rv32-gdb.md): copy n bytes of RAM or the framebuffer without any device
  * side effect; false when any byte lies outside RAM and outside the framebuffer (device windows
- * included). CSRs by number with the CSR instructions' WARL masks; false for a number that does not exist. */
-bool emu_debug_read(machine *m, uint32_t addr, uint8_t *out, size_t n);
+ * included). CSRs by number with the CSR instructions' WARL masks: a read is false for a number
+ * that does not exist, a write also for a read-only one (the Zicntr counters). */
+bool emu_debug_read(const machine *m, uint32_t addr, uint8_t *out, size_t n);
 bool emu_debug_write(machine *m, uint32_t addr, const uint8_t *in, size_t n);
 bool emu_csr_read(const machine *m, uint32_t number, uint32_t *value);
 bool emu_csr_write(machine *m, uint32_t number, uint32_t value);
