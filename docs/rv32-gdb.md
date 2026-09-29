@@ -72,11 +72,11 @@ The stub sends a target description so gdb needs no guessing about the register 
 | --- | --- | --- |
 | `org.gnu.gdb.riscv.cpu` | `zero ra sp gp tp t0–t2 fp s1 a0–a7 s2–s11 t3–t6` (x0–x31), `pc`, 32 bits | 0–31, 32 |
 | `org.gnu.gdb.riscv.fpu` | `ft0–ft7 fs0 fs1 fa0–fa7 fs2–fs11 ft8–ft11` (f0–f31) as `ieee_single`; `fflags`, `frm`, `fcsr` | 33–64; 66, 67, 68 |
-| `org.gnu.gdb.riscv.csr` | `mtvec`, `mepc`, `mcause`, `mtval` | 65 + CSR number: 838, 898, 899, 900 |
+| `org.gnu.gdb.riscv.csr` | `mtvec`, `mepc`, `mcause`, `mtval`; the Zicntr counters `cycle`, `time`, `instret`, `cycleh`, `timeh`, `instreth` | 65 + CSR number: 838, 898, 899, 900; 3137, 3138, 3139, 3265, 3266, 3267 |
 
 `<architecture>riscv:rv32</architecture>` tells gdb the XLEN. Every `<reg>` carries an explicit `regnum`, so the CSRs sit at 65 + number without filler registers for the gaps. `p` also answers any other CSR number the core's `csr_read` accepts (a counter CSR added later is readable at 65 + its number without touching the stub); unknown numbers, such as `mstatus` (65 + 0x300), are `E01`.
 
-Writes follow the machine's rules, not the debugger's convenience: a write to x0 is accepted and discarded (x0 stays zero, as with an instruction); pc takes any value (a misaligned pc traps on the next step, as it would after a jump); f registers take any bit pattern; CSRs go through `emu_csr_write`, which applies the same WARL masks as `csrrw` (`mtvec`/`mepc` bits 1:0 read back zero, `fcsr` keeps eight bits, `fflags` five, `frm` three). A CSR that reads but has no write case in the core keeps its value.
+Writes follow the machine's rules, not the debugger's convenience: a write to x0 is accepted and discarded (x0 stays zero, as with an instruction); pc takes any value (a misaligned pc traps on the next step, as it would after a jump); f registers take any bit pattern; CSRs go through `emu_csr_write`, which applies the same WARL masks as `csrrw` (`mtvec`/`mepc` bits 1:0 read back zero, `fcsr` keeps eight bits, `fflags` five, `frm` three). The read-only Zicntr counters refuse a write with `E01`, as `csrw` to one traps.
 
 ## Stops and exits
 
@@ -123,9 +123,9 @@ The stub's own API is three calls that `rv32emu.c` makes around its run loop: `g
 
 ## Verification
 
-`make test-rv32-gdb` (part of `make test-rv32`) builds the emulator from source and runs 25 tests in [tests/test_rv32_gdb.py](../tests/test_rv32_gdb.py). A client written in the test (framing, checksums, acks, binary escapes, strict about every byte the stub sends) drives `rv32emu --gdb 0`, which reports its chosen port on stderr:
+`make test-rv32-gdb` (part of `make test-rv32`) builds the emulator from source and runs 26 tests in [tests/test_rv32_gdb.py](../tests/test_rv32_gdb.py). A client written in the test (framing, checksums, acks, binary escapes, strict about every byte the stub sends) drives `rv32emu --gdb 0`, which reports its chosen port on stderr:
 
-- the target description, fetched in 256-byte chunks, parses as XML with 33 cpu registers numbered 0–32, 32 `ieee_single` registers at 33–64, `fflags`/`frm`/`fcsr` at 66–68, and the four CSRs at 65 + number; `qSupported` advertises it;
+- the target description, fetched in 256-byte chunks, parses as XML with 33 cpu registers numbered 0–32, 32 `ieee_single` registers at 33–64, `fflags`/`frm`/`fcsr` at 66–68, and the four trap CSRs and six counters at 65 + number; `qSupported` advertises it;
 - the initial stop at `0x8000_0000` with zero registers; the thread queries; empty replies for unknown packets and watchpoints;
 - 300 single steps of the self-check visit the pcs of the plain run's `--trace` in order, and each register a trace line wrote holds that value after the step; a trapping `ecall` is one step to `mtvec` with `mcause` 11;
 - a run under the stub with `--trace` (ten steps, a breakpoint stop, a continue to the end) writes a trace identical to the plain run's;
@@ -133,6 +133,7 @@ The stub's own API is three calls that `rv32emu.c` makes around its run loop: `g
 - Ctrl-C stops a self-loop with `T02` at the loop, twice, with and without a breakpoint set;
 - exits: the self-check continues to `W00`, exit 0, `PASS 807d9fad` and the plain run's halt line; a fail word gives `W01` and exit 1; the instruction limit `W02`; detach runs to a pass; kill, `vKill`, and hang-up give `halt=stopped`, exit 2;
 - memory: the image read back byte for byte, zeros in the framebuffer, `E01` for unmapped, device, crossing, and wrapping ranges; `M` and `X` (with all four escaped bytes) written and read back; patching the next instruction changes what executes; reads of the input window's EVENT/COUNT/KEYS are refused and the guest still sees both scripted events;
+- counters: `cycle`, `time` and `instret` read the steps taken, their high halves zero, and a write is refused (added with Track 0's Zicntr);
 - registers: x0 writes discarded, `mtvec`/`mepc`/`fcsr`/`fflags`/`frm` WARL masks, `mstatus` refused, `G` round trip, pc writes and `c ADDR`/`s ADDR`, and a debugger write of x31 turning a fail word into a pass;
 - framing: bad and non-hex checksums get `-`, a rejected reply is resent, stray acks are ignored, malformed requests get `E01`, no-ack mode works; a taken port and an out-of-range port are refused with exit 2;
 - one end-to-end run of a real gdb (`gdb-multiarch` or `riscv64-elf-gdb` from PATH; skipped with the reason when neither exists): `target remote`, `break *main`, `continue`, `info registers pc`, `stepi`, `x/4wx 0x80000000`, `continue` to "exited normally", with the emulator exiting 0 and printing the pass line.
@@ -148,7 +149,7 @@ The stub's own API is three calls that `rv32emu.c` makes around its run loop: `g
 
 Run in the Linux container (Ubuntu clang/lld 18 for the firmware, gcc for the host, GDB 15.1 `gdb-multiarch`):
 
-- `make RV32_LLVM=/usr/bin RV32_LD=/usr/bin/ld.lld test-rv32-gdb test-rv32-emu run-rv32-emu` passes: `test-rv32-gdb` 25 tests, 0 skipped (the real-gdb and `llvm-nm` tests ran), about 3 s; `test-rv32-emu` 33 tests unchanged; `run-rv32-emu` prints `PASS 807d9fad`, exit 0, 33,226 instructions retired, 0 traps.
+- `make RV32_LLVM=/usr/bin RV32_LD=/usr/bin/ld.lld test-rv32-gdb test-rv32-emu run-rv32-emu` passes: `test-rv32-gdb` 25 tests (26 with the counter test added when Zicntr merged), 0 skipped (the real-gdb and `llvm-nm` tests ran), about 3 s; `test-rv32-emu` 33 tests unchanged; `run-rv32-emu` prints `PASS 807d9fad`, exit 0, 33,226 instructions retired, 0 traps.
 - The emulator builds with `-std=c11 -O2 -Wall -Wextra -Werror` under gcc, and the stub also compiles cleanly with clang `-Wall -Wextra -Werror -Wimplicit-fallthrough`.
 - The self-check under the stub gives the same stdout, halt line, exit status, and trace as without it.
 - Speed as measured [above](#the-cost-of-ctrl-c-polling): no measurable cost without breakpoints, about 20% with one set.

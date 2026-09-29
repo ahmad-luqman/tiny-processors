@@ -17,6 +17,9 @@ chosen; the entries below say what it would take and what "done" could mean.
 
 ## Track 0: groundwork
 
+**Done (2026-09-29):** all five steps; see the [Track 0 record](../rv32-groundwork.md).
+The CPU row of the table above is now RV32IMF with Zicntr, and O1 is next.
+
 Small, low-risk steps that every later track leans on.
 
 - **Architectural compliance.** Run `riscv-arch-test` (the official RISC-V
@@ -127,7 +130,7 @@ This track does not depend on the others and can run alongside any of them.
 
 ## Recommended order
 
-1. Groundwork: compliance suite, M, Zicntr, CoreMark, GDB stub.
+1. Groundwork: compliance suite, M, Zicntr, CoreMark, GDB stub (done, [record](../rv32-groundwork.md)).
 2. O1 interrupts with the CLINT at `virt` addresses, which starts both
    "proper QEMU" and "proper OS".
 3. O2 kernel, syscalls, separate programs and a shell, run on QEMU `virt` as
