@@ -178,8 +178,15 @@ Verilator 5.040 built from their release tags, Yosys 0.33, dtc 1.7.
   cases).
 - **Earlier results:** the self-check (`PASS 807d9fad`, traces identical on
   Icarus and Verilator), Pong (`PASS 8fef54bc`, 200 checkpoints), the
-  diagnostic, the SIMD4, G1, G2, digit, S1 and capstone runs listed below keep
-  their PASS words and checkpoints. The diagnostic's word changed from
+  diagnostic, and the Verilator runs of the F images, SIMD4, G1 (and its
+  menu), G2 (and its menu), the digit check and menu, S1 and its menu session,
+  the capstone and Pong keep their PASS words and checkpoints; so do the RV32IM
+  builds on the emulator and Verilator. `test-rv32-m`, `test-rv32-gdb`,
+  `test-rv32-simd4`, `test-rv32-gfx`, `test-rv32-3d`, `test-rv32-digit` and
+  `test-rv32-f` pass on Verilator (the first two after updating what the
+  contract changed: `time` is one more than `cycle` on the RTL, and `a1` is
+  `0x1000` at reset), and all 189 architectural tests pass on the emulator
+  against QEMU. The diagnostic's word changed from
   `8bd87e9a` to `efd4ec82` because it folds the faulting address of its byte
   read of the timer, now `0x0200_bff8`. That value is recomputed in
   [rv32_devices.py](../tools/rv32_devices.py), not copied from a run.
@@ -192,8 +199,9 @@ Failures that reproduce identically on the base commit in this container, as
 self-check's pinned clang 22 trace length, the runner test that uses BSD
 `sed -i ""`, the Icarus diagnostic and Pong tests' 120-second timeout, the
 diagnostic's Verilator target at the default 10-million-cycle limit (it passes
-at 30 million: 19,027,745 cycles), and the host tests that link `-shared`
-libraries.
+at 30 million: 19,027,745 cycles), the host tests that link `-shared`
+libraries, and the QEMU runs of the self-check and `floatsoft`, which ask for
+the `rv32i` model QEMU 8.2 lacks (both pass with `--cpu rv32`).
 
 ## Exercises
 
