@@ -998,3 +998,92 @@ test-rv32-m: $(RV32EMU)
 test-rv32-m-verilator: $(RV32EMU) $(RV32_TB_VERILATOR)
 	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_m.py' -v
 test-rv32: test-rv32-m test-rv32-m-verilator run-rv32m-emu run-rv32m-rtl run-rv32m-rtl-verilator
+
+# Track 0: CoreMark and Dhrystone, each built for RV32I (software multiply and divide) and
+# RV32IM, timed with the Zicntr counters. The benchmark sources are vendored unmodified
+# (third_party/coremark, third_party/dhrystone) and compiled without -Werror; the port
+# (programs/rv32/bench) is ours and is. docs/rv32-groundwork.md has the record.
+.PHONY: firmware-rv32-bench check-rv32-bench-image bench-rv32-emu bench-rv32 test-rv32-bench
+RV32_COREMARK_ITERATIONS ?= 30
+RV32_BENCH_OPT := -O2
+RV32_BENCH_BASE := --target=riscv32-unknown-elf -mabi=ilp32 -mcmodel=medlow -mno-relax -ffreestanding -fno-builtin -nostdlib \
+	$(RV32_BENCH_OPT) -g -fno-asynchronous-unwind-tables -fno-unwind-tables
+RV32_BENCH_PORT_FLAGS := -std=c11 -Wall -Wextra -Werror -Iprograms/rv32 -Iprograms/rv32/bench -Ithird_party/coremark
+RV32_COREMARK_FLAGS := -std=c11 -w -Iprograms/rv32/bench -Ithird_party/coremark -DITERATIONS=$(RV32_COREMARK_ITERATIONS) \
+	-DPERFORMANCE_RUN=1 -DCOMPILER_FLAGS='"$(RV32_BENCH_OPT)"'
+# riscv-tests' Dhrystone is K&R C that asks not to be inlined (a GCC pragma clang ignores).
+RV32_DHRYSTONE_FLAGS := -std=gnu89 -w -fno-inline -Iprograms/rv32/bench/dhrystone -Ithird_party/dhrystone
+RV32_COREMARK_SOURCES := $(addprefix third_party/coremark/,core_list_join.c core_main.c core_matrix.c core_state.c core_util.c)
+RV32_BENCH_HEADERS := programs/rv32/bench/bench.h programs/rv32/bench/core_portme.h third_party/coremark/coremark.h \
+	$(wildcard programs/rv32/bench/dhrystone/*.h) third_party/dhrystone/dhrystone.h programs/rv32/console.h
+RV32_BENCH_IMAGES := coremark-i coremark-im dhrystone-i dhrystone-im
+build/rv32bench/i build/rv32bench/im:
+	mkdir -p $@
+# One object set per ISA: `i` links the software multiply/divide, `im` does not need it.
+define RV32_BENCH_ISA
+build/rv32bench/$(1)/%.o: third_party/coremark/%.c $(RV32_BENCH_HEADERS) Makefile | build/rv32bench/$(1)
+	$(RV32_CC) $(RV32_BENCH_BASE) -march=$(2) $(RV32_COREMARK_FLAGS) -c -o $$@ $$<
+build/rv32bench/$(1)/%.o: third_party/dhrystone/%.c $(RV32_BENCH_HEADERS) | build/rv32bench/$(1)
+	$(RV32_CC) $(RV32_BENCH_BASE) -march=$(2) $(RV32_DHRYSTONE_FLAGS) -c -o $$@ $$<
+build/rv32bench/$(1)/%.o: programs/rv32/bench/%.c $(RV32_BENCH_HEADERS) Makefile | build/rv32bench/$(1)
+	$(RV32_CC) $(RV32_BENCH_BASE) -march=$(2) $(RV32_BENCH_PORT_FLAGS) -DITERATIONS=$(RV32_COREMARK_ITERATIONS) -DPERFORMANCE_RUN=1 -c -o $$@ $$<
+build/rv32bench/$(1)/port.o: programs/rv32/bench/dhrystone/port.c $(RV32_BENCH_HEADERS) | build/rv32bench/$(1)
+	$(RV32_CC) $(RV32_BENCH_BASE) -march=$(2) $(RV32_BENCH_PORT_FLAGS) -c -o $$@ $$<
+build/rv32bench/$(1)/%.o: programs/rv32/%.S programs/rv32/board.h | build/rv32bench/$(1)
+	$(RV32_CC) $(RV32_BENCH_BASE) -march=$(2) $(RV32_BENCH_PORT_FLAGS) -c -o $$@ $$<
+build/rv32bench/$(1)/%.o: programs/rv32/%.c $(RV32_HEADERS) | build/rv32bench/$(1)
+	$(RV32_CC) $(RV32_BENCH_BASE) -march=$(2) $(RV32_BENCH_PORT_FLAGS) -c -o $$@ $$<
+build/rv32bench/$(1)/muldiv.o: programs/rv32/rt/muldiv.c programs/rv32/rt/muldiv.h | build/rv32bench/$(1)
+	$(RV32_CC) $(RV32_BENCH_BASE) -march=$(2) $(RV32_BENCH_PORT_FLAGS) -c -o $$@ $$<
+build/rv32bench/coremark-$(1).elf: $(patsubst third_party/coremark/%.c,build/rv32bench/$(1)/%.o,$(RV32_COREMARK_SOURCES)) \
+		build/rv32bench/$(1)/core_portme.o build/rv32bench/$(1)/bench.o build/rv32bench/$(1)/start.o build/rv32bench/$(1)/console.o $(3) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_BENCH_BASE) -march=$(2) -static --ld-path=$(RV32_LD) -Wl,-T,programs/rv32/link.ld -Wl,-Map,$$(@:.elf=.map) -o $$@ $$(filter %.o,$$^)
+build/rv32bench/dhrystone-$(1).elf: build/rv32bench/$(1)/dhrystone.o build/rv32bench/$(1)/dhrystone_main.o build/rv32bench/$(1)/port.o \
+		build/rv32bench/$(1)/bench.o build/rv32bench/$(1)/start.o build/rv32bench/$(1)/console.o $(3) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_BENCH_BASE) -march=$(2) -static --ld-path=$(RV32_LD) -Wl,-T,programs/rv32/link.ld -Wl,--wrap=debug_printf -Wl,-Map,$$(@:.elf=.map) -o $$@ $$(filter %.o,$$^)
+endef
+$(eval $(call RV32_BENCH_ISA,i,rv32i,build/rv32bench/i/muldiv.o))
+$(eval $(call RV32_BENCH_ISA,im,rv32im,))
+build/rv32bench/%.lst: build/rv32bench/%.elf
+	$(RV32_OBJDUMP) -d -S $< > $@
+build/rv32bench/%.bin: build/rv32bench/%.elf
+	$(RV32_OBJCOPY) -O binary $< $@
+.SECONDARY: $(foreach image,$(RV32_BENCH_IMAGES),build/rv32bench/$(image).elf)
+firmware-rv32-bench: toolchain-rv32 $(foreach image,$(RV32_BENCH_IMAGES),build/rv32bench/$(image).bin build/rv32bench/$(image).lst)
+check-rv32-bench-image: firmware-rv32-bench
+	$(PYTHON) tools/rv32_image.py build/rv32bench/coremark-i.elf --listing build/rv32bench/coremark-i.lst --bin build/rv32bench/coremark-i.bin --hex build/rv32bench/coremark-i.hex --allow-counters
+	$(PYTHON) tools/rv32_image.py build/rv32bench/coremark-im.elf --listing build/rv32bench/coremark-im.lst --bin build/rv32bench/coremark-im.bin --hex build/rv32bench/coremark-im.hex --allow-counters --allow-m --require-m
+	$(PYTHON) tools/rv32_image.py build/rv32bench/dhrystone-i.elf --listing build/rv32bench/dhrystone-i.lst --bin build/rv32bench/dhrystone-i.bin --hex build/rv32bench/dhrystone-i.hex --allow-counters
+	$(PYTHON) tools/rv32_image.py build/rv32bench/dhrystone-im.elf --listing build/rv32bench/dhrystone-im.lst --bin build/rv32bench/dhrystone-im.bin --hex build/rv32bench/dhrystone-im.hex --allow-counters --allow-m --require-m
+RV32_BENCH_BINS := $(foreach image,$(RV32_BENCH_IMAGES),build/rv32bench/$(image).bin)
+# The emulator validates the four images and pins instret; its "cycles" are instructions.
+bench-rv32-emu: check-rv32-bench-image $(RV32EMU)
+	$(PYTHON) tools/rv32_bench.py $(RV32_BENCH_BINS) --backend emulator --emulator $(RV32EMU)
+# The performance baseline: clock cycles on the RTL (Verilator; Icarus counts the same cycles,
+# slowly), with the emulator alongside to require the same console and instret.
+bench-rv32: check-rv32-bench-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) tools/rv32_bench.py $(RV32_BENCH_BINS) --backend emulator --backend verilator --emulator $(RV32EMU) --verilator $(RV32_TB_VERILATOR)
+test-rv32-bench:
+	$(PYTHON) -m unittest discover -s tests -p 'test_rv32_bench.py' -v
+test-rv32: test-rv32-bench bench-rv32-emu
+
+# Track 0: architectural compliance. riscv-arch-test is fetched at the pinned commit (only the
+# model headers and the I, M and F suites); each test's signature must match QEMU's and the
+# emulator's trace must match each simulator's. The QEMU CPU is generic RV32 with C and D off.
+.PHONY: fetch-rv32-arch-test test-rv32-arch-model test-rv32-arch test-rv32-arch-verilator test-rv32-arch-icarus
+RV32_ARCH_QEMU_CPU ?= rv32,c=false,d=false
+RV32_ARCH_JOBS ?= 4
+RV32_ARCH_ARGS = --cc $(RV32_CC) --ld $(RV32_LD) --qemu $(QEMU_RV32) --qemu-cpu $(RV32_ARCH_QEMU_CPU) --emulator $(RV32EMU) --jobs $(RV32_ARCH_JOBS)
+fetch-rv32-arch-test:
+	$(PYTHON) tools/rv32_arch_test.py --fetch
+# The model header's own behaviour (signature dump, the mstatus skip, failures), no suite needed.
+test-rv32-arch-model: toolchain-rv32 $(RV32EMU)
+	RV32_CC=$(RV32_CC) RV32_LD=$(RV32_LD) QEMU_RV32=$(QEMU_RV32) RV32_ARCH_QEMU_CPU=$(RV32_ARCH_QEMU_CPU) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_arch.py' -v
+test-rv32-arch: toolchain-rv32 fetch-rv32-arch-test $(RV32EMU)
+	$(PYTHON) tools/rv32_arch_test.py $(RV32_ARCH_ARGS) --backend qemu --out build/rv32/arch/emu
+test-rv32-arch-verilator: toolchain-rv32 fetch-rv32-arch-test $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) tools/rv32_arch_test.py $(RV32_ARCH_ARGS) --backend verilator --verilator $(RV32_TB_VERILATOR) --out build/rv32/arch/verilator
+# About an hour on four cores: the F suite alone retires 19.5 million instructions.
+test-rv32-arch-icarus: toolchain-rv32 fetch-rv32-arch-test $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) tools/rv32_arch_test.py $(RV32_ARCH_ARGS) --backend icarus --icarus $(RV32_TB_VVP) --out build/rv32/arch/icarus
+test-rv32: test-rv32-arch-model test-rv32-arch test-rv32-arch-verilator
