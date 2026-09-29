@@ -51,8 +51,8 @@
 #define FB_ROWS 240u
 #define FB_SIZE (FB_COLUMNS * FB_ROWS)
 
-/* Why the run ended. HALT_STOPPED is the host's doing (the window was closed);
- * the headless emulator never produces it. */
+/* Why the run ended. HALT_STOPPED is the host's doing (the window was closed, or a
+ * debugger killed the run or hung up); a plain headless run never produces it. */
 enum halt { RUNNING, HALT_DONE, HALT_DOUBLE_FAULT, HALT_LIMIT, HALT_STOPPED };
 
 /* One line of the input script: the event and the frame it arrives at. */
@@ -157,5 +157,13 @@ void emu_require_outside(const char *path, const char *what, const char *directo
 FILE *emu_open_output(const char *path, const char *what);
 void emu_require_distinct_streams(FILE *a, const char *a_path, const char *a_what, FILE *b, const char *b_path, const char *b_what);
 bool emu_close_output(FILE *stream, const char *path);
+
+/* Debugger access (docs/rv32-gdb.md): copy n bytes of RAM or the framebuffer without any device
+ * side effect; false when any byte lies outside RAM and outside the framebuffer (device windows
+ * included). CSRs by number with the CSR instructions' WARL masks; false for a number that does not exist. */
+bool emu_debug_read(machine *m, uint32_t addr, uint8_t *out, size_t n);
+bool emu_debug_write(machine *m, uint32_t addr, const uint8_t *in, size_t n);
+bool emu_csr_read(const machine *m, uint32_t number, uint32_t *value);
+bool emu_csr_write(machine *m, uint32_t number, uint32_t value);
 
 #endif

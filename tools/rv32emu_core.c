@@ -1255,3 +1255,60 @@ int emu_exit_status(const machine *m, int status, bool outputs_ok, bool allow_lo
     }
     return status;
 }
+
+/* Debugger access (docs/rv32-gdb.md). A debugger looks at the machine without being part of
+ * it: reads and writes go straight to the RAM and framebuffer arrays, never through the bus
+ * handlers, so reading a device cannot pop the input queue, print a console byte, present a
+ * frame, or disturb an accelerator, and no G1 source or G2 depth lock refuses the debugger.
+ * Device windows and unmapped addresses are refused as a whole: the access must lie entirely
+ * inside RAM or entirely inside the framebuffer. The arithmetic is 64-bit so a range that
+ * wraps past 0xffffffff is refused instead of aliasing low memory. */
+static uint8_t *debug_bytes(machine *m, uint32_t addr, size_t n)
+{
+    uint64_t end = (uint64_t)addr + n;
+    if (addr >= RAM_BASE && end <= (uint64_t)RAM_BASE + RAM_SIZE) {
+        return m->ram + (addr - RAM_BASE);
+    }
+    if (addr >= FB_BASE && end <= (uint64_t)FB_BASE + FB_SIZE) {
+        return m->fb + (addr - FB_BASE);
+    }
+    return NULL;
+}
+
+bool emu_debug_read(machine *m, uint32_t addr, uint8_t *out, size_t n)
+{
+    const uint8_t *p = debug_bytes(m, addr, n);
+    if (!p) {
+        return false;
+    }
+    memcpy(out, p, n);
+    return true;
+}
+
+bool emu_debug_write(machine *m, uint32_t addr, const uint8_t *in, size_t n)
+{
+    uint8_t *p = debug_bytes(m, addr, n);
+    if (!p) {
+        return false;
+    }
+    memcpy(p, in, n);
+    return true;
+}
+
+/* CSRs by number with the instructions' own rules: a number csr_read does not know is refused,
+ * and a write applies the same WARL masks a CSRRW would (mtvec/mepc low bits clear, fcsr eight
+ * bits, fflags five, frm three). The read-only Zicntr counters refuse writes, as a CSRRW traps. */
+bool emu_csr_read(const machine *m, uint32_t number, uint32_t *value)
+{
+    return csr_read(m, number, value);
+}
+
+bool emu_csr_write(machine *m, uint32_t number, uint32_t value)
+{
+    uint32_t old;
+    if (!csr_read(m, number, &old) || (number >> 10) == 3) { /* absent, or a read-only counter */
+        return false;
+    }
+    csr_write(m, number, value);
+    return true;
+}

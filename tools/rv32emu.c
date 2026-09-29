@@ -11,6 +11,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "rv32emu_core.h"
+#include "rv32_gdb.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -19,7 +20,7 @@ static void usage(void)
 {
     fputs("usage: rv32emu --image FILE [--base ADDR] [--pc ADDR] [--trace FILE] [--dump-state FILE]\n"
           "               [--max-instructions N] [--checkpoints FILE] [--frames DIR] [--input FILE]\n"
-          "               [--record FILE] [--allow-lost-events]\n"
+          "               [--record FILE] [--allow-lost-events] [--gdb PORT]\n"
           "Loads FILE at ADDR (default 0x80000000), starts at --pc (default 0x80000000), and runs\n"
           "until the done register is written. Console bytes go to stdout, the trace and state\n"
           "to their files, and a final 'rv32emu: halt=...' line to stderr. Each present appends\n"
@@ -27,7 +28,9 @@ static void usage(void)
           "script's `frame N down|up KEY` events arrive when frame N is presented; an event the\n"
           "full queue dropped or the guest never reached turns a pass into an error unless\n"
           "--allow-lost-events says it was expected. --record writes every event offered to the\n"
-          "queue as a script that replays the run.\n",
+          "queue as a script that replays the run. --gdb serves one GDB remote-protocol client on\n"
+          "127.0.0.1:PORT (0 picks a free port; the chosen one is printed to stderr) with the\n"
+          "machine stopped at the reset pc (docs/rv32-gdb.md).\n",
           stderr);
     exit(EXIT_EMULATOR_ERROR);
 }
@@ -37,7 +40,8 @@ int main(int argc, char **argv)
     const char *image_path = NULL, *trace_path = NULL, *state_path = NULL, *checkpoints_path = NULL;
     const char *input_path = NULL, *record_path = NULL, *frames_dir = NULL;
     uint32_t base = RAM_BASE, start = 0;
-    bool start_given = false, allow_lost_events = false;
+    bool start_given = false, allow_lost_events = false, gdb = false;
+    uint16_t gdb_port = 0;
     machine m;
     emu_init(&m);
     for (int i = 1; i < argc; i++) {
@@ -71,6 +75,9 @@ int main(int argc, char **argv)
             input_path = value;
         } else if (!strcmp(arg, "--record")) {
             record_path = value;
+        } else if (!strcmp(arg, "--gdb")) {
+            gdb_port = (uint16_t)emu_parse_u64(value, 65535, "gdb port");
+            gdb = true;
         } else {
             usage();
         }
@@ -134,6 +141,18 @@ int main(int argc, char **argv)
         emu_deliver_events(&m); /* frame 0's events are queued before the first instruction */
     }
 
+    /* Under --gdb the client drives the machine until the guest halts, the client kills the run
+     * (HALT_STOPPED), or it detaches, in which case the run continues as if it had never been
+     * attached. Everything after the halt is the same as for a plain run. */
+    int gdb_fd = -1;
+    gdb_end session = GDB_DETACHED;
+    if (gdb) {
+        gdb_fd = gdb_accept(gdb_port);
+        if (gdb_fd < 0) {
+            return EXIT_EMULATOR_ERROR;
+        }
+        session = gdb_serve(gdb_fd, &m);
+    }
     while (emu_run_until(&m, UINT64_MAX) != EMU_STOP_HALTED) {
         /* the headless emulator has nothing to do at a present */
     }
@@ -148,7 +167,10 @@ int main(int argc, char **argv)
             outputs_ok = false;
         }
     }
-    int status = emu_report_halt(&m, loaded);
+    int status = emu_exit_status(&m, emu_report_halt(&m, loaded), outputs_ok, allow_lost_events);
     emu_free(&m);
-    return emu_exit_status(&m, status, outputs_ok, allow_lost_events);
+    if (session == GDB_HALTED) {
+        gdb_report_exit(gdb_fd, status); /* the client learns the same status the process returns */
+    }
+    return status;
 }

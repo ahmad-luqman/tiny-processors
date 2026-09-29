@@ -291,8 +291,8 @@ test-rv32-tools:
 test-rv32-rt:
 	$(PYTHON) -m unittest discover -s tests -p 'test_rv32_rt.py' -v
 
-$(RV32EMU): tools/rv32emu.c $(RV32EMU_CORE) $(RV32_FP_OBJ) | build/rv32
-	$(HOST_CC) $(RV32EMU_CFLAGS) -o $@ tools/rv32emu.c tools/rv32emu_core.c tools/rv32_simd4.c tools/rv32_gpu.c tools/rv32_g3d.c $(RV32_FP_OBJ)
+$(RV32EMU): tools/rv32emu.c tools/rv32_gdb.c tools/rv32_gdb.h $(RV32EMU_CORE) $(RV32_FP_OBJ) | build/rv32
+	$(HOST_CC) $(RV32EMU_CFLAGS) -o $@ tools/rv32emu.c tools/rv32_gdb.c tools/rv32emu_core.c tools/rv32_simd4.c tools/rv32_gpu.c tools/rv32_g3d.c $(RV32_FP_OBJ)
 
 build-rv32-emu: toolchain-rv32-emu $(RV32EMU)
 
@@ -327,6 +327,18 @@ trace-rv32-emu: run-rv32-emu
 
 diff-rv32-qemu: run-rv32-emu
 	$(PYTHON) tools/rv32_diff_qemu.py build/rv32/selfcheck.elf build/rv32/selfcheck.trace --qemu $(QEMU_RV32) --log build/rv32/qemu-exec.log
+
+# The GDB stub (docs/rv32-gdb.md): protocol tests with a built-in client, plus one end-to-end run
+# of gdb-multiarch or riscv64-elf-gdb when either is on PATH. debug-rv32-gdb waits for a client:
+#   gdb-multiarch build/rv32/selfcheck.elf -ex 'set architecture riscv:rv32' -ex 'target remote :3333'
+.PHONY: test-rv32-gdb debug-rv32-gdb
+test-rv32-gdb: check-rv32-image $(RV32EMU)
+	HOST_CC=$(HOST_CC) RV32_NM=$(RV32_NM) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_gdb.py' -v
+
+debug-rv32-gdb: check-rv32-image $(RV32EMU)
+	$(RV32EMU) --image $(or $(IMAGE),build/rv32/selfcheck.bin) --gdb $(or $(PORT),3333)
+
+test-rv32: test-rv32-gdb
 
 $(RV32_TB_VVP): $(RV32_SOC_RTL) $(FP32_HEADERS) $(RV32_TB) | build/rv32
 	iverilog -Irtl/fp32 -g2012 -Wall -s rv32_tb -o $@ $(RV32_TB) $(RV32_SOC_RTL)
