@@ -117,6 +117,8 @@ module rv32_tb;
     reg [69:0] held_request;    // the request as it was on the first stalled edge
     integer fp_waits = 0;
     integer md_waits = 0;       // cycles in MD_WAIT: 33 per M-extension instruction
+    integer ptw_waits = 0;      // issue #20: cycles the page-table walk adds, stalls apart
+    integer walks = 0;          // issue #20: page-table reads, transfers that are not the instruction's
     reg fp_inflight = 0, fp_completed = 0;
     // Integration protocol: each arithmetic retirement consumes one completion.
     // Reset cancels both tokens, even if a response was accepted before writeback.
@@ -261,6 +263,7 @@ module rv32_tb;
             if (interrupts != 0) $fwrite(STDERR, " interrupts=%0d", interrupts);
             if (fp_waits != 0) $fwrite(STDERR, " fp_waits=%0d", fp_waits);
             if (md_waits != 0) $fwrite(STDERR, " md_waits=%0d", md_waits);
+            if (walks != 0 || ptw_waits != 0) $fwrite(STDERR, " walks=%0d ptw_waits=%0d", walks, ptw_waits);
             if (halt_name == "done") begin
                 $fwrite(STDERR, " done=%h", done_word);
                 if (done_word == 32'h5555)
@@ -321,6 +324,7 @@ module rv32_tb;
             cycles = cycles + 1;
             if (state == dut.core.FP_ISSUE || state == dut.core.FP_WAIT) fp_waits = fp_waits + 1;
             if (state == dut.core.MD_WAIT) md_waits = md_waits + 1;
+            if (dut.core.ptw_cycle) ptw_waits = ptw_waits + 1;
             // The M unit restarts on a start while busy (rtl/rv32/rv32_muldiv.v);
             // the core must never ask it to.
             if (dut.core.muldiv.start && dut.core.muldiv.busy)
@@ -353,13 +357,17 @@ module rv32_tb;
                         if (checkpoints_fd != 0)
                             $fwrite(checkpoints_fd, "frame %0d %h\n", display_frames + 1, frame_hash(FB_WORDS));
                     end
-                    if (!mem_fetch) begin
+                    if (dut.core.mem_ptw) begin
+                        walks = walks + 1; // a page-table read belongs to no instruction's trace line
+                    end else if (!mem_fetch) begin
                         if (pending)
                             $fatal(1, "Two data transactions without a retirement between them");
                         pending = 1;
                         pending_write = mem_we;
                         pending_error = mem_error;
-                        pending_addr = mem_addr;
+                        // The trace shows the virtual address, as the emulator's does (issue #20);
+                        // untranslated, it is the bus address.
+                        pending_addr = dut.core.alu_out;
                         // Both directions show the strobed lanes: a store's written
                         // bytes, a load's raw bytes before the core extends them.
                         pending_value = narrowed(mem_strb, mem_we ? mem_wdata : mem_rdata);

@@ -213,6 +213,8 @@ def ECALL(): return 0x00000073
 def EBREAK(): return 0x00100073
 def MRET(): return 0x30200073
 def WFI(): return 0x10500073
+def SRET(): return 0x10200073                              # issue #20: S-mode
+def SFENCE_VMA(rs1=0, rs2=0): return 0x12000073 | rs2 << 20 | rs1 << 15
 def CSRRW(rd, csr, rs1): return i_type(0x73, rd, 1, rs1, csr)
 def CSRRS(rd, csr, rs1): return i_type(0x73, rd, 2, rs1, csr)
 def CSRRC(rd, csr, rs1): return i_type(0x73, rd, 3, rs1, csr)
@@ -223,8 +225,18 @@ MTVEC, MEPC, MCAUSE, MTVAL, MSTATUS = 0x305, 0x341, 0x342, 0x343, 0x300
 MCOUNTEREN, PMPCFG0, PMPCFG1, PMPADDR0 = 0x306, 0x3A0, 0x3A1, 0x3B0  # O5: pmpaddr n is PMPADDR0 + n
 MIE_CSR, MIP_CSR, MSCRATCH, FCSR = 0x304, 0x344, 0x340, 0x003  # O1's interrupt CSRs; F2's fcsr
 MSTATUS_RESET = 0x80007800  # SD and FS = 3 read as constants; MPP = 3 (machine) from reset
-MSTATUS_MPP = 0x1800        # O5: WARL, machine (3) or user (0); mret leaves it user
+MSTATUS_MPP = 0x1800        # O5: WARL, machine (3), supervisor (1, issue #20) or user (0); mret leaves it user
 MSTATUS_USER = MSTATUS_RESET & ~MSTATUS_MPP
+MSTATUS_SUPERVISOR = MSTATUS_USER | 0x800
+# Issue #20: S-mode and Sv32. mstatus's supervisor fields, delegation, the supervisor's CSRs and satp.
+MSTATUS_SIE, MSTATUS_SPIE, MSTATUS_SPP = 0x2, 0x20, 0x100
+MSTATUS_MPRV, MSTATUS_SUM, MSTATUS_MXR = 1 << 17, 1 << 18, 1 << 19
+MSTATUS_TVM, MSTATUS_TW, MSTATUS_TSR = 1 << 20, 1 << 21, 1 << 22
+MEDELEG, MIDELEG = 0x302, 0x303
+SSTATUS, SIE_CSR, STVEC, SCOUNTEREN, SSCRATCH = 0x100, 0x104, 0x105, 0x106, 0x140
+SEPC, SCAUSE, STVAL, SIP_CSR, SATP = 0x141, 0x142, 0x143, 0x144, 0x180
+SATP_SV32 = 0x80000000
+PTE_V, PTE_R, PTE_W, PTE_X, PTE_U, PTE_G, PTE_A, PTE_D = 0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80
 # Zicntr: read-only counters; `rdcycle rd` is `csrrs rd, cycle, x0`.
 CYCLE, TIME, INSTRET, CYCLEH, TIMEH, INSTRETH = 0xC00, 0xC01, 0xC02, 0xC80, 0xC81, 0xC82
 def RDCYCLE(rd): return CSRRS(rd, CYCLE, 0)

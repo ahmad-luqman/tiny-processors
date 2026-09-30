@@ -122,22 +122,23 @@ class PmpTest(StepTicksCase):
         self.assertEqual(self.log(rtl.trace), [(8, 0, USER + 4, MSTATUS_U | 0x80)])
         self.assertEqual(trap_records(rtl.trace), trap_records(emulator.trace))
 
-    def test_mpp_is_warl_machine_or_user(self):
+    def test_mpp_is_warl_machine_supervisor_or_user(self):
         machine = []
         for mpp in range(4):
             machine += LI(5, 0x1800) + [CSRRC(0, MSTATUS, 5)] + LI(5, mpp << 11) + [CSRRS(0, MSTATUS, 5),
                                                                                    CSRRS(10 + mpp, MSTATUS, 0)]
         emulator, rtl = self.assert_same(program(machine + store_at(DUMP, 10, 11, 12, 13) + [ECALL()]))
         got = [stored(rtl.trace, DUMP + 4 * i) for i in range(4)]
-        self.assertEqual(got, [MSTATUS_U, MSTATUS_U, MSTATUS_U, MSTATUS_M])
+        self.assertEqual(got, [MSTATUS_U, MSTATUS_SUPERVISOR, MSTATUS_U, MSTATUS_M])  # 2 is reserved
 
     def test_privileged_instructions_and_csrs_are_illegal_in_user_mode(self):
         refused = [CSRRS(5, MSTATUS, 0), CSRRS(5, MSCRATCH, 0), MRET(), WFI(),
                    CSRRS(5, MCOUNTEREN, 0), CSRRS(5, PMPADDR0, 0), CSRRS(5, PMPCFG0, 0),
-                   RDTIME(5)]                                 # TM is clear in mcounteren
+                   RDTIME(5),                                 # TM is clear in mcounteren
+                   SRET(), SFENCE_VMA(), CSRRS(5, SSTATUS, 0), CSRRS(5, SATP, 0)]  # issue #20: S mode's
         allowed = [RDCYCLE(6), RDINSTRET(7), RDINSTRETH(8), CSRRS(9, FCSR, 0)]
         user = refused + allowed + [ECALL()]
-        machine = set_pmp(ALL) + [CSRRWI(0, MCOUNTEREN, 0b101)] + enter_user()
+        machine = set_pmp(ALL) + [CSRRWI(0, MCOUNTEREN, 0b101), CSRRWI(0, SCOUNTEREN, 0b111)] + enter_user()
         emulator, rtl = self.assert_same(program(machine, user))
         expected = [(2, word, USER + 4 * i, MSTATUS_U | 0x80) for i, word in enumerate(refused)]
         expected.append((8, 0, USER + 4 * len(user) - 4, MSTATUS_U | 0x80))
@@ -265,11 +266,13 @@ class PmpTest(StepTicksCase):
         self.assertEqual(stored(rtl.trace, DUMP + 8), PLIC_SOURCE_INPUT)  # the event was still unclaimed
 
     def test_mcounteren_gates_each_counter(self):
+        """Since issue #20 user mode needs the counter's bit in scounteren too."""
         reads = [RDCYCLE(5), RDTIME(6), RDINSTRET(7), RDCYCLEH(8), RDTIMEH(9), RDINSTRETH(10)]
-        for enabled in (0b000, 0b010, 0b111):
-            with self.subTest(mcounteren=enabled):
-                machine = set_pmp(ALL) + [CSRRWI(0, MCOUNTEREN, enabled)] + enter_user()
-                emulator, rtl = self.assert_same(program(machine, reads + [ECALL()]))
+        for mcounteren, scounteren in ((0b000, 0b111), (0b010, 0b111), (0b111, 0b111), (0b111, 0b101), (0b110, 0b011)):
+            with self.subTest(mcounteren=mcounteren, scounteren=scounteren):
+                machine = set_pmp(ALL) + [CSRRWI(0, MCOUNTEREN, mcounteren), CSRRWI(0, SCOUNTEREN, scounteren)]
+                emulator, rtl = self.assert_same(program(machine + enter_user(), reads + [ECALL()]))
+                enabled = mcounteren & scounteren
                 refused = [i for i in range(len(reads)) if not (enabled >> (i % 3)) & 1]
                 self.assertEqual([entry[:3] for entry in self.log(rtl.trace)][:-1],
                                  [(2, reads[i], USER + 4 * i) for i in refused])

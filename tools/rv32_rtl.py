@@ -33,7 +33,7 @@ DEFAULT_SIMULATOR = "build/rv32/rv32_tb.vvp"
 DEFAULT_OUT = "build/rv32/rtl"
 BENCH_SEED = 7
 COUNTERS = ("cycles", "steps", "stalls", "transfers")
-DECIMAL = COUNTERS + ("cause", "fp_waits", "md_waits", "interrupts")
+DECIMAL = COUNTERS + ("cause", "fp_waits", "md_waits", "interrupts", "walks", "ptw_waits")
 HEX = ("done", "tval", "pc", "word")
 # The keys each halt reason carries besides the counters and the outcome (docs/rv32-rtl.md).
 REQUIRED = {"done": ("done",), "double-fault": ("cause", "tval"), "limit": ()}
@@ -116,10 +116,13 @@ def rtl_halt_line(stderr):
     if reason not in REQUIRED:
         raise ValueError(f"unknown halt reason {reason!r} in {line!r}")
     expected = {"halt", "outcome", *COUNTERS, *REQUIRED[reason]}
-    for waits, unit in (("fp_waits", "FPU"), ("md_waits", "multiply/divide"), ("interrupts", "interrupt")):
+    for waits, unit in (("fp_waits", "FPU"), ("md_waits", "multiply/divide"), ("interrupts", "interrupt"),
+                        ("walks", "page-table read"), ("ptw_waits", "page-table walk")):
         if waits in fields:
             expected.add(waits)
             if fields[waits] < 0: raise ValueError(f"negative {unit} wait count")
+    if ("walks" in fields) != ("ptw_waits" in fields):
+        raise ValueError(f"walks and ptw_waits come together in {line!r}")
     if set(fields) != expected:
         raise ValueError(f"halt line keys {sorted(fields)} do not match {sorted(expected)} in {line!r}")
     return fields
@@ -419,16 +422,20 @@ def cycle_relation(rtl):
     memory = sum("mem[" in line for line in rtl.trace)
     traps = sum(" trap " in line or " interrupt " in line for line in rtl.trace)
     halt = rtl.halt
-    expected = 4 * (steps - memory) + 5 * memory + halt["stalls"] + halt.get("fp_waits", 0) + halt.get("md_waits", 0)
+    expected = (4 * (steps - memory) + 5 * memory + halt["stalls"] + halt.get("fp_waits", 0) + halt.get("md_waits", 0) +
+                halt.get("ptw_waits", 0))
+    walks = halt.get("walks", 0)
     text = (f"cycles {halt['cycles']} = 4 x {steps - memory} + 5 x {memory} + {halt['stalls']} stalls; "
             f"transfers {halt['transfers']} = {steps} fetches + {memory} data")
     if halt.get("fp_waits", 0):
         text += f"; plus {halt['fp_waits']} FPU issue/wait cycles"
     if halt.get("md_waits", 0):
         text += f"; plus {halt['md_waits']} multiply/divide wait cycles"
+    if walks:
+        text += f"; plus {halt['ptw_waits']} page-table walk cycles and {walks} page-table reads"
     if traps:
         return f"{text} (not exact: {traps} trap lines)", None
-    return text, halt["cycles"] == expected and halt["transfers"] == steps + memory
+    return text, halt["cycles"] == expected and halt["transfers"] == steps + memory + walks
 
 
 def check_fp_waits(rtl, expected):

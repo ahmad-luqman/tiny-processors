@@ -173,7 +173,11 @@ class ImageCheckerTests(unittest.TestCase):
                   "80000004: 34402573     \tcsrr\ta0, mip", "80000004: 34051073     \tcsrw\tmscratch, a0",
                   "80000004: 10500073     \twfi", "80000004: 00000073     \tecall",
                   "80000004: 30679073     \tcsrw\tmcounteren, a5", "80000004: 3a051073     \tcsrw\tpmpcfg0, a0",
-                  "80000004: 3b751073     \tcsrw\tpmpaddr7, a0"]
+                  "80000004: 3b751073     \tcsrw\tpmpaddr7, a0",
+                  # issue #20: S-mode and Sv32
+                  "80000004: 10200073     \tsret", "80000004: 12000073     \tsfence.vma",
+                  "80000004: 18051073     \tcsrw\tsatp, a0", "80000004: 30251073     \tcsrw\tmedeleg, a0",
+                  "80000004: 10551073     \tcsrw\tstvec, a0", "80000004: 14202573     \tcsrr\ta0, scause"]
         for line in system:
             with self.subTest(line=line):
                 self.assertEqual(len(check_listing(base + line, allow_privileged=True)), 1)
@@ -183,7 +187,7 @@ class ImageCheckerTests(unittest.TestCase):
         self.assertEqual(len(check_listing(unimp, allow_counters=True)), 1)
         self.assertEqual(check_listing(unimp, allow_system=True), [])
         for line in ("80000004: 3b851073     \tcsrw\tpmpaddr8, a0", "80000004: 3a251073     \tcsrw\tpmpcfg2, a0",
-                     "80000004: 10200073     \tsret"):
+                     "80000004: 60051073     \tcsrw\thstatus, a0"):
             with self.subTest(line=line):
                 self.assertEqual(len(check_listing(base + line, allow_system=True)), 1)
 

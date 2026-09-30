@@ -267,7 +267,8 @@ class EmulatorTest(unittest.TestCase):
                 ([r_type(0x33, 1, 1, 2, 3, 0x20)], 2, r_type(0x33, 1, 1, 2, 3, 0x20)),  # sll with sub bit
                 ([b_type(2, 0, 0, 8)], 2, b_type(2, 0, 0, 8)),                     # unused branch funct3
                 ([i_type(0x03, 1, 3, 0, 0)], 2, i_type(0x03, 1, 3, 0, 0)),         # ld does not exist
-                ([0x10200073], 2, 0x10200073)]:                                    # sret
+                ([0x10500073 | 1 << 7], 2, 0x10500073 | 1 << 7),                   # wfi with rd set
+                ([0x12000073 | 1 << 7], 2, 0x12000073 | 1 << 7)]:                  # sfence.vma with rd set
             with self.subTest(body=body):
                 result = self.run_trapping(body)
                 self.assertEqual((result.state.x[10], result.state.x[11]), (cause, tval))
