@@ -1,7 +1,8 @@
 /* The kernel (Track 2, O2; docs/rv32-os.md).
  *
  * It boots from the device tree it is given in a1, loads programs from the RAM
- * disk bundled into its image into fixed 256 KiB slots, and serves their
+ * disk bundled into its image into fixed slots of 128 KiB (a program may span
+ * several; sys.h), and serves their
  * system calls (sys.h). Every context, each process and the idle loop, has a
  * frame; kentry.S saves the running one on every trap and resumes whichever
  * kernel_trap returns. The kernel runs with interrupts off and never traps
@@ -11,6 +12,9 @@
  * and the PLIC on every platform, and our input, display and accelerators
  * where the tree lists them. On QEMU the tree lies in RAM a program slot
  * covers, so everything is read from it before the first program is loaded.
+ *
+ * Since O4 the timer interrupt also preempts: when another process is ready,
+ * the running one goes to the back of the round and the next one runs.
  *
  * Blocking is by retry: a call that cannot finish yet (read with no byte
  * waiting, wait for a child still running) leaves the process's pc on its
@@ -33,7 +37,7 @@
 #include "virtio.h"
 
 #define MAX_PROCS 8
-#define KERNEL_TICK 10000u      /* device ticks between timer interrupts */
+#define KERNEL_TICK 10000u      /* device ticks between timer interrupts, where ticks have no rate */
 #define KEY_BUFFER 64u          /* input events waiting for a program */
 #define ARGS_MAX 64u            /* bytes of argument string, NUL included */
 #define MSTATUS_MPP_M 0x1800u
@@ -63,7 +67,7 @@ struct proc {
     struct frame f;
     struct open_file files[OPEN_FILES];
     enum state state;
-    uint32_t pid, parent, slot, brk, exit_code, wait_pid, flags;
+    uint32_t pid, parent, base, span, brk, exit_code, wait_pid, flags, switches;
     uint64_t wake;
     char name[24];
 };
@@ -71,7 +75,7 @@ struct proc {
 /* A RAM disk entry (tools/rv32_ramdisk.py). */
 struct program {
     char name[24];
-    uint32_t load, entry, file_size, memory_size, offset, flags;
+    uint32_t load, entry, file_size, memory_size, offset, flags, span;
 };
 #define PROGRAM_ACCELERATORS 1u /* it drives SIMD4, G1 and G2 itself */
 
@@ -89,6 +93,7 @@ static uint32_t next_pid = 1, exits, exit_sum;
 static uint32_t console, done_register, clint, plic;
 static uint32_t input, input_source, display, framebuffer, gpu, g3d, disk;
 static char model[48];
+static uint32_t tick = KERNEL_TICK; /* O4: 100 µs where the tree gives a timebase (QEMU), else KERNEL_TICK */
 
 static uint32_t keys[KEY_BUFFER];
 static uint32_t key_head, key_count, keys_dropped;
@@ -267,6 +272,10 @@ static void discover(uintptr_t address)
     }
     gpu = find(&t, "tiny-processors,g1", 0, 0);
     g3d = find(&t, "tiny-processors,g2", 0, 0);
+    uint32_t timebase;
+    if (fdt_cell(&t, "@name", "cpus", "timebase-frequency", 0, &timebase) == FDT_OK && timebase >= 10000u) {
+        tick = timebase / 10000u;
+    }
     const char *name = "unknown";
     (void)fdt_root_string(&t, "model", &name);
     uint32_t i = 0;
@@ -283,16 +292,10 @@ static struct proc *proc_of(struct frame *f)
     return f == &idle_frame ? 0 : (struct proc *)((uint8_t *)f - offsetof(struct proc, f));
 }
 
-static uint32_t slot_base(const struct proc *p)
-{
-    return OS_SLOT_BASE + p->slot * OS_SLOT_SIZE;
-}
-
-/* A user range is `len` bytes inside the process's own slot. */
+/* A user range is `len` bytes inside the process's own slots. */
 static int user_range(const struct proc *p, uint32_t address, uint32_t len)
 {
-    uint32_t base = slot_base(p);
-    return address >= base && len <= OS_SLOT_SIZE && address - base <= OS_SLOT_SIZE - len;
+    return address >= p->base && len <= p->span && address - p->base <= p->span - len;
 }
 
 /* A NUL-terminated user string of at most `max` bytes, copied out; 0 on a bad pointer or length. */
@@ -337,18 +340,18 @@ static int alive(const struct proc *p)
     return p->state != FREE && p->state != ZOMBIE;
 }
 
-/* Load a program into its slot and make it ready; returns the process or 0. */
+/* Load a program into its slots and make it ready; returns the process or 0. */
 static struct proc *spawn(const char *name, const char *args, uint32_t parent)
 {
     const struct program *program = program_named(name);
     if (!program) {
         return 0;
     }
-    uint32_t slot = (program->load - OS_SLOT_BASE) / OS_SLOT_SIZE;
     struct proc *p = 0;
     for (uint32_t i = 0; i < MAX_PROCS; i++) {
-        if (alive(&procs[i]) && procs[i].slot == slot) {
-            return 0; /* its slot is in use: one instance at a time */
+        const struct proc *q = &procs[i];
+        if (alive(q) && q->base < program->load + program->span && program->load < q->base + q->span) {
+            return 0; /* its slots are in use: one instance at a time */
         }
         if (!p && procs[i].state == FREE) {
             p = &procs[i];
@@ -358,12 +361,13 @@ static struct proc *spawn(const char *name, const char *args, uint32_t parent)
         return 0;
     }
     memset(p, 0, sizeof *p);
-    p->slot = slot;
+    p->base = program->load;
+    p->span = program->span;
     p->flags = program->flags;
     uint8_t *base = (uint8_t *)(uintptr_t)program->load;
     memcpy(base, ramdisk + program->offset, program->file_size);
     memset(base + program->file_size, 0, program->memory_size - program->file_size);
-    uint32_t top = slot_base(p) + OS_SLOT_SIZE;
+    uint32_t top = p->base + p->span;
     char *copy = (char *)(uintptr_t)(top - ARGS_MAX);
     uint32_t i = 0;
     for (; args[i] && i + 1 < ARGS_MAX; i++) {
@@ -563,7 +567,7 @@ static int syscall(struct proc *p)
         }
         break;
     case SYS_SBRK:
-        if (a0 <= slot_base(p) + OS_SLOT_SIZE - OS_STACK_SIZE - p->brk) {
+        if (a0 <= p->base + p->span - OS_STACK_SIZE - p->brk) {
             result = p->brk;
             p->brk += a0;
         }
@@ -623,6 +627,37 @@ static int syscall(struct proc *p)
         break;
     case SYS_DISPLAY:
         result = framebuffer;
+        break;
+    case SYS_SWITCHES:
+        result = p->switches;
+        break;
+    case SYS_PS:
+        if (a0 < MAX_PROCS && procs[a0].state != FREE && user_range(p, a1, a2) && a2 >= 48) {
+            static const char *const states[] = {"free", "ready", "running", "reading", "waiting", "sleeping", "zombie"};
+            const struct proc *q = &procs[a0];
+            char line[48];
+            uint32_t n = 0;
+            const char *parts[3] = {q->name, " ", states[q->state]};
+            for (uint32_t k = 0; k < 3; k++) {
+                for (const char *c = parts[k]; *c && n + 12 < sizeof line; c++) {
+                    line[n++] = *c;
+                }
+            }
+            line[n++] = ' ';
+            char digits[11];
+            uint32_t d = 10, v = q->pid;
+            digits[d] = 0;
+            do {
+                digits[--d] = (char)('0' + v % 10u);
+                v /= 10u;
+            } while (v);
+            while (digits[d] && n + 1 < sizeof line) {
+                line[n++] = digits[d++];
+            }
+            line[n] = 0;
+            memcpy((void *)(uintptr_t)a1, line, n + 1);
+            result = n;
+        }
         break;
     case SYS_OPEN: {
         uint32_t mode = a1 & (O_READ | O_WRITE);
@@ -697,7 +732,13 @@ struct frame *kernel_trap(struct frame *f)
         if (code == IRQ_MEI) {
             external_interrupt();
         } else if (code == IRQ_MTI) {
-            set_timer(mtime() + KERNEL_TICK);
+            set_timer(mtime() + tick);
+            /* O4: round robin. The running process yields the machine when another is ready. */
+            struct proc *next = p ? next_ready(p) : 0;
+            if (p && p->state == RUNNING && next && next != p) {
+                p->state = READY;
+                p->switches++;
+            }
         }
     } else if (!p) {
         panic("trap in the idle loop");
@@ -743,7 +784,7 @@ _Noreturn void kernel_main(uint32_t hart, uintptr_t tree)
         mmio_write32(plic + RV32_PLIC_ENABLE, 1u << input_source);
         mmio_write32(plic + RV32_PLIC_THRESHOLD, 0);
     }
-    set_timer(mtime() + KERNEL_TICK);
+    set_timer(mtime() + tick);
     csr_write(CSR_MIE, MIP_MEIP | MIP_MTIP);
 
     idle_frame.x[2] = (uint32_t)(uintptr_t)&idle_stack[64];

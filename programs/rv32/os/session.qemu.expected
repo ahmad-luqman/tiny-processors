@@ -1,6 +1,6 @@
 kernel: riscv-virtio,qemu, hart 0
 kernel: devices console clint plic disk
-kernel: 11 programs
+kernel: 13 programs
 kernel: disk 256 sectors, tfs
 sh: ls, NAME [ARGS] [&], wait, halt [CODE]
 $ ls
@@ -15,6 +15,8 @@ fault
 cat
 write
 files
+bars
+life
 $ hello
 hello from pid 2
 $ hello a b c
@@ -37,15 +39,17 @@ syscheck: list
 syscheck: time
 syscheck: ok
 $ fault load
-kernel: pid 9 fault killed: cause 5 at 802c0074 tval 00200000
+kernel: pid 9 fault killed: cause 5 at 80200074 tval 00200000
 sh: fault exited 133
 $ fault illegal
-kernel: pid 10 fault killed: cause 2 at 802c0054 tval c0001073
+kernel: pid 10 fault killed: cause 2 at 80200054 tval c0001073
 sh: fault exited 130
 $ hello still here
 hello from pid 11, args: still here
 $ files
 welcome 83
+bars.out 0
+life.out 0
 $ cat welcome
 Welcome to the tiny computer.
 ls lists the programs, files the files on this disk.
@@ -57,6 +61,8 @@ cat: nosuch: no such file
 sh: cat exited 1
 $ files
 welcome 83
+bars.out 0
+life.out 0
 note 11
 $ halt
 kernel: halt, 16 exits

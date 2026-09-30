@@ -157,7 +157,7 @@ Yosys 0.33.
 | Range | What |
 | --- | --- |
 | `0x8000_0000`–`0x800F_FFFF` | The kernel: code, data, the RAM disk, a 16 KiB stack at the top ([kernel.ld](../programs/rv32/os/kernel.ld)) |
-| `0x8010_0000 + 0x4_0000 × n`, n = 0..11 | Program slot n: code, data and `.bss` from the bottom, the heap above them, a 32 KiB stack at the top ([user.ld](../programs/rv32/os/user.ld)) |
+| `0x8010_0000 + 0x2_0000 × n`, n = 0..23 | Program slot n of 128 KiB (256 KiB, 12 slots, until O4); a program spans one or more: code, data and `.bss` from the bottom, the heap above them, a 32 KiB stack at the top ([user.ld](../programs/rv32/os/user.ld)) |
 
 Each program is linked for its own slot (`--defsym SLOT_BASE=...`), so any
 set of programs can be resident at once with no relocation and no MMU; the
@@ -228,23 +228,24 @@ left to the programs, which get its address from `display()`; on QEMU it is 0
 and Pong says `pong: no display`.
 
 A program that faults is killed: the kernel prints
-`kernel: pid 9 fault killed: cause 5 at 802c0074 tval 00200000`, the exit
+`kernel: pid 9 fault killed: cause 5 at 80200074 tval 00200000`, the exit
 code is 128 plus the cause, and the shell carries on. Nothing stops a program
 from writing kernel memory yet; that is O5.
 
 ### Programs
 
-| Slot | Program | What |
+| Slot (since O4) | Program | What |
 | --- | --- | --- |
 | 0 | [sh](../programs/rv32/os/sh.c) | The shell, pid 1: `ls`, `NAME [ARGS]`, `NAME &`, `wait`, `halt [CODE]`; it echoes each line, since the host does not |
 | 1 | [hello](../programs/rv32/os/hello.c) | Its pid and arguments |
 | 2 | [primes](../programs/rv32/os/primes.c) | A sieve on `sbrk` memory |
 | 3 | [pong](../programs/rv32/os/pong.c) | [pong.c](../programs/rv32/pong.c) on system calls |
 | 4 | [tetris](../programs/rv32/os/tetris.c) | The M7 Tetris, Q quits |
-| 5 | [menu](../programs/rv32/os/menu.c) | The capstone runtime (menu, games, 2D, 3D, digit screen) on system calls, accelerators direct |
-| 6 | [syscheck](../programs/rv32/os/syscheck.c) | System-call edge cases |
-| 7 | [fault](../programs/rv32/os/fault.c) | A load from an unmapped address, or an illegal instruction |
-| 8, 9, 10 | [cat](../programs/rv32/os/cat.c), [write](../programs/rv32/os/write.c), [files](../programs/rv32/os/files.c) | Print a file, write one, list them (O3) |
+| 5–6 | [menu](../programs/rv32/os/menu.c) | The capstone runtime (menu, games, 2D, 3D, digit screen) on system calls, accelerators direct |
+| 7 | [syscheck](../programs/rv32/os/syscheck.c) | System-call edge cases |
+| 8 | [fault](../programs/rv32/os/fault.c) | A load from an unmapped address, or an illegal instruction |
+| 9, 10, 11 | [cat](../programs/rv32/os/cat.c), [write](../programs/rv32/os/write.c), [files](../programs/rv32/os/files.c) | Print a file, write one, list them (O3) |
+| 12, 13 | [bars](../programs/rv32/os/bars.c), [life](../programs/rv32/os/life.c) | Two programs that share the screen (O4) |
 
 The user library ([ulib.c](../programs/rv32/os/ulib.c)) also defines
 `console.h`'s functions and `rv32_exit` on top of system calls, so the game
@@ -267,7 +268,7 @@ sh: ls, NAME [ARGS] [&], wait, halt [CODE]
 $ ls
 ...
 $ fault load
-kernel: pid 9 fault killed: cause 5 at 802c0074 tval 00200000
+kernel: pid 9 fault killed: cause 5 at 80200074 tval 00200000
 sh: fault exited 133
 ...
 $ halt
@@ -392,6 +393,110 @@ and takes the first whose DeviceID is 2.
   trace-identical between the emulator and Verilator (1,507,642 lines).
 - **Cost:** the device is 5,153 generic cells with its disk shrunk to 64
   words (Yosys 0.33), latch-free.
+
+## O4: preemptive multitasking
+
+### The scheduler
+
+O2's kernel already had everything a round-robin scheduler needs: every
+context's registers live in its frame, `kernel_trap` returns whichever frame
+should run next, and `next_ready()` walks the process table from the one after
+the current process. O4 adds one rule to the timer interrupt: when another
+process is ready, the running one becomes ready too, goes to the back of the
+round, and counts a switch. A process that blocks (reading the console,
+waiting for a child, sleeping) gives the machine up at once, as before; one
+that computes now loses it at the next tick. `yield`, `sleep` and `wait` are
+unchanged. `switches()` tells a program how often the timer took the machine
+from it, and `ps(i, buf, len)` describes process table entry `i`.
+
+The quantum is 10,000 device ticks where ticks have no rate (our machine's
+tree has no `timebase-frequency`, deliberately) and 100 µs where the tree
+gives one: QEMU's 10 MHz timebase makes that 1,000 ticks. The kernel reads it
+with the FDT reader's new `"@name"` query (the `/cpus` node's own property).
+Without that, QEMU runs the demo programs so fast that a 1 ms quantum might
+never interrupt them.
+
+### Slots
+
+Twelve 256 KiB slots were all taken by the end of O3. Slots are now 128 KiB
+(24 of them), and a program may span several: its link script's
+`SLOT_SPAN`, recorded in the RAM disk entry, sets where its stack starts. The
+menu, the only program larger than 96 KiB, spans two. `spawn` refuses a
+program whose span overlaps a live process's.
+
+### Two programs, one machine
+
+[bars](../programs/rv32/os/bars.c) animates bands of colour in the left half
+of the screen for 24 frames; [life](../programs/rv32/os/life.c) runs Conway's
+Life on a 20 × 30 torus in the right half for 16 generations. Both present
+every frame, so in the window you see the halves move together as the timer
+passes the machine between them. The session is
+
+```
+$ bars &
+[2]
+$ life &
+[3]
+$ wait
+$ cat bars.out
+bars: 24 frames, sum 6bf3c4c5, preempted yes
+$ cat life.out
+life: 16 generations, population 31, sum 63c97f8a, preempted yes
+```
+
+Each program writes its line to a file ([report.c](../programs/rv32/os/report.c))
+rather than the console, because two programs' console lines would interleave
+differently on every backend, and the shell prints the files after `wait`.
+The files are already on the disk image, so creating them cannot depend on
+the order either; the directory is written last with both sizes, so the disks
+end identical too. The sums fold only what each program drew or computed, and
+"preempted yes" says the timer took the machine from it at least once.
+
+With cycle ticks the frames each backend presented are mixes of the two
+programs' work at different moments, so the runner compares only how many
+there were (`--compare-checkpoints count`, 40). In step-tick mode the timer
+fires on the same instruction on both backends, so the whole trace, every
+switch and every frame's hash, is compared.
+
+Preemption also changes what results comparison can ask. With cycle ticks the
+order of two processes' exceptions depends on when the timer fired, and so
+does the number of a single process's system calls: a blocked `read` or
+`wait` runs its `ecall` again, and whether `wait` blocks at all depends on
+whether the child has already finished. What cannot change is each process's
+own sequence of faults. The runner therefore groups exception records by the
+128 KiB region of their PC (a slot, so a process) and, with
+`--compare-traps faults`, leaves environment calls out; the kernel sessions
+use both. The default comparison is unchanged for everything else.
+
+### Evidence (O4)
+
+- **Two programs:** the `bars &`, `life &`, `wait` session gives the same
+  transcript and `PASS 408a6738` on QEMU `virt` (three runs, "preempted yes"
+  each time), the emulator (6,560,282 steps, 626 interrupts) and Verilator
+  with a stall per request (39,935,033 cycles), with 40 presents each and
+  identical final disks. In step-tick mode with seeded stalls the emulator
+  and Verilator traces are identical, 6,560,282 lines, every switch and all
+  40 frame hashes included.
+- **Earlier sessions under preemption:** the console session, Pong (with its
+  200 checkpoints, trace-identical in step-tick mode), the second boot and the
+  S1 menu session keep their results; only the fault addresses in the console
+  transcript moved with the slots.
+- **Tools:** `test-rv32-os` checks the per-region and faults-only trap
+  comparison and the checkpoint count on made-up runs, and the RAM disk's
+  spans.
+
+## Exercises (O4)
+
+1. **Switches.** Print `switches()` at the end of `bars` and run the jobs
+   session on the emulator, on Verilator with cycle ticks and in step-tick
+   mode. Which two agree, and why?
+2. **The quantum.** Set `KERNEL_TICK` to 1,000 and to 100,000. What happens to
+   the number of interrupts and to the frames the window shows?
+3. **Starvation.** Start `bars &` and then type into the shell while it runs.
+   How long does the shell take to answer on the emulator, and what decides
+   it?
+4. **Fairness.** `next_ready()` starts after the current process. What would
+   go wrong if it always started at entry 0?
 
 ## Exercises (O2)
 

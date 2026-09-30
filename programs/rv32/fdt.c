@@ -174,6 +174,7 @@ static fdt_status find(const fdt *t, const char *property, const char *value, ui
     int has_named = 0;
     uint32_t at = t->structs;
     int list = fdt_same(property, "compatible");
+    int by_name = fdt_same(property, "@name"); /* match the node's own name, not a property (O4) */
 
     for (;;) {
         if (at + 4 > t->structs_end) {
@@ -206,13 +207,15 @@ static fdt_status find(const fdt *t, const char *property, const char *value, ui
             in_props = 0;
         }
         if (token == FDT_BEGIN_NODE) {
+            uint32_t name = at;
             skip_name(t, &at);
             if (++depth >= FDT_MAX_DEPTH) {
                 return FDT_BAD_LAYOUT;
             }
             address_cells[depth] = 2; /* the specification's defaults for the children */
             size_cells[depth] = 1;
-            matched = 0;
+            matched = by_name && at <= t->structs_end && terminated(t, name, at) &&
+                      fdt_same((const char *)t->blob + name, value);
             in_props = 1;
             reg.length = 0;
             has_named = 0;

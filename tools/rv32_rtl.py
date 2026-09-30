@@ -271,6 +271,18 @@ def trap_records(trace):
     return [line.split(" ", 1)[1] for line in trace if " trap " in line]
 
 
+def trap_records_by_region(trace, faults_only=False):
+    """The trap records grouped by the 128 KiB region of RAM (a program slot since O4) their PC lies
+    in, each group in trace order. With preemption the order of two processes' exceptions depends
+    on device time; the order of one process's own does not (docs/rv32-os.md, O4)."""
+    groups = {}
+    for record in trap_records(trace):
+        if faults_only and record.split()[3] in ("8", "11"):
+            continue  # an environment call: a kernel may run it again when it had to wait
+        groups.setdefault(int(record.split()[0], 16) >> 17, []).append(record)
+    return groups
+
+
 def takes_interrupts(trace):
     """Whether a trace has an interrupt entry (O1): with cycle ticks it lands on a
     backend-dependent instruction, so only step ticks keep trace comparison."""
@@ -319,20 +331,28 @@ def store_records(trace):
     return [line.split(" ", 1)[1] for line in trace if "<-" in line]
 
 
-def compare_backends(rtl, emulator, compare, compare_stores=False):
+def compare_backends(rtl, emulator, compare, compare_stores=False, checkpoints="lines", traps="all"):
     """What must agree between two passing runs, as the first mismatch or None: the console
     transcript and the checkpoint lines always; the whole retirement trace in trace mode; in
-    results mode (device time) the trap records, which step numbers never move.
+    results mode (device time) the trap records, which step numbers never move, compared per 128 KiB
+    region of their PC: one process's order is fixed, two processes' interleaving is not (O4).
     compare_stores is an opt-in for firmware whose stores are timing-independent;
     even timer-free accelerator polling may store a varying poll count."""
     if rtl.console != emulator.console:
         return f"console mismatch: RTL {rtl.console!r}, emulator {emulator.console!r}"
-    if rtl.checkpoints != emulator.checkpoints:
+    if checkpoints == "count":  # frames drawn by programs the scheduler interleaves (O4)
+        if len(rtl.checkpoints) != len(emulator.checkpoints):
+            return f"checkpoint count mismatch: RTL {len(rtl.checkpoints)}, emulator {len(emulator.checkpoints)}"
+    elif rtl.checkpoints != emulator.checkpoints:
         return f"checkpoint mismatch: RTL {rtl.checkpoints}, emulator {emulator.checkpoints}"
     if compare == "results":
-        rtl_traps, emulator_traps = trap_records(rtl.trace), trap_records(emulator.trace)
+        faults_only = traps == "faults"
+        rtl_traps = trap_records_by_region(rtl.trace, faults_only)
+        emulator_traps = trap_records_by_region(emulator.trace, faults_only)
         if rtl_traps != emulator_traps:
-            return f"trap mismatch: RTL {rtl_traps}, emulator {emulator_traps}"
+            region = next(r for r in sorted(set(rtl_traps) | set(emulator_traps)) if rtl_traps.get(r) != emulator_traps.get(r))
+            return (f"trap mismatch in the region at {region << 17:#010x}: RTL {rtl_traps.get(region, [])}, "
+                    f"emulator {emulator_traps.get(region, [])}")
         if compare_stores:
             difference = diff_traces(store_records(rtl.trace), store_records(emulator.trace))
             if difference:
@@ -445,6 +465,12 @@ def main():
     parser.add_argument("--compare", choices=("trace", "results"), default="trace",
                         help="`trace`: identical retirement traces and the cycle formula; `results`: identical "
                              "console, outcome, and checkpoints, for a program that reads the timer, the cycle/time counters or accelerator registers (device time)")
+    parser.add_argument("--compare-checkpoints", choices=("lines", "count"), default="lines",
+                        help="`count` compares only how many frames each backend presented, for programs whose frames "
+                             "depend on how the scheduler interleaved them (O4); results mode only")
+    parser.add_argument("--compare-traps", choices=("all", "faults"), default="all",
+                        help="`faults` leaves environment calls out of the compared trap records, for a kernel that "
+                             "retries a blocked system call (O2) under preemption (O4); results mode only")
     parser.add_argument("--compare-stores", action="store_true",
                         help="also compare ordered stores in results mode; firmware must have timing-independent stores")
     parser.add_argument("--ticks", choices=("cycles", "steps"), default="cycles",
@@ -465,6 +491,10 @@ def main():
     args = parser.parse_args()
     if args.compare_stores and args.compare != "results":
         parser.error("--compare-stores requires --compare results")
+    if args.compare_traps == "faults" and args.compare != "results":
+        parser.error("--compare-traps faults requires --compare results")
+    if args.compare_checkpoints == "count" and args.compare != "results":
+        parser.error("--compare-checkpoints count requires --compare results")
     for option in ("simd_stall", "simd_seed", "gpu_stall", "gpu_seed"):
         value = getattr(args, option)
         if value is not None and not 0 <= value <= 2147483647:
@@ -572,7 +602,8 @@ def main():
                           ticks=args.ticks, console_input=args.console_input, disk=backend_disk("rtl"))
             check_passed(rtl)
             check_fp_waits(rtl, args.expect_fp_waits)
-            mismatch = compare_backends(rtl, emulator, args.compare, compare_stores=args.compare_stores)  # the same agreement as a check run
+            mismatch = compare_backends(rtl, emulator, args.compare, compare_stores=args.compare_stores,
+                                        checkpoints=args.compare_checkpoints, traps=args.compare_traps)  # the same agreement as a check run
             if mismatch:
                 sys.exit(f"stall={stall} seed={seed}: {mismatch}")
             if stall is not None and rtl.halt["stalls"] != stall * rtl.halt["transfers"]:
@@ -600,7 +631,8 @@ def main():
     print(rtl.stderr.strip().splitlines()[-1] if rtl.stderr.strip() else "rv32_tb: no halt line")
     check_passed(rtl)
     check_fp_waits(rtl, args.expect_fp_waits)
-    mismatch = compare_backends(rtl, emulator, args.compare, compare_stores=args.compare_stores)
+    mismatch = compare_backends(rtl, emulator, args.compare, compare_stores=args.compare_stores,
+                                        checkpoints=args.compare_checkpoints, traps=args.compare_traps)
     if mismatch:
         sys.exit(mismatch)
     if args.disk is not None:  # what each backend left on its disk (O3)

@@ -1199,19 +1199,24 @@ test-rv32: run-rv32-irq-qemu run-rv32-irq-emu run-rv32-irq-rtl run-rv32-irq-rtl-
 .PHONY: run-rv32-os-pong-emu run-rv32-os-pong-rtl-steps run-rv32-os-boot2 run-rv32-os-menu-emu run-rv32-os-menu-rtl-verilator test-rv32-os
 RV32_OS := programs/rv32/os
 RV32_OS_CFLAGS := $(RV32_CFLAGS) -I$(RV32_OS) -Ibuild/rv32
-RV32_OS_HEADERS := $(RV32_OS)/sys.h $(RV32_OS)/ulib.h $(RV32_OS)/fs.h $(RV32_OS)/virtio.h $(RV32_OS)/score.h programs/rv32/csr.h programs/rv32/fdt.h $(RV32_HEADERS)
-RV32_OS_PROGRAMS := sh hello primes pong tetris menu syscheck fault cat write files
+RV32_OS_HEADERS := $(RV32_OS)/sys.h $(RV32_OS)/ulib.h $(RV32_OS)/fs.h $(RV32_OS)/virtio.h $(RV32_OS)/score.h $(RV32_OS)/report.h programs/rv32/csr.h programs/rv32/fdt.h $(RV32_HEADERS)
+RV32_OS_PROGRAMS := sh hello primes pong tetris menu syscheck fault cat write files bars life
+# Slots of 128 KiB from 0x8010_0000 (programs/rv32/os/sys.h); a program's span is 1 slot unless given.
 RV32_OS_SLOT_sh := 0
 RV32_OS_SLOT_hello := 1
 RV32_OS_SLOT_primes := 2
 RV32_OS_SLOT_pong := 3
 RV32_OS_SLOT_tetris := 4
 RV32_OS_SLOT_menu := 5
-RV32_OS_SLOT_syscheck := 6
-RV32_OS_SLOT_fault := 7
-RV32_OS_SLOT_cat := 8
-RV32_OS_SLOT_write := 9
-RV32_OS_SLOT_files := 10
+RV32_OS_SPAN_menu := 2
+RV32_OS_SLOT_syscheck := 7
+RV32_OS_SLOT_fault := 8
+RV32_OS_SLOT_cat := 9
+RV32_OS_SLOT_write := 10
+RV32_OS_SLOT_files := 11
+RV32_OS_SLOT_bars := 12
+RV32_OS_SLOT_life := 13
+rv32_os_span = $(or $(RV32_OS_SPAN_$(1)),1)
 RV32_OS_USER := build/rv32/os/ustart.o build/rv32/os/ulib.o build/rv32/muldiv.o
 RV32_OS_OBJS_sh := build/rv32/os/sh.o
 RV32_OS_OBJS_hello := build/rv32/os/hello.o
@@ -1221,13 +1226,15 @@ RV32_OS_OBJS_fault := build/rv32/os/fault.o
 RV32_OS_OBJS_cat := build/rv32/os/cat.o
 RV32_OS_OBJS_write := build/rv32/os/write.o
 RV32_OS_OBJS_files := build/rv32/os/files.o
+RV32_OS_OBJS_bars := build/rv32/os/bars.o build/rv32/os/report.o
+RV32_OS_OBJS_life := build/rv32/os/life.o build/rv32/os/report.o
 RV32_OS_OBJS_pong := build/rv32/os/pong.o build/rv32/os/score.o build/rv32/pong_game.o build/rv32/gfx.o
 RV32_OS_OBJS_tetris := build/rv32/os/tetris.o build/rv32/os/score.o build/rv32/tetris_game.o build/rv32/gfx.o build/rv32/gfx_text.o
 RV32_OS_OBJS_menu := build/rv32/os/menu.o $(filter-out build/rv32/capstone.o $(RV32_COMMON_OBJS),$(RV32_CAPSTONE_OBJS))
 RV32_OS_ELFS := $(foreach p,$(RV32_OS_PROGRAMS),build/rv32/os/$(p).elf)
 RV32_OS_KERNEL_OBJS := build/rv32/os/kentry.o build/rv32/os/kernel.o build/rv32/os/virtio.o build/rv32/os/fs.o build/rv32/fdt.o build/rv32/muldiv.o
 RV32_OS_DISK := build/rv32/os/disk.img
-RV32_OS_ARGS := --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/session.txt --disk $(RV32_OS_DISK) --compare results --expect-console-file $(RV32_OS)/session.expected
+RV32_OS_ARGS := --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/session.txt --disk $(RV32_OS_DISK) --compare results --compare-traps faults --expect-console-file $(RV32_OS)/session.expected
 RV32_OS_PONG_ARGS := --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/pong.session --input $(RV32_PONG_INPUT) --disk $(RV32_OS_DISK) \
 	--expect-checkpoints $(RV32_PONG_EXPECTED) --expect-console-file $(RV32_OS)/pong.session.expected --timeout 600
 
@@ -1240,7 +1247,8 @@ build/rv32/os/ustart.o: $(RV32_OS)/ustart.S $(RV32_OS)/sys.h | build/rv32/os
 .SECONDEXPANSION:
 build/rv32/os/%.elf: $$(RV32_OS_OBJS_$$*) $(RV32_OS_USER) $(RV32_OS)/user.ld
 	$(RV32_CC) $(RV32_ARCH) -nostdlib -static --ld-path=$(RV32_LD) -Wl,-T,$(RV32_OS)/user.ld \
-		-Wl,--defsym=SLOT_BASE=$$(printf '0x%x' $$((0x80100000 + $(RV32_OS_SLOT_$*) * 0x40000))) \
+		-Wl,--defsym=SLOT_BASE=$$(printf '0x%x' $$((0x80100000 + $(RV32_OS_SLOT_$*) * 0x20000))) \
+		-Wl,--defsym=SLOT_SPAN=$$(printf '0x%x' $$(($(call rv32_os_span,$*) * 0x20000))) \
 		-Wl,-Map,$(@:.elf=.map) -o $@ $(RV32_OS_OBJS_$*) $(RV32_OS_USER)
 build/rv32/os/%.lst: build/rv32/os/%.elf
 	$(RV32_OBJDUMP) -d -S $< > $@
@@ -1260,16 +1268,17 @@ firmware-rv32-os: build/rv32/os/kernel.elf build/rv32/os/kernel.bin build/rv32/o
 # Every program is checked against its slot, the kernel against its 1 MiB.
 # O3: the disk the sessions start from, a tfs file system holding one file.
 $(RV32_OS_DISK): tools/rv32_mkfs.py $(RV32_OS)/welcome.txt | build/rv32/os
-	$(PYTHON) tools/rv32_mkfs.py --new --add welcome=$(RV32_OS)/welcome.txt $@
+	$(PYTHON) tools/rv32_mkfs.py --new --add welcome=$(RV32_OS)/welcome.txt --add bars.out=/dev/null --add life.out=/dev/null $@
 check-rv32-os-image: firmware-rv32-os $(RV32_OS_DISK)
 	@set -e; for p in $(RV32_OS_PROGRAMS); do \
-		base=$$(printf '0x%x' $$((0x80100000 + $$(make -s --no-print-directory print-rv32-os-slot-$$p) * 0x40000))); \
-		$(PYTHON) tools/rv32_image.py build/rv32/os/$$p.elf --listing build/rv32/os/$$p.lst --ram-base $$base --ram-size 0x40000 --allow-system > /dev/null || exit 1; \
+		set -- $$(make -s --no-print-directory print-rv32-os-slot-$$p); \
+		base=$$(printf '0x%x' $$((0x80100000 + $$1 * 0x20000))); size=$$(printf '0x%x' $$(($$2 * 0x20000))); \
+		$(PYTHON) tools/rv32_image.py build/rv32/os/$$p.elf --listing build/rv32/os/$$p.lst --ram-base $$base --ram-size $$size --allow-system > /dev/null || exit 1; \
 		echo "build/rv32/os/$$p.elf: slot at $$base"; done
 	$(PYTHON) tools/rv32_image.py build/rv32/os/kernel.elf --listing build/rv32/os/kernel.lst --bin build/rv32/os/kernel.bin --hex build/rv32/os/kernel.hex --ram-size 0x100000 --allow-system
 	$(PYTHON) tools/rv32_ramdisk.py --list build/rv32/os/ramdisk.img
 print-rv32-os-slot-%:
-	@echo $(RV32_OS_SLOT_$*)
+	@echo $(RV32_OS_SLOT_$*) $(call rv32_os_span,$*)
 
 run-rv32-os-qemu: check-rv32-os-image
 	cp $(RV32_OS_DISK) build/rv32/os/session.qemu.disk
@@ -1291,16 +1300,33 @@ run-rv32-os-pong-rtl-steps: check-rv32-os-image $(RV32EMU) $(RV32_TB_VERILATOR)
 # and the host tool reads the same file.
 run-rv32-os-boot2: run-rv32-os-pong-rtl-steps
 	$(PYTHON) -m tools.rv32_rtl --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/boot2.session --disk build/rv32/os/pong.disk \
-		--compare results --expect-console-file $(RV32_OS)/boot2.session.expected --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --out build/rv32/os/boot2
+		--compare results --compare-traps faults --expect-console-file $(RV32_OS)/boot2.session.expected --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --out build/rv32/os/boot2
 	$(PYTHON) tools/rv32_mkfs.py build/rv32/os/pong.disk --cat scores | diff -u $(RV32_OS)/scores.expected -
 # The S1 menu session, the menu run from the shell: S1's 185 checkpoints and PASS word, on the
 # emulator and on Verilator at the results level (it drives the accelerators).
 RV32_OS_MENU_ARGS := --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/menu.session --input programs/rv32/soc.input \
-	--expect-checkpoints programs/rv32/soc.expected --expect-console-file $(RV32_OS)/menu.session.expected --compare results --limit 2000000000 --timeout 3600
+	--expect-checkpoints programs/rv32/soc.expected --expect-console-file $(RV32_OS)/menu.session.expected --compare results --compare-traps faults --limit 2000000000 --timeout 3600
 run-rv32-os-menu-emu: check-rv32-os-image $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_MENU_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32/os/menu-emu
 run-rv32-os-menu-rtl-verilator: check-rv32-os-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_MENU_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --seed 17 --gpu-seed 31 --simd-seed 43 --max-cycles 200000000 --out build/rv32/os/menu-verilator
+# O4: two programs share the machine, preempted by the timer. Each writes its result to a file the
+# shell prints after `wait`, so the transcript does not depend on the interleaving; with cycle ticks
+# only the number of frames is compared, in step-tick mode the whole trace.
+RV32_OS_JOBS_ARGS := --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/jobs.session --disk $(RV32_OS_DISK) \
+	--expect-console-file $(RV32_OS)/jobs.session.expected --timeout 900
+.PHONY: run-rv32-os-jobs-qemu run-rv32-os-jobs-emu run-rv32-os-jobs-rtl-verilator run-rv32-os-jobs-rtl-steps
+run-rv32-os-jobs-qemu: check-rv32-os-image
+	cp $(RV32_OS_DISK) build/rv32/os/jobs.qemu.disk
+	$(PYTHON) tools/rv32_run_qemu.py build/rv32/os/kernel.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --stdin $(RV32_OS)/jobs.session --drive build/rv32/os/jobs.qemu.disk --last-line --timeout 60 --transcript build/rv32/os/jobs.qemu.transcript
+	diff -u $(RV32_OS)/jobs.session.qemu.expected build/rv32/os/jobs.qemu.transcript
+run-rv32-os-jobs-emu: check-rv32-os-image $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_JOBS_ARGS) --compare results --backend emulator --emulator $(RV32EMU) --out build/rv32/os/jobs-emu
+run-rv32-os-jobs-rtl-verilator: check-rv32-os-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_JOBS_ARGS) --compare results --compare-traps faults --compare-checkpoints count --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --max-cycles 100000000 --out build/rv32/os/jobs-verilator
+run-rv32-os-jobs-rtl-steps: check-rv32-os-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_JOBS_ARGS) --ticks steps --allow-traps --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --seed 21 --max-cycles 100000000 --out build/rv32/os/jobs-steps
+test-rv32: run-rv32-os-jobs-qemu run-rv32-os-jobs-emu run-rv32-os-jobs-rtl-verilator run-rv32-os-jobs-rtl-steps
 test-rv32-os: check-rv32-os-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) QEMU_RV32=$(QEMU_RV32) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_os.py' -v
 test-rv32: run-rv32-os-qemu run-rv32-os-emu run-rv32-os-rtl-verilator run-rv32-os-pong-emu run-rv32-os-pong-rtl-steps run-rv32-os-boot2 run-rv32-os-menu-emu run-rv32-os-menu-rtl-verilator test-rv32-os

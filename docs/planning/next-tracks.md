@@ -80,7 +80,8 @@ deterministic step-tick mode on the RTL that keeps trace comparison). O2 is
 done: a kernel with system calls runs separately linked programs from a RAM
 disk and a shell, on QEMU, the emulator and the RTL. O3 is done: virtio-blk at
 `virt`'s first virtio slot, a tiny file system, and high scores that survive
-a boot.
+a boot. O4 is done: timer-driven round-robin scheduling, two programs sharing
+the screen, trace-identical in step-tick mode.
 
 - **O1 interrupts.** `mstatus` (MIE/MPIE), `mie`, `mip`, a CLINT timer
   interrupt and `wfi`, on the RTL and the emulator.

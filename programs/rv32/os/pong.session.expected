@@ -1,6 +1,6 @@
 kernel: tiny-processors RV32 machine, hart 0
 kernel: devices console clint plic input display g1 g2 disk
-kernel: 11 programs
+kernel: 13 programs
 kernel: disk 256 sectors, tfs
 sh: ls, NAME [ARGS] [&], wait, halt [CODE]
 $ pong

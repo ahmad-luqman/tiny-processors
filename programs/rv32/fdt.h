@@ -42,7 +42,8 @@ fdt_status fdt_open(fdt *t, uintptr_t address);
 
 /* The `index`th reg entry of the first node, in tree order, whose `property` matches `value`:
  * for "compatible" the string list contains it, for any other property the value is exactly that
- * string (e.g. "device_type" = "memory"). The first matching node answers even when a later one
+ * string (e.g. "device_type" = "memory"), and the pseudo-property "@name" matches the node's own
+ * name (e.g. "cpus", O4). The first matching node answers even when a later one
  * would have the entry asked for. */
 fdt_status fdt_find(const fdt *t, const char *property, const char *value, uint32_t index,
                     uint32_t *base, uint32_t *size);

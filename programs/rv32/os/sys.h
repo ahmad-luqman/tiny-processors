@@ -3,7 +3,7 @@
  * A program executes `ecall` with the call number in a7 and its arguments in
  * a0..a5; the kernel returns the result in a0 and resumes after the ecall.
  * Every other register is preserved. A call that fails returns SYS_ERROR.
- * Pointers must lie inside the calling program's own slot.
+ * Pointers must lie inside the calling program's own slots.
  *
  * Shared by the kernel and the user library; numbers never change meaning. */
 #ifndef RV32_OS_SYS_H
@@ -28,8 +28,9 @@
 #define SYS_OPEN    16  /* open(name, flags): a file on the disk (O3); returns a descriptor */
 #define SYS_CLOSE   17  /* close(fd) */
 #define SYS_FILES   18  /* files(index, buf, len): the name of file `index` (O3); returns its length */
-#define SYS_PS      19  /* ps(index, buf, len): one line about process slot `index` (O4) */
-#define SYS_CALLS   20
+#define SYS_PS      19  /* ps(index, buf, len): one line about process table entry `index` (O4) */
+#define SYS_SWITCHES 20 /* switches(): how often the timer took the machine from the caller (O4) */
+#define SYS_CALLS   21
 
 #define SYS_ERROR 0xffffffffu
 
@@ -38,11 +39,12 @@
 #define O_WRITE  2u  /* write from the start; the file's size becomes what is written */
 #define O_CREATE 4u
 
-/* The layout every program is linked for: slot n of 256 KiB above the kernel's 1 MiB. */
+/* The layout every program is linked for: from slot n of 128 KiB above the kernel's 1 MiB, one
+ * or more slots (a program's span, O4); the top 32 KiB of the span is its stack. */
 #define OS_KERNEL_SIZE 0x00100000u
 #define OS_SLOT_BASE   0x80100000u
-#define OS_SLOT_SIZE   0x00040000u
-#define OS_SLOTS       12u
-#define OS_STACK_SIZE  0x00008000u /* the top 32 KiB of a slot is the stack; sbrk stops below it */
+#define OS_SLOT_SIZE   0x00020000u
+#define OS_SLOTS       24u
+#define OS_STACK_SIZE  0x00008000u /* sbrk stops below it */
 
 #endif

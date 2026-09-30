@@ -16,10 +16,10 @@ from tools import rv32_mkfs as mkfs
 from tools import rv32_ramdisk
 from tools.rv32_asm import *  # noqa: F401,F403
 from tools.rv32_image import flatten, parse_elf
-from tools.rv32_rtl import ROOT, diff_traces, run_emulator, run_rtl, write_image
+from tools.rv32_rtl import ROOT, Run, compare_backends, diff_traces, run_emulator, run_rtl, write_image
 
 OS = ROOT / "build/rv32/os"
-PROGRAMS = ("sh", "hello", "primes", "pong", "tetris", "menu", "syscheck", "fault", "cat", "write", "files")
+PROGRAMS = ("sh", "hello", "primes", "pong", "tetris", "menu", "syscheck", "fault", "cat", "write", "files", "bars", "life")
 
 
 def elfs(*names):
@@ -41,10 +41,12 @@ class RamdiskTest(unittest.TestCase):
                 self.assertEqual(entry["entry"], entry["load"])
                 self.assertEqual(entry["flags"], rv32_ramdisk.ACCELERATORS if entry["name"] == "menu" else 0)
                 self.assertLessEqual(entry["size"], entry["memory"])
-                self.assertLessEqual(entry["memory"], rv32_ramdisk.SLOT_SIZE - rv32_ramdisk.STACK_SIZE)
+                self.assertEqual(entry["span"], rv32_ramdisk.SLOT_SIZE * (2 if entry["name"] == "menu" else 1))
+                self.assertLessEqual(entry["memory"], entry["span"] - rv32_ramdisk.STACK_SIZE)
                 elf = parse_elf((OS / f"{entry['name']}.elf").read_bytes())
                 self.assertEqual(entry["data"], flatten(elf, entry["load"]))
-        self.assertEqual(len({e["load"] for e in entries}), len(entries), "one slot each")
+        ranges = sorted((e["load"], e["load"] + e["span"]) for e in entries)
+        self.assertTrue(all(end <= start for (_, end), (start, _) in zip(ranges, ranges[1:])), "no two spans overlap")
         self.assertEqual(blob, (OS / "ramdisk.img").read_bytes(), "the committed build rule makes the same bytes")
 
     def test_refusals(self):
@@ -96,6 +98,35 @@ class FileSystemToolTest(unittest.TestCase):
             mkfs.add(full, f"f{i}", b"", capacity=1)
         with self.assertRaises(mkfs.FsError):
             mkfs.add(full, "one-more", b"", capacity=1)
+
+
+class ComparisonTest(unittest.TestCase):
+    """The runner's comparisons for multitasking (O4), on made-up runs."""
+
+    def run_of(self, trace, checkpoints=()):
+        return Run(0, "ok\n", "", "", trace, {"halt": "done"}, list(checkpoints))
+
+    def test_trap_records_are_compared_per_region(self):
+        shell = "80100140 00000073 trap 11 00000000"
+        child = "80120010 00000073 trap 11 00000000"
+        fault = "80120020 00000000 trap 5 00200000"
+        a = self.run_of([f"1 {shell}", f"2 {child}", f"3 {fault}"])
+        b = self.run_of([f"1 {child}", f"2 {shell}", f"3 {fault}"])
+        self.assertIsNone(compare_backends(a, b, "results"), "two processes may interleave")
+        c = self.run_of([f"1 {fault}", f"2 {child}", f"3 {shell}"])
+        self.assertIn("region at 0x80120000", compare_backends(a, c, "results"), "one process's order is fixed")
+        retried = self.run_of([f"1 {shell}", f"2 {shell}", f"3 {child}", f"4 {fault}"])
+        self.assertIn("trap mismatch", compare_backends(a, retried, "results"))
+        self.assertIsNone(compare_backends(a, retried, "results", traps="faults"), "a retried ecall is not a fault")
+        moved = self.run_of([f"1 {shell}", f"2 {child}", "3 80120024 00000000 trap 5 00200000"])
+        self.assertIn("trap mismatch", compare_backends(a, moved, "results", traps="faults"))
+
+    def test_checkpoint_count(self):
+        a = self.run_of([], ["frame 1 00000001", "frame 2 00000002"])
+        b = self.run_of([], ["frame 1 00000002", "frame 2 00000001"])
+        self.assertIn("checkpoint mismatch", compare_backends(a, b, "results"))
+        self.assertIsNone(compare_backends(a, b, "results", checkpoints="count"))
+        self.assertIn("count mismatch", compare_backends(a, self.run_of([], ["frame 1 00000001"]), "results", checkpoints="count"))
 
 
 class ConsoleReceiveTest(unittest.TestCase):
