@@ -1,0 +1,17 @@
+kernel: riscv-virtio,qemu, hart 0
+kernel: devices console clint plic disk
+kernel: 14 programs
+kernel: disk 256 sectors, tfs
+sh: ls, NAME [ARGS] [&], wait, halt [CODE]
+$ files
+welcome 83
+bars.out 0
+life.out 0
+note 3
+long 704
+big 4096
+$ cat note
+hi
+$ halt
+kernel: halt, 2 exits
+PASS 455b9c97

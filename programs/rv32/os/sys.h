@@ -27,7 +27,7 @@
 #define SYS_DISPLAY 15  /* display(): the framebuffer's address, or 0 when there is no display */
 #define SYS_OPEN    16  /* open(name, flags): a file on the disk (O3); returns a descriptor */
 #define SYS_CLOSE   17  /* close(fd) */
-#define SYS_FILES   18  /* files(index, buf, len): the name of file `index` (O3); returns its length */
+#define SYS_FILES   18  /* files(index, buf, len): the name of file `index` into buf (O3); returns its size in bytes */
 #define SYS_PS      19  /* ps(index, buf, len): one line about process table entry `index` (O4) */
 #define SYS_SWITCHES 20 /* switches(): how often the timer took the machine from the caller (O4) */
 #define SYS_CALLS   21

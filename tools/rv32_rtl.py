@@ -197,7 +197,11 @@ def run_rtl(simulator, image_hex, trace, stall=None, seed=None, wave=None, max_c
     run = run_backend(command, trace, rtl_halt_line, timeout, console=console, checkpoints=checkpoints)
     if disk is not None:
         # The testbench reads and writes the disk as hex words; the run's disk is the bytes again.
-        text = Path(disk_out).read_text() if Path(disk_out).exists() else ""
+        # A run that never wrote it (a crash, a timeout) leaves no disk rather than an empty one.
+        if not Path(disk_out).exists():
+            Path(disk).unlink(missing_ok=True)
+            return run
+        text = Path(disk_out).read_text()
         # Icarus's $writememh adds `// 0x...` address comments; Verilator writes words only.
         words = [w for line in text.splitlines() if not line.lstrip().startswith("//") for w in line.split()]
         Path(disk).write_bytes(b"".join(int(w, 16).to_bytes(4, "little") for w in words))
@@ -592,20 +596,38 @@ def main():
               f"console ends {last_line!r}")
         return
 
+    def run_rtl_as_asked(stall, seed, wave=None):
+        """The RTL run every mode makes: the arguments given, with this stall setting."""
+        return run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=seed, wave=wave,
+                       timeout=args.timeout, max_cycles=args.max_cycles, checkpoints=out / f"{name}.rtl.checkpoints",
+                       input_script=args.input, allow_lost_events=args.allow_lost_events, simd_stall=args.simd_stall,
+                       simd_seed=args.simd_seed, gpu_stall=args.gpu_stall, gpu_seed=args.gpu_seed, ticks=args.ticks,
+                       console_input=args.console_input, disk=backend_disk("rtl"))
+
+    def compare_disks():
+        """What each backend left on its disk (O3): identical, or the run fails."""
+        emu_path, rtl_path = out / f"{name}.emu.disk", out / f"{name}.rtl.disk"
+        if not rtl_path.exists():
+            sys.exit("the RTL wrote no disk (+disk-out): it did not finish")
+        emu_disk, rtl_disk = emu_path.read_bytes(), rtl_path.read_bytes()
+        if emu_disk != rtl_disk:
+            differs = next((i for i in range(min(len(emu_disk), len(rtl_disk))) if emu_disk[i] != rtl_disk[i]), None)
+            sys.exit(f"disk mismatch: {len(rtl_disk)} bytes on the RTL, {len(emu_disk)} on the emulator, first difference at {differs}")
+        return emu_disk
+
     if args.mode == "bench":
         print("stall  cycles  stalls  transfers  steps")
         seed = BENCH_SEED if args.seed is None else args.seed
         for stall, seed in [(0, None), (1, None), (2, None), (3, None), (None, seed)]:
-            rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=seed,
-                          timeout=args.timeout, max_cycles=args.max_cycles, checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input,
-                          allow_lost_events=args.allow_lost_events, simd_stall=args.simd_stall, simd_seed=args.simd_seed, gpu_stall=args.gpu_stall, gpu_seed=args.gpu_seed,
-                          ticks=args.ticks, console_input=args.console_input, disk=backend_disk("rtl"))
+            rtl = run_rtl_as_asked(stall, seed)
             check_passed(rtl)
             check_fp_waits(rtl, args.expect_fp_waits)
             mismatch = compare_backends(rtl, emulator, args.compare, compare_stores=args.compare_stores,
                                         checkpoints=args.compare_checkpoints, traps=args.compare_traps)  # the same agreement as a check run
             if mismatch:
                 sys.exit(f"stall={stall} seed={seed}: {mismatch}")
+            if args.disk is not None:
+                compare_disks()
             if stall is not None and rtl.halt["stalls"] != stall * rtl.halt["transfers"]:
                 sys.exit(f"stall={stall}: {rtl.halt['stalls']} stalls for {rtl.halt['transfers']} transfers")
             label = f"seed {seed}" if seed is not None else str(stall)
@@ -623,10 +645,7 @@ def main():
     else:
         stall = 0
     wave = out / f"{name}.vcd" if args.mode == "waves" else None
-    rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=args.seed, wave=wave,
-                  timeout=args.timeout, max_cycles=args.max_cycles, checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input,
-                  allow_lost_events=args.allow_lost_events, simd_stall=args.simd_stall, simd_seed=args.simd_seed, gpu_stall=args.gpu_stall, gpu_seed=args.gpu_seed,
-                          ticks=args.ticks, console_input=args.console_input, disk=backend_disk("rtl"))
+    rtl = run_rtl_as_asked(stall, args.seed, wave)
     print(emulator.stderr.strip().splitlines()[-1])
     print(rtl.stderr.strip().splitlines()[-1] if rtl.stderr.strip() else "rv32_tb: no halt line")
     check_passed(rtl)
@@ -635,11 +654,8 @@ def main():
                                         checkpoints=args.compare_checkpoints, traps=args.compare_traps)
     if mismatch:
         sys.exit(mismatch)
-    if args.disk is not None:  # what each backend left on its disk (O3)
-        emu_disk, rtl_disk = (out / f"{name}.emu.disk").read_bytes(), (out / f"{name}.rtl.disk").read_bytes()
-        if emu_disk != rtl_disk:
-            differs = next((i for i in range(min(len(emu_disk), len(rtl_disk))) if emu_disk[i] != rtl_disk[i]), None)
-            sys.exit(f"disk mismatch: {len(rtl_disk)} bytes on the RTL, {len(emu_disk)} on the emulator, first difference at {differs}")
+    if args.disk is not None:
+        emu_disk = compare_disks()
         print(f"disks identical: {len(emu_disk)} bytes")
         if args.disk_out is not None:
             args.disk_out.write_bytes(emu_disk)

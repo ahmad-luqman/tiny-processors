@@ -7,6 +7,9 @@
  *   wait            wait for every background program
  *   halt [CODE]     stop the machine; 0 passes
  *
+ * A line longer than LINE - 1 bytes, or a halt code that is not a number, is
+ * refused with a message rather than cut or read as 0.
+ *
  * The shell is pid 1: when it exits, the kernel halts with its code. */
 #include "ulib.h"
 
@@ -16,9 +19,11 @@
 static char line[LINE];
 static uint32_t background[BACKGROUND];
 
-static void read_line(void)
+/* One line into `line`; returns 0 when it was too long (its end is read and dropped). */
+static int read_line(void)
 {
     uint32_t n = 0;
+    int fits = 1;
     for (;;) {
         char c;
         if (sys_read(0, &c, 1) != 1 || c == '\r') {
@@ -29,9 +34,12 @@ static void read_line(void)
         }
         if (n + 1 < LINE) {
             line[n++] = c;
+        } else {
+            fits = 0;
         }
     }
     line[n] = 0;
+    return fits;
 }
 
 static void report(const char *name, uint32_t pid, uint32_t code)
@@ -100,9 +108,13 @@ int main(void)
     u_puts("sh: ls, NAME [ARGS] [&], wait, halt [CODE]\n");
     for (;;) {
         u_puts("$ ");
-        read_line();
+        int fits = read_line();
         u_puts(line);
         u_puts("\n");
+        if (!fits) {
+            u_puts("sh: line too long\n");
+            continue;
+        }
         char *command = line;
         while (*command == ' ') {
             command++;
@@ -137,8 +149,14 @@ int main(void)
         } else if (!u_strcmp(command, "wait")) {
             wait_all();
         } else if (!u_strcmp(command, "halt")) {
+            const char *end;
+            uint32_t code = u_parse(args, &end);
+            if (*end) {
+                u_puts("sh: halt: CODE is a number\n");
+                continue;
+            }
             wait_all();
-            sys_halt(u_parse(args, 0));
+            sys_halt(code);
         } else {
             run(command, args, in_background);
         }

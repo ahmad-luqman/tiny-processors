@@ -300,7 +300,10 @@ module rv32 #(
     wire fetch_deny = pmp_fetch && !pmp_ok;
     // User mode may use the floating CSRs and, as mcounteren allows, the counters (the only CSRs
     // numbered 0xCxx); a machine CSR, mret or wfi there is an illegal instruction.
-    wire csr_user_ok = csr_addr[9:8] == 2'b00 && (csr_addr[11:10] != 2'b11 || mcounteren[csr_addr[1:0]]);
+    // Counters 0xc03 and 0xc83 do not exist (the decoder makes them illegal anyway); the fourth bit
+    // is 0 so the index stays inside the vector.
+    wire [3:0] counter_enable = {1'b0, mcounteren};
+    wire csr_user_ok = csr_addr[9:8] == 2'b00 && (csr_addr[11:10] != 2'b11 || counter_enable[csr_addr[1:0]]);
     wire priv_illegal = !priv_m && ((is_csr && !csr_user_ok) || is_mret || is_wfi);
 
     assign mem_valid = !reset && ((state == FETCH && !irq_take && !fetch_deny) || (state == MEM));

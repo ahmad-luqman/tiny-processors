@@ -369,8 +369,8 @@ static bool virtio_request(machine *m)
     virtio_blk *v = m->virtio;
     uint32_t mask = v->queue_num - 1u;
     uint16_t head, next = 0;
-    if (!dma_read16(m, v->driver_lo + 4u + 2u * (v->last_avail & mask), &head)) {
-        return false;
+    if (!dma_read16(m, v->driver_lo + 4u + 2u * (v->last_avail & mask), &head) || head >= v->queue_num) {
+        return false; /* the head must name one of the queue's descriptors */
     }
     uint32_t address[3], length = 0, words[4];
     bool data_write = false;
@@ -382,7 +382,8 @@ static bool virtio_request(machine *m)
             }
         }
         bool has_next = words[3] & 1u, write = words[3] & 2u;
-        if (has_next != (which != 2) || (which == 0 && write) || (which == 2 && !write)) {
+        if (has_next != (which != 2) || (which == 0 && write) || (which == 2 && !write) ||
+            (which != 2 && (words[3] >> 16) >= v->queue_num)) {
             return false;
         }
         address[which] = words[0];
@@ -412,6 +413,9 @@ static bool virtio_request(machine *m)
                 }
             } else {
                 if (!dma_read(m, address[1] + 4u * i, &word)) {
+                    /* The RTL has written the words before this one to its disk too: the file
+                     * follows, so it stays the disk the machine holds. */
+                    virtio_disk_written(m, sector * 512u, 4u * i);
                     return false;
                 }
                 bytes_write(v->disk + at, 4, word);
@@ -420,7 +424,9 @@ static bool virtio_request(machine *m)
         if (type == 1) {
             virtio_disk_written(m, sector * 512u, length);
         }
-        result = 0;
+        /* A failed write to the host's file, now or earlier, is the guest's I/O error: the disk
+         * it would boot from next time is not the disk it wrote. */
+        result = v->write_error ? 1 : 0;
     }
     uint32_t used = v->device_lo + 4u + 8u * (v->used_idx & mask);
     uint32_t written = (result == 0 && type == 0) ? length + 1u : 1u;
@@ -497,7 +503,7 @@ static mem_access virtio_store(machine *m, uint32_t offset, int width, uint32_t 
     switch (offset) {
     case 0x014: v->features_sel = value == 1; break;
     case 0x020: break; /* the driver's features are accepted and not used */
-    case 0x024: v->driver_features_sel = value == 1; break;
+    case 0x024: break; /* nor is which half of them the driver writes */
     case 0x030: v->queue_sel_zero = value == 0; break;
     case 0x038:
         if (v->queue_sel_zero) {
@@ -856,15 +862,22 @@ static void enter_handler(machine *m, uint32_t cause, uint32_t tval)
     m->pc = m->mtvec;
 }
 
+/* One device tick of the accelerators: every step (an instruction retired or trapped, or an
+ * interrupt taken) is one. */
+static void tick_accelerators(machine *m)
+{
+    simd_tick(&m->simd, false);
+    gpu_tick(&m->gpu, m->ram, RAM_SIZE, m->fb, false);
+    g3d_tick(&m->g3d, m->ram, RAM_SIZE, m->fb, false);
+}
+
 /* Deliver a trap for the instruction at m->pc. The instruction does not
  * retire. If the previous trap's handler has not yet retired an instruction,
  * the machine cannot make progress (the M1 firmware leaves mtvec at 0, so its
  * handler would be fetched from unmapped memory): halt and report both traps. */
 static void trap(machine *m, uint32_t word, uint32_t cause, uint32_t tval)
 {
-    simd_tick(&m->simd, false);
-    gpu_tick(&m->gpu,m->ram,RAM_SIZE,m->fb,false);
-    g3d_tick(&m->g3d,m->ram,RAM_SIZE,m->fb,false);
+    tick_accelerators(m);
     m->steps++;
     if (m->trace) {
         fprintf(m->trace, "%" PRIu64 " %08" PRIx32 " %08" PRIx32 " trap %" PRIu32 " %08" PRIx32 "\n",
@@ -885,9 +898,7 @@ static void trap(machine *m, uint32_t word, uint32_t cause, uint32_t tval)
  * like a trap, with its own trace line and no instruction word. */
 static void take_interrupt(machine *m, uint32_t code)
 {
-    simd_tick(&m->simd, false);
-    gpu_tick(&m->gpu,m->ram,RAM_SIZE,m->fb,false);
-    g3d_tick(&m->g3d,m->ram,RAM_SIZE,m->fb,false);
+    tick_accelerators(m);
     m->steps++;
     if (m->trace) {
         fprintf(m->trace, "%" PRIu64 " %08" PRIx32 " 00000000 interrupt %" PRIu32 "\n", m->steps, m->pc, code);
@@ -1352,9 +1363,7 @@ static void step(machine *m)
         m->wr_reg = (int)rd;
         m->wr_value = result;
     }
-    simd_tick(&m->simd, false);
-    gpu_tick(&m->gpu,m->ram,RAM_SIZE,m->fb,false);
-    g3d_tick(&m->g3d,m->ram,RAM_SIZE,m->fb,false);
+    tick_accelerators(m);
     m->steps++;
     m->retired++;
     m->in_trap = false;

@@ -105,7 +105,7 @@ PASS 8bd87e9a
 ```
 
 1. **Timer**: two reads differ and the difference is small; a write of `0xFFFF_FF00` is followed by a bounded wait until the count has wrapped through zero. No tick value is printed.
-2. **Faults**: `mtvec` is pointed at `diag_trap_entry`, which saves the caller-saved registers, calls `diag_trap(mcause, mtval, mepc)` and resumes at the PC it returns. Four accesses fault on purpose (a word from `0x5000_0000`, a byte read of TICKS, a store to KEYS, the byte after the last pixel) and the recorded causes and `mtval` values are checked. The image checker admits `csr*` and `mret` for this image with `--allow-privileged`.
+2. **Faults**: `mtvec` is pointed at `trap_entry` ([trap.S](../programs/rv32/trap.S)), which saves the caller-saved registers, calls `trap_handler(mcause, mtval, mepc)` and resumes at the PC it returns. Four accesses fault on purpose (a word from `0x5000_0000`, a byte read of TICKS, a store to KEYS, the byte after the last pixel) and the recorded causes and `mtval` values are checked. The image checker admits `csr*` and `mret` for this image with `--allow-privileged`.
 3. **Display**: WIDTH and HEIGHT are read; pixel (x, y) = (x ^ y) & 0xFF is written four pixels per word, a red box with byte stores, a green row with halfword stores; the whole frame is read back and hashed with the checkpoint hash (`h = ((h << 5) + h) ^ word` from 5381: shift, add, xor, no multiply). The hash is printed and the frame is presented; a blue box is added and presented again.
 4. **Input**: after the first present, frame 1's three scripted events are queued: COUNT is 3, KEYS has only SPACE held (LEFT came and went), and the events pop in order. After the second present, the fourth event arrives and KEYS is clear.
 

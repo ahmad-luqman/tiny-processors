@@ -6,6 +6,8 @@
  *   fault kernel    a store to the kernel's memory, refused by PMP (O5, cause 7)
  *   fault shell     a store to the shell's slot, another process's memory (O5, cause 7)
  *   fault csr       a read of mstatus, a machine CSR, from user mode (O5, cause 2)
+ *   fault read      a load from the kernel's memory, refused by PMP (O5, cause 5)
+ *   fault exec      a jump into the kernel's code, a fetch PMP refuses (O5, cause 1)
  */
 #include "ulib.h"
 
@@ -28,6 +30,12 @@ int main(const char *args)
         __asm__ volatile("csrr %0, mstatus" : "=r"(mstatus));
         return (int)mstatus;
     }
-    u_puts("fault: load | illegal | kernel | shell | csr\n");
+    if (!u_strcmp(args, "read")) {
+        return (int)*(volatile uint32_t *)(OS_SLOT_BASE - OS_KERNEL_SIZE);
+    }
+    if (!u_strcmp(args, "exec")) {
+        ((void (*)(void))(uintptr_t)(OS_SLOT_BASE - OS_KERNEL_SIZE))(); /* the kernel's _start */
+    }
+    u_puts("fault: load | illegal | kernel | shell | csr | read | exec\n");
     return 1;
 }

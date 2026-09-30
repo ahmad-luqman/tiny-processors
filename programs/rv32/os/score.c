@@ -17,7 +17,9 @@ uint32_t score_record(const char *game, uint32_t value)
         length = sys_read(fd, text, TEXT - 1);
         sys_close(fd);
         if (length == SYS_ERROR) {
-            length = 0;
+            u_puts(game);
+            u_puts(": scores not saved\n"); /* rewriting from what was read would lose the rest */
+            return value;
         }
     }
     text[length] = 0;
@@ -63,20 +65,19 @@ uint32_t score_record(const char *game, uint32_t value)
     if (fd == SYS_ERROR) {
         return value; /* no disk: nothing to keep */
     }
+    int ok = 1;
     for (uint32_t k = 0; k < games; k++) {
-        (void)sys_write(fd, names[k], u_strlen(names[k]));
-        (void)sys_write(fd, " ", 1);
         char digits[11];
-        uint32_t d = 10, v = bests[k];
-        digits[d] = 0;
-        do {
-            digits[--d] = (char)('0' + v % 10u);
-            v /= 10u;
-        } while (v);
-        (void)sys_write(fd, digits + d, 10 - d);
-        (void)sys_write(fd, "\n", 1);
+        uint32_t d = u_decimal(bests[k], digits), n = u_strlen(names[k]);
+        ok = ok && sys_write(fd, names[k], n) == n && sys_write(fd, " ", 1) == 1 &&
+             sys_write(fd, digits + d, 10 - d) == 10 - d && sys_write(fd, "\n", 1) == 1;
     }
-    sys_close(fd);
+    ok = sys_close(fd) == 0 && ok;
+    if (!ok) {
+        u_puts(game);
+        u_puts(": scores not saved\n");
+        return value;
+    }
     u_puts(game);
     u_puts(": best ");
     u_putdec(best);

@@ -11,9 +11,16 @@ int main(const char *name)
         return 1;
     }
     char buffer[64];
-    for (uint32_t n = sys_read(fd, buffer, sizeof buffer); n && n != SYS_ERROR; n = sys_read(fd, buffer, sizeof buffer)) {
+    uint32_t n;
+    while ((n = sys_read(fd, buffer, sizeof buffer)) && n != SYS_ERROR) {
         (void)sys_write(1, buffer, n);
     }
     sys_close(fd);
+    if (n == SYS_ERROR) { /* a read error is not the end of the file */
+        u_puts("cat: ");
+        u_puts(name);
+        u_puts(": read error\n");
+        return 2;
+    }
     return 0;
 }

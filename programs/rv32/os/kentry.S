@@ -7,7 +7,11 @@
  * and the trap CSRs into that frame, switches to the kernel stack and calls
  * kernel_trap(frame), which returns the frame to run next; kernel_resume
  * restores it and returns with mret. The kernel itself always runs with
- * interrupts off (trap entry clears MIE), on one stack, and never traps.
+ * interrupts off (trap entry clears MIE), on one stack, and must never trap:
+ * mscratch is 0 while it runs, so a trap that swaps a 0 into sp is a fault in
+ * the kernel. That path takes the kernel's own stack back and calls
+ * kernel_fault(), which reports it and stops the machine, instead of saving
+ * registers through a user stack pointer into a frame that does not exist.
  */
 #include "board.h"
 
@@ -32,6 +36,7 @@ _start:
     .type trap_vector, @function
 trap_vector:
     csrrw sp, mscratch, sp       /* sp = the frame, mscratch = the context's sp */
+    beqz sp, kernel_trapped      /* the kernel was running: mscratch was 0 */
     sw x1, 4(sp)
     sw x3, 12(sp)
     sw x4, 16(sp)
@@ -64,6 +69,7 @@ trap_vector:
     sw x31, 124(sp)
     csrr t0, mscratch
     sw t0, 8(sp)                 /* the context's own sp */
+    csrw mscratch, zero          /* the kernel runs: a trap now is a fault in it */
     csrr t0, mepc
     sw t0, 128(sp)
     csrr t0, mstatus
@@ -113,6 +119,28 @@ kernel_resume:                   /* a0 = the frame */
     lw x10, 40(a0)
     mret
     .size trap_vector, . - trap_vector
+
+/* A trap while the kernel ran: sp is 0 and mscratch holds the kernel's sp. */
+kernel_trapped:
+    la sp, _stack_top
+    call kernel_fault            /* reports the trap and halts; never returns */
+1:  j 1b
+
+/* write_scounteren(a0): scounteren = a0 where the hart has S-mode (QEMU's does, and there a
+ * user-mode counter read needs its bit in scounteren as well as mcounteren); on ours the CSR does
+ * not exist and the write is an illegal instruction, so mtvec points at the next instruction
+ * meanwhile and the trap just skips it. Boot time only: interrupts are off. */
+    .balign 4
+    .globl write_scounteren
+    .type write_scounteren, @function
+write_scounteren:
+    la t0, 1f
+    csrrw t0, mtvec, t0
+    csrw scounteren, a0
+    .balign 4
+1:  csrw mtvec, t0
+    ret
+    .size write_scounteren, . - write_scounteren
 
 /* The idle context: waits for an interrupt with interrupts on. */
     .balign 4

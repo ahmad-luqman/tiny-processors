@@ -101,7 +101,7 @@ combinational pending line reaches `meip` in time.
 ### irqcheck
 
 [irqcheck.c](../programs/rv32/irqcheck.c) finds the CLINT and PLIC in the
-tree, installs [trap_entry.S](../programs/rv32/trap_entry.S) and checks the
+tree, installs [trap.S](../programs/rv32/trap.S) and checks the
 registers, the gating (a pending timer interrupt is not taken while `mie` or
 MIE is clear, the handler sees MIE clear and MPIE set, `mret` restores MIE), a
 software interrupt, MSI before MTI, a `wfi` loop woken by a timer interrupt
@@ -165,10 +165,12 @@ price is that one program cannot run twice at the same time, which `spawn`
 refuses. [tools/rv32_ramdisk.py](../tools/rv32_ramdisk.py) checks the rules
 (one load segment at a slot base, entry at the base, room for the stack, one
 program per slot) and packs the programs into a RAM disk that
-[kentry.S](../programs/rv32/os/kentry.S) includes with `.incbin`. An entry's
-flag says the program drives the accelerators itself (only the menu); the
-kernel waits for their engines before that program's present, and O5 will
-grant it their windows.
+[kentry.S](../programs/rv32/os/kentry.S) includes with `.incbin`; the
+kernel checks the table again at boot, since `spawn` trusts it. An entry's
+flag says the program drives the accelerators itself (only the menu). While
+G1 or G2 is busy it owns the framebuffer, so only such a program is scheduled
+then and a `present` from anyone waits for the engines; O5 grants the flagged
+program the engines' windows.
 
 ### Contexts and traps
 
@@ -180,9 +182,14 @@ switches to the kernel's one stack and calls `kernel_trap(frame)`; whatever
 frame that returns, `kernel_resume` loads into `mscratch`, `mepc`, `mstatus`
 and the registers, and `mret` runs it. A process's `mstatus` holds MPIE set,
 so it always runs with interrupts on; the kernel always runs with them off
-(trap entry clears MIE) and never traps itself, so a kernel bug is a double
-fault and stops the machine with both traps reported, as the contract has
-done since M2.
+(trap entry clears MIE) and must never trap itself. Trap entry sets
+`mscratch` to 0 once the frame is saved, and `kernel_resume` sets it to the
+next frame, so a trap that finds 0 there is a fault in the kernel: the vector
+takes the kernel's stack back and `kernel_fault()` prints the cause, pc and
+`mtval` and halts with code 254, instead of saving registers through a user
+stack pointer into a frame that is not there. (The machine's double-fault
+rule catches only a handler that faults before its first instruction
+retires, so it would not.)
 
 The idle context is a frame whose pc is `kernel_idle: wfi; j kernel_idle` on a
 small stack. When nothing is ready, `schedule()` returns it; an interrupt
@@ -243,9 +250,10 @@ from writing kernel memory yet; that is O5.
 | 4 | [tetris](../programs/rv32/os/tetris.c) | The M7 Tetris, Q quits |
 | 5–6 | [menu](../programs/rv32/os/menu.c) | The capstone runtime (menu, games, 2D, 3D, digit screen) on system calls, accelerators direct |
 | 7 | [syscheck](../programs/rv32/os/syscheck.c) | System-call edge cases |
-| 8 | [fault](../programs/rv32/os/fault.c) | A load from an unmapped address, or an illegal instruction |
+| 8 | [fault](../programs/rv32/os/fault.c) | A load from an unmapped address, or an illegal instruction; since O5 also kernel and other-slot accesses and a machine CSR |
 | 9, 10, 11 | [cat](../programs/rv32/os/cat.c), [write](../programs/rv32/os/write.c), [files](../programs/rv32/os/files.c) | Print a file, write one, list them (O3) |
 | 12, 13 | [bars](../programs/rv32/os/bars.c), [life](../programs/rv32/os/life.c) | Two programs that share the screen (O4) |
+| 14 | [fill](../programs/rv32/os/fill.c) | Numbered lines into a file, to a given size (after O5's review) |
 
 The user library ([ulib.c](../programs/rv32/os/ulib.c)) also defines
 `console.h`'s functions and `rv32_exit` on top of system calls, so the game
@@ -256,9 +264,12 @@ and demo sources link unchanged.
 The kernel finds its devices only through the tree: the console
 (`tiny-processors,console`, else `ns16550a`), the done register
 (`sifive,test0`), the CLINT and PLIC, and our input, display and engines where
-listed. QEMU puts its tree at `0x8020_0000`, inside slot 4, so the kernel reads
+listed. QEMU puts its tree at `0x8020_0000`, inside slot 8 (slot 4 of O2's
+256 KiB slots, where `tetris` was linked then), so the kernel reads
 everything it needs (including the model string) before loading the first
-program. The same `kernel.elf` then runs the console session on QEMU `virt`:
+program. The same `kernel.elf` then ran O2's console session on QEMU `virt`
+(the addresses and the count have moved with later steps; the pinned
+transcripts are current):
 
 ```
 kernel: riscv-virtio,qemu, hart 0
@@ -373,7 +384,10 @@ and takes the first whose DeviceID is 2.
 - **virtiocheck** ([virtiocheck.c](../programs/rv32/virtiocheck.c)): set up;
   sector 3 out and back; `InterruptStatus` and the PLIC's pending bit until
   acknowledged; two requests served by one notify; a read past the disk is
-  IOERR and type 6 is UNSUPP. `PASS edec4a52` on QEMU `virt`, the emulator,
+  IOERR and type 6 is UNSUPP (and, since O5's review, a two-sector write from
+  the last sector is IOERR and leaves it blank, and a descriptor index past
+  the queue's size needs a reset). `PASS 16fc0878` (`edec4a52` before the
+  review added the crossing write) on QEMU `virt`, the emulator,
   Icarus and Verilator (with seeded stalls on the CPU's bus and the graphics
   port), the traces identical and every backend's final disk the same
   131,072 bytes as QEMU's. On our machine it also checks what QEMU does
@@ -533,10 +547,20 @@ the console, the CLINT, the PLIC and the disk, is refused in user mode. The
 kernel rewrites the entries only when a different process is about to run.
 It runs in machine mode with no locked entry, so PMP never stops it: system
 calls still copy to and from the caller's memory after `user_range()` has
-checked the pointer. `mcounteren` is 7, so programs may read the counters.
+checked the pointer. `mcounteren` is 7, so programs may read the counters; on
+a hart with S-mode (QEMU's) a user counter read also needs `scounteren`, so
+the kernel writes that too, with `mtvec` pointed past the write for the
+moment, since on our machine the CSR does not exist and the write traps.
+
+Entries 4 and 5 are a hole PMP cannot close. G1 and G2 read and write RAM by
+DMA wherever their registers point (G2's depth buffer, G1's blit source), and
+PMP holds only the CPU, so the menu could reach the kernel or another slot
+through the engines. A program flagged `accelerators` is therefore trusted,
+as a driver would be; closing the hole would take the kernel starting every
+engine job itself, or bounds in the engines.
 
 A fault in user mode was already fatal to the process (O2); now there are
-more ways to earn one. [fault.c](../programs/rv32/os/fault.c) gains three:
+more ways to earn one. [fault.c](../programs/rv32/os/fault.c) gains five:
 
 ```
 $ fault kernel
@@ -546,15 +570,74 @@ $ fault shell
 kernel: pid 12 fault killed: cause 7 at 80200094 tval 80100000
 sh: fault exited 135
 $ fault csr
-kernel: pid 13 fault killed: cause 2 at 802000d4 tval 30002573
+kernel: pid 13 fault killed: cause 2 at 80200108 tval 30002573
 sh: fault exited 130
+$ fault read
+kernel: pid 14 fault killed: cause 5 at 80200114 tval 80000000
+sh: fault exited 133
+$ fault exec
+kernel: pid 15 fault killed: cause 1 at 80000000 tval 80000000
+sh: fault exited 129
 ```
 
 A store to the kernel's first word and one to the shell's slot are store
 access faults at the address, and `csrr a0, mstatus` is an illegal
-instruction with the instruction in `mtval`. QEMU `virt`, whose hart has PMP
-too, prints the same lines. `fault load` still faults at `0x0020_0000`, but
-PMP now refuses it before the bus decoder could.
+instruction with the instruction in `mtval`; `fault read` is a load from the
+kernel and `fault exec` a jump to the kernel's `_start`, a fetch fault with
+the pc and `mtval` both `0x8000_0000`. QEMU `virt`, whose
+hart has PMP too, prints the same lines. `fault load` still faults at
+`0x0020_0000`, but PMP now refuses it before the bus decoder could.
+
+Programs are built for user mode too: their images are checked with
+`--allow-user`, which admits `ecall`, `unimp` and counter reads and none of
+the machine's CSRs or `mret`/`wfi`; only `fault` is checked with
+`--allow-system`, since it reads `mstatus` on purpose.
+
+### Hardening after review
+
+A review of the whole track found places where the kernel trusted what it
+should check, or said nothing when something failed. Each is fixed and
+covered:
+
+- **Busy engines.** A present, or a CPU store to the framebuffer, faults while
+  G1 or G2 owns it. The kernel now schedules only a program flagged
+  `accelerators` while an engine is busy, and every `present` waits (runs
+  its `ecall` again) until the engines are idle, so no process can be killed
+  for another's engine work and the kernel's own store cannot fault.
+- **Faults in the kernel** are caught at trap entry (above, "Contexts and
+  traps") and reported by `kernel_fault()` instead of corrupting memory.
+- **Processes.** A finishing process frees its zombie children, which nobody
+  could wait for any more. `halt` writes the directory back when a file is
+  still open for writing, so its size is not lost, and a failed write-back
+  when a process finishes is reported. It also reports input events the full
+  buffer dropped.
+- **Files.** One writer per file and no readers while it is written (opening
+  for writing truncates); `open` finds a free descriptor before it creates a
+  file, so a refused open leaves nothing behind. A device error is an error:
+  `read` and `write` return `0xffff_ffff` rather than a partial count that
+  looks like the end of the file, `cat` says so, a game's score is not
+  written from a table it could not read, and `bars` and `life` exit nonzero
+  when their report cannot be written. `fs_write` counts only bytes whose
+  sector reached the disk, `fs_mount` refuses a file system larger than the
+  device, and a corrupt directory entry is set aside (and reported at boot)
+  but written back unchanged rather than erased.
+- **The driver** reads the used ring with a fence before the status byte and
+  the data (QEMU's device completes asynchronously), gives up on a request
+  after a bound, and reports once that the disk is disabled when the device
+  needs a reset.
+- **The devices.** Both virtio-blk models refuse a descriptor index at or past
+  QueueNum; the emulator's file follows its in-memory disk when a DMA fault
+  stops an OUT, and a failed host write reaches the guest as IOERR.
+- **Programs.** `write` refuses a name longer than 19 bytes instead of moving
+  the rest into the contents, the shell refuses an over-long line and a halt
+  code that is not a number, and the kernel checks the RAM disk's table at
+  boot.
+
+The new [fill](../programs/rv32/os/fill.c) program (slot 14) writes numbered
+lines, so the console session now covers a file of two sectors, rewriting a
+file, and a 5,000-byte write stopped at the 4 KiB capacity; `syscheck`
+refuses kernel, straddling and wrapping buffers for every call that writes
+into the caller's memory.
 
 ### Evidence (O5)
 
@@ -619,9 +702,11 @@ PMP now refuses it before the bus decoder could.
 1. **Blocking by retry.** Run the console session with `--trace` and find a
    `read` ecall that executes more than once. What changed between the two
    executions, and which function made the process ready again?
-2. **Where the tree is.** Link `tetris` at slot 4 and run the session on QEMU
-   with the kernel's `discover()` moved after the first `spawn`. Which line
-   of the banner goes wrong, and why only on QEMU?
+2. **Where the tree is.** Swap the slots of `sh` and `fault` (so the shell,
+   the first program spawned, is linked at slot 8) and move the kernel's
+   `discover()` after that first `spawn`. Run the session on QEMU and on the
+   emulator. How does the QEMU run end, what does the done register say, and
+   why does the emulator not notice?
 3. **A second shell.** Try `sh` from the shell. Which check in `spawn()`
    refuses it, and what would it take to run two programs linked for the same
    slot?

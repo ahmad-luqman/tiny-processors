@@ -24,7 +24,8 @@
 // the data, writes the status (0 OK, 1 IOERR for a range past the disk or a
 // misaligned buffer, 2 UNSUPP for another type), fills a used-ring element,
 // advances the used index and sets InterruptStatus bit 0, which is `irq`. A
-// chain it cannot follow, or a DMA address outside RAM, sets Status bit 6
+// chain it cannot follow (a descriptor index at or past QueueNum included), or a
+// DMA address outside RAM, sets Status bit 6
 // (DEVICE_NEEDS_RESET) and stops. tools/rv32emu_core.c runs the same steps.
 module rv32_virtio_blk #(
     parameter integer DISK_WORDS = 32768,   // 128 KiB: 256 sectors
@@ -63,8 +64,7 @@ module rv32_virtio_blk #(
     reg [31:0] disk [0:DISK_WORDS-1];
 
     reg [7:0] status;
-    reg features_sel, driver_features_sel, queue_sel_zero, queue_ready, served;
-    reg [31:0] driver_features0, driver_features1;
+    reg features_sel, queue_sel_zero, queue_ready, served; // the driver's features are accepted and not kept
     reg [3:0] queue_num;
     reg [31:0] desc_lo, desc_hi, driver_lo, driver_hi, device_lo, device_hi;
     reg [15:0] last_avail, used_idx;
@@ -169,9 +169,6 @@ module rv32_virtio_blk #(
         if (reset) begin
             status <= 8'd0;
             features_sel <= 1'b0;
-            driver_features_sel <= 1'b0;
-            driver_features0 <= 32'd0;
-            driver_features1 <= 32'd0;
             queue_sel_zero <= 1'b1;
             queue_ready <= 1'b0;
             queue_num <= 4'd0;
@@ -192,8 +189,6 @@ module rv32_virtio_blk #(
             if (valid && we && is_word && !error && !busy && !at_notify) begin
                 case (offset)
                     12'h014: features_sel <= wdata == 32'd1;
-                    12'h020: if (driver_features_sel) driver_features1 <= wdata; else driver_features0 <= wdata;
-                    12'h024: driver_features_sel <= wdata == 32'd1;
                     12'h030: queue_sel_zero <= wdata == 32'd0;
                     12'h038: if (queue_sel_zero) queue_num <= (wdata == 32'd1 || wdata == 32'd2 || wdata == 32'd4 || wdata == 32'd8) ? wdata[3:0] : 4'd0;
                     12'h044: if (queue_sel_zero) queue_ready <= wdata[0];
@@ -207,8 +202,6 @@ module rv32_virtio_blk #(
                             used_idx <= 16'd0;
                             interrupt_status <= 1'b0;
                             features_sel <= 1'b0;
-                            driver_features0 <= 32'd0;
-                            driver_features1 <= 32'd0;
                         end
                     end
                     12'h080: if (queue_sel_zero) desc_lo <= wdata;
@@ -245,11 +238,15 @@ module rv32_virtio_blk #(
                     end
                 end
                 RING: if (dma_valid && dma_ready) begin
-                    head <= half;
-                    which <= 2'd0;
-                    word <= 2'd0;
-                    state <= DESC;
-                    access(1'b0, desc_lo + {12'd0, half, 4'd0}, 4'b1111, 32'd0);
+                    if (half >= {12'd0, queue_num}) begin // the head names no descriptor of the queue
+                        state <= FAIL;
+                    end else begin
+                        head <= half;
+                        which <= 2'd0;
+                        word <= 2'd0;
+                        state <= DESC;
+                        access(1'b0, desc_lo + {12'd0, half, 4'd0}, 4'b1111, 32'd0);
+                    end
                 end
                 // Each descriptor is four words: address low, address high (must be 0), length,
                 // and flags | next << 16. NEXT (bit 0) must be set on the first two and clear on
@@ -267,7 +264,8 @@ module rv32_virtio_blk #(
                         word <= word + 2'd1;
                         access(1'b0, desc_base + {28'd0, word + 2'd1, 2'b00}, 4'b1111, 32'd0);
                     end else if ((which != 2'd2) != dma_rdata[0] || (which == 2'd0 && dma_rdata[1]) ||
-                                 (which == 2'd2 && !dma_rdata[1])) begin
+                                 (which == 2'd2 && !dma_rdata[1]) ||
+                                 (which != 2'd2 && dma_rdata[31:16] >= {12'd0, queue_num})) begin
                         state <= FAIL;
                     end else if (which == 2'd2) begin
                         word <= 2'd0;
@@ -355,5 +353,5 @@ module rv32_virtio_blk #(
         end
     end
 
-    wire unused_ok = &{1'b0, addr[31:12], driver_features0, driver_features1, disk_index};
+    wire unused_ok = &{1'b0, addr[31:12], disk_index};
 endmodule

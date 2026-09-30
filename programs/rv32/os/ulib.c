@@ -34,55 +34,31 @@ int u_strcmp(const char *a, const char *b)
     return (unsigned char)*a - (unsigned char)*b;
 }
 
-int u_starts(const char *s, const char *prefix)
-{
-    while (*prefix) {
-        if (*s++ != *prefix++) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-void *memcpy(void *dst, const void *src, size_t n)
-{
-    uint8_t *d = dst;
-    const uint8_t *s = src;
-    while (n--) {
-        *d++ = *s++;
-    }
-    return dst;
-}
-
-void *memset(void *dst, int value, size_t n)
-{
-    uint8_t *d = dst;
-    while (n--) {
-        *d++ = (uint8_t)value;
-    }
-    return dst;
-}
-
 void u_puts(const char *s)
 {
     (void)sys_write(1, s, u_strlen(s));
 }
 
-void u_putdec(uint32_t value)
+uint32_t u_decimal(uint32_t value, char digits[11])
 {
-    char text[11];
-    int i = 10;
-    text[i] = 0;
+    uint32_t i = 10;
+    digits[i] = 0;
     do {
         uint32_t q = 0, r = value;
         while (r >= 10) { /* no divide: RV32I programs would call the software routine for every digit */
             r -= 10;
             q++;
         }
-        text[--i] = (char)('0' + r);
+        digits[--i] = (char)('0' + r);
         value = q;
     } while (value);
-    u_puts(text + i);
+    return i;
+}
+
+void u_putdec(uint32_t value)
+{
+    char digits[11];
+    u_puts(digits + u_decimal(value, digits));
 }
 
 void u_puthex(uint32_t value)

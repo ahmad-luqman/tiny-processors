@@ -1,11 +1,16 @@
-/* write NAME TEXT: make NAME hold TEXT and a newline, creating it if needed (Track 2, O3). */
+/* write NAME TEXT: make NAME hold TEXT and a newline, creating it if needed (Track 2, O3).
+ * A name is 1 to 19 bytes; a longer one is refused rather than cut. */
 #include "ulib.h"
 
 int main(const char *args)
 {
     char name[20];
     uint32_t n = 0;
-    while (args[n] && args[n] != ' ' && n + 1 < sizeof name) {
+    while (args[n] && args[n] != ' ') {
+        if (n + 1 == sizeof name) {
+            u_puts("write: a name is at most 19 bytes\n");
+            return 1;
+        }
         name[n] = args[n];
         n++;
     }

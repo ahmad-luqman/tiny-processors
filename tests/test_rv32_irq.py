@@ -7,21 +7,14 @@ ticks they are checked for what must hold on any backend. Expected values are wr
 hand from the privileged specification and the PLIC contract, so neither backend is checked only
 against the other.
 """
-import os
-import tempfile
 import unittest
-from pathlib import Path
 
-import test_rv32_rtl as integer_tests
+from rv32_step_case import DISARM_SOFTWARE, DISARM_TIMER, StepTicksCase, set_timer, stored
 from tools.rv32_asm import *  # noqa: F401,F403
-from tools.rv32_rtl import diff_traces, run_emulator, run_rtl, trap_records, write_image
+from tools.rv32_rtl import diff_traces, trap_records
 
-MIE_CSR, MIP_CSR, MSCRATCH = 0x304, 0x344, 0x340
-WFI = 0x10500073
 HANDLER = RAM + 0x400  # handlers live here; bodies must stay below
 SAVE = RAM + 0x2000    # where handlers store what they saw
-MSTATUS_RESET = 0x80007800  # SD and FS = 3 read as constants; MPP = 3 from reset
-MSTATUS_MPP = 0x1800         # O5: WARL, machine (3) or user (0); mret leaves it user
 
 
 def at_handler(body, handler):
@@ -42,15 +35,6 @@ def record_and_return(disarm):
     ] + list(disarm) + [MRET()]
 
 
-DISARM_TIMER = LI(27, MTIMECMP) + [ADDI(26, 0, -1), SW(26, 27, 0), SW(26, 27, 4)]
-DISARM_SOFTWARE = LI(27, MSIP) + [SW(0, 27, 0)]
-
-
-def set_timer(value):
-    """mtimecmp = value (below 2^32): low word to all ones first, then high 0, then the low word."""
-    return LI(27, MTIMECMP) + [ADDI(26, 0, -1), SW(26, 27, 0), SW(0, 27, 4)] + LI(26, value) + [SW(26, 27, 0)]
-
-
 def dump(*regs):
     """Store registers at SAVE + 0x40 onwards, then finish: the trace shows each store's value."""
     words = LI(28, SAVE + 0x40)
@@ -59,43 +43,7 @@ def dump(*regs):
     return words + FINISH()
 
 
-def stored(trace, address):
-    """The last value a trace line stored at `address`, or None."""
-    value = None
-    for line in trace:
-        if f"mem[{address:08x}]<-" in line:
-            value = int(line.split(f"mem[{address:08x}]<-")[1].split("/")[0], 16)
-    return value
-
-
-class InterruptTest(unittest.TestCase):
-    setUpClass = classmethod(integer_tests.RtlTest.setUpClass.__func__)
-    tearDownClass = classmethod(integer_tests.RtlTest.tearDownClass.__func__)
-
-    def run_both(self, words, ticks="steps", stall=None, seed=None, input_script=None, limit=200000, halt="done"):
-        with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
-            hex_path, bin_path = write_image(words, directory, "image")
-            script = None
-            if input_script is not None:
-                script = Path(directory) / "input.txt"
-                script.write_text(input_script)
-            emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace", limit=limit, input_script=script)
-            rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", stall=stall, seed=seed,
-                          input_script=script, ticks=ticks, max_cycles=4000000)
-        report = f"\n--- simulator ---\n{rtl.noise}--- console ---\n{rtl.console}--- stderr ---\n{rtl.stderr}{emulator.stderr}"
-        self.assertEqual(rtl.status, 0, report)
-        self.assertEqual(rtl.noise, "", report)
-        self.assertEqual(emulator.halt["halt"], halt, report)
-        self.assertEqual(rtl.halt["halt"], halt, report)
-        return emulator, rtl
-
-    def assert_same(self, words, **kwargs):
-        """Step ticks: identical traces and a pass on both backends."""
-        emulator, rtl = self.run_both(words, **kwargs)
-        self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
-        self.assertEqual((emulator.halt["outcome"], rtl.halt["outcome"]), ("pass", "pass"), emulator.stderr + rtl.stderr)
-        self.assertEqual(rtl.halt["steps"], len(rtl.trace))
-        return emulator, rtl
+class InterruptTest(StepTicksCase):
 
     def test_the_interrupt_csrs(self):
         words = [CSRRS(1, MSTATUS, 0)]                     # reset value
@@ -129,7 +77,7 @@ class InterruptTest(unittest.TestCase):
         self.assertEqual((emulator.halt["interrupts"], rtl.halt["interrupts"]), (1, 1))
         self.assertEqual(trap_records(rtl.trace), [], "an interrupt is not a trap record")
 
-    def test_masking_msi_before_mti_and_mei_first(self):
+    def test_masking_then_msi_before_mti(self):
         # Both CLINT interrupts pending with MIE clear: nothing happens until MIE is set, then MSI
         # and MTI in that order. The handler counts; the stored causes show the order.
         body = set_timer(0) + LI(1, MSIP) + LI(2, 1) + [SW(2, 1, 0)]
@@ -142,6 +90,68 @@ class InterruptTest(unittest.TestCase):
         emulator, rtl = self.assert_same(at_handler(body, handler))
         self.assertEqual(stored(rtl.trace, SAVE + 0x40), (1 << 3) | (1 << 7))
         self.assertEqual([stored(rtl.trace, SAVE + 16), stored(rtl.trace, SAVE + 20)], [0x80000003, 0x80000007])
+
+    def test_mei_msi_mti_all_pending_are_taken_in_that_order(self):
+        # An input event (MEI through the PLIC), MSIP and a due timer, all pending before MIE is
+        # set: MEI first, then MSI, then MTI. The handler removes each cause and logs mcause.
+        body = LI(1, PLIC + 4 * PLIC_SOURCE_INPUT) + LI(2, 1) + [SW(2, 1, 0)]
+        body += LI(1, PLIC_ENABLE) + LI(2, 1 << PLIC_SOURCE_INPUT) + [SW(2, 1, 0)]
+        body += set_timer(0) + LI(1, MSIP) + LI(2, 1) + [SW(2, 1, 0)]
+        body += LI(3, (1 << 3) | (1 << 7) | (1 << 11)) + [CSRRW(0, MIE_CSR, 3), CSRRS(4, MIP_CSR, 0), CSRRSI(0, MSTATUS, 8),
+                                                          CSRRCI(0, MSTATUS, 8)] + dump(4)
+        log = LI(28, SAVE) + [LW(29, 28, 12), SLLI(30, 29, 2), ADD(30, 30, 28), CSRRS(31, MCAUSE, 0), SW(31, 30, 16),
+                              ADDI(29, 29, 1), SW(29, 28, 12), ANDI(31, 31, 15)]
+        external = LI(20, PLIC_CLAIM) + [LW(21, 20, 0)] + LI(22, INPUT) + [LW(23, 22, 0), BNE(23, 0, -4), SW(21, 20, 0), MRET()]
+        software = DISARM_SOFTWARE + [MRET()]
+        handler = log + [ADDI(30, 0, 11), BNE(31, 30, 4 * (1 + len(external)))] + external \
+            + [ADDI(30, 0, 3), BNE(31, 30, 4 * (1 + len(software)))] + software + DISARM_TIMER + [MRET()]
+        emulator, rtl = self.assert_same(at_handler(body, handler), input_script="frame 0 down A\n")
+        self.assertEqual(stored(rtl.trace, SAVE + 0x40), (1 << 3) | (1 << 7) | (1 << 11))
+        self.assertEqual([stored(rtl.trace, SAVE + 16 + 4 * i) for i in range(3)], [0x8000000B, 0x80000003, 0x80000007])
+        self.assertEqual((emulator.halt["interrupts"], rtl.halt["interrupts"]), (3, 3))
+
+    def test_two_plic_sources_arbitrate_and_virtio_interrupts(self):
+        # A virtio-blk read of sector 0 (O3) raises source 1 while an input event holds source 12.
+        # Higher priority wins, a tie goes to the lower number, priority 0 never interrupts (it
+        # stays pending), and the virtio completion is then taken as a trap through MEI.
+        ring = RAM + 0x3000
+        desc, avail, used, header, data, status = ring, ring + 0x100, ring + 0x200, ring + 0x300, ring + 0x400, ring + 0x600
+        words = []
+
+        def put(address, value):
+            words.extend(LI(1, address) + LI(2, value) + [SW(2, 1, 0)])
+
+        for i, (address, length, flags) in enumerate(((header, 16, 1 | 1 << 16), (data, 512, 3 | 2 << 16), (status, 1, 2))):
+            put(desc + 16 * i, address)
+            put(desc + 16 * i + 8, length)
+            put(desc + 16 * i + 12, flags)
+        put(avail, 1 << 16)                               # idx 1, ring[0] = descriptor 0 (header: IN, sector 0)
+        for offset, value in ((0x070, 0), (0x070, 1), (0x070, 3), (0x070, 11), (0x030, 0), (0x038, 8), (0x080, desc),
+                              (0x090, avail), (0x0A0, used), (0x044, 1), (0x070, 15), (0x050, 0)):
+            put(VIRTIO + offset, value)                   # set up, then notify: served before the store retires
+        prio = lambda source: PLIC + 4 * source  # noqa: E731
+        put(prio(PLIC_SOURCE_VIRTIO), 2)
+        put(prio(PLIC_SOURCE_INPUT), 5)
+        put(PLIC_ENABLE, (1 << PLIC_SOURCE_VIRTIO) | (1 << PLIC_SOURCE_INPUT))
+        words += LI(10, PLIC_CLAIM) + LI(11, PLIC_PENDING)
+        words += [LW(3, 10, 0), LW(4, 10, 0), LW(5, 10, 0), SW(3, 10, 0), SW(4, 10, 0)]  # 12, then 1, then 0
+        put(prio(PLIC_SOURCE_INPUT), 2)
+        words += [LW(6, 10, 0), SW(6, 10, 0)]                                             # a tie: 1
+        put(prio(PLIC_SOURCE_VIRTIO), 0)
+        words += [LW(7, 10, 0), SW(7, 10, 0)]                                             # 12
+        put(prio(PLIC_SOURCE_INPUT), 0)
+        words += [LW(8, 10, 0), LW(9, 11, 0), CSRRS(12, MIP_CSR, 0)]                      # 0, both pending, no MEIP
+        put(prio(PLIC_SOURCE_VIRTIO), 1)
+        words += LI(1, 1 << 11) + [CSRRW(0, MIE_CSR, 1), CSRRSI(0, MSTATUS, 8), CSRRCI(0, MSTATUS, 8), LW(13, 11, 0)]
+        handler = LI(20, PLIC_CLAIM) + [LW(21, 20, 0)] + LI(22, VIRTIO) + [ADDI(23, 0, 1), SW(23, 22, 0x064), SW(21, 20, 0)] \
+            + LI(28, SAVE) + [SW(21, 28, 0), CSRRS(29, MCAUSE, 0), SW(29, 28, 4), MRET()]
+        emulator, rtl = self.assert_same(at_handler(words + dump(3, 4, 5, 6, 7, 8, 9, 12, 13), handler),
+                                         input_script="frame 0 down A\n")
+        got = [stored(rtl.trace, SAVE + 0x40 + 4 * i) for i in range(9)]
+        both = (1 << PLIC_SOURCE_VIRTIO) | (1 << PLIC_SOURCE_INPUT)
+        self.assertEqual(got, [PLIC_SOURCE_INPUT, PLIC_SOURCE_VIRTIO, 0, PLIC_SOURCE_VIRTIO, PLIC_SOURCE_INPUT,
+                               0, both, 0, 1 << PLIC_SOURCE_INPUT])
+        self.assertEqual((stored(rtl.trace, SAVE), stored(rtl.trace, SAVE + 4)), (PLIC_SOURCE_VIRTIO, 0x8000000B))
 
     def test_an_external_interrupt_from_the_input_queue(self):
         # Frame 0's event is queued before the first instruction. With priority 1 and threshold 0
@@ -223,10 +233,10 @@ class InterruptTest(unittest.TestCase):
         body = LI(1, MTIME) + [LW(2, 1, 0), ADDI(2, 2, 2000), ADDI(2, 2, 1000)]
         body += LI(27, MTIMECMP) + [ADDI(26, 0, -1), SW(26, 27, 0), SW(0, 27, 4), SW(2, 27, 0)]
         body += LI(1, 1 << 7) + [CSRRW(0, MIE_CSR, 1)]
-        body += [WFI, CSRRS(3, MIP_CSR, 0), ANDI(3, 3, 1 << 7), BEQ(3, 0, -12)] + FINISH()
+        body += [WFI(), CSRRS(3, MIP_CSR, 0), ANDI(3, 3, 1 << 7), BEQ(3, 0, -12)] + FINISH()
         emulator, rtl = self.run_both(body, ticks="cycles")
         self.assertEqual((emulator.halt["outcome"], rtl.halt["outcome"]), ("pass", "pass"))
-        wfis = lambda trace: sum(line.split()[2] == f"{WFI:08x}" for line in trace)  # noqa: E731
+        wfis = lambda trace: sum(line.split()[2] == f"{WFI():08x}" for line in trace)  # noqa: E731
         self.assertEqual(wfis(rtl.trace), 1, "the RTL's wfi waited")
         self.assertGreater(wfis(emulator.trace), 100, "the emulator's wfi retires at once")
         self.assertGreater(rtl.halt["cycles"], 3000)
@@ -246,7 +256,9 @@ class InterruptTest(unittest.TestCase):
         words = at_handler(body, record_and_return(DISARM_TIMER))
         for seed in (1, 9):
             with self.subTest(seed=seed):
-                self.assert_same(words, seed=seed)
+                emulator, rtl = self.assert_same(words, seed=seed)
+                self.assertEqual((emulator.halt["interrupts"], rtl.halt["interrupts"]), (1, 1))  # the timer fired
+                self.assertEqual(stored(rtl.trace, SAVE), 0x80000007)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
  * emulator and the RTL.
  *
  * It finds the CLINT and the PLIC in the device tree (a1), installs
- * trap_entry.S, and checks, in order:
+ * trap.S, and checks, in order:
  *
  * 1. mscratch holds a word; mstatus.MIE/MPIE and mie's three enables are
  *    writable (only those bits are compared: QEMU's mstatus and mie have more).
@@ -29,6 +29,7 @@
 #include <stdint.h>
 
 #include "board.h"
+#include "clint.h"
 #include "console.h"
 #include "csr.h"
 #include "fdt.h"
@@ -76,23 +77,15 @@ static void ok(const char *what)
 
 static void set_mtimecmp(uint64_t value)
 {
-    /* Low word to all ones first, so no intermediate value lies below the target. */
-    mmio_write32(clint + RV32_CLINT_MTIMECMP, 0xffffffffu);
-    mmio_write32(clint + RV32_CLINT_MTIMECMP + 4, (uint32_t)(value >> 32));
-    mmio_write32(clint + RV32_CLINT_MTIMECMP, (uint32_t)value);
+    clint_set_mtimecmp(clint, value);
 }
 
 static uint64_t mtime(void)
 {
-    uint32_t hi, lo;
-    do {
-        hi = mmio_read32(clint + RV32_CLINT_MTIME + 4);
-        lo = mmio_read32(clint + RV32_CLINT_MTIME);
-    } while (hi != mmio_read32(clint + RV32_CLINT_MTIME + 4));
-    return (uint64_t)hi << 32 | lo;
+    return clint_mtime(clint);
 }
 
-/* Called by trap_entry.S; returns the PC to resume at. Every interrupt is handled by removing
+/* Called by trap.S; returns the PC to resume at. Every interrupt is handled by removing
  * its cause, so returning to mepc does not take it again. */
 uint32_t trap_handler(uint32_t cause, uint32_t tval, uint32_t epc)
 {

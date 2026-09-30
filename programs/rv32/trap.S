@@ -1,19 +1,21 @@
-/* Machine-mode trap entry for the M5 diagnostic.
+/* Machine-mode trap entry for programs with a trap handler in C: the M5
+ * diagnostic, soccheck, and irqcheck and virtiocheck of Track 2.
  *
  * mtvec points here (direct mode, so the address must be word aligned).
  * Save the caller-saved registers, hand mcause, mtval, and mepc to
- * diag_trap in C, take the PC it returns as the resume address, restore,
- * and mret. Sixty-four bytes keep the stack 16-byte aligned (ILP32 ABI).
- * Only the diagnostic links this file: csr* and mret are outside the M1
- * image contract, and the image checker admits them with --allow-privileged.
+ * trap_handler in C, take the PC it returns as the resume address, restore,
+ * and mret: an interrupt is resumed at mepc itself, an exception usually at
+ * mepc + 4. Sixty-four bytes keep the stack 16-byte aligned (ILP32 ABI).
+ * csr* and mret are outside the M1 image contract; the image checker admits
+ * them with --allow-privileged (or --allow-system).
  */
 #include "board.h"
 
     .section .text, "ax", @progbits
     .balign 4
-    .globl diag_trap_entry
-    .type diag_trap_entry, @function
-diag_trap_entry:
+    .globl trap_entry
+    .type trap_entry, @function
+trap_entry:
     addi sp, sp, -64
     sw ra, 0(sp)
     sw t0, 4(sp)
@@ -34,7 +36,7 @@ diag_trap_entry:
     csrr a0, mcause
     csrr a1, mtval
     csrr a2, mepc
-    call diag_trap             /* returns the PC to resume at */
+    call trap_handler          /* returns the PC to resume at */
     csrw mepc, a0
     lw ra, 0(sp)
     lw t0, 4(sp)
@@ -54,4 +56,4 @@ diag_trap_entry:
     lw a7, 60(sp)
     addi sp, sp, 64
     mret
-    .size diag_trap_entry, . - diag_trap_entry
+    .size trap_entry, . - trap_entry

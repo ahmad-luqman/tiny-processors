@@ -208,6 +208,7 @@ def FENCE(): return i_type(0x0F, 0, 0, 0, 0x0FF)
 def ECALL(): return 0x00000073
 def EBREAK(): return 0x00100073
 def MRET(): return 0x30200073
+def WFI(): return 0x10500073
 def CSRRW(rd, csr, rs1): return i_type(0x73, rd, 1, rs1, csr)
 def CSRRS(rd, csr, rs1): return i_type(0x73, rd, 2, rs1, csr)
 def CSRRC(rd, csr, rs1): return i_type(0x73, rd, 3, rs1, csr)
@@ -216,6 +217,10 @@ def CSRRSI(rd, csr, uimm): return i_type(0x73, rd, 6, uimm, csr)
 def CSRRCI(rd, csr, uimm): return i_type(0x73, rd, 7, uimm, csr)
 MTVEC, MEPC, MCAUSE, MTVAL, MSTATUS = 0x305, 0x341, 0x342, 0x343, 0x300
 MCOUNTEREN, PMPCFG0, PMPCFG1, PMPADDR0 = 0x306, 0x3A0, 0x3A1, 0x3B0  # O5: pmpaddr n is PMPADDR0 + n
+MIE_CSR, MIP_CSR, MSCRATCH, FCSR = 0x304, 0x344, 0x340, 0x003  # O1's interrupt CSRs; F2's fcsr
+MSTATUS_RESET = 0x80007800  # SD and FS = 3 read as constants; MPP = 3 (machine) from reset
+MSTATUS_MPP = 0x1800        # O5: WARL, machine (3) or user (0); mret leaves it user
+MSTATUS_USER = MSTATUS_RESET & ~MSTATUS_MPP
 # Zicntr: read-only counters; `rdcycle rd` is `csrrs rd, cycle, x0`.
 CYCLE, TIME, INSTRET, CYCLEH, TIMEH, INSTRETH = 0xC00, 0xC01, 0xC02, 0xC80, 0xC81, 0xC82
 def RDCYCLE(rd): return CSRRS(rd, CYCLE, 0)

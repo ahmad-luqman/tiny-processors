@@ -5,8 +5,10 @@
  * several; sys.h), and serves their
  * system calls (sys.h). Every context, each process and the idle loop, has a
  * frame; kentry.S saves the running one on every trap and resumes whichever
- * kernel_trap returns. The kernel runs with interrupts off and never traps
- * itself: a fault in the kernel is a double fault and stops the machine.
+ * kernel_trap returns. The kernel runs with interrupts off and must never trap
+ * itself: while it runs mscratch is 0, and a trap that finds it so is a fault
+ * in the kernel, which kentry.S reports through kernel_fault() before stopping
+ * the machine, rather than saving registers into a frame that is not there.
  *
  * Devices come only from the tree: the console, the done register, the CLINT
  * and the PLIC on every platform, and our input, display and accelerators
@@ -22,6 +24,14 @@
  * fault kills the process. The kernel (machine mode, no locked entries) is not
  * held by PMP, so system calls still read and write the caller's memory.
  *
+ * PMP holds the CPU, not the accelerators: G1 and G2 read and write memory by
+ * DMA wherever their registers point (G2's depth buffer, G1's blit source), so
+ * a program flagged `accelerators` could reach the kernel or another slot
+ * through them. Such a program is trusted, as a driver would be; only the menu
+ * is flagged. While an engine is busy it owns the framebuffer (a present or a
+ * CPU store to it faults), so only a flagged program runs until the engines
+ * are idle again, and nobody else can fault on its behalf.
+ *
  * Blocking is by retry: a call that cannot finish yet (read with no byte
  * waiting, wait for a child still running) leaves the process's pc on its
  * ecall and marks it blocked; wake_blocked() makes it ready again when the
@@ -33,6 +43,7 @@
 #include <stdint.h>
 
 #include "board.h"
+#include "clint.h"
 #include "csr.h"
 #include "fdt.h"
 #include "fs.h"
@@ -81,12 +92,14 @@ struct proc {
 /* A RAM disk entry (tools/rv32_ramdisk.py). */
 struct program {
     char name[24];
-    uint32_t load, entry, file_size, memory_size, offset, flags, span;
+    uint32_t load, entry, file_size, memory_size, offset, flags, span; /* span in bytes, whole slots */
 };
+_Static_assert(sizeof(struct program) == 52, "tools/rv32_ramdisk.py's <24s7I entry");
 #define PROGRAM_ACCELERATORS 1u /* it drives SIMD4, G1 and G2 itself */
 
 extern void trap_vector(void);
 extern void kernel_idle(void);
+extern void write_scounteren(uint32_t value);
 extern _Noreturn void kernel_resume(struct frame *f);
 extern const uint8_t ramdisk[], ramdisk_end[];
 
@@ -103,27 +116,13 @@ static uint32_t protected_pid;                  /* O5: the process PMP is set up
 static char model[48];
 static uint32_t tick = KERNEL_TICK; /* O4: 100 µs where the tree gives a timebase (QEMU), else KERNEL_TICK */
 
+static int faulted; /* kernel_fault ran: halt must not touch the disk again */
+
 static uint32_t keys[KEY_BUFFER];
 static uint32_t key_head, key_count, keys_dropped;
 
-void *memcpy(void *dst, const void *src, size_t n)
-{
-    uint8_t *d = dst;
-    const uint8_t *s = src;
-    while (n--) {
-        *d++ = *s++;
-    }
-    return dst;
-}
-
-void *memset(void *dst, int value, size_t n)
-{
-    uint8_t *d = dst;
-    while (n--) {
-        *d++ = (uint8_t)value;
-    }
-    return dst;
-}
+void *memcpy(void *dst, const void *src, size_t n); /* mem.c */
+void *memset(void *dst, int value, size_t n);
 
 /* The console, polled: LSR bit 5 before each byte, as on a 16550. */
 static void kputc(char c)
@@ -140,16 +139,22 @@ static void kputs(const char *s)
     }
 }
 
-static void kputdec(uint32_t value)
+/* The decimal digits of `value`, ending at digits[10] = 0; returns where they start. */
+static uint32_t kdecimal(uint32_t value, char digits[11])
 {
-    char text[11];
-    int i = 10;
-    text[i] = 0;
+    uint32_t i = 10;
+    digits[i] = 0;
     do {
-        text[--i] = (char)('0' + value % 10u);
+        digits[--i] = (char)('0' + value % 10u);
         value /= 10u;
     } while (value);
-    kputs(text + i);
+    return i;
+}
+
+static void kputdec(uint32_t value)
+{
+    char digits[11];
+    kputs(digits + kdecimal(value, digits));
 }
 
 static void kputhex(uint32_t value)
@@ -167,19 +172,12 @@ static int console_ready(void)
 
 static uint64_t mtime(void)
 {
-    uint32_t hi, lo;
-    do {
-        hi = mmio_read32(clint + RV32_CLINT_MTIME + 4);
-        lo = mmio_read32(clint + RV32_CLINT_MTIME);
-    } while (hi != mmio_read32(clint + RV32_CLINT_MTIME + 4));
-    return (uint64_t)hi << 32 | lo;
+    return clint_mtime(clint);
 }
 
 static void set_timer(uint64_t when)
 {
-    mmio_write32(clint + RV32_CLINT_MTIMECMP, 0xffffffffu);
-    mmio_write32(clint + RV32_CLINT_MTIMECMP + 4, (uint32_t)(when >> 32));
-    mmio_write32(clint + RV32_CLINT_MTIMECMP, (uint32_t)when);
+    clint_set_mtimecmp(clint, when);
 }
 
 static uint32_t fold_name(const char *s)
@@ -195,6 +193,22 @@ static uint32_t fold_name(const char *s)
 
 static _Noreturn void halt(uint32_t code)
 {
+    /* A file's size reaches the disk only when the directory is written back: do it for files a
+     * process (a background writer, say) still has open for writing. */
+    int writing = 0;
+    for (uint32_t i = 0; i < MAX_PROCS; i++) {
+        for (uint32_t k = 0; k < OPEN_FILES; k++) {
+            writing |= procs[i].state != FREE && procs[i].files[k].mode == O_WRITE;
+        }
+    }
+    if (writing && !faulted && !fs_flush()) {
+        kputs("kernel: halt: the directory could not be written\n");
+    }
+    if (keys_dropped) {
+        kputs("kernel: ");
+        kputdec(keys_dropped);
+        kputs(" input events dropped: the buffer was full\n");
+    }
     if (code == 0) {
         kputs("kernel: halt, ");
         kputdec(exits);
@@ -349,6 +363,32 @@ static const struct program *programs(uint32_t *count)
     return (const struct program *)(ramdisk + 16);
 }
 
+/* The RAM disk is part of the kernel's image, but spawn trusts its table, so it is checked once
+ * at boot for what tools/rv32_ramdisk.py promises: every entry inside the disk and its slots,
+ * the file no larger than the memory it loads into, the entry point inside the file. */
+static void check_programs(void)
+{
+    uint32_t count, size = (uint32_t)(ramdisk_end - ramdisk);
+    const struct program *list = programs(&count);
+    if (count > (size - 16) / sizeof *list) {
+        panic("RAM disk table larger than the disk");
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        const struct program *e = &list[i];
+        uint32_t slots_end = OS_SLOT_BASE + OS_SLOTS * OS_SLOT_SIZE;
+        if (e->name[sizeof e->name - 1] || e->offset > size || e->file_size > size - e->offset ||
+            e->file_size > e->memory_size || e->span == 0 || e->span % OS_SLOT_SIZE ||
+            e->span > OS_SLOTS * OS_SLOT_SIZE || e->load < OS_SLOT_BASE || (e->load - OS_SLOT_BASE) % OS_SLOT_SIZE ||
+            e->load > slots_end - e->span || e->memory_size > e->span - OS_STACK_SIZE ||
+            e->entry < e->load || e->entry - e->load >= e->file_size) {
+            kputs("kernel: RAM disk entry ");
+            kputdec(i);
+            kputc('\n');
+            panic("bad RAM disk entry");
+        }
+    }
+}
+
 static const struct program *program_named(const char *name)
 {
     uint32_t count;
@@ -414,6 +454,30 @@ static struct proc *spawn(const char *name, const char *args, uint32_t parent)
     return p;
 }
 
+/* Descriptor `fd` of `p` when it is open in `mode` (0: either), else 0. */
+static struct open_file *open_file_of(struct proc *p, uint32_t fd, uint32_t mode)
+{
+    if (fd < 3 || fd >= 3 + OPEN_FILES || !p->files[fd - 3].mode || (mode && p->files[fd - 3].mode != mode)) {
+        return 0;
+    }
+    return &p->files[fd - 3];
+}
+
+/* Whether file `file` may be opened in `mode`: one writer at a time, and no readers while it is
+ * written, since writing truncates it first. */
+static int may_open(int file, uint32_t mode)
+{
+    for (uint32_t i = 0; i < MAX_PROCS; i++) {
+        for (uint32_t k = 0; procs[i].state != FREE && k < OPEN_FILES; k++) {
+            const struct open_file *o = &procs[i].files[k];
+            if (o->mode && o->file == file && (mode == O_WRITE || o->mode == O_WRITE)) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
 static uint32_t close_file(struct open_file *o)
 {
     uint32_t mode = o->mode;
@@ -424,7 +488,18 @@ static uint32_t close_file(struct open_file *o)
 static void finish(struct proc *p, uint32_t code)
 {
     for (uint32_t i = 0; i < OPEN_FILES; i++) {
-        (void)close_file(&p->files[i]);
+        if (close_file(&p->files[i]) == SYS_ERROR) {
+            kputs("kernel: pid ");
+            kputdec(p->pid);
+            kputs(": a file's size could not be written\n");
+        }
+    }
+    /* Children it never waited for: nobody else can, so the finished ones are freed now and the
+     * running ones will be when they finish (their parent is gone). */
+    for (uint32_t i = 0; i < MAX_PROCS; i++) {
+        if (procs[i].state == ZOMBIE && procs[i].parent == p->pid) {
+            procs[i].state = FREE;
+        }
     }
     p->exit_code = code;
     exits++;
@@ -500,15 +575,31 @@ static void wake_blocked(void)
     }
 }
 
-/* The next ready process after `after` in table order, round robin, or 0. */
+static uint32_t engines_busy(void)
+{
+    return (gpu && (mmio_read32(gpu + GPU_STATUS) & GPU_BUSY)) || (g3d && (mmio_read32(g3d + G3D_STATUS) & G3D_BUSY));
+}
+
+/* The next ready process after `after` in table order, round robin, or 0. While G1 or G2 is busy
+ * only a program that drives them may run: anyone else's present or framebuffer store would fault. */
 static struct proc *next_ready(const struct proc *after)
 {
     uint32_t start = after ? (uint32_t)(after - procs) + 1 : 0;
+    int busy = -1;
     for (uint32_t k = 0; k < MAX_PROCS; k++) {
         struct proc *p = &procs[(start + k) % MAX_PROCS];
-        if (p->state == READY) {
-            return p;
+        if (p->state != READY) {
+            continue;
         }
+        if (!(p->flags & PROGRAM_ACCELERATORS)) {
+            if (busy < 0) {
+                busy = (int)engines_busy();
+            }
+            if (busy) {
+                continue;
+            }
+        }
+        return p;
     }
     return 0;
 }
@@ -549,11 +640,6 @@ static struct frame *schedule(void)
 
 /* ---- System calls ---- */
 
-static uint32_t engines_busy(void)
-{
-    return (gpu && (mmio_read32(gpu + GPU_STATUS) & GPU_BUSY)) || (g3d && (mmio_read32(g3d + G3D_STATUS) & G3D_BUSY));
-}
-
 /* Returns 1 when the call finished (pc moves past the ecall), 0 to run it again later. */
 static int syscall(struct proc *p)
 {
@@ -564,11 +650,13 @@ static int syscall(struct proc *p)
     case SYS_EXIT:
         finish(p, a0);
         return 1;
-    case SYS_WRITE:
-        if (a0 >= 3 && a0 < 3 + OPEN_FILES && p->files[a0 - 3].mode == O_WRITE && user_range(p, a1, a2)) {
-            struct open_file *o = &p->files[a0 - 3];
+    case SYS_WRITE: {
+        struct open_file *o = open_file_of(p, a0, O_WRITE);
+        if (o && user_range(p, a1, a2)) {
             result = fs_write(o->file, o->position, (const uint8_t *)(uintptr_t)a1, a2);
-            o->position += result;
+            if (result != FS_ERROR) {
+                o->position += result;
+            }
         } else if ((a0 == 1 || a0 == 2) && user_range(p, a1, a2)) {
             for (uint32_t i = 0; i < a2; i++) {
                 kputc(*(const char *)(uintptr_t)(a1 + i));
@@ -576,11 +664,14 @@ static int syscall(struct proc *p)
             result = a2;
         }
         break;
-    case SYS_READ:
-        if (a0 >= 3 && a0 < 3 + OPEN_FILES && p->files[a0 - 3].mode == O_READ && user_range(p, a1, a2)) {
-            struct open_file *o = &p->files[a0 - 3];
+    }
+    case SYS_READ: {
+        struct open_file *o = open_file_of(p, a0, O_READ);
+        if (o && user_range(p, a1, a2)) {
             result = fs_read(o->file, o->position, (uint8_t *)(uintptr_t)a1, a2);
-            o->position += result;
+            if (result != FS_ERROR) {
+                o->position += result;
+            }
         } else if (a0 == 0 && a2 && user_range(p, a1, a2)) {
             if (!console_ready()) {
                 p->state = BLOCKED_READ;
@@ -592,6 +683,7 @@ static int syscall(struct proc *p)
             }
         }
         break;
+    }
     case SYS_EVENT:
         result = 0;
         if (key_count) {
@@ -605,8 +697,12 @@ static int syscall(struct proc *p)
         break;
     case SYS_PRESENT:
         /* A present while an engine owns the framebuffer faults, and the kernel must not fault:
-         * for a program that drives the engines, wait until they finish. */
-        if (display && !((p->flags & PROGRAM_ACCELERATORS) && engines_busy())) {
+         * the call waits, running again, until the engines are idle. Only a program that drives
+         * them runs meanwhile (next_ready), so this is the caller's own work finishing. */
+        if (display) {
+            if (engines_busy()) {
+                return 0;
+            }
             mmio_write32(display + RV32_DISPLAY_PRESENT, 1);
             result = mmio_read32(display + RV32_DISPLAY_FRAMES);
         }
@@ -690,12 +786,7 @@ static int syscall(struct proc *p)
             }
             line[n++] = ' ';
             char digits[11];
-            uint32_t d = 10, v = q->pid;
-            digits[d] = 0;
-            do {
-                digits[--d] = (char)('0' + v % 10u);
-                v /= 10u;
-            } while (v);
+            uint32_t d = kdecimal(q->pid, digits);
             while (digits[d] && n + 1 < sizeof line) {
                 line[n++] = digits[d++];
             }
@@ -708,23 +799,25 @@ static int syscall(struct proc *p)
         uint32_t mode = a1 & (O_READ | O_WRITE);
         if ((mode == O_READ || mode == O_WRITE) && !(a1 & ~(O_READ | O_WRITE | O_CREATE)) &&
             user_string(p, a0, name, FS_NAME)) {
-            int file = fs_open(name, (a1 & O_CREATE) && mode == O_WRITE);
-            for (uint32_t i = 0; file >= 0 && i < OPEN_FILES; i++) {
-                if (!p->files[i].mode) {
-                    p->files[i] = (struct open_file){mode, file, 0};
-                    if (mode == O_WRITE) {
-                        fs_truncate(file); /* writing replaces the contents */
-                    }
-                    result = 3 + i;
-                    break;
+            /* A free descriptor first, so a refused open never leaves a new, empty file behind. */
+            uint32_t i = 0;
+            while (i < OPEN_FILES && p->files[i].mode) {
+                i++;
+            }
+            int file = i < OPEN_FILES ? fs_open(name, (a1 & O_CREATE) && mode == O_WRITE) : -1;
+            if (file >= 0 && may_open(file, mode)) {
+                p->files[i] = (struct open_file){mode, file, 0};
+                if (mode == O_WRITE) {
+                    fs_truncate(file); /* writing replaces the contents */
                 }
+                result = 3 + i;
             }
         }
         break;
     }
     case SYS_CLOSE:
-        if (a0 >= 3 && a0 < 3 + OPEN_FILES && p->files[a0 - 3].mode) {
-            result = close_file(&p->files[a0 - 3]);
+        if (open_file_of(p, a0, 0)) {
+            result = close_file(open_file_of(p, a0, 0));
         }
         break;
     case SYS_FILES: {
@@ -766,6 +859,19 @@ static void kill(struct proc *p, uint32_t cause, uint32_t tval)
     finish(p, 128u + cause);
 }
 
+/* The disk driver gives up for good on a device that needs a reset or a lost request; say so once. */
+static void report_disk_failure(void)
+{
+    static int reported;
+    const char *why = virtio_failure();
+    if (why && !reported) {
+        reported = 1;
+        kputs("kernel: disk disabled: ");
+        kputs(why);
+        kputc('\n');
+    }
+}
+
 /* Called by kentry.S with the frame it saved; returns the frame to resume. */
 struct frame *kernel_trap(struct frame *f)
 {
@@ -791,10 +897,26 @@ struct frame *kernel_trap(struct frame *f)
         if (syscall(p)) {
             f->pc += 4;
         }
+        report_disk_failure();
     } else {
         kill(p, cause, tval);
     }
-    return schedule(); /* O2 has no preemption: a running process keeps the machine */
+    return schedule(); /* the running process keeps the machine unless it blocked, finished or was preempted */
+}
+
+/* Called by kentry.S for a trap taken while the kernel itself ran (mscratch 0): a bug in the
+ * kernel, never a process's fault. The machine stops. */
+_Noreturn void kernel_fault(void)
+{
+    faulted = 1;
+    kputs("kernel: fault in the kernel: cause ");
+    kputdec(csr_read(CSR_MCAUSE));
+    kputs(" at ");
+    kputhex(csr_read(CSR_MEPC));
+    kputs(" tval ");
+    kputhex(csr_read(CSR_MTVAL));
+    kputc('\n');
+    halt(254);
 }
 
 _Noreturn void kernel_main(uint32_t hart, uintptr_t tree)
@@ -811,16 +933,22 @@ _Noreturn void kernel_main(uint32_t hart, uintptr_t tree)
     kputs(g3d ? " g2" : "");
     kputs(disk ? " disk" : "");
     uint32_t count;
+    check_programs();
     (void)programs(&count);
     kputs("\nkernel: ");
     kputdec(count);
     kputs(" programs\n");
     if (disk) {
         uint32_t sectors = virtio_init(disk);
-        int mounted = sectors && fs_mount();
+        int mounted = sectors && fs_mount(sectors);
         kputs("kernel: disk ");
         kputdec(sectors);
         kputs(mounted ? " sectors, tfs\n" : " sectors, no file system\n");
+        if (mounted && fs_corrupt()) {
+            kputs("kernel: tfs: ");
+            kputdec(fs_corrupt());
+            kputs(" corrupt directory entries set aside\n");
+        }
     }
 
     csr_write(CSR_MTVEC, (uint32_t)(uintptr_t)trap_vector);
@@ -832,6 +960,7 @@ _Noreturn void kernel_main(uint32_t hart, uintptr_t tree)
     set_timer(mtime() + tick);
     csr_write(CSR_MIE, MIP_MEIP | MIP_MTIP);
     csr_write(CSR_MCOUNTEREN, 7u); /* O5: user mode may read cycle, time and instret */
+    write_scounteren(7u);          /* and on a hart with S-mode (QEMU's) that takes scounteren too */
 
     idle_frame.x[2] = (uint32_t)(uintptr_t)&idle_stack[64];
     idle_frame.pc = (uint32_t)(uintptr_t)kernel_idle;

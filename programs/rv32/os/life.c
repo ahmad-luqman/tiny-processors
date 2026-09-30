@@ -67,16 +67,10 @@ int main(void)
     char what[32] = "16 generations, population ";
     uint32_t n = 27;
     char digits[11];
-    uint32_t d = 10;
-    digits[d] = 0;
-    do {
-        digits[--d] = (char)('0' + population % 10u);
-        population /= 10u;
-    } while (population);
+    uint32_t d = u_decimal(population, digits);
     while (digits[d] && n + 1 < sizeof what) {
         what[n++] = digits[d++];
     }
     what[n] = 0;
-    report("life", what, sum);
-    return 0;
+    return report("life", what, sum);
 }

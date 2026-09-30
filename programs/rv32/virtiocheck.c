@@ -4,16 +4,18 @@
  * It scans the device tree's "virtio,mmio" nodes for a block device, sets it
  * up as the virtio 1.x specification's driver initialization describes, and
  * checks: a sector written and read back; two requests made available before
- * one notify both complete; a read past the end of the disk is IOERR; an
- * unknown request type (6) is UNSUPP; InterruptStatus and the device's PLIC
+ * one notify both complete; a read past the end of the disk is IOERR, and so
+ * is a two-sector write from the last sector, which leaves that sector as it
+ * was; an unknown request type (6) is UNSUPP; InterruptStatus and the device's PLIC
  * source report completion until acknowledged. Every value it folds into the
  * PASS word is one the virtio specification fixes, so all three platforms
  * print the same word. The disk's sector 3 is overwritten.
  *
  * On our machine (root compatible "tiny-processors,rv32-machine") it goes on
  * to what our contract adds and QEMU does differently: a buffer that is not
- * word aligned is IOERR, a chain the device cannot follow or a queue outside
- * RAM sets DEVICE_NEEDS_RESET and serves nothing until a reset, and a byte
+ * word aligned is IOERR, a chain the device cannot follow (one naming a
+ * descriptor past the queue's size included) or a queue outside RAM sets
+ * DEVICE_NEEDS_RESET and serves nothing until a reset, and a byte
  * access or a write to a read-only register is an access fault (a trap
  * handler counts them). None of it is folded into the PASS word.
  */
@@ -23,46 +25,29 @@
 #include "console.h"
 #include "fdt.h"
 #include "mmio.h"
+#include "virtio_mmio.h"
 
 static inline void csr_write_mtvec(uint32_t value)
 {
     __asm__ volatile("csrw mtvec, %0" ::"r"(value));
 }
 
-#define QUEUE 8u
+#define QUEUE VIRTIO_QUEUE
 #define SECTOR 512u
 #define STATUS_WAITING 0xffu
 
-struct desc {
-    uint32_t addr, addr_hi, len;
-    uint16_t flags, next;
-};
-struct avail {
-    uint16_t flags, idx, ring[QUEUE], used_event;
-};
-struct used {
-    uint16_t flags, idx;
-    struct {
-        uint32_t id, len;
-    } ring[QUEUE];
-    uint16_t avail_event;
-};
-struct header {
-    uint32_t type, reserved, sector, sector_hi;
-};
-
-static struct desc descs[6] __attribute__((aligned(16)));
-static struct avail avail __attribute__((aligned(4)));
-static volatile struct used used __attribute__((aligned(4)));
-static struct header headers[2] __attribute__((aligned(16)));
+static struct virtio_desc descs[6] __attribute__((aligned(16)));
+static struct virtio_avail avail __attribute__((aligned(4)));
+static volatile struct virtio_used used __attribute__((aligned(4)));
+static struct virtio_blk_header headers[2] __attribute__((aligned(16)));
 static volatile uint8_t statuses[2];
-static uint32_t out[SECTOR / 4], in[SECTOR / 4], second[SECTOR / 4];
+static uint32_t out[SECTOR / 4], in[SECTOR / 4], second[SECTOR / 4], two[2 * SECTOR / 4];
 static uint32_t base, plic, source, checksum = 2166136261u, failures;
 static uint16_t seen;
 static volatile uint32_t faults;
 extern void trap_entry(void);
 
-/* trap_entry.S's handler: count an access fault and step over the instruction. */
+/* trap.S's handler: count an access fault and step over the instruction. */
 uint32_t trap_handler(uint32_t cause, uint32_t tval, uint32_t epc)
 {
     (void)tval;
@@ -93,26 +78,32 @@ static void check(const char *what, uint32_t got, uint32_t want)
     }
 }
 
-/* Chain `slot`'s three descriptors (0-2 or 3-5) for one request. */
-static void prepare(uint32_t slot, uint32_t type, uint32_t sector, void *buffer, int device_writes)
+/* Chain `slot`'s three descriptors (0-2 or 3-5) for one request of `length` bytes. */
+static void prepare_length(uint32_t slot, uint32_t type, uint32_t sector, void *buffer, uint32_t length, int device_writes)
 {
-    struct desc *d = &descs[3 * slot];
-    headers[slot] = (struct header){type, 0, sector, 0};
+    struct virtio_desc *d = &descs[3 * slot];
+    headers[slot] = (struct virtio_blk_header){type, 0, sector, 0};
     statuses[slot] = STATUS_WAITING;
-    d[0] = (struct desc){(uint32_t)(uintptr_t)&headers[slot], 0, sizeof headers[slot], 1, (uint16_t)(3 * slot + 1)};
-    d[1] = (struct desc){(uint32_t)(uintptr_t)buffer, 0, SECTOR, (uint16_t)(device_writes ? 3 : 1), (uint16_t)(3 * slot + 2)};
-    d[2] = (struct desc){(uint32_t)(uintptr_t)&statuses[slot], 0, 1, 2, 0};
+    d[0] = (struct virtio_desc){(uint32_t)(uintptr_t)&headers[slot], 0, sizeof headers[slot], VIRTIO_DESC_NEXT, (uint16_t)(3 * slot + 1)};
+    d[1] = (struct virtio_desc){(uint32_t)(uintptr_t)buffer, 0, length,
+                                (uint16_t)(VIRTIO_DESC_NEXT | (device_writes ? VIRTIO_DESC_WRITE : 0u)), (uint16_t)(3 * slot + 2)};
+    d[2] = (struct virtio_desc){(uint32_t)(uintptr_t)&statuses[slot], 0, 1, VIRTIO_DESC_WRITE, 0};
     avail.ring[avail.idx % QUEUE] = (uint16_t)(3 * slot);
     __asm__ volatile("fence" ::: "memory");
     avail.idx++;
     __asm__ volatile("fence" ::: "memory");
 }
 
+static void prepare(uint32_t slot, uint32_t type, uint32_t sector, void *buffer, int device_writes)
+{
+    prepare_length(slot, type, sector, buffer, SECTOR, device_writes);
+}
+
 /* Notify and wait for `count` more used entries; our device has finished before the store
  * completes, QEMU's some time after. */
 static void submit(uint32_t count)
 {
-    mmio_write32(base + 0x050, 0);
+    mmio_write32(base + VIRTIO_REG_QUEUE_NOTIFY, 0);
     while ((uint16_t)(used.idx - seen) < count) {
     }
     seen = (uint16_t)(seen + count);
@@ -128,17 +119,17 @@ static uint32_t one(uint32_t type, uint32_t sector, void *buffer, int device_wri
 /* Set the device up from scratch, as main does. */
 static void set_up(void)
 {
-    mmio_write32(base + 0x070, 0);
-    mmio_write32(base + 0x070, 3);
-    mmio_write32(base + 0x024, 1);
-    mmio_write32(base + 0x020, 1);
-    mmio_write32(base + 0x070, 11);
-    mmio_write32(base + 0x038, QUEUE);
-    mmio_write32(base + 0x080, (uint32_t)(uintptr_t)descs);
-    mmio_write32(base + 0x090, (uint32_t)(uintptr_t)&avail);
-    mmio_write32(base + 0x0a0, (uint32_t)(uintptr_t)&used);
-    mmio_write32(base + 0x044, 1);
-    mmio_write32(base + 0x070, 15);
+    mmio_write32(base + VIRTIO_REG_STATUS, 0);
+    mmio_write32(base + VIRTIO_REG_STATUS, 3);
+    mmio_write32(base + VIRTIO_REG_DRIVER_FEATURES_SEL, 1);
+    mmio_write32(base + VIRTIO_REG_DRIVER_FEATURES, 1);
+    mmio_write32(base + VIRTIO_REG_STATUS, 11);
+    mmio_write32(base + VIRTIO_REG_QUEUE_NUM, QUEUE);
+    mmio_write32(base + VIRTIO_REG_QUEUE_DESC, (uint32_t)(uintptr_t)descs);
+    mmio_write32(base + VIRTIO_REG_QUEUE_DRIVER, (uint32_t)(uintptr_t)&avail);
+    mmio_write32(base + VIRTIO_REG_QUEUE_DEVICE, (uint32_t)(uintptr_t)&used);
+    mmio_write32(base + VIRTIO_REG_QUEUE_READY, 1);
+    mmio_write32(base + VIRTIO_REG_STATUS, 15);
     avail.idx = 0;
     used.idx = 0;
     seen = 0;
@@ -153,37 +144,49 @@ static void ours(void)
     /* A chain whose data descriptor lacks NEXT: DEVICE_NEEDS_RESET, nothing served. */
     prepare(0, 0, 0, in, 1);
     descs[1].flags = 2;
-    mmio_write32(base + 0x050, 0);
-    check("broken chain needs reset", mmio_read32(base + 0x070) & 0x40u, 0x40);
+    mmio_write32(base + VIRTIO_REG_QUEUE_NOTIFY, 0);
+    check("broken chain needs reset", mmio_read32(base + VIRTIO_REG_STATUS) & 0x40u, 0x40);
     check("nothing served", used.idx, seen);
     set_up();
-    check("a reset clears it", mmio_read32(base + 0x070), 15);
+    check("a reset clears it", mmio_read32(base + VIRTIO_REG_STATUS), 15);
     check("served again", one(0, 3, in, 1), 0);
+    /* A chain naming a descriptor past the queue's size, as a head or as a next: also a reset. */
+    prepare(0, 0, 0, in, 1);
+    descs[0].next = QUEUE;
+    mmio_write32(base + VIRTIO_REG_QUEUE_NOTIFY, 0);
+    check("next past the queue", mmio_read32(base + VIRTIO_REG_STATUS) & VIRTIO_STATUS_NEEDS_RESET, VIRTIO_STATUS_NEEDS_RESET);
+    set_up();
+    prepare(0, 0, 0, in, 1);
+    avail.ring[0] = QUEUE;
+    mmio_write32(base + VIRTIO_REG_QUEUE_NOTIFY, 0);
+    check("head past the queue", mmio_read32(base + VIRTIO_REG_STATUS) & VIRTIO_STATUS_NEEDS_RESET, VIRTIO_STATUS_NEEDS_RESET);
+    check("nothing served either", used.idx, seen);
+    set_up();
     /* A queue outside RAM. */
-    mmio_write32(base + 0x070, 0);
-    mmio_write32(base + 0x070, 3);
-    mmio_write32(base + 0x070, 11);
-    mmio_write32(base + 0x038, QUEUE);
-    mmio_write32(base + 0x080, 0x10000000u);
-    mmio_write32(base + 0x090, (uint32_t)(uintptr_t)&avail);
-    mmio_write32(base + 0x0a0, (uint32_t)(uintptr_t)&used);
-    mmio_write32(base + 0x044, 1);
-    mmio_write32(base + 0x070, 15);
+    mmio_write32(base + VIRTIO_REG_STATUS, 0);
+    mmio_write32(base + VIRTIO_REG_STATUS, 3);
+    mmio_write32(base + VIRTIO_REG_STATUS, 11);
+    mmio_write32(base + VIRTIO_REG_QUEUE_NUM, QUEUE);
+    mmio_write32(base + VIRTIO_REG_QUEUE_DESC, 0x10000000u);
+    mmio_write32(base + VIRTIO_REG_QUEUE_DRIVER, (uint32_t)(uintptr_t)&avail);
+    mmio_write32(base + VIRTIO_REG_QUEUE_DEVICE, (uint32_t)(uintptr_t)&used);
+    mmio_write32(base + VIRTIO_REG_QUEUE_READY, 1);
+    mmio_write32(base + VIRTIO_REG_STATUS, 15);
     avail.idx = 1;
-    mmio_write32(base + 0x050, 0);
-    check("descriptors outside RAM", mmio_read32(base + 0x070) & 0x40u, 0x40);
+    mmio_write32(base + VIRTIO_REG_QUEUE_NOTIFY, 0);
+    check("descriptors outside RAM", mmio_read32(base + VIRTIO_REG_STATUS) & 0x40u, 0x40);
     set_up();
     /* Register misuse: each an access fault. */
     faults = 0;
-    (void)*(volatile uint8_t *)(uintptr_t)(base + 0x070);
-    *(volatile uint32_t *)(uintptr_t)(base + 0x000) = 1;
-    (void)*(volatile uint32_t *)(uintptr_t)(base + 0x050);
-    (void)*(volatile uint32_t *)(uintptr_t)(base + 0x0f8);
+    (void)*(volatile uint8_t *)(uintptr_t)(base + VIRTIO_REG_STATUS);
+    *(volatile uint32_t *)(uintptr_t)(base + VIRTIO_REG_MAGIC) = 1;
+    (void)*(volatile uint32_t *)(uintptr_t)(base + VIRTIO_REG_QUEUE_NOTIFY);
+    (void)*(volatile uint32_t *)(uintptr_t)(base + 0x0f8); /* no register there */
     check("faults", faults, 4);
     /* A notify with the queue not ready does nothing, and does not wait. */
-    mmio_write32(base + 0x044, 0);
+    mmio_write32(base + VIRTIO_REG_QUEUE_READY, 0);
     prepare(0, 0, 0, in, 1);
-    mmio_write32(base + 0x050, 0);
+    mmio_write32(base + VIRTIO_REG_QUEUE_NOTIFY, 0);
     check("queue not ready", used.idx, seen);
     rv32_puts("virtiocheck: our refusals\n");
 }
@@ -196,7 +199,7 @@ static int find_disk(const fdt *tree)
         if (status != FDT_OK) {
             return 0;
         }
-        if (mmio_read32(base + 0x008) == 2) {
+        if (mmio_read32(base + VIRTIO_REG_DEVICE) == 2) {
             /* The source is this node's `interrupts`: fdt_cell answers for the first node only, so
              * the check below trusts virt's layout, slot n at source n + 1. */
             source = 1 + (base - 0x10001000u) / 0x1000u;
@@ -215,35 +218,35 @@ int main(uint32_t hart, uintptr_t tree_address)
         rv32_puts("virtiocheck: FAILED no PLIC or no block device\n");
         return 1;
     }
-    check("magic", mmio_read32(base + 0x000), 0x74726976u);
-    check("version", mmio_read32(base + 0x004), 2);
-    check("capacity", mmio_read32(base + 0x100), 256);
-    fold(mmio_read32(base + 0x004));
-    fold(mmio_read32(base + 0x100));
+    check("magic", mmio_read32(base + VIRTIO_REG_MAGIC), VIRTIO_MAGIC_VALUE);
+    check("version", mmio_read32(base + VIRTIO_REG_VERSION), 2);
+    check("capacity", mmio_read32(base + VIRTIO_REG_CAPACITY), 256);
+    fold(mmio_read32(base + VIRTIO_REG_VERSION));
+    fold(mmio_read32(base + VIRTIO_REG_CAPACITY));
     /* Initialization (virtio 1.x, "Device Initialization"). */
-    mmio_write32(base + 0x070, 0);
-    mmio_write32(base + 0x070, 1);
-    mmio_write32(base + 0x070, 3);
-    mmio_write32(base + 0x014, 1);
-    check("VERSION_1 offered", mmio_read32(base + 0x010) & 1u, 1);
-    mmio_write32(base + 0x024, 1);
-    mmio_write32(base + 0x020, 1);
-    mmio_write32(base + 0x024, 0);
-    mmio_write32(base + 0x020, 0);
-    mmio_write32(base + 0x070, 11);
-    check("FEATURES_OK", mmio_read32(base + 0x070) & 8u, 8);
-    mmio_write32(base + 0x030, 0);
-    check("queue not ready", mmio_read32(base + 0x044), 0);
-    check("queue size", mmio_read32(base + 0x034) >= QUEUE, 1);
-    mmio_write32(base + 0x038, QUEUE);
-    mmio_write32(base + 0x080, (uint32_t)(uintptr_t)descs);
-    mmio_write32(base + 0x084, 0);
-    mmio_write32(base + 0x090, (uint32_t)(uintptr_t)&avail);
-    mmio_write32(base + 0x094, 0);
-    mmio_write32(base + 0x0a0, (uint32_t)(uintptr_t)&used);
-    mmio_write32(base + 0x0a4, 0);
-    mmio_write32(base + 0x044, 1);
-    mmio_write32(base + 0x070, 15);
+    mmio_write32(base + VIRTIO_REG_STATUS, 0);
+    mmio_write32(base + VIRTIO_REG_STATUS, 1);
+    mmio_write32(base + VIRTIO_REG_STATUS, 3);
+    mmio_write32(base + VIRTIO_REG_DEVICE_FEATURES_SEL, 1);
+    check("VERSION_1 offered", mmio_read32(base + VIRTIO_REG_DEVICE_FEATURES) & 1u, 1);
+    mmio_write32(base + VIRTIO_REG_DRIVER_FEATURES_SEL, 1);
+    mmio_write32(base + VIRTIO_REG_DRIVER_FEATURES, 1);
+    mmio_write32(base + VIRTIO_REG_DRIVER_FEATURES_SEL, 0);
+    mmio_write32(base + VIRTIO_REG_DRIVER_FEATURES, 0);
+    mmio_write32(base + VIRTIO_REG_STATUS, 11);
+    check("FEATURES_OK", mmio_read32(base + VIRTIO_REG_STATUS) & 8u, 8);
+    mmio_write32(base + VIRTIO_REG_QUEUE_SEL, 0);
+    check("queue not ready", mmio_read32(base + VIRTIO_REG_QUEUE_READY), 0);
+    check("queue size", mmio_read32(base + VIRTIO_REG_QUEUE_NUM_MAX) >= QUEUE, 1);
+    mmio_write32(base + VIRTIO_REG_QUEUE_NUM, QUEUE);
+    mmio_write32(base + VIRTIO_REG_QUEUE_DESC, (uint32_t)(uintptr_t)descs);
+    mmio_write32(base + VIRTIO_REG_QUEUE_DESC + 4, 0);
+    mmio_write32(base + VIRTIO_REG_QUEUE_DRIVER, (uint32_t)(uintptr_t)&avail);
+    mmio_write32(base + VIRTIO_REG_QUEUE_DRIVER + 4, 0);
+    mmio_write32(base + VIRTIO_REG_QUEUE_DEVICE, (uint32_t)(uintptr_t)&used);
+    mmio_write32(base + VIRTIO_REG_QUEUE_DEVICE + 4, 0);
+    mmio_write32(base + VIRTIO_REG_QUEUE_READY, 1);
+    mmio_write32(base + VIRTIO_REG_STATUS, 15);
     rv32_puts("virtiocheck: set up\n");
 
     /* A sector out and back. */
@@ -262,10 +265,10 @@ int main(uint32_t hart, uintptr_t tree_address)
     rv32_puts("virtiocheck: sector 3 written and read\n");
 
     /* The interrupt: InterruptStatus and the PLIC's pending bit until acknowledged. */
-    check("interrupt status", mmio_read32(base + 0x060) & 1u, 1);
+    check("interrupt status", mmio_read32(base + VIRTIO_REG_INTERRUPT_STATUS) & 1u, 1);
     check("PLIC pending", (mmio_read32(plic + RV32_PLIC_PENDING) >> source) & 1u, 1);
-    mmio_write32(base + 0x064, 1);
-    check("acknowledged", mmio_read32(base + 0x060) & 1u, 0);
+    mmio_write32(base + VIRTIO_REG_INTERRUPT_ACK, 1);
+    check("acknowledged", mmio_read32(base + VIRTIO_REG_INTERRUPT_STATUS) & 1u, 0);
     check("PLIC quiet", (mmio_read32(plic + RV32_PLIC_PENDING) >> source) & 1u, 0);
     rv32_puts("virtiocheck: interrupt\n");
 
@@ -281,12 +284,26 @@ int main(uint32_t hart, uintptr_t tree_address)
 
     /* Refusals. */
     uint32_t past = one(0, 256, in, 1), unknown = one(6, 0, in, 1); /* no such type */
-    check("past the end", past, 1);   /* VIRTIO_BLK_S_IOERR */
-    check("unknown type", unknown, 2); /* VIRTIO_BLK_S_UNSUPP */
+    check("past the end", past, VIRTIO_BLK_IOERR);
+    check("unknown type", unknown, VIRTIO_BLK_UNSUPP);
     fold(past);
     fold(unknown);
+    /* Two sectors from the last one: the request crosses the end, so none of it is written. */
+    for (uint32_t i = 0; i < 2 * SECTOR / 4; i++) {
+        two[i] = 0xa5a5a5a5u ^ i;
+    }
+    prepare_length(0, VIRTIO_BLK_OUT, 255, two, 2 * SECTOR, 0);
+    submit(1);
+    uint32_t crossing = statuses[0], untouched = one(VIRTIO_BLK_IN, 255, in, 1) == VIRTIO_BLK_OK;
+    for (uint32_t i = 0; i < SECTOR / 4; i++) {
+        untouched &= in[i] == 0; /* the disk starts blank */
+    }
+    check("across the end", crossing, VIRTIO_BLK_IOERR);
+    check("last sector untouched", untouched, 1);
+    fold(crossing);
+    fold(untouched);
     rv32_puts("virtiocheck: refusals\n");
-    mmio_write32(base + 0x064, mmio_read32(base + 0x060));
+    mmio_write32(base + VIRTIO_REG_INTERRUPT_ACK, mmio_read32(base + VIRTIO_REG_INTERRUPT_STATUS));
     const char *machine = "";
     (void)fdt_root_string(&tree, "compatible", &machine);
     if (fdt_same(machine, "tiny-processors,rv32-machine")) {
@@ -294,7 +311,7 @@ int main(uint32_t hart, uintptr_t tree_address)
     } else {
         rv32_puts("virtiocheck: our refusals skipped\n");
     }
-    mmio_write32(base + 0x070, 0);
+    mmio_write32(base + VIRTIO_REG_STATUS, 0);
     if (failures) {
         return 1;
     }

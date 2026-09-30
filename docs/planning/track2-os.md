@@ -7,6 +7,25 @@ Written 2026-09-30, after Track 1. This fixes the contract and acceptance for
 own commit with its own evidence; the record is
 [docs/rv32-os.md](../rv32-os.md).
 
+**As built.** The plan below is kept as written; where the build departed
+from it, the [record](../rv32-os.md) and [docs/rv32.md](../rv32.md) are the
+contract:
+
+- Slots are 128 KiB, 24 of them from `0x8010_0000`, and a program may span
+  several (O4); they were 256 KiB in O2, as planned.
+- The shell runs a program by its name (`NAME [ARGS]`, `NAME &`), not
+  `run NAME`, and gained `wait` (O4) and file programs (`cat`, `write`,
+  `files`, `fill`) rather than built-in `ls`/`cat` for files.
+- The process table has eight entries, not four.
+- The second boot is a second run on the disk the first left, on the
+  emulator and the RTL (`run-rv32-os-boot2`) and on QEMU
+  (`run-rv32-os-qemu-reboot`), not a mid-run reset on the RTL.
+- The file calls are `open`, `read`, `write`, `close` and `files`; there is
+  no seek, and opening for writing truncates.
+- O5 grants the framebuffer to every process and the accelerators only to a
+  program flagged for them, which is trusted: the engines' DMA is not held by
+  PMP.
+
 The track keeps the project's two rules. Every hardware change is made twice,
 in the emulator and in the RTL, and compared. Every program that can run on
 QEMU's `virt` board does, as an independent reference: Track 1 made that

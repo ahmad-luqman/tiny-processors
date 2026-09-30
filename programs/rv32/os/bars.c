@@ -38,6 +38,5 @@ int main(void)
             sys_present();
         }
     }
-    report("bars", "24 frames", sum);
-    return 0;
+    return report("bars", "24 frames", sum);
 }

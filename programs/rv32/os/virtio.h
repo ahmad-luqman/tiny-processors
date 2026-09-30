@@ -14,5 +14,8 @@ uint32_t virtio_init(uint32_t base);
 /* Read or write `count` whole sectors from `sector` into or out of `buffer` (word aligned);
  * returns 1 on success. */
 int virtio_transfer(uint32_t sector, void *buffer, uint32_t count, int write);
+/* Why the device stopped being used, or 0: after the device asks for a reset or a request never
+ * completes, every later transfer fails at once. */
+const char *virtio_failure(void);
 
 #endif

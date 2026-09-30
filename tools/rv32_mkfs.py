@@ -60,7 +60,10 @@ def entries(disk: bytes) -> list[tuple[str, int, int, int]]:
     out = []
     for i in range(ENTRIES):
         name, first, capacity, size = ENTRY.unpack_from(disk, DIRECTORY * SECTOR + ENTRY.size * i)
-        name = name.rstrip(b"\0").decode()
+        try:
+            name = name.rstrip(b"\0").decode()
+        except UnicodeDecodeError:
+            raise FsError(f"directory entry {i}: the name {name!r} is not UTF-8") from None
         if name:
             if first < DATA or first + capacity > SECTORS or size > capacity * SECTOR:
                 raise FsError(f"{name}: extent {first}+{capacity} or size {size} does not fit the disk")

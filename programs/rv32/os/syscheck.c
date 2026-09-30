@@ -3,6 +3,8 @@
  * promises; one line per group, then `syscheck: ok` or the failures. */
 #include "ulib.h"
 
+extern char _stack_top[]; /* the end of my slots (user.ld) */
+
 static uint32_t failures;
 
 static void check(const char *what, uint32_t got, uint32_t want)
@@ -29,6 +31,21 @@ int main(void)
     check("read from fd 1", sys_read(1, buffer, 1), SYS_ERROR);
     check("read nothing", sys_read(0, buffer, 0), SYS_ERROR);
     check("unknown call", syscall3(999, 0, 0, 0), SYS_ERROR);
+    /* Calls that write into my memory refuse a buffer outside it: the kernel's, one that runs
+     * past the end of my slots, and one whose end wraps around the address space. */
+    uint32_t top = (uint32_t)(uintptr_t)_stack_top, kernel = 0x80000000u, wraps = 0xfffffff0u;
+    check("read into kernel memory", sys_read(0, (void *)(uintptr_t)kernel, 4), SYS_ERROR);
+    check("read across my end", sys_read(0, (void *)(uintptr_t)(top - 4), 8), SYS_ERROR);
+    check("read wrapping around", sys_read(0, (void *)(uintptr_t)wraps, 0x20), SYS_ERROR);
+    check("write across my end", sys_write(1, (const void *)(uintptr_t)(top - 4), 8), SYS_ERROR);
+    check("list into kernel memory", sys_list(0, (char *)(uintptr_t)kernel, 8), SYS_ERROR);
+    check("list across my end", sys_list(0, (char *)(uintptr_t)(top - 4), 8), SYS_ERROR);
+    check("ps into kernel memory", sys_ps(0, (char *)(uintptr_t)kernel, 48), SYS_ERROR);
+    check("ps across my end", sys_ps(0, (char *)(uintptr_t)(top - 4), 48), SYS_ERROR);
+    check("ps wrapping around", sys_ps(0, (char *)(uintptr_t)wraps, 48), SYS_ERROR);
+    check("files into kernel memory", sys_files(0, (char *)(uintptr_t)kernel, 20), SYS_ERROR);
+    check("files across my end", sys_files(0, (char *)(uintptr_t)(top - 4), 20), SYS_ERROR);
+    check("open a kernel name", sys_open((const char *)(uintptr_t)kernel, O_READ), SYS_ERROR);
     u_puts("syscheck: pointers\n");
     /* The heap: sbrk moves the break and stops below the stack. */
     uint32_t start = (uint32_t)(uintptr_t)sys_sbrk(0);

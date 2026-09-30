@@ -8,7 +8,8 @@
 
 #include <stdint.h>
 
-/* "NAME: WHAT, sum XXXXXXXX, preempted yes|no" into NAME.out. */
-void report(const char *name, const char *what, uint32_t sum);
+/* "NAME: WHAT, sum XXXXXXXX, preempted yes|no" into NAME.out; returns 0, or 2 (after saying so on
+ * the console) when the file could not be written. */
+int report(const char *name, const char *what, uint32_t sum);
 
 #endif

@@ -188,6 +188,20 @@ class ImageCheckerTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertEqual(len(check_listing(base + line, allow_system=True)), 1)
 
+    def test_user_gate_admits_ecall_unimp_and_counter_reads_only(self):
+        """O5: --allow-user admits what a user-mode program may run, and none of the machine's
+        instructions or CSRs."""
+        base = "80000000: 00040117     \tauipc\tsp, 0x40\n"
+        for line in ("80000004: 00000073     \tecall", "80000004: c0001073     \tunimp",
+                     "80000004: c0102573     \trdtime\ta0"):
+            with self.subTest(line=line):
+                self.assertEqual(check_listing(base + line, allow_user=True), [])
+        for line in ("80000004: 30002573     \tcsrr\ta0, mstatus", "80000004: 30200073     \tmret",
+                     "80000004: 10500073     \twfi", "80000004: 34051073     \tcsrw\tmscratch, a0",
+                     "80000004: c0101073     \tcsrw\ttime, zero"):
+            with self.subTest(line=line):
+                self.assertEqual(len(check_listing(base + line, allow_user=True)), 1)
+
     def test_m_and_counter_gates_admit_exactly_their_instructions(self):
         base = "80000000: 00040117     \tauipc\tsp, 0x40\n"
         m_lines = ["80000004: 02b50533     \tmul\ta0, a0, a1", "80000004: 02b51533     \tmulh\ta0, a0, a1",
@@ -245,7 +259,7 @@ class ImageCheckerTests(unittest.TestCase):
             self.assertEqual(check(good, "--listing", str(listing)).returncode, 1, "without either flag mul is refused")
             result = check(good, "--require-m")
             self.assertEqual(result.returncode, 2, "--require-m needs a listing to inspect")
-            self.assertIn("--allow-m, --allow-counters, --allow-privileged and --allow-system require --listing", result.stderr)
+            self.assertIn("--allow-m, --allow-counters, --allow-privileged, --allow-system and --allow-user require --listing", result.stderr)
 
     def test_selfcheck_expected_checksum_matches_source_and_makefile(self):
         checksum = 2166136261

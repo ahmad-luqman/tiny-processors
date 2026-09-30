@@ -5,8 +5,10 @@ session runs on the emulator and the RTL in step-tick mode, where the whole trac
 lines included, must agree; the Make targets run it on QEMU and with cycle ticks.
 """
 import os
+import re
 import shutil
 import struct
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,7 +21,8 @@ from tools.rv32_image import flatten, parse_elf
 from tools.rv32_rtl import ROOT, Run, compare_backends, diff_traces, run_emulator, run_rtl, write_image
 
 OS = ROOT / "build/rv32/os"
-PROGRAMS = ("sh", "hello", "primes", "pong", "tetris", "menu", "syscheck", "fault", "cat", "write", "files", "bars", "life")
+PROGRAMS = ("sh", "hello", "primes", "pong", "tetris", "menu", "syscheck", "fault", "cat", "write", "files", "bars", "life",
+            "fill")
 
 
 def elfs(*names):
@@ -89,6 +92,7 @@ class FileSystemToolTest(unittest.TestCase):
                              ("long name", lambda: mkfs.add(disk, "x" * 20, b"")),
                              ("too big", lambda: mkfs.add(disk, "big", bytes(0x20000))),
                              ("missing", lambda: mkfs.read(disk, "nope")),
+                             ("undecodable name", lambda: mkfs.entries(disk[:512] + b"\xff" * 20 + disk[532:])),
                              ("not tfs", lambda: mkfs.entries(bytes(0x20000))),
                              ("wrong size", lambda: mkfs.entries(bytes(512)))):
             with self.subTest(name), self.assertRaises(mkfs.FsError):
@@ -149,6 +153,22 @@ class ConsoleReceiveTest(unittest.TestCase):
         self.assertEqual(loads, ["00000021", "0000006f", "00000021", "0000006b", "00000020", "00000000"])
 
 
+class LayoutTest(unittest.TestCase):
+    """The slot layout is written in three places: sys.h (the kernel and the programs), the
+    Makefile (the link addresses) and tools/rv32_ramdisk.py (the RAM disk's checks)."""
+
+    def test_the_three_descriptions_of_the_slots_agree(self):
+        text = (ROOT / "programs/rv32/os/sys.h").read_text()
+        header = {name: int(value, 16) for name, value in re.findall(r"#define (OS_\w+)\s+(0x[0-9a-f]+)u", text)}
+        header["OS_SLOTS"] = int(re.search(r"#define OS_SLOTS\s+(\d+)u", text).group(1))
+        make = subprocess.run(["make", "-s", "--no-print-directory", "print-rv32-os-layout"], cwd=ROOT,
+                              capture_output=True, text=True, check=True).stdout.split()
+        self.assertEqual((header["OS_SLOT_BASE"], header["OS_SLOT_SIZE"]), (int(make[0], 16), int(make[1], 16)))
+        self.assertEqual((header["OS_SLOT_BASE"], header["OS_SLOT_SIZE"], header["OS_SLOTS"], header["OS_STACK_SIZE"]),
+                         (rv32_ramdisk.SLOT_BASE, rv32_ramdisk.SLOT_SIZE, rv32_ramdisk.SLOTS, rv32_ramdisk.STACK_SIZE))
+        self.assertEqual(header["OS_SLOT_BASE"], 0x80000000 + header["OS_KERNEL_SIZE"])
+
+
 class KernelTest(unittest.TestCase):
     """The kernel's console session in step-tick mode: the emulator and the RTL agree trace for trace."""
     setUpClass = classmethod(integer_tests.RtlTest.setUpClass.__func__)
@@ -168,14 +188,50 @@ class KernelTest(unittest.TestCase):
                 shutil.copy(OS / "disk.img", disk)
             emulator = run_emulator(self.emulator, image, Path(directory) / "emu.trace", console_input=session, disk=disks[0])
             rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", seed=11, ticks="steps",
-                          console_input=session, max_cycles=30000000, timeout=600, disk=disks[1])
+                          console_input=session, max_cycles=60000000, timeout=900, disk=disks[1])
+            # The outcome first: a run that failed leaves a disk that says nothing about the kernel.
+            self.assertEqual(rtl.halt["outcome"], "pass", rtl.stderr)
             self.assertEqual(disks[0].read_bytes(), disks[1].read_bytes(), "both backends leave the same disk")
-            self.assertEqual(mkfs.read(disks[1].read_bytes(), "note"), b"hello disk\n")
-        self.assertEqual(rtl.halt["outcome"], "pass", rtl.stderr)
+            self.assertEqual(mkfs.read(disks[1].read_bytes(), "note"), b"hi\n")
+            self.assertEqual(len(mkfs.read(disks[1].read_bytes(), "big")), 4096, "a file stops at its capacity")
         self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
         self.assertEqual(rtl.console, (ROOT / "programs/rv32/os/session.expected").read_text())
         self.assertGreater(rtl.halt["interrupts"], 10, "the timer ticked and the kernel took it")
         self.assertIn("kernel: pid 9 fault killed: cause 5", rtl.console)
+
+
+    def test_two_jobs_share_the_machine_fairly(self):
+        """O4's round robin, measured: in the jobs session the emulator's trace (read as it is
+        written, through a pipe) shows the timer passing the machine back and forth between bars
+        and life, and while both run each gets about half of the instructions."""
+        image = OS / "kernel.bin"
+        if not image.exists():
+            self.skipTest("run make check-rv32-os-image")
+        slot = lambda pc: (pc - 0x80100000) // 0x20000 if pc >= 0x80100000 else None  # noqa: E731
+        bars, life = 12, 13
+        with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
+            disk, fifo = Path(directory) / "jobs.disk", Path(directory) / "trace"
+            shutil.copy(OS / "disk.img", disk)
+            os.mkfifo(fifo)
+            process = subprocess.Popen([str(self.emulator), "--image", str(image), "--disk", str(disk), "--trace", str(fifo),
+                                        "--console-input", str(ROOT / "programs/rv32/os/jobs.session")],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            order = []  # (step, program) for each instruction of either job
+            with open(fifo) as trace:
+                for line in trace:
+                    step, pc = line.split(maxsplit=2)[:2]
+                    which = slot(int(pc, 16))
+                    if which in (bars, life):
+                        order.append((int(step), which))
+            console, _ = process.communicate(timeout=120)
+        self.assertEqual(process.returncode, 0)
+        self.assertIn("preempted yes", console)
+        switches = [i for i in range(1, len(order)) if order[i][1] != order[i - 1][1]]
+        self.assertGreater(len(switches), 100, "the timer passed the machine between them many times")
+        both = order[switches[0]:switches[-1]]  # while both were running
+        share = sum(which == bars for _, which in both) / len(both)
+        self.assertGreater(share, 0.4, f"bars ran {share:.0%} of the time both were ready")
+        self.assertLess(share, 0.6, f"bars ran {share:.0%} of the time both were ready")
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ static void add(const char *s)
     }
 }
 
-void report(const char *name, const char *what, uint32_t sum)
+int report(const char *name, const char *what, uint32_t sum)
 {
     char hex[9], file[20];
     for (int i = 7; i >= 0; i--) {
@@ -39,9 +39,16 @@ void report(const char *name, const char *what, uint32_t sum)
     file[n + 4] = 0;
     uint32_t fd = sys_open(file, O_WRITE);
     if (fd == SYS_ERROR) {
-        (void)sys_write(1, line, length);
-        return;
+        (void)sys_write(1, line, length); /* no disk: the console instead */
+        return 0;
     }
-    (void)sys_write(fd, line, length);
-    sys_close(fd);
+    int ok = sys_write(fd, line, length) == length;
+    ok = sys_close(fd) == 0 && ok;
+    if (!ok) {
+        u_puts(name);
+        u_puts(": cannot write ");
+        u_puts(file);
+        u_puts("\n");
+    }
+    return ok ? 0 : 2;
 }

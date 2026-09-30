@@ -73,7 +73,7 @@
  * device and its disk, held in memory and written through to the file it came from. */
 typedef struct {
     uint8_t status;
-    bool features_sel, driver_features_sel, queue_sel_zero, queue_ready, interrupt;
+    bool features_sel, queue_sel_zero, queue_ready, interrupt;
     uint32_t queue_num, desc_lo, desc_hi, driver_lo, driver_hi, device_lo, device_hi;
     uint16_t last_avail, used_idx;
     uint8_t disk[VIRTIO_DISK_SIZE];

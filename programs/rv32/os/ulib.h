@@ -45,10 +45,10 @@ static inline uint32_t sys_switches(void) { return syscall3(SYS_SWITCHES, 0, 0, 
 
 uint32_t u_strlen(const char *s);
 int u_strcmp(const char *a, const char *b);
-int u_starts(const char *s, const char *prefix);   /* s begins with prefix */
-void *memcpy(void *dst, const void *src, size_t n);
+void *memcpy(void *dst, const void *src, size_t n); /* mem.c */
 void *memset(void *dst, int value, size_t n);
 void u_puts(const char *s);                        /* the string, no newline */
+uint32_t u_decimal(uint32_t value, char digits[11]); /* the digits end at digits[10] = 0; returns where they start */
 void u_putdec(uint32_t value);
 void u_puthex(uint32_t value);                     /* eight lowercase digits */
 uint32_t u_parse(const char *s, const char **end); /* a decimal number */
