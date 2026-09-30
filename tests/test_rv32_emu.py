@@ -367,7 +367,7 @@ class EmulatorTest(unittest.TestCase):
         self.assertEqual((result.state.mcause, result.state.mepc, result.state.mtval), (11, RAM, 0))
         self.assertIn("unhandled-trap mcause=11 mepc=80000000 mtval=00000000 then mcause=1 mtval=00000000 at pc=00000000",
                       result.stderr)
-        self.assertEqual(result.trace, [f"1 80000000 00000073 trap 11 00000000", "2 00000000 00000000 trap 1 00000000"])
+        self.assertEqual(result.trace, ["1 80000000 00000073 trap 11 00000000", "2 00000000 00000000 trap 1 00000000"])
         self.assertEqual(result.state.steps, 2)
         self.assertEqual(result.state.retired, 0)
         # A handler whose first instruction is illegal is also a double fault.

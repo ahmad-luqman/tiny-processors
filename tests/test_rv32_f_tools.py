@@ -44,7 +44,7 @@ class FloatingToolsTest(unittest.TestCase):
             run = subprocess.run([sys.executable, str(ROOT/'tools/rv32_image.py'),
                                   '/unused/image.elf', option], capture_output=True, text=True)
             self.assertEqual(run.returncode, 2)
-            self.assertIn('--allow-f, --allow-m, --allow-counters and --allow-privileged require --listing', run.stderr)
+            self.assertIn('--allow-f, --allow-m, --allow-counters, --allow-privileged, --allow-system and --allow-user require --listing', run.stderr)
 
     def test_compiled_images_abi_and_real_instructions(self):
         expectations = {'floatcheck': ('fmul.s', 'fadd.s', 'fdiv.s', 'fsub.s', 'fmv.w.x', 'fmv.x.w'),

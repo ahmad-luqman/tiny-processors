@@ -154,7 +154,6 @@ class EmulatorDevice(unittest.TestCase):
         # The directed fault jobs (every ERROR, including ILLEGAL, MISMATCH and PC=128) and the
         # raster edge cases, through the CPU access path with holds on alternate jobs.
         from tools.rv32_g3d_corpus import directed_faults, raster_cases
-        from tools.rv32_g3d_model import unpack_triangle
         seen = set()
         for i, scene in enumerate(directed_faults() + raster_cases()):
             name, program, consts, inputs, triangles, vcount, limit, zbase = scene

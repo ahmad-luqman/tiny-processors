@@ -514,7 +514,12 @@ class RtlTest(unittest.TestCase):
             self.assertIsNotNone(emulator.halt, emulator.stderr)
             self.assertEqual((emulator.halt["halt"], emulator.halt["outcome"], emulator.console),
                              ("done", "pass", "PASS 807d9fad\n"), emulator.stderr)
-            self.assertEqual(len(emulator.trace), 32610)
+            # The counts depend on the compiler that built the image, so they come from the emulator's
+            # trace, which the RTL must match line for line: a fetch per step plus its data access,
+            # 4 cycles a step and one more with a data access, plus the stalls on each transfer.
+            steps = len(emulator.trace)
+            accesses = sum(" mem[" in line for line in emulator.trace)
+            self.assertGreater(accesses, 0)
             for stall, seed in ((0, None), (1, None), (None, SEED)):
                 with self.subTest(stall=stall, seed=seed):
                     rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", stall=stall, seed=seed)
@@ -525,9 +530,9 @@ class RtlTest(unittest.TestCase):
                     self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
                     relation, holds = cycle_relation(rtl)
                     self.assertTrue(holds, relation)
-                    self.assertEqual(rtl.halt["transfers"], 40665, "32,610 fetches and 8,055 data accesses")
+                    self.assertEqual(rtl.halt["transfers"], steps + accesses)
                     if stall is not None:
-                        self.assertEqual(rtl.halt["cycles"], 138495 + stall * 40665)
+                        self.assertEqual(rtl.halt["cycles"], 4 * steps + accesses + stall * (steps + accesses))
 
     def test_diag_image_when_built(self):
         """The M5 diagnostic on the RTL: it reads the timer, so the comparison is at the results
@@ -1110,7 +1115,7 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("1 trap(s) alike", good.stdout)
         self.assertNotIn("traces identical", good.stdout, "results mode does not diff traces")
         # The same number of traps with a different value: a fault-handling divergence must not pass.
-        retrapped = self.wrapper("retrapped", 'for a in "$@"; do case $prev in --trace) sed -i "" "s/trap 11 00000000/trap 11 00000001/" "$a";; esac; prev=$a; done')
+        retrapped = self.wrapper("retrapped", 'for a in "$@"; do case $prev in --trace) sed "s/trap 11 00000000/trap 11 00000001/" "$a" > "$a.tmp" && mv "$a.tmp" "$a";; esac; prev=$a; done')
         result = self.run_results(retrapped)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("trap mismatch", result.stderr)
@@ -1118,7 +1123,7 @@ class RunnerTest(unittest.TestCase):
         # that reads it may not be trace-diffed: its traces differ by design (device time).
         result = self.run_results(self.emulator, program="loop")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("never did", result.stderr)
+        self.assertIn("this one does not, use --compare trace", result.stderr)
         result = self.run_results(self.emulator, compare="trace")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("reads the timer or the cycle/time counters, so its traces differ by design", result.stderr)

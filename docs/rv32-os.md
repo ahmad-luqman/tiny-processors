@@ -436,6 +436,17 @@ with the FDT reader's new `"@name"` query (the `/cpus` node's own property).
 Without that, QEMU runs the demo programs so fast that a 1 ms quantum might
 never interrupt them.
 
+Even 100 µs of host time was too long on a fast host: `life` finished all
+16 generations inside one quantum and printed "preempted no" on QEMU
+(issue #20). So the OS sessions run QEMU with `-icount shift=3,sleep=off`
+(`tools/rv32_run_qemu.py --icount 3`, `RV32_OS_QEMU_ICOUNT` in the Makefile):
+`mtime` then advances 8 ns for every instruction retired, and `wfi` skips
+straight to the next timer deadline rather than waiting on the host. A
+quantum is 12,500 instructions on every host, near the emulator's 10,000,
+and the QEMU transcripts depend only on the program. The other QEMU runs
+(selfcheck, the platform, irq and virtio checks) keep host time; none of
+their output depends on how fast it passes.
+
 ### Slots
 
 Twelve 256 KiB slots were all taken by the end of O3. Slots are now 128 KiB
@@ -491,8 +502,8 @@ use both. The default comparison is unchanged for everything else.
 ### Evidence (O4)
 
 - **Two programs:** the `bars &`, `life &`, `wait` session gives the same
-  transcript and `PASS 408a6738` on QEMU `virt` (three runs, "preempted yes"
-  each time), the emulator (6,560,282 steps, 626 interrupts) and Verilator
+  transcript and `PASS 408a6738` on QEMU `virt` (with instruction-counted
+  time, ten runs in a row, "preempted yes" each time), the emulator (6,560,282 steps, 626 interrupts) and Verilator
   with a stall per request (39,935,033 cycles), with 40 presents each and
   identical final disks. In step-tick mode with seeded stalls the emulator
   and Verilator traces are identical, 6,560,282 lines, every switch and all

@@ -33,7 +33,7 @@ def build(optimization):
                '-o', str(library), *map(str, SOURCES)]
     subprocess.run(command, check=True)
     library_handle = ctypes.CDLL(str(library))
-    void, u32, i32 = None, ctypes.c_uint32, ctypes.c_int32
+    void, u32 = None, ctypes.c_uint32
     bytes_pointer = ctypes.POINTER(ctypes.c_uint8)
     ints_pointer = ctypes.POINTER(ctypes.c_int32)
     for name, restype, argtypes in (

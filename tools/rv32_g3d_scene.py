@@ -12,7 +12,7 @@ Vertex input slots: 0..2 position, 3 base colour 0x00RRGGBB (raw), 4..6 normal.
 """
 import math
 
-from tools.rv32_g3d_model import ONE, CONSTS, SLOTS, assemble
+from tools.rv32_g3d_model import ONE, CONSTS, assemble
 
 FACES = (  # normal, base colour; the four corners are derived, counter-clockwise from outside
     ((1, 0, 0), 0xe04030), ((-1, 0, 0), 0x30c040), ((0, 1, 0), 0x3060e0),

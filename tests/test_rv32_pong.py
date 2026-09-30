@@ -15,7 +15,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tools.rv32_devices import EVENT_PRESS, EVENT_VALID, KEYS, frame_hash, parse_input_script  # noqa: E402
+from tools.rv32_devices import EVENT_PRESS, EVENT_VALID, KEYS, parse_input_script  # noqa: E402
 from tools.rv32_pong_native import EXPECTED, INPUT, Pong, build, make_surface, run_script  # noqa: E402
 
 FP = 256

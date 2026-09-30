@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 import unittest
-from tools.rv32_asm import LI,LW,SW,SB,SH,ADDI,CSRRS,CSRRW,MRET,FINISH,ECALL,RAM,JALR,LBU,BNE,GPU_BASE,GPU_STATUS,GPU_PARAMS,GPU_ERROR,GPU_STALLS,GPU_COMMAND,DISPLAY,FB
+from tools.rv32_asm import LI,LW,SW,SB,SH,ADDI,CSRRS,CSRRW,MRET,FINISH,ECALL,RAM,LBU,GPU_BASE,GPU_STATUS,GPU_PARAMS,GPU_ERROR,GPU_STALLS,GPU_COMMAND,DISPLAY,FB
 from tools.rv32_rtl import write_image,run_rtl,run_emulator,check_passed,compare_backends,uses_accelerator,simulator_command
 BASE=GPU_BASE
 
