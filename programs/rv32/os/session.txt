@@ -8,6 +8,9 @@ nosuch
 syscheck
 fault load
 fault illegal
+fault kernel
+fault shell
+fault csr
 hello still here
 files
 cat welcome

@@ -215,6 +215,7 @@ def CSRRWI(rd, csr, uimm): return i_type(0x73, rd, 5, uimm, csr)
 def CSRRSI(rd, csr, uimm): return i_type(0x73, rd, 6, uimm, csr)
 def CSRRCI(rd, csr, uimm): return i_type(0x73, rd, 7, uimm, csr)
 MTVEC, MEPC, MCAUSE, MTVAL, MSTATUS = 0x305, 0x341, 0x342, 0x343, 0x300
+MCOUNTEREN, PMPCFG0, PMPCFG1, PMPADDR0 = 0x306, 0x3A0, 0x3A1, 0x3B0  # O5: pmpaddr n is PMPADDR0 + n
 # Zicntr: read-only counters; `rdcycle rd` is `csrrs rd, cycle, x0`.
 CYCLE, TIME, INSTRET, CYCLEH, TIMEH, INSTRETH = 0xC00, 0xC01, 0xC02, 0xC80, 0xC81, 0xC82
 def RDCYCLE(rd): return CSRRS(rd, CYCLE, 0)

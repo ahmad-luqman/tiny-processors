@@ -69,6 +69,14 @@ _Avoid_: an interrupt vector table, the CLINT.
 The RTL's deterministic tick mode (`+ticks=steps`, `--ticks steps`): mtime and cycle advance once per step (an instruction retired or trapped, or an interrupt taken) as on the emulator, and wfi never waits, so timer reads and interrupts land on the same instruction on both backends and traces stay comparable. Accelerators still advance per clock.
 _Avoid_: a faster simulation, a host-time mode.
 
+**User mode**:
+The hart's less privileged mode (Track 2, O5), entered with mret when mstatus.MPP is 0. Programs under the kernel run in it: machine CSRs, mret and wfi are illegal there, ecall is cause 8, and PMP decides what memory it may touch. Interrupts are always enabled in it.
+_Avoid_: supervisor mode, a process (a process runs in user mode; the mode is the hart's).
+
+**PMP**:
+Physical memory protection (Track 2, O5): eight entries (pmpcfg0-1, pmpaddr0-7) of OFF, TOR, NA4 or NAPOT regions with R, W, X and a lock, checked before an access reaches the bus. User mode needs an entry that allows the access; machine mode only obeys locked entries. The kernel grants the running process its slots, the framebuffer and, if it drives them, the accelerators. See [the contract](docs/rv32.md#o5-protection).
+_Avoid_: an MMU, virtual memory, page tables, the bus decoder's access faults (those are for addresses nothing is mapped at).
+
 **SAP8**:
 The project's SAP-inspired teaching CPU and its instruction set.
 _Avoid_: Hack computer, RISC-V CPU.

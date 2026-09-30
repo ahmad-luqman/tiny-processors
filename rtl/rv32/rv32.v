@@ -63,10 +63,11 @@ module rv32 #(
                      CAUSE_ILLEGAL = 4'd2, CAUSE_BREAKPOINT = 4'd3,
                      CAUSE_LOAD_MISALIGNED = 4'd4, CAUSE_LOAD_FAULT = 4'd5,
                      CAUSE_STORE_MISALIGNED = 4'd6, CAUSE_STORE_FAULT = 4'd7,
-                     CAUSE_ECALL = 4'd11;
+                     CAUSE_ECALL_U = 4'd8, CAUSE_ECALL = 4'd11;
     localparam [11:0] CSR_MTVEC = 12'h305, CSR_MEPC = 12'h341, CSR_MCAUSE = 12'h342,
                       CSR_MTVAL = 12'h343, CSR_MSTATUS = 12'h300, CSR_MIE = 12'h304, CSR_MSCRATCH = 12'h340,
-                      CSR_MIP = 12'h344, CSR_FFLAGS = 12'h001, CSR_FRM = 12'h002, CSR_FCSR = 12'h003,
+                      CSR_MIP = 12'h344, CSR_MCOUNTEREN = 12'h306, CSR_PMPCFG0 = 12'h3a0, CSR_PMPCFG1 = 12'h3a1,
+                      CSR_FFLAGS = 12'h001, CSR_FRM = 12'h002, CSR_FCSR = 12'h003,
                       CSR_CYCLE = 12'hc00, CSR_TIME = 12'hc01, CSR_INSTRET = 12'hc02,
                       CSR_CYCLEH = 12'hc80, CSR_TIMEH = 12'hc81, CSR_INSTRETH = 12'hc82;
     localparam [2:0] DIRECT_NONE=3'd0, DIRECT_SIGN=3'd1, DIRECT_CLASS=3'd3;
@@ -88,6 +89,12 @@ module rv32 #(
     reg [2:0] mie_bits; // {MEIE, MTIE, MSIE}
     reg [31:0] mscratch;
     reg fetch_waiting;  // this FETCH has presented its request, so it can no longer be replaced
+    // Protection (O5): the privilege mode (1 machine, 0 user), mstatus.MPP (1 machine, 0 user),
+    // the counters user mode may read, and eight PMP entries.
+    reg priv_m, mpp_m;
+    reg [2:0] mcounteren;
+    reg [7:0] pmpcfg [0:7];
+    reg [31:0] pmpaddr [0:7];
 
     // Decoded fields, combinational from ir.
     wire [4:0] rd, rs1, rs2;
@@ -108,7 +115,8 @@ module rv32 #(
     // is never withdrawn: MEI first, then MSI, then MTI.
     wire [31:0] mip = {20'd0, irq_external, 3'd0, irq_timer, 3'd0, irq_software, 3'd0};
     wire [2:0] irq_ready = {irq_external, irq_timer, irq_software} & mie_bits;
-    wire irq_take = (state == FETCH) && !fetch_waiting && mstatus_mie && (irq_ready != 3'd0);
+    // In user mode interrupts are always enabled (O5).
+    wire irq_take = (state == FETCH) && !fetch_waiting && (mstatus_mie || !priv_m) && (irq_ready != 3'd0);
     wire [3:0] irq_code = irq_ready[2] ? 4'd11 : irq_ready[0] ? 4'd3 : 4'd7;
 
     wire fp_valid, fp_to_integer, fp_from_integer;
@@ -193,7 +201,11 @@ module rv32 #(
         (csr_addr == CSR_MTVEC) ? mtvec :
         (csr_addr == CSR_MEPC) ? mepc :
         (csr_addr == CSR_MCAUSE) ? mcause :
-        (csr_addr == CSR_MSTATUS) ? {24'h80_0078, mstatus_mpie, 3'd0, mstatus_mie, 3'd0} :
+        (csr_addr == CSR_MSTATUS) ? {1'b1, 16'd0, 2'b11, {2{mpp_m}}, 3'd0, mstatus_mpie, 3'd0, mstatus_mie, 3'd0} :
+        (csr_addr == CSR_MCOUNTEREN) ? {29'd0, mcounteren} :
+        (csr_addr == CSR_PMPCFG0) ? {pmpcfg[3], pmpcfg[2], pmpcfg[1], pmpcfg[0]} :
+        (csr_addr == CSR_PMPCFG1) ? {pmpcfg[7], pmpcfg[6], pmpcfg[5], pmpcfg[4]} :
+        (csr_addr[11:3] == 9'h076) ? pmpaddr[csr_addr[2:0]] :
         (csr_addr == CSR_MIE) ? {20'd0, mie_bits[2], 3'd0, mie_bits[1], 3'd0, mie_bits[0], 3'd0} :
         (csr_addr == CSR_MIP) ? mip :
         (csr_addr == CSR_MSCRATCH) ? mscratch :
@@ -258,7 +270,40 @@ module rv32 #(
     // Memory port: a fetch in FETCH, a data access in MEM, nothing otherwise
     // and nothing while reset is asserted (the state register already says
     // FETCH then, so the gate is explicit).
-    assign mem_valid = !reset && ((state == FETCH && !irq_take) || (state == MEM));
+    // PMP (O5): one checker, on the fetch address in FETCH and on the data address in EXECUTE. The
+    // lowest-numbered matching entry decides; user mode needs a match that grants the access,
+    // machine mode only a locked entry's permission. Regions are whole words (granularity 4).
+    wire pmp_fetch = state == FETCH;
+    wire [31:0] pmp_word = {2'b00, pmp_fetch ? pc[31:2] : alu_result[31:2]};
+    wire [2:0] pmp_need = pmp_fetch ? 3'b100 : is_store ? 3'b010 : 3'b001; // X, W, R
+    reg pmp_ok, pmp_found, pmp_match;
+    reg [31:0] pmp_low, pmp_ones;
+    integer entry;
+    always @* begin
+        pmp_ok = priv_m;
+        pmp_found = 1'b0;
+        for (entry = 0; entry < 8; entry = entry + 1) begin
+            pmp_low = entry == 0 ? 32'd0 : pmpaddr[entry == 0 ? 0 : entry - 1];
+            pmp_ones = pmpaddr[entry] ^ (pmpaddr[entry] + 32'd1);
+            case (pmpcfg[entry][4:3])
+                2'd1: pmp_match = pmp_word >= pmp_low && pmp_word < pmpaddr[entry]; // TOR
+                2'd2: pmp_match = pmp_word == pmpaddr[entry];                        // NA4
+                2'd3: pmp_match = ((pmp_word ^ pmpaddr[entry]) & ~pmp_ones) == 32'd0; // NAPOT
+                default: pmp_match = 1'b0;                                           // OFF
+            endcase
+            if (pmp_match && !pmp_found) begin
+                pmp_found = 1'b1;
+                pmp_ok = (priv_m && !pmpcfg[entry][7]) || ((pmpcfg[entry][2:0] & pmp_need) == pmp_need);
+            end
+        end
+    end
+    wire fetch_deny = pmp_fetch && !pmp_ok;
+    // User mode may use the floating CSRs and, as mcounteren allows, the counters (the only CSRs
+    // numbered 0xCxx); a machine CSR, mret or wfi there is an illegal instruction.
+    wire csr_user_ok = csr_addr[9:8] == 2'b00 && (csr_addr[11:10] != 2'b11 || mcounteren[csr_addr[1:0]]);
+    wire priv_illegal = !priv_m && ((is_csr && !csr_user_ok) || is_mret || is_wfi);
+
+    assign mem_valid = !reset && ((state == FETCH && !irq_take && !fetch_deny) || (state == MEM));
     assign mem_fetch = mem_valid && (state == FETCH);
     assign mem_addr = mem_fetch ? pc : alu_out;
     assign mem_we = mem_valid && (state == MEM) && is_store;
@@ -288,6 +333,8 @@ module rv32 #(
                 mcause <= {interrupt, 27'd0, cause};
                 mstatus_mpie <= mstatus_mie;
                 mstatus_mie <= 1'b0;
+                mpp_m <= priv_m;
+                priv_m <= 1'b1;
                 mtval <= value;
                 pc <= mtvec;
                 state <= FETCH;
@@ -313,6 +360,13 @@ module rv32 #(
             mstatus_mie <= 1'b0;
             mstatus_mpie <= 1'b0;
             mie_bits <= 3'd0;
+            priv_m <= 1'b1;
+            mpp_m <= 1'b1;
+            mcounteren <= 3'd0;
+            for (entry = 0; entry < 8; entry = entry + 1) begin
+                pmpcfg[entry] <= 8'd0;
+                pmpaddr[entry] <= 32'd0;
+            end
             mscratch <= 32'd0;
             fetch_waiting <= 1'b0;
             trap_interrupt <= 1'b0;
@@ -343,6 +397,10 @@ module rv32 #(
                     retire_pc <= pc;
                     retire_insn <= 32'd0;
                     take_trap(1'b1, irq_code, 32'd0, pc);
+                end else if (fetch_deny) begin // PMP refuses the fetch before the bus sees it (O5)
+                    retire_pc <= pc;
+                    retire_insn <= 32'd0;
+                    take_trap(1'b0, CAUSE_FETCH_FAULT, pc, pc);
                 end else if (mem_ready) begin
                     ir <= mem_rdata;
                     ir_pc <= pc;
@@ -358,10 +416,10 @@ module rv32 #(
                     b <= fp_store ? f2 : rs2_value;
                     fa <= fp_from_integer ? rs1_value : f1;
                     fb <= f2; fc <= f3; fp_flags <= 5'd0;
-                    if (illegal && !fp_valid)
+                    if ((illegal && !fp_valid) || priv_illegal)
                         take_trap(1'b0, CAUSE_ILLEGAL, ir, ir_pc);
                     else if (is_ecall)
-                        take_trap(1'b0, CAUSE_ECALL, 32'd0, ir_pc);
+                        take_trap(1'b0, priv_m ? CAUSE_ECALL : CAUSE_ECALL_U, 32'd0, ir_pc);
                     else if (is_ebreak)
                         take_trap(1'b0, CAUSE_BREAKPOINT, ir_pc, ir_pc);
                     else
@@ -372,6 +430,8 @@ module rv32 #(
                     taken <= branch_taken;
                     if (access_misaligned)
                         take_trap(1'b0, is_load ? CAUSE_LOAD_MISALIGNED : CAUSE_STORE_MISALIGNED, alu_result, ir_pc);
+                    else if ((is_load || is_store) && !pmp_ok) // PMP, before the bus (O5)
+                        take_trap(1'b0, is_load ? CAUSE_LOAD_FAULT : CAUSE_STORE_FAULT, alu_result, ir_pc);
                     else if (target_misaligned)
                         take_trap(1'b0, CAUSE_TARGET_MISALIGNED, execute_out, ir_pc);
                     else if (fp_valid) begin
@@ -428,16 +488,33 @@ module rv32 #(
                             CSR_MEPC: mepc <= {csr_new[31:2], 2'b00};   // IALIGN is 32
                             CSR_MCAUSE: mcause <= csr_new;
                             CSR_MTVAL: mtval <= csr_new;
-                            CSR_MSTATUS: begin mstatus_mie <= csr_new[3]; mstatus_mpie <= csr_new[7]; end
+                            CSR_MSTATUS: begin
+                                mstatus_mie <= csr_new[3];
+                                mstatus_mpie <= csr_new[7];
+                                mpp_m <= csr_new[12:11] == 2'b11; // WARL: machine or user
+                            end
+                            CSR_MCOUNTEREN: mcounteren <= csr_new[2:0];
+                            CSR_PMPCFG0, CSR_PMPCFG1:
+                                for (entry = 0; entry < 4; entry = entry + 1)
+                                    if (!pmpcfg[{csr_addr[0], entry[1:0]}][7]) // a locked entry ignores writes
+                                        // Bits 6:5 read 0; W without R is reserved and stored as neither.
+                                        pmpcfg[{csr_addr[0], entry[1:0]}] <=
+                                            (csr_new[8 * entry +: 8] & 8'h9f) & ~{6'd0, csr_new[8 * entry + 1] && !csr_new[8 * entry], 1'b0};
                             CSR_MIE: mie_bits <= {csr_new[11], csr_new[7], csr_new[3]};
                             CSR_MSCRATCH: mscratch <= csr_new;
                             // mip's bits are read-only: the write is legal and does nothing.
-                            default: begin end // Floating CSRs were handled above.
+                            default: // pmpaddr0-7, unless the entry or the TOR entry above it is locked
+                                if (csr_addr[11:3] == 9'h076 && !pmpcfg[csr_addr[2:0]][7] &&
+                                    !(csr_addr[2:0] != 3'd7 && pmpcfg[csr_addr[2:0] + 3'd1][7] &&
+                                      pmpcfg[csr_addr[2:0] + 3'd1][4:3] == 2'd1))
+                                    pmpaddr[csr_addr[2:0]] <= csr_new;
                         endcase
                     end
                     if (is_mret) begin
                         mstatus_mie <= mstatus_mpie;
                         mstatus_mpie <= 1'b1;
+                        priv_m <= mpp_m;  // O5: the mode MPP names,
+                        mpp_m <= 1'b0;    // and MPP becomes the least privileged mode
                     end
                     in_trap <= 1'b0;
                     instret_count <= instret_count + 64'd1;

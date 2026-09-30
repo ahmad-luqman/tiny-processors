@@ -485,6 +485,118 @@ use both. The default comparison is unchanged for everything else.
   comparison and the checkpoint count on made-up runs, and the RAM disk's
   spans.
 
+## O5: protection
+
+### Two modes
+
+Until O5 every program ran in machine mode, so the kernel's system call
+checks were a courtesy: any program could write the kernel's memory, the
+process table or another program's slots, or turn interrupts off. O5 adds the
+two things the privileged specification needs to stop that, on the emulator
+and the RTL: user mode, and physical memory protection
+([the contract](rv32.md#o5-protection)).
+
+User mode costs the core two bits, the current mode and `mstatus.MPP`. A trap
+saves the mode in MPP and enters machine mode; `mret` enters the mode MPP
+names and leaves MPP at user. In user mode `ecall` is cause 8 instead of 11,
+and a machine CSR, `mret` or `wfi` is an illegal instruction (the counters
+too, unless `mcounteren` allows them). Interrupts are always enabled there:
+a less privileged mode must not be able to mask the machine's interrupts, and
+that is what makes the kernel's timer inescapable.
+
+PMP is one combinational checker in [rv32.v](../rtl/rv32/rv32.v). In FETCH it
+looks at the PC and, if the fetch is refused, the core takes the fault in
+place of presenting the request, the way it takes an interrupt: the bus never
+sees the address. In EXECUTE it looks at the data address, after the
+misalignment check and before MEM, so a refused load or store is an access
+fault with the address in `mtval` and nothing reaches a device. Eight entries
+cover what the kernel needs with room to spare; the checker walks them in
+order and the first that matches decides. A locked entry binds machine mode
+too and ignores writes until reset, which the directed tests exercise though
+the kernel does not use it.
+
+### The kernel's side
+
+Programs now start with MPP 0, so the `mret` in `kernel_resume` enters user
+mode; a trap saves the frame's `mstatus` with the mode it came from, and the
+idle loop keeps MPP 3 and stays in machine mode, where `wfi` is legal.
+Before resuming a process the kernel points PMP at it, in three TOR pairs:
+
+| Entries | Region | Access |
+| --- | --- | --- |
+| 0, 1 | the process's slots, `base` to `base + span` | read, write, execute |
+| 2, 3 | the framebuffer, from the tree | read, write |
+| 4, 5 | the accelerators' windows, SIMD4 to G2, from the tree | read, write, only for a program flagged `accelerators` (the menu) |
+
+Nothing else matches, so every other address, the kernel's MiB, other slots,
+the console, the CLINT, the PLIC and the disk, is refused in user mode. The
+kernel rewrites the entries only when a different process is about to run.
+It runs in machine mode with no locked entry, so PMP never stops it: system
+calls still copy to and from the caller's memory after `user_range()` has
+checked the pointer. `mcounteren` is 7, so programs may read the counters.
+
+A fault in user mode was already fatal to the process (O2); now there are
+more ways to earn one. [fault.c](../programs/rv32/os/fault.c) gains three:
+
+```
+$ fault kernel
+kernel: pid 11 fault killed: cause 7 at 80200074 tval 80000000
+sh: fault exited 135
+$ fault shell
+kernel: pid 12 fault killed: cause 7 at 80200094 tval 80100000
+sh: fault exited 135
+$ fault csr
+kernel: pid 13 fault killed: cause 2 at 802000d4 tval 30002573
+sh: fault exited 130
+```
+
+A store to the kernel's first word and one to the shell's slot are store
+access faults at the address, and `csrr a0, mstatus` is an illegal
+instruction with the instruction in `mtval`. QEMU `virt`, whose hart has PMP
+too, prints the same lines. `fault load` still faults at `0x0020_0000`, but
+PMP now refuses it before the bus decoder could.
+
+### Evidence (O5)
+
+- **Directed tests:** `make test-rv32-pmp` runs seven programs (user-mode
+  entry and `ecall`, the instructions and CSRs user mode may not use and the
+  `mcounteren` gate, every PMP address mode with the permission bits and entry
+  priority, locked entries holding machine mode, MPP's WARL values, a timer
+  interrupt taken in user mode with MIE clear, and seeded memory stalls) on
+  the emulator and the RTL in step-tick mode: identical traces on Verilator
+  and on Icarus, and every cause, `mtval`, `mepc` and `mstatus` equal to the
+  values written into the test by hand. `test-rv32-irq` now expects MPP to
+  read user after `mret`.
+- **Console session with the new faults:** `PASS 91219bd0` on QEMU `virt`
+  (the same three fault lines, pinned in
+  [session.qemu.expected](../programs/rv32/os/session.qemu.expected)), the
+  emulator (1,168,545 steps) and Verilator with a stall per request
+  (7,011,061 cycles), results-identical over 78 console lines and 552
+  exception records, with identical disks.
+- **Earlier sessions in user mode:** Pong keeps its 200 checkpoints and
+  `PASS 814f72be` on the emulator and is trace-identical to Verilator in
+  step-tick mode (1,165,956 lines); the second boot (`PASS 455b9c97`) is
+  results-identical between the emulator and Verilator; the jobs session
+  gives `PASS 408a6738` on QEMU and the emulator; the S1 menu session, which
+  drives G1, G2 and SIMD4 from user mode through entries 4 and 5, keeps its
+  185 checkpoints on the emulator.
+- **Cost:** the core grows from 51,542 to 56,096 generic cells (Yosys 0.33,
+  `synth -top rv32`), 4,554 cells for the eight entries' 320 flip-flops, the
+  checker's comparators and the mode logic; still latch-free.
+
+## Exercises (O5)
+
+1. **One entry for a slot.** Slots are 128 KiB and aligned, so one NAPOT entry
+   could replace entries 0 and 1. Which program would that break, and why?
+2. **A locked kernel.** Add a locked entry that makes the kernel's text
+   read-and-execute only, even for machine mode. What must the link script
+   guarantee first, and what happens if the kernel then writes a variable?
+3. **The idle loop in user mode.** What stops the idle loop running in user
+   mode as it is, and what would the kernel have to grant it?
+4. **Without the fetch check.** Make `fetch_deny` 0 in
+   [rv32.v](../rtl/rv32/rv32.v) and run `make test-rv32-pmp`. Which tests
+   fail, and what does the RTL execute instead of faulting?
+
 ## Exercises (O4)
 
 1. **Switches.** Print `switches()` at the end of `bars` and run the jobs

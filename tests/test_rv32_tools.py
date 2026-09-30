@@ -166,12 +166,15 @@ class ImageCheckerTests(unittest.TestCase):
                 self.assertEqual(check_listing(empty, allow_privileged=True), ["listing has no instruction lines"])
 
     def test_system_gate_admits_the_interrupt_csrs_wfi_and_ecall(self):
-        """Track 2: --allow-system admits mstatus, mie, mip, mscratch, wfi and ecall on top of the
-        trap handler's CSRs; --allow-privileged alone still refuses them."""
+        """Track 2: --allow-system admits mstatus, mie, mip, mscratch, wfi and ecall (O1, O2) and
+        mcounteren and the PMP CSRs (O5) on top of the trap handler's CSRs; --allow-privileged alone
+        still refuses them."""
         base = "80000000: 00040117     \tauipc\tsp, 0x40\n"
         system = ["80000004: 30047073     \tcsrci\tmstatus, 8", "80000004: 30451073     \tcsrw\tmie, a0",
                   "80000004: 34402573     \tcsrr\ta0, mip", "80000004: 34051073     \tcsrw\tmscratch, a0",
-                  "80000004: 10500073     \twfi", "80000004: 00000073     \tecall"]
+                  "80000004: 10500073     \twfi", "80000004: 00000073     \tecall",
+                  "80000004: 30679073     \tcsrw\tmcounteren, a5", "80000004: 3a051073     \tcsrw\tpmpcfg0, a0",
+                  "80000004: 3b751073     \tcsrw\tpmpaddr7, a0"]
         for line in system:
             with self.subTest(line=line):
                 self.assertEqual(len(check_listing(base + line, allow_privileged=True)), 1)
@@ -180,7 +183,8 @@ class ImageCheckerTests(unittest.TestCase):
         unimp = base + "80000004: c0001073     \tunimp"  # the canonical illegal instruction, for a program that traps on purpose
         self.assertEqual(len(check_listing(unimp, allow_counters=True)), 1)
         self.assertEqual(check_listing(unimp, allow_system=True), [])
-        for line in ("80000004: 3b051073     \tcsrw\tpmpaddr0, a0", "80000004: 10200073     \tsret"):
+        for line in ("80000004: 3b851073     \tcsrw\tpmpaddr8, a0", "80000004: 3a251073     \tcsrw\tpmpcfg2, a0",
+                     "80000004: 10200073     \tsret"):
             with self.subTest(line=line):
                 self.assertEqual(len(check_listing(base + line, allow_system=True)), 1)
 

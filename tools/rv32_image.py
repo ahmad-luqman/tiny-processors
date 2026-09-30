@@ -37,8 +37,9 @@ FORBIDDEN_MNEMONIC = re.compile(r"\A(mul\w*|div\w*|rem\w*|csr\w*|fence\.i|c\.\w+
 # four trap CSRs (the operand is checked below), and mret.
 PRIVILEGED_MNEMONIC = re.compile(r"\A(csr\w*|mret)\Z")
 TRAP_CSR = re.compile(r"\b(mtvec|mepc|mcause|mtval)\b")
-# What a system image may use in addition (Track 2): the interrupt CSRs, wfi and ecall (O1, O2).
-SYSTEM_CSR = re.compile(r"\b(mstatus|mie|mip|mscratch)\b")
+# What a system image may use in addition (Track 2): the interrupt CSRs, wfi and ecall (O1, O2), and
+# the protection CSRs, mcounteren and PMP (O5).
+SYSTEM_CSR = re.compile(r"\b(mstatus|mie|mip|mscratch|mcounteren|pmpcfg[01]|pmpaddr[0-7])\b")
 SYSTEM_MNEMONIC = re.compile(r"\A(wfi|ecall)\Z")
 UNIMP = 0xC0001073  # `unimp`: csrrw x0, cycle, x0, illegal everywhere since cycle is read-only
 # What an RV32IM image may use in addition (Track 0): exactly the eight M-extension instructions.
@@ -325,7 +326,8 @@ def main():
     parser.add_argument("--allow-m", action="store_true", help="admit the M extension's multiply and divide instructions")
     parser.add_argument("--allow-counters", action="store_true", help="admit reads of the Zicntr counters (cycle, time, instret)")
     parser.add_argument("--allow-system", action="store_true",
-                        help="implies --allow-privileged: also the interrupt CSRs (mstatus, mie, mip, mscratch), wfi and ecall (Track 2)")
+                        help="implies --allow-privileged: also the interrupt CSRs (mstatus, mie, mip, mscratch), "
+                             "mcounteren, pmpcfg0-1, pmpaddr0-7, wfi and ecall (Track 2)")
     parser.add_argument("--require-m", action="store_true",
                         help="implies --allow-m: the listing must use M instructions and the image must not contain the "
                              "software multiply/divide routines (an RV32IM build that really retired rt/muldiv.c)")

@@ -39,13 +39,22 @@ syscheck: list
 syscheck: time
 syscheck: ok
 $ fault load
-kernel: pid 9 fault killed: cause 5 at 80200074 tval 00200000
+kernel: pid 9 fault killed: cause 5 at 802000cc tval 00200000
 sh: fault exited 133
 $ fault illegal
 kernel: pid 10 fault killed: cause 2 at 80200054 tval c0001073
 sh: fault exited 130
+$ fault kernel
+kernel: pid 11 fault killed: cause 7 at 80200074 tval 80000000
+sh: fault exited 135
+$ fault shell
+kernel: pid 12 fault killed: cause 7 at 80200094 tval 80100000
+sh: fault exited 135
+$ fault csr
+kernel: pid 13 fault killed: cause 2 at 802000d4 tval 30002573
+sh: fault exited 130
 $ hello still here
-hello from pid 11, args: still here
+hello from pid 14, args: still here
 $ files
 welcome 83
 bars.out 0
@@ -65,5 +74,5 @@ bars.out 0
 life.out 0
 note 11
 $ halt
-kernel: halt, 16 exits
-PASS 8409efe3
+kernel: halt, 19 exits
+PASS 91219bd0

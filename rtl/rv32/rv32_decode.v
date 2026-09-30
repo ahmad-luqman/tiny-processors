@@ -43,11 +43,13 @@ module rv32_decode (
     assign rs2 = insn[24:20];
     assign funct3 = insn[14:12];
 
-    // The trap CSRs, the interrupt CSRs of O1 (mstatus, mie, mscratch, mip), the three
+    // The trap CSRs, the interrupt CSRs of O1 (mstatus, mie, mscratch, mip), O5's mcounteren,
+    // pmpcfg0-1 and pmpaddr0-7, the three
     // floating aliases, and the six Zicntr counters (cycle, time, instret and their high
     // halves); other numbers are illegal.
     wire csr_exists = (csr == 12'h001) || (csr == 12'h002) || (csr == 12'h003) || (csr == 12'h305) || (csr == 12'h341) || (csr == 12'h342) || (csr == 12'h343) ||
                       (csr == 12'h300) || (csr == 12'h304) || (csr == 12'h340) || (csr == 12'h344) ||
+                      (csr == 12'h306) || (csr == 12'h3a0) || (csr == 12'h3a1) || (csr[11:3] == 9'h076) || // O5: mcounteren, PMP
                       (csr == 12'hc00) || (csr == 12'hc01) || (csr == 12'hc02) || (csr == 12'hc80) || (csr == 12'hc81) || (csr == 12'hc82);
     // CSR numbers with bits [11:10] set are read-only; csrrw always writes, and
     // csrrs/csrrc (and the immediate forms) write when the rs1 field is nonzero.

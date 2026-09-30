@@ -16,6 +16,12 @@
  * Since O4 the timer interrupt also preempts: when another process is ready,
  * the running one goes to the back of the round and the next one runs.
  *
+ * Since O5 programs run in user mode. PMP grants the running process its own
+ * slots, the framebuffer and, to a program that drives them, the accelerators;
+ * anything else it touches, and any privileged instruction, is a fault, and a
+ * fault kills the process. The kernel (machine mode, no locked entries) is not
+ * held by PMP, so system calls still read and write the caller's memory.
+ *
  * Blocking is by retry: a call that cannot finish yet (read with no byte
  * waiting, wait for a child still running) leaves the process's pc on its
  * ecall and marks it blocked; wake_blocked() makes it ready again when the
@@ -40,7 +46,7 @@
 #define KERNEL_TICK 10000u      /* device ticks between timer interrupts, where ticks have no rate */
 #define KEY_BUFFER 64u          /* input events waiting for a program */
 #define ARGS_MAX 64u            /* bytes of argument string, NUL included */
-#define MSTATUS_MPP_M 0x1800u
+#define MSTATUS_MPP_M 0x1800u  /* the idle loop; a process's MPP is 0, user mode (O5) */
 #define MSTATUS_FS_INITIAL 0x2000u /* QEMU's FPU is off until FS is set; ours is always on */
 #define CAUSE_ECALL_M 11u
 #define CAUSE_ECALL_U 8u
@@ -91,7 +97,9 @@ static uint32_t idle_stack[64];
 static uint32_t next_pid = 1, exits, exit_sum;
 
 static uint32_t console, done_register, clint, plic;
-static uint32_t input, input_source, display, framebuffer, gpu, g3d, disk;
+static uint32_t input, input_source, display, framebuffer, framebuffer_size, gpu, g3d, disk;
+static uint32_t accelerators, accelerators_end; /* O5: the window PMP grants a PROGRAM_ACCELERATORS program */
+static uint32_t protected_pid;                  /* O5: the process PMP is set up for */
 static char model[48];
 static uint32_t tick = KERNEL_TICK; /* O4: 100 µs where the tree gives a timebase (QEMU), else KERNEL_TICK */
 
@@ -253,7 +261,9 @@ static void discover(uintptr_t address)
         panic("input without interrupts");
     }
     display = find(&t, "tiny-processors,display", 0, 0);
-    framebuffer = display ? find(&t, "tiny-processors,display", 1, 1) : 0;
+    if (display && fdt_find(&t, "compatible", "tiny-processors,display", 1, &framebuffer, &framebuffer_size) != FDT_OK) {
+        panic("display without a framebuffer");
+    }
     /* The disk: the first "virtio,mmio" node with a block device behind it. QEMU lists all eight
      * of virt's slots, most of them empty (DeviceID 0); our tree lists the one we have. */
     for (uint32_t node = 0;; node++) {
@@ -272,6 +282,22 @@ static void discover(uintptr_t address)
     }
     gpu = find(&t, "tiny-processors,g1", 0, 0);
     g3d = find(&t, "tiny-processors,g2", 0, 0);
+    /* O5: one PMP region from the lowest accelerator window to the end of the highest. */
+    static const struct { const char *compatible; uint32_t index; } windows[] = {
+        {"tiny-processors,simd4", 0}, {"tiny-processors,simd4", 1}, {"tiny-processors,simd4", 2},
+        {"tiny-processors,g1", 0}, {"tiny-processors,g2", 0},
+    };
+    for (uint32_t w = 0; w < sizeof windows / sizeof windows[0]; w++) {
+        uint32_t base, size;
+        if (fdt_find(&t, "compatible", windows[w].compatible, windows[w].index, &base, &size) == FDT_OK) {
+            if (!accelerators_end || base < accelerators) {
+                accelerators = base;
+            }
+            if (base + size > accelerators_end) {
+                accelerators_end = base + size;
+            }
+        }
+    }
     uint32_t timebase;
     if (fdt_cell(&t, "@name", "cpus", "timebase-frequency", 0, &timebase) == FDT_OK && timebase >= 10000u) {
         tick = timebase / 10000u;
@@ -377,7 +403,7 @@ static struct proc *spawn(const char *name, const char *args, uint32_t parent)
     p->f.x[2] = (top - ARGS_MAX - 16u) & ~15u; /* sp */
     p->f.x[10] = (uint32_t)(uintptr_t)copy;      /* a0: the arguments */
     p->f.pc = program->entry;
-    p->f.mstatus = MSTATUS_MPP_M | MSTATUS_MPIE | MSTATUS_FS_INITIAL;
+    p->f.mstatus = MSTATUS_MPIE | MSTATUS_FS_INITIAL; /* MPP 0: mret enters user mode (O5) */
     p->brk = (program->load + program->memory_size + 15u) & ~15u;
     p->pid = next_pid++;
     p->parent = parent;
@@ -487,19 +513,38 @@ static struct proc *next_ready(const struct proc *after)
     return 0;
 }
 
+/* O5: PMP for the process about to run, in TOR pairs: entries 0-1 its slots (RWX), 2-3 the
+ * framebuffer (RW), 4-5 the accelerators (RW) for a program that drives them. Entries 6-7 stay
+ * off. A user access nothing matches faults; the idle loop runs in machine mode and ignores it. */
+static void protect(const struct proc *p)
+{
+    if (p->pid == protected_pid) {
+        return;
+    }
+    protected_pid = p->pid;
+    uint32_t tor_rwx = PMP_TOR | PMP_R | PMP_W | PMP_X, tor_rw = PMP_TOR | PMP_R | PMP_W;
+    csr_write(CSR_PMPADDR0, p->base >> 2);
+    csr_write(CSR_PMPADDR1, (p->base + p->span) >> 2);
+    csr_write(CSR_PMPADDR2, framebuffer >> 2);
+    csr_write(CSR_PMPADDR3, (framebuffer + framebuffer_size) >> 2);
+    csr_write(CSR_PMPADDR4, accelerators >> 2);
+    csr_write(CSR_PMPADDR5, accelerators_end >> 2);
+    csr_write(CSR_PMPCFG0, tor_rwx << 8 | (framebuffer ? tor_rw << 24 : 0u));
+    csr_write(CSR_PMPCFG1, (p->flags & PROGRAM_ACCELERATORS) && accelerators_end ? tor_rw << 8 : 0u);
+}
+
 static struct frame *schedule(void)
 {
     wake_blocked();
-    if (current && current->state == RUNNING) {
-        return &current->f;
+    if (!current || current->state != RUNNING) {
+        current = next_ready(current);
+        if (!current) {
+            return &idle_frame;
+        }
+        current->state = RUNNING;
     }
-    struct proc *p = next_ready(current);
-    current = p;
-    if (!p) {
-        return &idle_frame;
-    }
-    p->state = RUNNING;
-    return &p->f;
+    protect(current);
+    return &current->f;
 }
 
 /* ---- System calls ---- */
@@ -786,6 +831,7 @@ _Noreturn void kernel_main(uint32_t hart, uintptr_t tree)
     }
     set_timer(mtime() + tick);
     csr_write(CSR_MIE, MIP_MEIP | MIP_MTIP);
+    csr_write(CSR_MCOUNTEREN, 7u); /* O5: user mode may read cycle, time and instret */
 
     idle_frame.x[2] = (uint32_t)(uintptr_t)&idle_stack[64];
     idle_frame.pc = (uint32_t)(uintptr_t)kernel_idle;

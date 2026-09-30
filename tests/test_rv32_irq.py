@@ -20,7 +20,8 @@ MIE_CSR, MIP_CSR, MSCRATCH = 0x304, 0x344, 0x340
 WFI = 0x10500073
 HANDLER = RAM + 0x400  # handlers live here; bodies must stay below
 SAVE = RAM + 0x2000    # where handlers store what they saw
-MSTATUS_RESET = 0x80007800  # SD, FS = 3 and MPP = 3 read as constants
+MSTATUS_RESET = 0x80007800  # SD and FS = 3 read as constants; MPP = 3 from reset
+MSTATUS_MPP = 0x1800         # O5: WARL, machine (3) or user (0); mret leaves it user
 
 
 def at_handler(body, handler):
@@ -99,13 +100,13 @@ class InterruptTest(unittest.TestCase):
     def test_the_interrupt_csrs(self):
         words = [CSRRS(1, MSTATUS, 0)]                     # reset value
         words += LI(2, 0xFFFFFFFF) + [CSRRW(0, MSTATUS, 2), CSRRS(3, MSTATUS, 0)]  # only MIE and MPIE are writable
-        words += [CSRRW(0, MSTATUS, 0), CSRRS(4, MSTATUS, 0)]
+        words += [CSRRW(0, MSTATUS, 0), CSRRS(4, MSTATUS, 0)]  # MPP = 0 is user mode (O5)
         words += [CSRRW(0, MIE_CSR, 2), CSRRS(5, MIE_CSR, 0), CSRRW(0, MIE_CSR, 0)]  # MSIE, MTIE, MEIE
         words += [CSRRW(0, MIP_CSR, 2), CSRRS(6, MIP_CSR, 0)]  # mip is read-only: nothing pending, nothing set
         words += LI(7, 0x12345678) + [CSRRW(8, MSCRATCH, 7), CSRRS(9, MSCRATCH, 0)]
         emulator, rtl = self.assert_same(words + dump(1, 3, 4, 5, 6, 8, 9))
         got = [stored(rtl.trace, SAVE + 0x40 + 4 * i) for i in range(7)]
-        self.assertEqual(got, [MSTATUS_RESET, MSTATUS_RESET | 0x88, MSTATUS_RESET, 0x888, 0, 0, 0x12345678])
+        self.assertEqual(got, [MSTATUS_RESET, MSTATUS_RESET | 0x88, MSTATUS_RESET & ~MSTATUS_MPP, 0x888, 0, 0, 0x12345678])
 
     def test_a_timer_interrupt_is_taken_at_the_next_boundary_and_mret_restores_mie(self):
         body = set_timer(0) + LI(1, 1 << 7) + [CSRRW(0, MIE_CSR, 1), CSRRSI(0, MSTATUS, 8),
@@ -122,7 +123,8 @@ class InterruptTest(unittest.TestCase):
         self.assertEqual(stored(rtl.trace, SAVE), 0x80000007)
         self.assertEqual(stored(rtl.trace, SAVE + 4), int(after, 16))
         self.assertEqual(stored(rtl.trace, SAVE + 8), MSTATUS_RESET | 0x80)   # MIE clear, MPIE set in the handler
-        self.assertEqual(stored(rtl.trace, SAVE + 0x44), MSTATUS_RESET | 0x88)  # mret: MIE from MPIE, MPIE set
+        # mret: MIE from MPIE, MPIE set, back to machine mode with MPP now user (O5)
+        self.assertEqual(stored(rtl.trace, SAVE + 0x44), (MSTATUS_RESET & ~MSTATUS_MPP) | 0x88)
         self.assertEqual(stored(rtl.trace, SAVE + 0x40), 42)
         self.assertEqual((emulator.halt["interrupts"], rtl.halt["interrupts"]), (1, 1))
         self.assertEqual(trap_records(rtl.trace), [], "an interrupt is not a trap record")

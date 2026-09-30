@@ -14,6 +14,18 @@
 #define CSR_MCAUSE   0x342
 #define CSR_MTVAL    0x343
 #define CSR_MIP      0x344
+/* O5: the counters user mode may read, and PMP (eight entries). */
+#define CSR_MCOUNTEREN 0x306
+#define CSR_PMPCFG0    0x3a0
+#define CSR_PMPCFG1    0x3a1
+#define CSR_PMPADDR0   0x3b0
+#define CSR_PMPADDR1   0x3b1
+#define CSR_PMPADDR2   0x3b2
+#define CSR_PMPADDR3   0x3b3
+#define CSR_PMPADDR4   0x3b4
+#define CSR_PMPADDR5   0x3b5
+#define CSR_PMPADDR6   0x3b6
+#define CSR_PMPADDR7   0x3b7
 
 #define MSTATUS_MIE  0x8u
 #define MSTATUS_MPIE 0x80u
@@ -25,6 +37,14 @@
 #define MIP_MTIP (1u << IRQ_MTI)
 #define MIP_MEIP (1u << IRQ_MEI)
 #define MCAUSE_INTERRUPT 0x80000000u
+/* A PMP configuration byte (O5): permissions, the address-matching mode and the lock. */
+#define PMP_R     0x01u
+#define PMP_W     0x02u
+#define PMP_X     0x04u
+#define PMP_TOR   0x08u
+#define PMP_NA4   0x10u
+#define PMP_NAPOT 0x18u
+#define PMP_L     0x80u
 
 #define STR_(x) #x
 #define STR(x) STR_(x)

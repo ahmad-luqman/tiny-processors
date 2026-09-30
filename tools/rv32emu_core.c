@@ -32,6 +32,7 @@ enum cause {
     CAUSE_LOAD_FAULT = 5,
     CAUSE_STORE_MISALIGNED = 6,
     CAUSE_STORE_FAULT = 7,
+    CAUSE_ECALL_U = 8,
     CAUSE_ECALL_M = 11,
 };
 
@@ -39,13 +40,27 @@ enum cause {
  * counters (0xc00-0xc02 and their high halves at 0xc80-0xc82) are read-only: numbers with
  * bits [11:10] set are, by the CSR address convention, and a write to one is illegal. */
 enum csr { CSR_FFLAGS = 0x001, CSR_FRM = 0x002, CSR_FCSR = 0x003, CSR_MSTATUS = 0x300, CSR_MIE = 0x304, CSR_MTVEC = 0x305,
+           CSR_MCOUNTEREN = 0x306, CSR_PMPCFG0 = 0x3a0, CSR_PMPCFG1 = 0x3a1, CSR_PMPADDR0 = 0x3b0, CSR_PMPADDR7 = 0x3b7,
            CSR_MSCRATCH = 0x340, CSR_MEPC = 0x341, CSR_MCAUSE = 0x342, CSR_MTVAL = 0x343, CSR_MIP = 0x344,
            CSR_CYCLE = 0xc00, CSR_TIME = 0xc01, CSR_INSTRET = 0xc02, CSR_CYCLEH = 0xc80, CSR_TIMEH = 0xc81, CSR_INSTRETH = 0xc82 };
-/* mstatus and the interrupt bits (O1, docs/rv32.md "Behavior fixed in Track 2"). MPP reads 3 (machine
- * mode is the only mode), FS reads 3 and SD 1 because floating state is always on. */
+/* mstatus and the interrupt bits (O1, docs/rv32.md "Behavior fixed in Track 2"). MPP is 3 (machine) or
+ * 0 (user) since O5, kept in machine.mpp; FS reads 3 and SD 1 because floating state is always on. */
 #define MSTATUS_MIE 0x8u
 #define MSTATUS_MPIE 0x80u
-#define MSTATUS_CONSTANT 0x80007800u /* SD, FS = 3, MPP = 3 */
+#define MSTATUS_CONSTANT 0x80006000u /* SD, FS = 3 */
+#define MSTATUS_MPP 0x1800u
+#define PRIV_U 0u
+#define PRIV_M 3u
+/* PMP (O5): a configuration byte per entry. */
+#define PMP_R 0x01u
+#define PMP_W 0x02u
+#define PMP_X 0x04u
+#define PMP_A 0x18u
+#define PMP_TOR 0x08u
+#define PMP_NA4 0x10u
+#define PMP_NAPOT 0x18u
+#define PMP_L 0x80u
+#define PMP_ENTRIES 8u
 #define IRQ_MSI 3u
 #define IRQ_MTI 7u
 #define IRQ_MEI 11u
@@ -756,11 +771,37 @@ static uint32_t ram_read(const machine *m, uint32_t addr, int width)
     return bytes_read(m->ram + (addr - RAM_BASE), width);
 }
 
-/* Data load. Misalignment is checked before the address is decoded. */
+/* PMP (O5; docs/rv32.md "Behavior fixed in Track 2"): the lowest-numbered entry that matches the
+ * address decides. Regions are whole words (granularity 4), so an aligned access matches whole or not
+ * at all. User mode needs a match with the permission; machine mode is held only to locked
+ * entries and may go where nothing matches. */
+static bool pmp_allows(const machine *m, uint32_t addr, uint32_t need)
+{
+    uint32_t word = addr >> 2;
+    for (uint32_t i = 0; i < PMP_ENTRIES; i++) {
+        uint32_t cfg = m->pmpcfg[i], at = m->pmpaddr[i];
+        bool match;
+        switch (cfg & PMP_A) {
+        case PMP_TOR: match = word >= (i ? m->pmpaddr[i - 1] : 0u) && word < at; break;
+        case PMP_NA4: match = word == at; break;
+        case PMP_NAPOT: match = ((word ^ at) & ~(at ^ (at + 1u))) == 0; break;
+        default: continue; /* OFF */
+        }
+        if (match) {
+            return (m->priv == PRIV_M && !(cfg & PMP_L)) || (cfg & need) == need;
+        }
+    }
+    return m->priv == PRIV_M;
+}
+
+/* Data load. Misalignment is checked before the address is decoded, and PMP before the bus. */
 static mem_access load(machine *m, uint32_t addr, int width, uint32_t *value)
 {
     if (addr % (uint32_t)width) {
         return ACC_MISALIGNED;
+    }
+    if (!pmp_allows(m, addr, PMP_R)) {
+        return ACC_FAULT;
     }
     const region *r = find_region(addr, width);
     if (!r || !r->load) {
@@ -773,6 +814,9 @@ static mem_access store(machine *m, uint32_t addr, int width, uint32_t value)
 {
     if (addr % (uint32_t)width) {
         return ACC_MISALIGNED;
+    }
+    if (!pmp_allows(m, addr, PMP_W)) {
+        return ACC_FAULT;
     }
     const region *r = find_region(addr, width);
     if (!r || !r->store) {
@@ -800,13 +844,15 @@ static void trace_effects(const machine *m)
 }
 
 /* Trap entry, shared by exceptions and interrupts: mepc is the instruction not executed, MPIE takes
- * MIE and MIE clears (MPP is always machine mode until O5). */
+ * MIE and MIE clears, MPP takes the privilege mode and the machine enters machine mode (O5). */
 static void enter_handler(machine *m, uint32_t cause, uint32_t tval)
 {
     m->mepc = m->pc;
     m->mcause = cause;
     m->mtval = tval;
     m->mstatus = (m->mstatus & MSTATUS_MIE) ? MSTATUS_MPIE : 0u;
+    m->mpp = m->priv;
+    m->priv = PRIV_M;
     m->pc = m->mtvec;
 }
 
@@ -863,7 +909,13 @@ static bool csr_read(const machine *m, uint32_t number, uint32_t *value)
     case CSR_FFLAGS: *value = m->fcsr & 31u; return true;
     case CSR_FRM: *value = m->fcsr >> 5; return true;
     case CSR_FCSR: *value = m->fcsr; return true;
-    case CSR_MSTATUS: *value = m->mstatus | MSTATUS_CONSTANT; return true;
+    case CSR_MSTATUS: *value = m->mstatus | MSTATUS_CONSTANT | (m->mpp == PRIV_M ? MSTATUS_MPP : 0u); return true;
+    case CSR_MCOUNTEREN: *value = m->mcounteren; return true;
+    case CSR_PMPCFG0: case CSR_PMPCFG1: {
+        const uint8_t *c = m->pmpcfg + 4 * (number - CSR_PMPCFG0);
+        *value = (uint32_t)c[0] | (uint32_t)c[1] << 8 | (uint32_t)c[2] << 16 | (uint32_t)c[3] << 24;
+        return true;
+    }
     case CSR_MIE: *value = m->mie; return true;
     case CSR_MIP: *value = mip_now(m); return true;
     case CSR_MSCRATCH: *value = m->mscratch; return true;
@@ -881,7 +933,12 @@ static bool csr_read(const machine *m, uint32_t number, uint32_t *value)
     case CSR_TIMEH: *value = (uint32_t)(mtime_now(m) >> 32); return true;
     case CSR_INSTRET: *value = (uint32_t)m->retired; return true;
     case CSR_INSTRETH: *value = (uint32_t)(m->retired >> 32); return true;
-    default: return false;
+    default:
+        if (number >= CSR_PMPADDR0 && number <= CSR_PMPADDR7) {
+            *value = m->pmpaddr[number - CSR_PMPADDR0];
+            return true;
+        }
+        return false;
     }
 }
 
@@ -897,7 +954,23 @@ static void csr_write(machine *m, uint32_t number, uint32_t value)
     case CSR_FFLAGS: m->fcsr = (m->fcsr & 0xe0u) | (value & 31u); m->wr_fcsr = true; break;
     case CSR_FRM: m->fcsr = (m->fcsr & 31u) | ((value & 7u) << 5); m->wr_fcsr = true; break;
     case CSR_FCSR: m->fcsr = value & 255u; m->wr_fcsr = true; break;
-    case CSR_MSTATUS: m->mstatus = value & (MSTATUS_MIE | MSTATUS_MPIE); break;
+    case CSR_MSTATUS:
+        m->mstatus = value & (MSTATUS_MIE | MSTATUS_MPIE);
+        m->mpp = (value & MSTATUS_MPP) == MSTATUS_MPP ? PRIV_M : PRIV_U; /* WARL: 3 or 0 */
+        break;
+    case CSR_MCOUNTEREN: m->mcounteren = value & 7u; break;
+    case CSR_PMPCFG0: case CSR_PMPCFG1:
+        for (uint32_t k = 0; k < 4; k++) {
+            uint32_t i = 4 * (number - CSR_PMPCFG0) + k, cfg = (value >> (8 * k)) & 0x9fu; /* bits 6:5 read 0 */
+            if (m->pmpcfg[i] & PMP_L) {
+                continue; /* a locked entry ignores writes until reset */
+            }
+            if ((cfg & PMP_W) && !(cfg & PMP_R)) {
+                cfg &= ~PMP_W; /* W without R is reserved: stored as neither */
+            }
+            m->pmpcfg[i] = (uint8_t)cfg;
+        }
+        break;
     case CSR_MIE: m->mie = value & MIE_MASK; break;
     case CSR_MIP: break; /* MSIP, MTIP and MEIP are read-only: the write is legal and does nothing */
     case CSR_MSCRATCH: m->mscratch = value; break;
@@ -905,7 +978,33 @@ static void csr_write(machine *m, uint32_t number, uint32_t value)
     case CSR_MEPC: m->mepc = value & ~3u; break;   /* IALIGN is 32 */
     case CSR_MCAUSE: m->mcause = value; break;
     case CSR_MTVAL: m->mtval = value; break;
+    default:
+        if (number >= CSR_PMPADDR0 && number <= CSR_PMPADDR7) {
+            uint32_t i = number - CSR_PMPADDR0;
+            bool locked = (m->pmpcfg[i] & PMP_L) ||
+                          (i + 1 < PMP_ENTRIES && (m->pmpcfg[i + 1] & (PMP_L | PMP_A)) == (PMP_L | PMP_TOR));
+            if (!locked) {
+                m->pmpaddr[i] = value;
+            }
+        }
+        break;
     }
+}
+
+/* User mode (O5) may use the floating CSRs and, as mcounteren allows, the counters; every
+ * machine CSR is an illegal instruction there. */
+static bool csr_allowed(const machine *m, uint32_t number)
+{
+    if (m->priv == PRIV_M) {
+        return true;
+    }
+    if ((number >> 8) & 3u) {
+        return false;
+    }
+    if (number >= CSR_CYCLE && number <= CSR_INSTRETH) {
+        return (m->mcounteren >> (number & 3u)) & 1u;
+    }
+    return true;
 }
 
 /* Branch and jump targets must be word aligned: there are no compressed
@@ -968,7 +1067,8 @@ static void step(machine *m)
     m->wr_fcsr = false;
     m->mem_read = m->mem_write = false;
     /* An enabled, pending interrupt is taken before the instruction (O1): MEI, then MSI, then MTI. */
-    uint32_t pending = (m->mstatus & MSTATUS_MIE) && m->mie ? mip_now(m) & m->mie : 0u;
+    /* In user mode interrupts are always enabled (O5). */
+    uint32_t pending = ((m->mstatus & MSTATUS_MIE) || m->priv == PRIV_U) && m->mie ? mip_now(m) & m->mie : 0u;
     if (pending) {
         take_interrupt(m, (pending >> IRQ_MEI) & 1u ? IRQ_MEI : (pending >> IRQ_MSI) & 1u ? IRQ_MSI : IRQ_MTI);
         return;
@@ -977,7 +1077,7 @@ static void step(machine *m)
         trap(m, 0, CAUSE_FETCH_MISALIGNED, pc);
         return;
     }
-    if (!in_ram(pc, 4)) {
+    if (!in_ram(pc, 4) || !pmp_allows(m, pc, PMP_X)) {
         trap(m, 0, CAUSE_FETCH_FAULT, pc);
         return;
     }
@@ -1205,19 +1305,22 @@ static void step(machine *m)
     case 0x73: { /* SYSTEM */
         if (funct3 == 0) {
             if (word == 0x00000073u) {
-                trap(m, word, CAUSE_ECALL_M, 0);
+                trap(m, word, m->priv == PRIV_U ? CAUSE_ECALL_U : CAUSE_ECALL_M, 0);
                 return;
             }
             if (word == 0x00100073u) {
                 trap(m, word, CAUSE_BREAKPOINT, pc);
                 return;
             }
-            if (word == 0x30200073u) { /* MRET: MIE from MPIE, MPIE set; machine mode only, so just return */
+            if (word == 0x30200073u && m->priv == PRIV_M) {
+                /* MRET: MIE from MPIE, MPIE set, the mode from MPP, MPP to user (O5) */
                 m->mstatus = MSTATUS_MPIE | ((m->mstatus & MSTATUS_MPIE) ? MSTATUS_MIE : 0u);
+                m->priv = m->mpp;
+                m->mpp = PRIV_U;
                 next = m->mepc;
                 break;
             }
-            if (word == 0x10500073u) { /* WFI: retires at once; programs wait in a loop (O1) */
+            if (word == 0x10500073u && m->priv == PRIV_M) { /* WFI: retires at once (O1); illegal in user mode */
                 break;
             }
             goto illegal;
@@ -1227,7 +1330,7 @@ static void step(machine *m)
         }
         uint32_t number = word >> 20, old, operand = (funct3 & 4u) ? rs1 : a;
         bool writes = (funct3 & 3u) == 1 || rs1 != 0; /* csrrs/csrrc with a zero field only read */
-        if (!csr_read(m, number, &old) || (writes && csr_read_only(number))) {
+        if (!csr_read(m, number, &old) || (writes && csr_read_only(number)) || !csr_allowed(m, number)) {
             goto illegal;
         }
         switch (funct3 & 3u) {
@@ -1287,7 +1390,8 @@ void emu_dump_state(const machine *m, FILE *out)
     for (int i = 0; i < 32; ++i) fprintf(out, "f%d %08" PRIx32 "\n", i, m->f[i]);
     fprintf(out, "fcsr %02x\n", m->fcsr);
     fprintf(out, "mstatus %08" PRIx32 "\nmie %08" PRIx32 "\nmip %08" PRIx32 "\nmscratch %08" PRIx32 "\n",
-            m->mstatus | MSTATUS_CONSTANT, m->mie, mip_now(m), m->mscratch);
+            m->mstatus | MSTATUS_CONSTANT | (m->mpp == PRIV_M ? MSTATUS_MPP : 0u), m->mie, mip_now(m), m->mscratch);
+    fprintf(out, "priv %u\n", m->priv);
     fprintf(out, "mtvec %08" PRIx32 "\nmepc %08" PRIx32 "\nmcause %08" PRIx32 "\nmtval %08" PRIx32 "\n",
             m->mtvec, m->mepc, m->mcause, m->mtval);
     fprintf(out, "steps %" PRIu64 "\nretired %" PRIu64 "\ntraps %" PRIu64 "\nframes %" PRIu32 "\nevents %u\nhalt %s\n",
@@ -1604,6 +1708,7 @@ void emu_init(machine *m)
     gpu_device_reset(&m->gpu);
     g3d_device_reset(&m->g3d);
     m->mtimecmp = ~0ull;
+    m->priv = m->mpp = PRIV_M; /* O5: machine mode from reset, MPP reading 3 until a trap or a write */
     /* Boot convention (docs/rv32.md, "Reset"): the hart id in a0, the device tree in a1. */
     m->x[10] = BOOT_HART;
     m->x[11] = RV32_DTB_ROM_BASE;

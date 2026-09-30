@@ -1156,7 +1156,7 @@ test-rv32: check-rv32-dtb check-rv32-virt-map test-rv32-platform run-rv32-platfo
 # Track 2 (docs/rv32-os.md, plan docs/planning/track2-os.md). O1: interrupts. irqcheck takes
 # CLINT and PLIC interrupts and runs unmodified on QEMU virt, the emulator and the RTL; the RTL is
 # compared at the results level with cycle ticks and trace for trace in step-tick mode.
-.PHONY: check-rv32-irqcheck-image run-rv32-irq-qemu run-rv32-irq-emu run-rv32-irq-rtl run-rv32-irq-rtl-verilator run-rv32-irq-rtl-steps test-rv32-irq
+.PHONY: check-rv32-irqcheck-image run-rv32-irq-qemu run-rv32-irq-emu run-rv32-irq-rtl run-rv32-irq-rtl-verilator run-rv32-irq-rtl-steps test-rv32-irq test-rv32-pmp
 RV32_IRQCHECK_OBJS := build/rv32/irqcheck.o build/rv32/trap_entry.o build/rv32/fdt.o $(RV32_COMMON_OBJS)
 RV32_IRQCHECK_HEX := 133cab46
 RV32_IRQ_ARGS := --image build/rv32/irqcheck.bin --input programs/rv32/irqcheck.input --expect-last-line "PASS $(RV32_IRQCHECK_HEX)" --expect-console-file programs/rv32/irqcheck.expected
@@ -1189,7 +1189,11 @@ run-rv32-irq-rtl-steps: check-rv32-irqcheck-image $(RV32EMU) $(RV32_TB_VERILATOR
 test-rv32-irq: $(RV32EMU) $(RV32_TB_VERILATOR)
 	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_irq.py' -v
 
-test-rv32: run-rv32-irq-qemu run-rv32-irq-emu run-rv32-irq-rtl run-rv32-irq-rtl-verilator run-rv32-irq-rtl-steps test-rv32-irq
+# O5: user mode and PMP, directed, emulator against the RTL in step-tick mode.
+test-rv32-pmp: $(RV32EMU) $(RV32_TB_VERILATOR)
+	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_pmp.py' -v
+
+test-rv32: run-rv32-irq-qemu run-rv32-irq-emu run-rv32-irq-rtl run-rv32-irq-rtl-verilator run-rv32-irq-rtl-steps test-rv32-irq test-rv32-pmp
 
 # O2: a kernel with system calls. Each program is linked for its own 256 KiB slot above the
 # kernel (programs/rv32/os/user.ld), packed onto a RAM disk (tools/rv32_ramdisk.py) and bundled

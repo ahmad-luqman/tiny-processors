@@ -102,8 +102,12 @@ typedef struct {
     uint8_t fcsr;
     uint32_t pc;
     uint32_t mtvec, mepc, mcause, mtval;
-    uint32_t mstatus;  /* the writable bits (MIE, MPIE); MPP, FS and SD read as constants (O1) */
+    uint32_t mstatus;  /* the writable bits (MIE, MPIE); FS and SD read as constants (O1), MPP is mpp (O5) */
     uint32_t mie, mscratch;
+    uint8_t priv, mpp;   /* O5: the privilege mode (3 machine, 0 user) and mstatus.MPP */
+    uint32_t mcounteren; /* O5: CY, TM, IR: the counters user mode may read */
+    uint8_t pmpcfg[8];   /* O5: eight PMP entries */
+    uint32_t pmpaddr[8];
     uint8_t plic_priority[PLIC_SOURCES]; /* the PLIC (O1): priorities of the wired sources */
     uint32_t plic_enable, plic_claimed;  /* context 0's enables; sources claimed and not completed */
     uint8_t plic_threshold;

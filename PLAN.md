@@ -78,7 +78,16 @@ in the emulator ([record](docs/rv32-groundwork.md)).
 Track 1 made the platform `virt`-compatible: our devices left `virt`'s address
 ranges, a CLINT at `virt`'s address replaced the timer, and every backend passes
 a device tree in `a1`, so one image runs on QEMU, the emulator and the RTL
-([record](docs/rv32-platform.md)). O1, interrupts through that CLINT, is next.
+([record](docs/rv32-platform.md)).
+
+Track 2 built an operating system in five steps ([record](docs/rv32-os.md)):
+interrupts through the CLINT and a PLIC, with a step-tick mode that keeps the
+RTL trace-comparable (O1); a kernel with system calls, a RAM disk of separately
+linked programs and a shell (O2); virtio-blk and a tiny file system, so high
+scores survive a boot (O3); timer-driven round-robin scheduling (O4); and user
+mode with PMP, so a program that touches kernel memory is killed while the
+shell keeps running (O5). Each step runs on QEMU `virt`, the emulator and the
+RTL.
 
 ## Later optional tracks
 
