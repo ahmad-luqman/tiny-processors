@@ -50,6 +50,14 @@ RAM_BASE, RAM_SIZE = rv32_asm.RAM, rv32_asm.RAM_SIZE
 DONE_BASE = rv32_asm.DONE
 CONSOLE_BASE = rv32_asm.CONSOLE
 CLINT_BASE, CLINT_SIZE = rv32_asm.CLINT, 0x1_0000
+PLIC_BASE, PLIC_SIZE = rv32_asm.PLIC, rv32_asm.PLIC_SIZE
+PLIC_SOURCES = 31                                   # riscv,ndev: sources 1..31
+INPUT_IRQ = rv32_asm.PLIC_SOURCE_INPUT
+VIRTIO_BASE, VIRTIO_SIZE, VIRTIO_IRQ = rv32_asm.VIRTIO, rv32_asm.VIRTIO_SIZE, rv32_asm.PLIC_SOURCE_VIRTIO
+# Interrupt wiring (O1): phandles of the hart's local interrupt controller and of the PLIC, and the
+# mip bit numbers each connection raises.
+CPU_INTC, PLIC_PHANDLE = 1, 2
+IRQ_MSI, IRQ_MTI, IRQ_MEI = 3, 7, 11
 INPUT_BASE = rv32_asm.INPUT
 DISPLAY_BASE = rv32_asm.DISPLAY
 SIMD4_BASE, SIMD4_PROGRAM, SIMD4_DATA = rv32_asm.SIMD_BASE, rv32_asm.SIMD_PROGRAM, rv32_asm.SIMD_DATA
@@ -83,9 +91,10 @@ def node(name: str, props: dict[str, bytes], *children: Node) -> Node:
     return Node(name, dict(props), list(children))
 
 
-def device(name: str, base: int, compatible: tuple[str, ...], regs: tuple[tuple[int, int], ...]) -> Node:
+def device(name: str, base: int, compatible: tuple[str, ...], regs: tuple[tuple[int, int], ...],
+           extra: dict[str, bytes] | None = None) -> Node:
     return node(f"{name}@{base:x}", {"compatible": string(*compatible),
-                                     "reg": b"".join(u32(a, s) for a, s in regs)})
+                                     "reg": b"".join(u32(a, s) for a, s in regs), **(extra or {})})
 
 
 # Root and soc use one address cell and one size cell: every address is 32-bit.
@@ -93,8 +102,11 @@ def device(name: str, base: int, compatible: tuple[str, ...], regs: tuple[tuple[
 # where our device implements everything a driver for it may touch: the done
 # register is a sifive,test0 without the reset word; the console is a 16550's
 # transmit and line-status registers only, so a 16550 driver's initialization
-# would fault and "ns16550a" is not claimed. The CLINT lists no interrupts
-# until the core takes them (O1).
+# would fault and "ns16550a" is not claimed. Since O1 the hart has a
+# riscv,cpu-intc; the CLINT raises its software and timer interrupts, the PLIC
+# (a full SiFive PLIC for one context, so it claims the generic names) its
+# external interrupt, and the input queue is PLIC source 12. Since O3 a
+# virtio-mmio block device sits in virt's first virtio slot, PLIC source 1.
 MACHINE = node("", {
     "#address-cells": u32(1), "#size-cells": u32(1),
     "compatible": string("tiny-processors,rv32-machine"),
@@ -103,14 +115,25 @@ MACHINE = node("", {
     node("chosen", {"stdout-path": string(f"/soc/console@{CONSOLE_BASE:x}")}),
     node("cpus", {"#address-cells": u32(1), "#size-cells": u32(0)},
          node("cpu@0", {"device_type": string("cpu"), "reg": u32(0), "compatible": string("riscv"),
-                        "riscv,isa": string("rv32imf_zicsr_zicntr"), "status": string("okay")})),
+                        "riscv,isa": string("rv32imf_zicsr_zicntr"), "status": string("okay")},
+              node("interrupt-controller", {"#interrupt-cells": u32(1), "interrupt-controller": b"",
+                                            "compatible": string("riscv,cpu-intc"), "phandle": u32(CPU_INTC)}))),
     node(f"memory@{RAM_BASE:x}", {"device_type": string("memory"), "reg": u32(RAM_BASE, RAM_SIZE)}),
     node("soc", {"#address-cells": u32(1), "#size-cells": u32(1),
                  "compatible": string("simple-bus"), "ranges": b""},
          device("test", DONE_BASE, ("tiny-processors,done", "sifive,test0"), ((DONE_BASE, 4),)),
-         device("clint", CLINT_BASE, ("tiny-processors,clint", "riscv,clint0"), ((CLINT_BASE, CLINT_SIZE),)),
+         device("clint", CLINT_BASE, ("tiny-processors,clint", "riscv,clint0"), ((CLINT_BASE, CLINT_SIZE),),
+                {"interrupts-extended": u32(CPU_INTC, IRQ_MSI, CPU_INTC, IRQ_MTI)}),
+         device("plic", PLIC_BASE, ("tiny-processors,plic", "sifive,plic-1.0.0", "riscv,plic0"), ((PLIC_BASE, PLIC_SIZE),),
+                {"#address-cells": u32(0), "#interrupt-cells": u32(1), "interrupt-controller": b"",
+                 "interrupts-extended": u32(CPU_INTC, IRQ_MEI), "riscv,ndev": u32(PLIC_SOURCES),
+                 "phandle": u32(PLIC_PHANDLE)}),
+         node(f"virtio_mmio@{VIRTIO_BASE:x}", {"compatible": string("virtio,mmio"),
+                                               "reg": u32(VIRTIO_BASE, VIRTIO_SIZE),
+                                               "interrupt-parent": u32(PLIC_PHANDLE), "interrupts": u32(VIRTIO_IRQ)}),
          device("console", CONSOLE_BASE, ("tiny-processors,console",), ((CONSOLE_BASE, 8),)),
-         device("input", INPUT_BASE, ("tiny-processors,input",), ((INPUT_BASE, 16),)),
+         device("input", INPUT_BASE, ("tiny-processors,input",), ((INPUT_BASE, 16),),
+                {"interrupt-parent": u32(PLIC_PHANDLE), "interrupts": u32(INPUT_IRQ)}),
          device("display", DISPLAY_BASE, ("tiny-processors,display",), ((DISPLAY_BASE, 16), (FB_BASE, FB_SIZE))),
          device("simd4", SIMD4_BASE, ("tiny-processors,simd4",),
                 ((SIMD4_BASE, 32), (SIMD4_PROGRAM, 1024), (SIMD4_DATA, 1024))),

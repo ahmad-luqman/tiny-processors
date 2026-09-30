@@ -1,0 +1,8 @@
+irqcheck: registers ok
+irqcheck: gating ok
+irqcheck: software ok
+irqcheck: priority ok
+irqcheck: wfi ok
+irqcheck: plic ok
+irqcheck: keyboard source 12 events 2
+PASS 133cab46

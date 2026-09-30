@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 
-from tools.rv32_asm import BOOTROM, CLINT, CONSOLE, DISPLAY, DONE, FB, INPUT, RAM
+from tools.rv32_asm import BOOTROM, CLINT, CONSOLE, DISPLAY, DONE, FB, INPUT, PLIC, RAM, VIRTIO
 from tools.rv32_devices import (DIAG_EXPECTED_VALUES, EVENT_PRESS, EVENT_VALID, FB_SIZE, KEYS, QUEUE_SIZE, diag_checksum,
                                 event_word, frame_hash, is_decimal, key_code, parse_input_script, render_diag_frame)
 from tools.rv32_image import (ImageError, check_image, check_listing, check_m_build, flatten, parse_elf,
@@ -165,6 +165,43 @@ class ImageCheckerTests(unittest.TestCase):
                 self.assertEqual(check_listing(empty), ["listing has no instruction lines"])
                 self.assertEqual(check_listing(empty, allow_privileged=True), ["listing has no instruction lines"])
 
+    def test_system_gate_admits_the_interrupt_csrs_wfi_and_ecall(self):
+        """Track 2: --allow-system admits mstatus, mie, mip, mscratch, wfi and ecall (O1, O2) and
+        mcounteren and the PMP CSRs (O5) on top of the trap handler's CSRs; --allow-privileged alone
+        still refuses them."""
+        base = "80000000: 00040117     \tauipc\tsp, 0x40\n"
+        system = ["80000004: 30047073     \tcsrci\tmstatus, 8", "80000004: 30451073     \tcsrw\tmie, a0",
+                  "80000004: 34402573     \tcsrr\ta0, mip", "80000004: 34051073     \tcsrw\tmscratch, a0",
+                  "80000004: 10500073     \twfi", "80000004: 00000073     \tecall",
+                  "80000004: 30679073     \tcsrw\tmcounteren, a5", "80000004: 3a051073     \tcsrw\tpmpcfg0, a0",
+                  "80000004: 3b751073     \tcsrw\tpmpaddr7, a0"]
+        for line in system:
+            with self.subTest(line=line):
+                self.assertEqual(len(check_listing(base + line, allow_privileged=True)), 1)
+                self.assertEqual(check_listing(base + line, allow_system=True), [])
+        self.assertEqual(check_listing(base + "80000004: 30200073     \tmret", allow_system=True), [])
+        unimp = base + "80000004: c0001073     \tunimp"  # the canonical illegal instruction, for a program that traps on purpose
+        self.assertEqual(len(check_listing(unimp, allow_counters=True)), 1)
+        self.assertEqual(check_listing(unimp, allow_system=True), [])
+        for line in ("80000004: 3b851073     \tcsrw\tpmpaddr8, a0", "80000004: 3a251073     \tcsrw\tpmpcfg2, a0",
+                     "80000004: 10200073     \tsret"):
+            with self.subTest(line=line):
+                self.assertEqual(len(check_listing(base + line, allow_system=True)), 1)
+
+    def test_user_gate_admits_ecall_unimp_and_counter_reads_only(self):
+        """O5: --allow-user admits what a user-mode program may run, and none of the machine's
+        instructions or CSRs."""
+        base = "80000000: 00040117     \tauipc\tsp, 0x40\n"
+        for line in ("80000004: 00000073     \tecall", "80000004: c0001073     \tunimp",
+                     "80000004: c0102573     \trdtime\ta0"):
+            with self.subTest(line=line):
+                self.assertEqual(check_listing(base + line, allow_user=True), [])
+        for line in ("80000004: 30002573     \tcsrr\ta0, mstatus", "80000004: 30200073     \tmret",
+                     "80000004: 10500073     \twfi", "80000004: 34051073     \tcsrw\tmscratch, a0",
+                     "80000004: c0101073     \tcsrw\ttime, zero"):
+            with self.subTest(line=line):
+                self.assertEqual(len(check_listing(base + line, allow_user=True)), 1)
+
     def test_m_and_counter_gates_admit_exactly_their_instructions(self):
         base = "80000000: 00040117     \tauipc\tsp, 0x40\n"
         m_lines = ["80000004: 02b50533     \tmul\ta0, a0, a1", "80000004: 02b51533     \tmulh\ta0, a0, a1",
@@ -222,7 +259,7 @@ class ImageCheckerTests(unittest.TestCase):
             self.assertEqual(check(good, "--listing", str(listing)).returncode, 1, "without either flag mul is refused")
             result = check(good, "--require-m")
             self.assertEqual(result.returncode, 2, "--require-m needs a listing to inspect")
-            self.assertIn("--allow-m, --allow-counters and --allow-privileged require --listing", result.stderr)
+            self.assertIn("--allow-m, --allow-counters, --allow-privileged, --allow-system and --allow-user require --listing", result.stderr)
 
     def test_selfcheck_expected_checksum_matches_source_and_makefile(self):
         checksum = 2166136261
@@ -435,12 +472,12 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertRegex(header, rf"#define RV32_EVENT_PRESS\s+{EVENT_PRESS:#010x}\b")
         self.assertIn(f"32'h{EVENT_VALID:08x} | ((token2 == \"down\") ? 32'h{EVENT_PRESS:x} : 32'h0)".replace("8000_0000", "80000000"),
                       testbench.replace("8000_0000", "80000000"))
-        bases = {"RAM": RAM, "CONSOLE": CONSOLE, "DONE": DONE, "CLINT": CLINT, "BOOTROM": BOOTROM, "INPUT": INPUT, "DISPLAY": DISPLAY, "FB": FB,
+        bases = {"RAM": RAM, "CONSOLE": CONSOLE, "DONE": DONE, "CLINT": CLINT, "PLIC": PLIC, "VIRTIO": VIRTIO, "BOOTROM": BOOTROM, "INPUT": INPUT, "DISPLAY": DISPLAY, "FB": FB,
                  "SIMD4": 0x11004000, "SIMD4_PROGRAM": 0x11005000, "SIMD4_DATA": 0x11006000, "GPU": 0x11007000,
                  "G3D": 0x11008000}
         header_bases = {name: int(value, 16) for name, value in re.findall(r"#define RV32_(\w+)_BASE\s+0x([0-9a-fA-F]+)", header)}
         self.assertEqual(header_bases, {name: bases[name] for name in header_bases}, "board.h")
-        self.assertLessEqual({"CLINT", "BOOTROM", "INPUT", "DISPLAY", "FB"}, set(header_bases))
+        self.assertLessEqual({"CLINT", "PLIC", "BOOTROM", "INPUT", "DISPLAY", "FB"}, set(header_bases))
         bus = (ROOT / "rtl/rv32/rv32_bus.v").read_text()
         bus_bases = {name.replace("_BASE", "").replace("_ADDR", ""): int(value.replace("_", ""), 16)
                      for name, value in re.findall(r"localparam \[31:0\] (\w+) = 32'h([0-9a-fA-F_]+);", bus)}
@@ -454,7 +491,7 @@ class DeviceHelperTests(unittest.TestCase):
             self.assertIn(f"SIMD4_{name} = 32'h{value:08x}", wrapper.replace("1100_", "1100"))
         from tools import rv32_dtb
         tree = {"RAM": rv32_dtb.RAM_BASE, "CONSOLE": rv32_dtb.CONSOLE_BASE, "DONE": rv32_dtb.DONE_BASE,
-                "CLINT": rv32_dtb.CLINT_BASE, "BOOTROM": rv32_dtb.ROM_BASE, "INPUT": rv32_dtb.INPUT_BASE,
+                "CLINT": rv32_dtb.CLINT_BASE, "PLIC": rv32_dtb.PLIC_BASE, "VIRTIO": rv32_dtb.VIRTIO_BASE, "BOOTROM": rv32_dtb.ROM_BASE, "INPUT": rv32_dtb.INPUT_BASE,
                 "DISPLAY": rv32_dtb.DISPLAY_BASE, "FB": rv32_dtb.FB_BASE, "SIMD4": rv32_dtb.SIMD4_BASE,
                 "SIMD4_PROGRAM": rv32_dtb.SIMD4_PROGRAM, "SIMD4_DATA": rv32_dtb.SIMD4_DATA,
                 "GPU": rv32_dtb.GPU_BASE, "G3D": rv32_dtb.G3D_BASE}
@@ -484,12 +521,16 @@ class DeviceHelperTests(unittest.TestCase):
         words = {name: int(value) for name, value in re.findall(r"parameter integer (\w+) = (\d+)", bus)}
         decoded = {}
         selects = re.findall(r"wire (\w+)_sel = (.*?);", bus, re.S)
-        self.assertEqual(len(selects), 12, "one select per window, plus none_sel")
+        self.assertEqual(len(selects), 14, "one select per window, plus none_sel")
         for select, expr in selects:
             if select == "none":
                 continue
             for bits, name in re.findall(r"mem_addr\[31:(\d+)\]\s*==\s*(\w+)\[31:\1\]", expr):
                 decoded[params[name]] = 1 << int(bits)
+                # The PLIC's 6 MiB: the top quarter of the 8 MiB block is excluded (O1).
+                for high, low in re.findall(r"mem_addr\[(\d+):(\d+)\] != 2'b11", expr):
+                    self.assertEqual(int(high), int(bits) - 1)
+                    decoded[params[name]] = 3 << int(low)
             for mask, name in re.findall(r"\(mem_addr & 32'h([0-9a-fA-F_]+)\)\s*==\s*(\w+)", expr):
                 decoded[params[name]] = (~int(mask.replace("_", ""), 16) + 1) & 0xFFFFFFFF
             for name in re.findall(r"mem_addr\s*==\s*(\w+)\)", expr):
@@ -527,6 +568,28 @@ class DeviceHelperTests(unittest.TestCase):
                 self.assertEqual(evaluate(f"CLINT_{name}"), offset, "rv32emu_core.h")
                 self.assertEqual(getattr(rv32_asm, name) - rv32_asm.CLINT, offset, "rv32_asm.py")
         self.assertEqual(set(offsets), {"MSIP", "MTIMECMP", "MTIME"})
+
+        # The PLIC's registers (O1): the RTL's offsets, board.h, the emulator's header and rv32_asm.py.
+        plic = (ROOT / "rtl/rv32/rv32_plic.v").read_text()
+        offsets = {name: int(value.replace("_", ""), 16)
+                   for name, value in re.findall(r"(PENDING|ENABLE|THRESHOLD|CLAIM) = 23'h([0-9a-f_]+)", plic)}
+        self.assertEqual(set(offsets), {"PENDING", "ENABLE", "THRESHOLD", "CLAIM"})
+        for name, offset in offsets.items():
+            with self.subTest(name):
+                self.assertRegex(board, rf"#define RV32_PLIC_{name}\s+0x0*{offset:x}\b")
+                self.assertEqual(evaluate(f"PLIC_{name}"), offset, "rv32emu_core.h")
+                self.assertEqual(getattr(rv32_asm, f"PLIC_{name}") - rv32_asm.PLIC, offset, "rv32_asm.py")
+        self.assertIn(f"32'h{1 << rv32_asm.PLIC_SOURCE_INPUT:08x}".replace("00001000", "0000_1000"), plic)
+        wired = (1 << rv32_asm.PLIC_SOURCE_INPUT) | (1 << rv32_asm.PLIC_SOURCE_VIRTIO)
+        self.assertIn(f"rv32_plic #(.WIRED(32'h{wired >> 16:04x}_{wired & 0xffff:04x}))", (ROOT / "rtl/rv32/rv32_soc.v").read_text())
+        self.assertEqual(evaluate("PLIC_WIRED"), wired, "rv32emu_core.h")
+        self.assertEqual(evaluate("VIRTIO_DISK_SIZE"), rv32_asm.VIRTIO_DISK_SIZE)
+        self.assertIn(f"parameter integer DISK_WORDS = {rv32_asm.VIRTIO_DISK_SIZE // 4}", (ROOT / "rtl/rv32/rv32_soc.v").read_text())
+        self.assertRegex(board, rf"#define RV32_PLIC_SOURCE_INPUT\s+{rv32_asm.PLIC_SOURCE_INPUT}\b")
+        self.assertEqual(evaluate("PLIC_SOURCE_INPUT"), rv32_asm.PLIC_SOURCE_INPUT)
+        self.assertEqual(rv32_dtb.INPUT_IRQ, rv32_asm.PLIC_SOURCE_INPUT)
+        soc = (ROOT / "rtl/rv32/rv32_soc.v").read_text()
+        self.assertIn(f".lines({{{31 - rv32_asm.PLIC_SOURCE_INPUT}'d0, input_nonempty, {rv32_asm.PLIC_SOURCE_INPUT - 2}'d0, virtio_irq, 1'b0}})", soc)
 
 
 if __name__ == "__main__":

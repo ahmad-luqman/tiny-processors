@@ -60,14 +60,14 @@ static int failed(uint32_t number)
         fold(observed_);                                          \
     } while (0)
 
-/* Trap bookkeeping, filled by diag_trap, which trap.S calls with mcause,
+/* Trap bookkeeping, filled by trap_handler, which trap.S calls with mcause,
  * mtval, and mepc and which returns the PC to resume at. Every RV32I
  * instruction is four bytes, so the faulting one is skipped. */
 #define TRAPS 8
 static volatile uint32_t trap_count;
 static volatile uint32_t trap_cause[TRAPS], trap_tval[TRAPS];
 
-uint32_t diag_trap(uint32_t cause, uint32_t tval, uint32_t epc)
+uint32_t trap_handler(uint32_t cause, uint32_t tval, uint32_t epc)
 {
     if (trap_count < TRAPS) {
         trap_cause[trap_count] = cause;
@@ -77,7 +77,7 @@ uint32_t diag_trap(uint32_t cause, uint32_t tval, uint32_t epc)
     return epc + 4;
 }
 
-extern void diag_trap_entry(void);
+extern void trap_entry(void);
 
 static void set_mtvec(void (*entry)(void))
 {
@@ -160,7 +160,7 @@ int main(void)
     rv32_puts("diag: timer ok\n");
 
     /* 2. Faults: one per device rule, each resumed after the faulting instruction. */
-    set_mtvec(diag_trap_entry);
+    set_mtvec(trap_entry);
     (void)mmio_read32(DIAG_UNMAPPED);
     (void)mmio_read8(RV32_CLINT_BASE + RV32_CLINT_MTIME);
     mmio_write32(RV32_INPUT_BASE + RV32_INPUT_KEYS, 1);

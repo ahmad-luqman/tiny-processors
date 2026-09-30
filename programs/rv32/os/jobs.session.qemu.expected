@@ -1,0 +1,17 @@
+kernel: riscv-virtio,qemu, hart 0
+kernel: devices console clint plic disk
+kernel: 14 programs
+kernel: disk 256 sectors, tfs
+sh: ls, NAME [ARGS] [&], wait, halt [CODE]
+$ bars &
+[2]
+$ life &
+[3]
+$ wait
+$ cat bars.out
+bars: 24 frames, sum 6bf3c4c5, preempted yes
+$ cat life.out
+life: 16 generations, population 31, sum 63c97f8a, preempted yes
+$ halt
+kernel: halt, 4 exits
+PASS 408a6738

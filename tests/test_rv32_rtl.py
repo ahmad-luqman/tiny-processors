@@ -250,7 +250,7 @@ class RtlTest(unittest.TestCase):
         unused_op = r_type(0x33, 1, 0, 2, 3, 2)  # funct7 2 is unused (funct7 1 is the M extension)
         fence_i = i_type(0x0F, 0, 1, 0, 0)
         bad_srai = SRAI(1, 1, 0x20 | 0x400 | 1)  # a funct7 bit set that neither srli nor srai allows
-        illegal = [unused_op, fence_i, 0xFFFFFFFF, CSRRW(0, MSTATUS, 1), bad_srai]
+        illegal = [unused_op, fence_i, 0xFFFFFFFF, CSRRW(0, 0x7C0, 1), bad_srai]
         cases = [(word, 2, word) for word in illegal] + [(ECALL(), 11, 0), (EBREAK(), 3, RAM + 4)]
         for word, cause, value in cases:
             with self.subTest(word=f"{word:08x}"):
@@ -619,7 +619,7 @@ class RtlTest(unittest.TestCase):
             ("misaligned halfword load", LI(1, RAM + 0x201) + [LH(2, 1, 0)], 4, RAM + 0x201),
             ("misaligned halfword store", LI(1, RAM + 0x203) + [SH(1, 1, 0)], 6, RAM + 0x203),
             ("halfword load of the console status", LI(1, CONSOLE) + [LHU(2, 1, 4)], 5, CONSOLE + 4),
-            ("byte load of the console TX register", LI(1, CONSOLE) + [LBU(2, 1, 0)], 5, CONSOLE),
+            ("halfword load of the console RBR", LI(1, CONSOLE) + [LHU(2, 1, 0)], 5, CONSOLE),
             ("byte load of the done register", LI(1, DONE) + [LB(2, 1, 0)], 5, DONE),
             ("halfword store to the done register", LI(1, DONE) + [SH(1, 1, 0)], 7, DONE),
             ("jalr to a non-word target", LI(1, RAM + 0x100) + [JALR(0, 1, 2)], 0, RAM + 0x102),
@@ -757,8 +757,10 @@ class RtlTest(unittest.TestCase):
                 ("fetch from the boot ROM", [JALR(0, 11, 0)], 1, BOOTROM),
                 ("byte load of mtime", LI(1, CLINT + 0xBFF8) + [LBU(2, 1, 0)], 5, CLINT + 0xBFF8),
                 ("word between CLINT registers", LI(1, CLINT + 0x4008) + [LW(2, 1, 0)], 5, CLINT + 0x4008),
-                ("virt's PLIC, reserved for O1", LI(1, 0x0C000000) + [LW(2, 1, 0)], 5, 0x0C000000),
-                ("virt's virtio-mmio, reserved for O3", LI(1, 0x10001000) + [SW(2, 1, 0)], 7, 0x10001000)):
+                ("byte load of the PLIC's claim (O1)", LI(1, 0x0C200004) + [LBU(2, 1, 0)], 5, 0x0C200004),
+                ("past the PLIC's 6 MiB (O1)", LI(1, 0x0C600000) + [LW(2, 1, 0)], 5, 0x0C600000),
+                ("a store to virtio-blk's MagicValue (O3)", LI(1, 0x10001000) + [SW(2, 1, 0)], 7, 0x10001000),
+                ("virt's second virtio slot, unmapped here", LI(1, 0x10002000) + [LW(2, 1, 0)], 5, 0x10002000)):
             with self.subTest(name):
                 self.assert_same_double_fault(body, cause, value)
 

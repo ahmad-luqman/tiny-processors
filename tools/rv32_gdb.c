@@ -87,10 +87,12 @@ static const char *const XREG_NAMES[32] = {
 static const char *const FREG_NAMES[32] = {
     "ft0", "ft1", "ft2", "ft3", "ft4", "ft5", "ft6", "ft7", "fs0", "fs1", "fa0", "fa1", "fa2", "fa3", "fa4", "fa5",
     "fa6", "fa7", "fs2", "fs3", "fs4", "fs5", "fs6", "fs7", "fs8", "fs9", "fs10", "fs11", "ft8", "ft9", "ft10", "ft11"};
-/* The machine CSRs of the trap contract; the floating ones live in the fpu feature, as in gdb's
- * own features/riscv/32bit-fpu.xml. */
+/* The machine CSRs of the trap contract and of interrupts (O1); the floating ones live in the fpu
+ * feature, as in gdb's own features/riscv/32bit-fpu.xml. mip is read-only in effect: a write is
+ * accepted and changes nothing, as a csrw does. */
 static const struct { const char *name; uint32_t number; } CSR_REGS[] = {
-    {"mtvec", 0x305}, {"mepc", 0x341}, {"mcause", 0x342}, {"mtval", 0x343},
+    {"mstatus", 0x300}, {"mie", 0x304}, {"mtvec", 0x305}, {"mscratch", 0x340}, {"mepc", 0x341}, {"mcause", 0x342},
+    {"mtval", 0x343}, {"mip", 0x344},
     /* Zicntr: read-only, so a debugger write is refused with an error, as a csrw would trap */
     {"cycle", 0xc00}, {"time", 0xc01}, {"instret", 0xc02}, {"cycleh", 0xc80}, {"timeh", 0xc81}, {"instreth", 0xc82}};
 

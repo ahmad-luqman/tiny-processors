@@ -161,17 +161,20 @@ static void skip_name(const fdt *t, uint32_t *at)
 }
 
 /* Walk the whole tree for the first node whose `property` matches `value`, and decode its reg
- * entry `index`. A node's properties come before its children, so a node is decided at the first
- * BEGIN_NODE, END_NODE or END after its BEGIN_NODE. */
-static fdt_status find(const fdt *t, const char *property, const char *value, uint32_t index,
-                       uint32_t *base, uint32_t *size)
+ * entry `index`, or with `cell_name` the `index`th 32-bit cell of that property instead. A node's
+ * properties come before its children, so a node is decided at the first BEGIN_NODE, END_NODE or
+ * END after its BEGIN_NODE. */
+static fdt_status find(const fdt *t, const char *property, const char *value, uint32_t node, uint32_t index,
+                       uint32_t *base, uint32_t *size, const char *cell_name)
 {
     uint32_t address_cells[FDT_MAX_DEPTH], size_cells[FDT_MAX_DEPTH];
     int depth = -1;
     int matched = 0, in_props = 0;
-    span reg = {0, 0};
+    span reg = {0, 0}, named = {0, 0};
+    int has_named = 0;
     uint32_t at = t->structs;
     int list = fdt_same(property, "compatible");
+    int by_name = fdt_same(property, "@name"); /* match the node's own name, not a property (O4) */
 
     for (;;) {
         if (at + 4 > t->structs_end) {
@@ -181,6 +184,20 @@ static fdt_status find(const fdt *t, const char *property, const char *value, ui
         at += 4;
         if (token == FDT_BEGIN_NODE || token == FDT_END_NODE || token == FDT_END) {
             /* The properties of the current node end here: decide on it. */
+            if (in_props && matched && node) {
+                node--; /* an earlier match: keep looking for the one asked for */
+                matched = 0;
+            }
+            if (in_props && matched && cell_name) {
+                if (!has_named || named.length % 4 != 0) {
+                    return FDT_NO_PROPERTY;
+                }
+                if (index >= named.length / 4) {
+                    return FDT_NOT_FOUND;
+                }
+                *base = be32(t->blob + named.offset + 4u * index);
+                return FDT_OK;
+            }
             if (in_props && matched) {
                 if (depth < 1) {
                     return FDT_NO_REG; /* the root has no parent to size a reg with */
@@ -190,15 +207,18 @@ static fdt_status find(const fdt *t, const char *property, const char *value, ui
             in_props = 0;
         }
         if (token == FDT_BEGIN_NODE) {
+            uint32_t name = at;
             skip_name(t, &at);
             if (++depth >= FDT_MAX_DEPTH) {
                 return FDT_BAD_LAYOUT;
             }
             address_cells[depth] = 2; /* the specification's defaults for the children */
             size_cells[depth] = 1;
-            matched = 0;
+            matched = by_name && at <= t->structs_end && terminated(t, name, at) &&
+                      fdt_same((const char *)t->blob + name, value);
             in_props = 1;
             reg.length = 0;
+            has_named = 0;
         } else if (token == FDT_END_NODE) {
             if (depth-- < 0) {
                 return FDT_BAD_LAYOUT;
@@ -220,6 +240,10 @@ static fdt_status find(const fdt *t, const char *property, const char *value, ui
             } else if (fdt_same(key, "reg")) {
                 reg = v;
             }
+            if (cell_name && fdt_same(key, cell_name)) {
+                named = v;
+                has_named = 1;
+            }
             if (fdt_same(key, property) && matches(t, v, list, value)) {
                 matched = 1;
             }
@@ -234,7 +258,19 @@ static fdt_status find(const fdt *t, const char *property, const char *value, ui
 fdt_status fdt_find(const fdt *t, const char *property, const char *value, uint32_t index,
                     uint32_t *base, uint32_t *size)
 {
-    return find(t, property, value, index, base, size);
+    return find(t, property, value, 0, index, base, size, 0);
+}
+
+fdt_status fdt_find_nth(const fdt *t, const char *property, const char *value, uint32_t node, uint32_t index,
+                        uint32_t *base, uint32_t *size)
+{
+    return find(t, property, value, node, index, base, size, 0);
+}
+
+fdt_status fdt_cell(const fdt *t, const char *property, const char *value, const char *name, uint32_t index,
+                    uint32_t *cell)
+{
+    return find(t, property, value, 0, index, cell, 0, name);
 }
 
 /* Only the root's own properties: they end at its first child's BEGIN_NODE or its END_NODE. */

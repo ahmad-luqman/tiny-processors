@@ -25,9 +25,10 @@
 #define RAM_BASE 0x80000000u
 #define RAM_SIZE 0x00400000u
 #define CONSOLE_BASE 0x10000000u
-#define CONSOLE_TX 0x0u
+#define CONSOLE_TX 0x0u      /* write: transmit; read: RBR, the next received byte (O2) */
 #define CONSOLE_STATUS 0x5u
 #define CONSOLE_TX_READY 0x20u
+#define CONSOLE_RX_READY 0x01u /* LSR.DR: a received byte is waiting (O2) */
 #define DONE_ADDR 0x00100000u
 #define DONE_PASS 0x5555u
 #define DONE_FAIL 0x3333u
@@ -38,6 +39,19 @@
 #define CLINT_MTIMECMP 0x4000u
 #define CLINT_MTIME 0xbff8u
 #define BOOT_HART 0u      /* a0 at reset: the hart id */
+#define PLIC_BASE 0x0c000000u
+#define PLIC_SIZE 0x600000u
+#define PLIC_PENDING 0x1000u
+#define PLIC_ENABLE 0x2000u
+#define PLIC_THRESHOLD 0x200000u
+#define PLIC_CLAIM 0x200004u
+#define PLIC_SOURCES 32u         /* sources 1..31; 0 means "none" */
+#define PLIC_SOURCE_INPUT 12u    /* the input queue: pending while COUNT is nonzero */
+#define PLIC_SOURCE_VIRTIO 1u    /* virtio-blk (O3): pending while InterruptStatus is nonzero */
+#define PLIC_WIRED ((1u << PLIC_SOURCE_INPUT) | (1u << PLIC_SOURCE_VIRTIO))
+#define VIRTIO_BASE 0x10001000u  /* virt's first virtio-mmio slot (O3) */
+#define VIRTIO_SIZE 0x200u
+#define VIRTIO_DISK_SIZE 0x20000u /* 128 KiB, the RTL's DISK_WORDS: a disk file must be this size */
 #define INPUT_BASE 0x11001000u
 #define INPUT_EVENT 0x0u
 #define INPUT_COUNT 0x4u
@@ -54,6 +68,18 @@
 #define FB_COLUMNS 320u
 #define FB_ROWS 240u
 #define FB_SIZE (FB_COLUMNS * FB_ROWS)
+
+/* virtio-blk (O3, docs/rv32.md "virtio-blk"): the registers of one virtio-mmio version 2 block
+ * device and its disk, held in memory and written through to the file it came from. */
+typedef struct {
+    uint8_t status;
+    bool features_sel, queue_sel_zero, queue_ready, interrupt;
+    uint32_t queue_num, desc_lo, desc_hi, driver_lo, driver_hi, device_lo, device_hi;
+    uint16_t last_avail, used_idx;
+    uint8_t disk[VIRTIO_DISK_SIZE];
+    FILE *file;       /* --disk: written through on every OUT request, or NULL */
+    bool write_error;
+} virtio_blk;
 
 /* Why the run ended. HALT_STOPPED is the host's doing (the window was closed, or a
  * debugger killed the run or hung up); a plain headless run never produces it. */
@@ -76,6 +102,18 @@ typedef struct {
     uint8_t fcsr;
     uint32_t pc;
     uint32_t mtvec, mepc, mcause, mtval;
+    uint32_t mstatus;  /* the writable bits (MIE, MPIE); FS and SD read as constants (O1), MPP is mpp (O5) */
+    uint32_t mie, mscratch;
+    uint8_t priv, mpp;   /* O5: the privilege mode (3 machine, 0 user) and mstatus.MPP */
+    uint32_t mcounteren; /* O5: CY, TM, IR: the counters user mode may read */
+    uint8_t pmpcfg[8];   /* O5: eight PMP entries */
+    uint32_t pmpaddr[8];
+    uint8_t plic_priority[PLIC_SOURCES]; /* the PLIC (O1): priorities of the wired sources */
+    uint32_t plic_enable, plic_claimed;  /* context 0's enables; sources claimed and not completed */
+    uint32_t plic_pending;               /* the gateways' latched requests */
+    uint8_t plic_threshold;
+    uint64_t interrupts; /* interrupts taken */
+    virtio_blk *virtio;  /* the block device (O3), allocated by emu_alloc */
     uint8_t *ram;
     uint64_t steps;   /* instructions executed: retired plus trapped */
     uint64_t retired; /* instructions whose architectural effects committed */
@@ -87,7 +125,7 @@ typedef struct {
     uint32_t done_word;
     uint32_t second_cause, second_tval; /* the trap that could not be delivered */
     uint64_t mtime_offset; /* mtime = steps + mtime_offset; a write sets the offset */
-    uint64_t mtimecmp;     /* CLINT registers with no effect until the core takes interrupts (O1) */
+    uint64_t mtimecmp;     /* CLINT: mip.MTIP is mtime >= mtimecmp, mip.MSIP is msip (O1) */
     uint32_t msip;
     uint8_t *fb;           /* the framebuffer window, FB_SIZE bytes */
     uint32_t frames;       /* presents since reset */
@@ -102,6 +140,9 @@ typedef struct {
     size_t scripted, next_scripted;
     size_t dropped;         /* events the full queue refused; a passing run is rejected unless allowed */
     FILE *record;           /* every event offered to the queue as a script line, or NULL */
+    uint8_t *console_in;    /* console input (O2): bytes the guest reads from RBR, all there from reset */
+    size_t console_in_len, console_in_next;
+    bool console_stdin;     /* --console-input -: bytes arrive from stdin as the host has them */
     /* Effects of the current step, for the trace line. */
     int wr_reg, wr_freg;
     bool wr_fcsr;
@@ -128,6 +169,13 @@ void emu_free(machine *m);
 /* Input: parse the script (exits with a message on error), deliver every scripted event whose
  * frame has been reached, or offer one event to the queue now (recorded, then queued or dropped). */
 void emu_read_input_script(machine *m, const char *path);
+/* Console input (O2): every byte of `path` is received before the first instruction; "-" instead
+ * reads stdin as it arrives, for interactive use. Exits with a message on error. */
+void emu_read_console_input(machine *m, const char *path);
+/* The disk (O3): a file of exactly VIRTIO_DISK_SIZE bytes, read now and written through on every
+ * OUT request. Without one the disk is that many zero bytes that last only for the run. Exits with
+ * a message on error. */
+void emu_open_disk(machine *m, const char *path);
 void emu_deliver_events(machine *m);
 void emu_queue_event(machine *m, uint32_t frame, uint32_t event);
 int emu_key_code(const char *text);   /* a board.h key name (any case) or 0..31; -1 otherwise */

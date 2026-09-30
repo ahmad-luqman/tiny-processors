@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -31,14 +32,40 @@ enum cause {
     CAUSE_LOAD_FAULT = 5,
     CAUSE_STORE_MISALIGNED = 6,
     CAUSE_STORE_FAULT = 7,
+    CAUSE_ECALL_U = 8,
     CAUSE_ECALL_M = 11,
 };
 
 /* The only CSRs that exist; every other number is an illegal instruction. The six Zicntr
  * counters (0xc00-0xc02 and their high halves at 0xc80-0xc82) are read-only: numbers with
  * bits [11:10] set are, by the CSR address convention, and a write to one is illegal. */
-enum csr { CSR_FFLAGS = 0x001, CSR_FRM = 0x002, CSR_FCSR = 0x003, CSR_MTVEC = 0x305, CSR_MEPC = 0x341, CSR_MCAUSE = 0x342, CSR_MTVAL = 0x343,
+enum csr { CSR_FFLAGS = 0x001, CSR_FRM = 0x002, CSR_FCSR = 0x003, CSR_MSTATUS = 0x300, CSR_MIE = 0x304, CSR_MTVEC = 0x305,
+           CSR_MCOUNTEREN = 0x306, CSR_PMPCFG0 = 0x3a0, CSR_PMPCFG1 = 0x3a1, CSR_PMPADDR0 = 0x3b0, CSR_PMPADDR7 = 0x3b7,
+           CSR_MSCRATCH = 0x340, CSR_MEPC = 0x341, CSR_MCAUSE = 0x342, CSR_MTVAL = 0x343, CSR_MIP = 0x344,
            CSR_CYCLE = 0xc00, CSR_TIME = 0xc01, CSR_INSTRET = 0xc02, CSR_CYCLEH = 0xc80, CSR_TIMEH = 0xc81, CSR_INSTRETH = 0xc82 };
+/* mstatus and the interrupt bits (O1, docs/rv32.md "Behavior fixed in Track 2"). MPP is 3 (machine) or
+ * 0 (user) since O5, kept in machine.mpp; FS reads 3 and SD 1 because floating state is always on. */
+#define MSTATUS_MIE 0x8u
+#define MSTATUS_MPIE 0x80u
+#define MSTATUS_CONSTANT 0x80006000u /* SD, FS = 3 */
+#define MSTATUS_MPP 0x1800u
+#define PRIV_U 0u
+#define PRIV_M 3u
+/* PMP (O5): a configuration byte per entry. */
+#define PMP_R 0x01u
+#define PMP_W 0x02u
+#define PMP_X 0x04u
+#define PMP_A 0x18u
+#define PMP_TOR 0x08u
+#define PMP_NA4 0x10u
+#define PMP_NAPOT 0x18u
+#define PMP_L 0x80u
+#define PMP_ENTRIES 8u
+#define IRQ_MSI 3u
+#define IRQ_MTI 7u
+#define IRQ_MEI 11u
+#define MIE_MASK ((1u << IRQ_MSI) | (1u << IRQ_MTI) | (1u << IRQ_MEI))
+#define INTERRUPT 0x80000000u
 typedef enum { ACC_OK, ACC_FAULT, ACC_MISALIGNED } mem_access; /* not `access`: unistd.h owns that name */
 
 /* Every window of the memory map is a region with a load and a store
@@ -87,14 +114,50 @@ static mem_access ram_store(machine *m, uint32_t offset, int width, uint32_t val
     return ACC_OK;
 }
 
+/* Interactive console input: take whatever stdin has now, without waiting. */
+static void console_poll_stdin(machine *m)
+{
+    if (!m->console_stdin || m->console_in_next < m->console_in_len) {
+        return;
+    }
+    struct pollfd p = {STDIN_FILENO, POLLIN, 0};
+    if (poll(&p, 1, 0) <= 0 || !(p.revents & (POLLIN | POLLHUP))) {
+        return;
+    }
+    uint8_t buffer[256];
+    ssize_t n = read(STDIN_FILENO, buffer, sizeof buffer);
+    if (n <= 0) {
+        m->console_stdin = false; /* end of input: nothing more will arrive */
+        return;
+    }
+    free(m->console_in);
+    m->console_in = malloc((size_t)n);
+    if (!m->console_in) {
+        fprintf(stderr, "%s: cannot allocate console input\n", emu_prog);
+        exit(EXIT_EMULATOR_ERROR);
+    }
+    memcpy(m->console_in, buffer, (size_t)n);
+    m->console_in_len = (size_t)n;
+    m->console_in_next = 0;
+}
+
+/* The console (docs/rv32.md, "Console"): a 16550's transmit and line-status registers, and since O2
+ * its receive buffer: a byte read of +0 takes the next received byte (0 when there is none) and
+ * LSR bit 0 says one is waiting. */
 static mem_access console_load(machine *m, uint32_t offset, int width, uint32_t *value)
 {
-    (void)m;
     if (width == 1 && offset == CONSOLE_STATUS) {
-        *value = CONSOLE_TX_READY; /* always ready: every byte is accepted at once */
+        console_poll_stdin(m);
+        /* always ready to transmit: every byte is accepted at once */
+        *value = CONSOLE_TX_READY | (m->console_in_next < m->console_in_len ? CONSOLE_RX_READY : 0u);
         return ACC_OK;
     }
-    return ACC_FAULT; /* TX is write-only; the status is a byte; other offsets do not exist */
+    if (width == 1 && offset == CONSOLE_TX) {
+        console_poll_stdin(m);
+        *value = m->console_in_next < m->console_in_len ? m->console_in[m->console_in_next++] : 0u;
+        return ACC_OK;
+    }
+    return ACC_FAULT; /* the status and RBR are bytes; other offsets do not exist */
 }
 
 static mem_access console_store(machine *m, uint32_t offset, int width, uint32_t value)
@@ -169,6 +232,327 @@ static mem_access rom_load(machine *m, uint32_t offset, int width, uint32_t *val
     }
     *value = v;
     return ACC_OK;
+}
+
+/* PLIC (O1; docs/rv32.md, "PLIC"): one context, hart 0 in machine mode. Each wired source has a
+ * gateway, as in the PLIC specification and QEMU: its pending bit is set while its line is high and
+ * it is not claimed, and then stays set, whatever the line does, until a claim clears it; a
+ * completion ends the claim, and a line still high sets the bit again. A claim returns the pending,
+ * enabled source with the highest priority above the threshold (ties to the lowest number). Unwired
+ * sources hold no priority or enable. The gateways sample the lines before every step, which is
+ * what the RTL's per-clock sampling amounts to: a line only changes through a device access or an
+ * input event, and an instruction takes more than one clock. */
+static uint32_t plic_lines(const machine *m)
+{
+    return (m->count ? 1u << PLIC_SOURCE_INPUT : 0u) | (m->virtio->interrupt ? 1u << PLIC_SOURCE_VIRTIO : 0u);
+}
+
+static void plic_sample(machine *m)
+{
+    m->plic_pending |= plic_lines(m) & PLIC_WIRED & ~m->plic_claimed;
+}
+
+static uint32_t plic_pending(const machine *m)
+{
+    return m->plic_pending;
+}
+
+/* The source a claim would return now, or 0. */
+static uint32_t plic_best(const machine *m)
+{
+    uint32_t candidates = m->plic_enable ? plic_pending(m) & m->plic_enable : 0u, best = 0, best_priority = m->plic_threshold;
+    for (uint32_t id = 1; id < PLIC_SOURCES; id++) {
+        if ((candidates >> id) & 1u && m->plic_priority[id] > best_priority) {
+            best = id;
+            best_priority = m->plic_priority[id];
+        }
+    }
+    return best;
+}
+
+static mem_access plic_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    if (width != 4) {
+        return ACC_FAULT;
+    }
+    if (offset < 4 * PLIC_SOURCES) {
+        *value = m->plic_priority[offset / 4];
+    } else if (offset == PLIC_PENDING) {
+        *value = plic_pending(m);
+    } else if (offset == PLIC_ENABLE) {
+        *value = m->plic_enable;
+    } else if (offset == PLIC_THRESHOLD) {
+        *value = m->plic_threshold;
+    } else if (offset == PLIC_CLAIM) {
+        *value = plic_best(m);
+        m->plic_claimed |= (1u << *value) & ~1u;
+        m->plic_pending &= ~(1u << *value); /* the claim takes the gateway's request */
+    } else {
+        return ACC_FAULT;
+    }
+    return ACC_OK;
+}
+
+static mem_access plic_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    if (width != 4) {
+        return ACC_FAULT;
+    }
+    if (offset < 4 * PLIC_SOURCES) {
+        if ((PLIC_WIRED >> (offset / 4)) & 1u) {
+            m->plic_priority[offset / 4] = (uint8_t)(value & 7u);
+        }
+    } else if (offset == PLIC_ENABLE) {
+        m->plic_enable = value & PLIC_WIRED;
+    } else if (offset == PLIC_THRESHOLD) {
+        m->plic_threshold = (uint8_t)(value & 7u);
+    } else if (offset == PLIC_CLAIM) {
+        if (value < PLIC_SOURCES && (m->plic_enable >> value) & 1u) {
+            m->plic_claimed &= ~(1u << value); /* a completion for a disabled source is ignored */
+        }
+    } else {
+        return ACC_FAULT; /* the pending word is read-only */
+    }
+    return ACC_OK;
+}
+
+/* virtio-blk (O3; rtl/rv32/rv32_virtio_blk.v runs the same steps). A notify of queue 0 with the
+ * queue ready and DRIVER_OK set serves every available request before the store completes; its
+ * DMA reads and writes RAM directly, like the RTL's, which goes around the engines' write locks. */
+#define VIRTIO_MAGIC 0x74726976u
+#define VIRTIO_VENDOR 0x594e4954u
+#define VIRTIO_QUEUE_MAX 8u
+#define VIRTIO_NEEDS_RESET 0x40u
+
+static bool dma_word(uint32_t addr)
+{
+    return addr >= RAM_BASE && addr - RAM_BASE < RAM_SIZE;
+}
+
+/* A DMA read of the word holding `addr` (the RAM ignores bits 1:0, as the RTL's does). */
+static bool dma_read(machine *m, uint32_t addr, uint32_t *value)
+{
+    if (!dma_word(addr)) {
+        return false;
+    }
+    *value = bytes_read(m->ram + ((addr & ~3u) - RAM_BASE), 4);
+    return true;
+}
+
+static bool dma_read16(machine *m, uint32_t addr, uint16_t *value)
+{
+    uint32_t word;
+    if (!dma_read(m, addr, &word)) {
+        return false;
+    }
+    *value = (uint16_t)((addr & 2u) ? word >> 16 : word);
+    return true;
+}
+
+/* A DMA write of the strobed bytes of the word holding `addr`. */
+static bool dma_write(machine *m, uint32_t addr, uint32_t value, uint32_t strobe)
+{
+    if (!dma_word(addr)) {
+        return false;
+    }
+    uint8_t *p = m->ram + ((addr & ~3u) - RAM_BASE);
+    for (int i = 0; i < 4; i++) {
+        if (strobe & (1u << i)) {
+            p[i] = (uint8_t)(value >> (8 * i));
+        }
+    }
+    return true;
+}
+
+static void virtio_disk_written(machine *m, uint32_t offset, uint32_t bytes)
+{
+    virtio_blk *v = m->virtio;
+    if (v->file && (fseek(v->file, (long)offset, SEEK_SET) != 0 || fwrite(v->disk + offset, 1, bytes, v->file) != bytes ||
+                    fflush(v->file) != 0)) {
+        v->write_error = true;
+    }
+}
+
+/* One request: false when the chain cannot be followed or an address is outside RAM. */
+static bool virtio_request(machine *m)
+{
+    virtio_blk *v = m->virtio;
+    uint32_t mask = v->queue_num - 1u;
+    uint16_t head, next = 0;
+    if (!dma_read16(m, v->driver_lo + 4u + 2u * (v->last_avail & mask), &head) || head >= v->queue_num) {
+        return false; /* the head must name one of the queue's descriptors */
+    }
+    uint32_t address[3], length = 0, words[4];
+    bool data_write = false;
+    for (int which = 0; which < 3; which++) {
+        uint32_t base = v->desc_lo + 16u * (which == 0 ? head : next);
+        for (int w = 0; w < 4; w++) { /* the RTL stops at a nonzero high word before reading on */
+            if (!dma_read(m, base + 4u * (uint32_t)w, &words[w]) || (w == 1 && words[1] != 0)) {
+                return false;
+            }
+        }
+        bool has_next = words[3] & 1u, write = words[3] & 2u;
+        if (has_next != (which != 2) || (which == 0 && write) || (which == 2 && !write) ||
+            (which != 2 && (words[3] >> 16) >= v->queue_num)) {
+            return false;
+        }
+        address[which] = words[0];
+        if (which == 1) {
+            length = words[2];
+            data_write = write;
+        }
+        next = (uint16_t)(words[3] >> 16);
+    }
+    uint32_t type, sector, sector_hi;
+    if (!dma_read(m, address[0], &type) || !dma_read(m, address[0] + 8u, &sector) || !dma_read(m, address[0] + 12u, &sector_hi)) {
+        return false;
+    }
+    const uint32_t sectors = VIRTIO_DISK_SIZE / 512u, words_total = VIRTIO_DISK_SIZE / 4u;
+    uint8_t result;
+    if (type > 1) {
+        result = 2; /* UNSUPP */
+    } else if (sector_hi != 0 || sector >= sectors || (length & 3u) || (address[1] & 3u) ||
+               (uint64_t)sector * 128u + (length >> 2) > words_total || data_write != (type == 0)) {
+        result = 1; /* IOERR */
+    } else {
+        for (uint32_t i = 0; i < length / 4u; i++) {
+            uint32_t at = sector * 512u + 4u * i, word;
+            if (type == 0) {
+                if (!dma_write(m, address[1] + 4u * i, bytes_read(v->disk + at, 4), 0xfu)) {
+                    return false;
+                }
+            } else {
+                if (!dma_read(m, address[1] + 4u * i, &word)) {
+                    /* The RTL has written the words before this one to its disk too: the file
+                     * follows, so it stays the disk the machine holds. */
+                    virtio_disk_written(m, sector * 512u, 4u * i);
+                    return false;
+                }
+                bytes_write(v->disk + at, 4, word);
+            }
+        }
+        if (type == 1) {
+            virtio_disk_written(m, sector * 512u, length);
+        }
+        /* A failed write to the host's file, now or earlier, is the guest's I/O error: the disk
+         * it would boot from next time is not the disk it wrote. */
+        result = v->write_error ? 1 : 0;
+    }
+    uint32_t used = v->device_lo + 4u + 8u * (v->used_idx & mask);
+    uint32_t written = (result == 0 && type == 0) ? length + 1u : 1u;
+    if (!dma_write(m, address[2], (uint32_t)result * 0x01010101u, 1u << (address[2] & 3u)) ||
+        !dma_write(m, used, head, 0xfu) || !dma_write(m, used + 4u, written, 0xfu) ||
+        !dma_write(m, v->device_lo + 2u, (uint32_t)(uint16_t)(v->used_idx + 1u) * 0x10001u, (v->device_lo & 2u) ? 0x3u : 0xcu)) {
+        return false;
+    }
+    v->used_idx++;
+    v->last_avail++;
+    v->interrupt = true;
+    return true;
+}
+
+static void virtio_serve(machine *m)
+{
+    virtio_blk *v = m->virtio;
+    if (v->desc_hi || v->driver_hi || v->device_hi || v->queue_num == 0) {
+        v->status |= VIRTIO_NEEDS_RESET;
+        return;
+    }
+    for (;;) {
+        uint16_t available;
+        if (!dma_read16(m, v->driver_lo + 2u, &available)) {
+            v->status |= VIRTIO_NEEDS_RESET;
+            return;
+        }
+        if (available == v->last_avail) {
+            return;
+        }
+        if (!virtio_request(m)) {
+            v->status |= VIRTIO_NEEDS_RESET;
+            return;
+        }
+    }
+}
+
+static mem_access virtio_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    virtio_blk *v = m->virtio;
+    if (width != 4) {
+        return ACC_FAULT;
+    }
+    switch (offset) {
+    case 0x000: *value = VIRTIO_MAGIC; break;
+    case 0x004: *value = 2; break;
+    case 0x008: *value = 2; break;
+    case 0x00c: *value = VIRTIO_VENDOR; break;
+    case 0x010: *value = v->features_sel ? 1u : 0u; break; /* feature 32: VIRTIO_F_VERSION_1 */
+    case 0x034: *value = v->queue_sel_zero ? VIRTIO_QUEUE_MAX : 0u; break;
+    case 0x044: *value = v->queue_ready; break;
+    case 0x060: *value = v->interrupt; break;
+    case 0x070: *value = v->status; break;
+    case 0x080: *value = v->desc_lo; break;
+    case 0x084: *value = v->desc_hi; break;
+    case 0x090: *value = v->driver_lo; break;
+    case 0x094: *value = v->driver_hi; break;
+    case 0x0a0: *value = v->device_lo; break;
+    case 0x0a4: *value = v->device_hi; break;
+    case 0x0fc: *value = 0; break;
+    case 0x100: *value = VIRTIO_DISK_SIZE / 512u; break;
+    case 0x104: *value = 0; break;
+    default: return ACC_FAULT; /* write-only registers and unused offsets */
+    }
+    return ACC_OK;
+}
+
+static mem_access virtio_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    virtio_blk *v = m->virtio;
+    if (width != 4) {
+        return ACC_FAULT;
+    }
+    switch (offset) {
+    case 0x014: v->features_sel = value == 1; break;
+    case 0x020: break; /* the driver's features are accepted and not used */
+    case 0x024: break; /* nor is which half of them the driver writes */
+    case 0x030: v->queue_sel_zero = value == 0; break;
+    case 0x038:
+        if (v->queue_sel_zero) {
+            v->queue_num = (value == 1 || value == 2 || value == 4 || value == 8) ? value : 0u;
+        }
+        break;
+    case 0x044: if (v->queue_sel_zero) { v->queue_ready = value & 1u; } break;
+    case 0x050:
+        if (value == 0 && v->queue_ready && (v->status & 4u) && !(v->status & VIRTIO_NEEDS_RESET)) {
+            virtio_serve(m);
+        }
+        break;
+    case 0x064: if (value & 1u) { v->interrupt = false; } break;
+    case 0x070:
+        v->status = (uint8_t)value;
+        if ((value & 0xffu) == 0) { /* a device reset: the queue starts again */
+            v->queue_ready = false;
+            v->queue_num = 0;
+            v->last_avail = v->used_idx = 0;
+            v->interrupt = false;
+            v->features_sel = false;
+        }
+        break;
+    case 0x080: if (v->queue_sel_zero) { v->desc_lo = value; } break;
+    case 0x084: if (v->queue_sel_zero) { v->desc_hi = value; } break;
+    case 0x090: if (v->queue_sel_zero) { v->driver_lo = value; } break;
+    case 0x094: if (v->queue_sel_zero) { v->driver_hi = value; } break;
+    case 0x0a0: if (v->queue_sel_zero) { v->device_lo = value; } break;
+    case 0x0a4: if (v->queue_sel_zero) { v->device_hi = value; } break;
+    default: return ACC_FAULT; /* read-only registers and unused offsets */
+    }
+    return ACC_OK;
+}
+
+/* mip: the live interrupt levels from the CLINT and the PLIC. */
+static uint32_t mip_now(const machine *m)
+{
+    return (m->msip ? 1u << IRQ_MSI : 0u) | (mtime_now(m) >= m->mtimecmp ? 1u << IRQ_MTI : 0u) |
+           (plic_best(m) ? 1u << IRQ_MEI : 0u);
 }
 
 /* Input (docs/rv32.md): the host queues an event when its frame is reached,
@@ -369,6 +753,8 @@ static const region REGIONS[] = {
     {"done", DONE_ADDR, 4, NULL, done_store},
     {"console", CONSOLE_BASE, 8, console_load, console_store},
     {"clint", CLINT_BASE, CLINT_SIZE, clint_load, clint_store},
+    {"plic", PLIC_BASE, PLIC_SIZE, plic_load, plic_store},
+    {"virtio", VIRTIO_BASE, VIRTIO_SIZE, virtio_load, virtio_store},
     {"bootrom", RV32_DTB_ROM_BASE, RV32_DTB_ROM_SIZE, rom_load, NULL},
     {"input", INPUT_BASE, 16, input_load, NULL},
     {"display", DISPLAY_BASE, 16, display_load, display_store},
@@ -401,11 +787,37 @@ static uint32_t ram_read(const machine *m, uint32_t addr, int width)
     return bytes_read(m->ram + (addr - RAM_BASE), width);
 }
 
-/* Data load. Misalignment is checked before the address is decoded. */
+/* PMP (O5; docs/rv32.md "Behavior fixed in Track 2"): the lowest-numbered entry that matches the
+ * address decides. Regions are whole words (granularity 4), so an aligned access matches whole or not
+ * at all. User mode needs a match with the permission; machine mode is held only to locked
+ * entries and may go where nothing matches. */
+static bool pmp_allows(const machine *m, uint32_t addr, uint32_t need)
+{
+    uint32_t word = addr >> 2;
+    for (uint32_t i = 0; i < PMP_ENTRIES; i++) {
+        uint32_t cfg = m->pmpcfg[i], at = m->pmpaddr[i];
+        bool match;
+        switch (cfg & PMP_A) {
+        case PMP_TOR: match = word >= (i ? m->pmpaddr[i - 1] : 0u) && word < at; break;
+        case PMP_NA4: match = word == at; break;
+        case PMP_NAPOT: match = ((word ^ at) & ~(at ^ (at + 1u))) == 0; break;
+        default: continue; /* OFF */
+        }
+        if (match) {
+            return (m->priv == PRIV_M && !(cfg & PMP_L)) || (cfg & need) == need;
+        }
+    }
+    return m->priv == PRIV_M;
+}
+
+/* Data load. Misalignment is checked before the address is decoded, and PMP before the bus. */
 static mem_access load(machine *m, uint32_t addr, int width, uint32_t *value)
 {
     if (addr % (uint32_t)width) {
         return ACC_MISALIGNED;
+    }
+    if (!pmp_allows(m, addr, PMP_R)) {
+        return ACC_FAULT;
     }
     const region *r = find_region(addr, width);
     if (!r || !r->load) {
@@ -418,6 +830,9 @@ static mem_access store(machine *m, uint32_t addr, int width, uint32_t value)
 {
     if (addr % (uint32_t)width) {
         return ACC_MISALIGNED;
+    }
+    if (!pmp_allows(m, addr, PMP_W)) {
+        return ACC_FAULT;
     }
     const region *r = find_region(addr, width);
     if (!r || !r->store) {
@@ -444,15 +859,35 @@ static void trace_effects(const machine *m)
     }
 }
 
+/* Trap entry, shared by exceptions and interrupts: mepc is the instruction not executed, MPIE takes
+ * MIE and MIE clears, MPP takes the privilege mode and the machine enters machine mode (O5). */
+static void enter_handler(machine *m, uint32_t cause, uint32_t tval)
+{
+    m->mepc = m->pc;
+    m->mcause = cause;
+    m->mtval = tval;
+    m->mstatus = (m->mstatus & MSTATUS_MIE) ? MSTATUS_MPIE : 0u;
+    m->mpp = m->priv;
+    m->priv = PRIV_M;
+    m->pc = m->mtvec;
+}
+
+/* One device tick of the accelerators: every step (an instruction retired or trapped, or an
+ * interrupt taken) is one. */
+static void tick_accelerators(machine *m)
+{
+    simd_tick(&m->simd, false);
+    gpu_tick(&m->gpu, m->ram, RAM_SIZE, m->fb, false);
+    g3d_tick(&m->g3d, m->ram, RAM_SIZE, m->fb, false);
+}
+
 /* Deliver a trap for the instruction at m->pc. The instruction does not
  * retire. If the previous trap's handler has not yet retired an instruction,
  * the machine cannot make progress (the M1 firmware leaves mtvec at 0, so its
  * handler would be fetched from unmapped memory): halt and report both traps. */
 static void trap(machine *m, uint32_t word, uint32_t cause, uint32_t tval)
 {
-    simd_tick(&m->simd, false);
-    gpu_tick(&m->gpu,m->ram,RAM_SIZE,m->fb,false);
-    g3d_tick(&m->g3d,m->ram,RAM_SIZE,m->fb,false);
+    tick_accelerators(m);
     m->steps++;
     if (m->trace) {
         fprintf(m->trace, "%" PRIu64 " %08" PRIx32 " %08" PRIx32 " trap %" PRIu32 " %08" PRIx32 "\n",
@@ -466,10 +901,27 @@ static void trap(machine *m, uint32_t word, uint32_t cause, uint32_t tval)
     }
     m->in_trap = true;
     m->traps++;
-    m->mepc = m->pc;
-    m->mcause = cause;
-    m->mtval = tval;
-    m->pc = m->mtvec;
+    enter_handler(m, cause, tval);
+}
+
+/* Take an interrupt instead of executing the instruction at m->pc (O1): a step and a device tick
+ * like a trap, with its own trace line and no instruction word. */
+static void take_interrupt(machine *m, uint32_t code)
+{
+    tick_accelerators(m);
+    m->steps++;
+    if (m->trace) {
+        fprintf(m->trace, "%" PRIu64 " %08" PRIx32 " 00000000 interrupt %" PRIu32 "\n", m->steps, m->pc, code);
+    }
+    if (m->in_trap) { /* unreachable while trap entry clears MIE; kept as the double-fault rule */
+        m->halt = HALT_DOUBLE_FAULT;
+        m->second_cause = INTERRUPT | code;
+        m->second_tval = 0;
+        return;
+    }
+    m->in_trap = true;
+    m->interrupts++;
+    enter_handler(m, INTERRUPT | code, 0);
 }
 
 static bool csr_read(const machine *m, uint32_t number, uint32_t *value)
@@ -478,6 +930,16 @@ static bool csr_read(const machine *m, uint32_t number, uint32_t *value)
     case CSR_FFLAGS: *value = m->fcsr & 31u; return true;
     case CSR_FRM: *value = m->fcsr >> 5; return true;
     case CSR_FCSR: *value = m->fcsr; return true;
+    case CSR_MSTATUS: *value = m->mstatus | MSTATUS_CONSTANT | (m->mpp == PRIV_M ? MSTATUS_MPP : 0u); return true;
+    case CSR_MCOUNTEREN: *value = m->mcounteren; return true;
+    case CSR_PMPCFG0: case CSR_PMPCFG1: {
+        const uint8_t *c = m->pmpcfg + 4 * (number - CSR_PMPCFG0);
+        *value = (uint32_t)c[0] | (uint32_t)c[1] << 8 | (uint32_t)c[2] << 16 | (uint32_t)c[3] << 24;
+        return true;
+    }
+    case CSR_MIE: *value = m->mie; return true;
+    case CSR_MIP: *value = mip_now(m); return true;
+    case CSR_MSCRATCH: *value = m->mscratch; return true;
     case CSR_MTVEC: *value = m->mtvec; return true;
     case CSR_MEPC: *value = m->mepc; return true;
     case CSR_MCAUSE: *value = m->mcause; return true;
@@ -492,7 +954,12 @@ static bool csr_read(const machine *m, uint32_t number, uint32_t *value)
     case CSR_TIMEH: *value = (uint32_t)(mtime_now(m) >> 32); return true;
     case CSR_INSTRET: *value = (uint32_t)m->retired; return true;
     case CSR_INSTRETH: *value = (uint32_t)(m->retired >> 32); return true;
-    default: return false;
+    default:
+        if (number >= CSR_PMPADDR0 && number <= CSR_PMPADDR7) {
+            *value = m->pmpaddr[number - CSR_PMPADDR0];
+            return true;
+        }
+        return false;
     }
 }
 
@@ -508,11 +975,57 @@ static void csr_write(machine *m, uint32_t number, uint32_t value)
     case CSR_FFLAGS: m->fcsr = (m->fcsr & 0xe0u) | (value & 31u); m->wr_fcsr = true; break;
     case CSR_FRM: m->fcsr = (m->fcsr & 31u) | ((value & 7u) << 5); m->wr_fcsr = true; break;
     case CSR_FCSR: m->fcsr = value & 255u; m->wr_fcsr = true; break;
+    case CSR_MSTATUS:
+        m->mstatus = value & (MSTATUS_MIE | MSTATUS_MPIE);
+        m->mpp = (value & MSTATUS_MPP) == MSTATUS_MPP ? PRIV_M : PRIV_U; /* WARL: 3 or 0 */
+        break;
+    case CSR_MCOUNTEREN: m->mcounteren = value & 7u; break;
+    case CSR_PMPCFG0: case CSR_PMPCFG1:
+        for (uint32_t k = 0; k < 4; k++) {
+            uint32_t i = 4 * (number - CSR_PMPCFG0) + k, cfg = (value >> (8 * k)) & 0x9fu; /* bits 6:5 read 0 */
+            if (m->pmpcfg[i] & PMP_L) {
+                continue; /* a locked entry ignores writes until reset */
+            }
+            if ((cfg & PMP_W) && !(cfg & PMP_R)) {
+                cfg &= ~PMP_W; /* W without R is reserved: stored as neither */
+            }
+            m->pmpcfg[i] = (uint8_t)cfg;
+        }
+        break;
+    case CSR_MIE: m->mie = value & MIE_MASK; break;
+    case CSR_MIP: break; /* MSIP, MTIP and MEIP are read-only: the write is legal and does nothing */
+    case CSR_MSCRATCH: m->mscratch = value; break;
     case CSR_MTVEC: m->mtvec = value & ~3u; break; /* direct mode only (WARL) */
     case CSR_MEPC: m->mepc = value & ~3u; break;   /* IALIGN is 32 */
     case CSR_MCAUSE: m->mcause = value; break;
     case CSR_MTVAL: m->mtval = value; break;
+    default:
+        if (number >= CSR_PMPADDR0 && number <= CSR_PMPADDR7) {
+            uint32_t i = number - CSR_PMPADDR0;
+            bool locked = (m->pmpcfg[i] & PMP_L) ||
+                          (i + 1 < PMP_ENTRIES && (m->pmpcfg[i + 1] & (PMP_L | PMP_A)) == (PMP_L | PMP_TOR));
+            if (!locked) {
+                m->pmpaddr[i] = value;
+            }
+        }
+        break;
     }
+}
+
+/* User mode (O5) may use the floating CSRs and, as mcounteren allows, the counters; every
+ * machine CSR is an illegal instruction there. */
+static bool csr_allowed(const machine *m, uint32_t number)
+{
+    if (m->priv == PRIV_M) {
+        return true;
+    }
+    if ((number >> 8) & 3u) {
+        return false;
+    }
+    if (number >= CSR_CYCLE && number <= CSR_INSTRETH) {
+        return (m->mcounteren >> (number & 3u)) & 1u;
+    }
+    return true;
 }
 
 /* Branch and jump targets must be word aligned: there are no compressed
@@ -574,11 +1087,19 @@ static void step(machine *m)
     m->wr_reg = m->wr_freg = -1;
     m->wr_fcsr = false;
     m->mem_read = m->mem_write = false;
+    /* An enabled, pending interrupt is taken before the instruction (O1): MEI, then MSI, then MTI. */
+    /* In user mode interrupts are always enabled (O5). */
+    plic_sample(m);
+    uint32_t pending = ((m->mstatus & MSTATUS_MIE) || m->priv == PRIV_U) && m->mie ? mip_now(m) & m->mie : 0u;
+    if (pending) {
+        take_interrupt(m, (pending >> IRQ_MEI) & 1u ? IRQ_MEI : (pending >> IRQ_MSI) & 1u ? IRQ_MSI : IRQ_MTI);
+        return;
+    }
     if (pc & 3u) { /* unreachable through the checked paths, kept as a guard */
         trap(m, 0, CAUSE_FETCH_MISALIGNED, pc);
         return;
     }
-    if (!in_ram(pc, 4)) {
+    if (!in_ram(pc, 4) || !pmp_allows(m, pc, PMP_X)) {
         trap(m, 0, CAUSE_FETCH_FAULT, pc);
         return;
     }
@@ -806,15 +1327,22 @@ static void step(machine *m)
     case 0x73: { /* SYSTEM */
         if (funct3 == 0) {
             if (word == 0x00000073u) {
-                trap(m, word, CAUSE_ECALL_M, 0);
+                trap(m, word, m->priv == PRIV_U ? CAUSE_ECALL_U : CAUSE_ECALL_M, 0);
                 return;
             }
             if (word == 0x00100073u) {
                 trap(m, word, CAUSE_BREAKPOINT, pc);
                 return;
             }
-            if (word == 0x30200073u) { /* MRET: machine mode only, so just return */
+            if (word == 0x30200073u && m->priv == PRIV_M) {
+                /* MRET: MIE from MPIE, MPIE set, the mode from MPP, MPP to user (O5) */
+                m->mstatus = MSTATUS_MPIE | ((m->mstatus & MSTATUS_MPIE) ? MSTATUS_MIE : 0u);
+                m->priv = m->mpp;
+                m->mpp = PRIV_U;
                 next = m->mepc;
+                break;
+            }
+            if (word == 0x10500073u && m->priv == PRIV_M) { /* WFI: retires at once (O1); illegal in user mode */
                 break;
             }
             goto illegal;
@@ -824,7 +1352,7 @@ static void step(machine *m)
         }
         uint32_t number = word >> 20, old, operand = (funct3 & 4u) ? rs1 : a;
         bool writes = (funct3 & 3u) == 1 || rs1 != 0; /* csrrs/csrrc with a zero field only read */
-        if (!csr_read(m, number, &old) || (writes && csr_read_only(number))) {
+        if (!csr_read(m, number, &old) || (writes && csr_read_only(number)) || !csr_allowed(m, number)) {
             goto illegal;
         }
         switch (funct3 & 3u) {
@@ -846,9 +1374,7 @@ static void step(machine *m)
         m->wr_reg = (int)rd;
         m->wr_value = result;
     }
-    simd_tick(&m->simd, false);
-    gpu_tick(&m->gpu,m->ram,RAM_SIZE,m->fb,false);
-    g3d_tick(&m->g3d,m->ram,RAM_SIZE,m->fb,false);
+    tick_accelerators(m);
     m->steps++;
     m->retired++;
     m->in_trap = false;
@@ -883,6 +1409,9 @@ void emu_dump_state(const machine *m, FILE *out)
     }
     for (int i = 0; i < 32; ++i) fprintf(out, "f%d %08" PRIx32 "\n", i, m->f[i]);
     fprintf(out, "fcsr %02x\n", m->fcsr);
+    fprintf(out, "mstatus %08" PRIx32 "\nmie %08" PRIx32 "\nmip %08" PRIx32 "\nmscratch %08" PRIx32 "\n",
+            m->mstatus | MSTATUS_CONSTANT | (m->mpp == PRIV_M ? MSTATUS_MPP : 0u), m->mie, mip_now(m), m->mscratch);
+    fprintf(out, "priv %u\n", m->priv);
     fprintf(out, "mtvec %08" PRIx32 "\nmepc %08" PRIx32 "\nmcause %08" PRIx32 "\nmtval %08" PRIx32 "\n",
             m->mtvec, m->mepc, m->mcause, m->mtval);
     fprintf(out, "steps %" PRIu64 "\nretired %" PRIu64 "\ntraps %" PRIu64 "\nframes %" PRIu32 "\nevents %u\nhalt %s\n",
@@ -1146,6 +1675,52 @@ void emu_read_input_script(machine *m, const char *path)
     fclose(in);
 }
 
+void emu_read_console_input(machine *m, const char *path)
+{
+    if (strcmp(path, "-") == 0) {
+        m->console_stdin = true;
+        return;
+    }
+    FILE *in = fopen(path, "rb");
+    if (!in) {
+        fprintf(stderr, "%s: cannot open console input %s\n", emu_prog, path);
+        exit(EXIT_EMULATOR_ERROR);
+    }
+    size_t capacity = 0;
+    int c;
+    while ((c = fgetc(in)) != EOF) {
+        if (m->console_in_len == capacity) {
+            capacity = capacity ? 2 * capacity : 256;
+            m->console_in = realloc(m->console_in, capacity);
+            if (!m->console_in) {
+                fprintf(stderr, "%s: cannot allocate console input\n", emu_prog);
+                exit(EXIT_EMULATOR_ERROR);
+            }
+        }
+        m->console_in[m->console_in_len++] = (uint8_t)c;
+    }
+    if (ferror(in)) { /* a directory opens but does not read */
+        fprintf(stderr, "%s: cannot read console input %s: %s\n", emu_prog, path, strerror(errno));
+        exit(EXIT_EMULATOR_ERROR);
+    }
+    fclose(in);
+}
+
+void emu_open_disk(machine *m, const char *path)
+{
+    virtio_blk *v = m->virtio;
+    v->file = fopen(path, "r+b");
+    if (!v->file) {
+        fprintf(stderr, "%s: cannot open disk %s: %s\n", emu_prog, path, strerror(errno));
+        exit(EXIT_EMULATOR_ERROR);
+    }
+    size_t got = fread(v->disk, 1, VIRTIO_DISK_SIZE, v->file);
+    if (ferror(v->file) || got != VIRTIO_DISK_SIZE || fgetc(v->file) != EOF) {
+        fprintf(stderr, "%s: disk %s must be exactly %u bytes\n", emu_prog, path, VIRTIO_DISK_SIZE);
+        exit(EXIT_EMULATOR_ERROR);
+    }
+}
+
 void emu_init(machine *m)
 {
     memset(m, 0, sizeof *m);
@@ -1153,6 +1728,7 @@ void emu_init(machine *m)
     gpu_device_reset(&m->gpu);
     g3d_device_reset(&m->g3d);
     m->mtimecmp = ~0ull;
+    m->priv = m->mpp = PRIV_M; /* O5: machine mode from reset, MPP reading 3 until a trap or a write */
     /* Boot convention (docs/rv32.md, "Reset"): the hart id in a0, the device tree in a1. */
     m->x[10] = BOOT_HART;
     m->x[11] = RV32_DTB_ROM_BASE;
@@ -1163,7 +1739,11 @@ bool emu_alloc(machine *m)
 {
     m->ram = calloc(RAM_SIZE, 1);
     m->fb = calloc(FB_SIZE, 1); /* unspecified by the contract; zero like the RTL testbench */
-    if (!m->ram || !m->fb) {
+    m->virtio = calloc(1, sizeof *m->virtio);
+    if (m->virtio) {
+        m->virtio->queue_sel_zero = true;
+    }
+    if (!m->ram || !m->fb || !m->virtio) {
         fprintf(stderr, "%s: cannot allocate memory\n", emu_prog);
         return false;
     }
@@ -1207,6 +1787,13 @@ void emu_free(machine *m)
     free(m->ram);
     free(m->fb);
     free(m->script);
+    free(m->console_in);
+    m->console_in = NULL;
+    if (m->virtio && m->virtio->file) {
+        fclose(m->virtio->file);
+    }
+    free(m->virtio);
+    m->virtio = NULL;
     m->ram = m->fb = NULL;
     m->script = NULL;
 }
@@ -1256,6 +1843,10 @@ bool emu_finish_outputs(machine *m, const char *trace_path, const char *checkpoi
     if (m->output_error) {
         ok = false;
     }
+    if (m->virtio && m->virtio->write_error) {
+        fprintf(stderr, "%s: error writing the disk\n", emu_prog);
+        ok = false;
+    }
     return ok;
 }
 
@@ -1266,8 +1857,12 @@ int emu_report_halt(const machine *m, size_t loaded)
                 m->scripted - m->next_scripted, m->script[m->next_scripted].frame);
     }
     int status = EXIT_EMULATOR_ERROR;
-    fprintf(stderr, "%s: halt=%s steps=%" PRIu64 " retired=%" PRIu64 " traps=%" PRIu64 " loaded=%zu", emu_prog,
-            emu_halt_name(m->halt), m->steps, m->retired, m->traps, loaded);
+    fprintf(stderr, "%s: halt=%s steps=%" PRIu64 " retired=%" PRIu64 " traps=%" PRIu64, emu_prog,
+            emu_halt_name(m->halt), m->steps, m->retired, m->traps);
+    if (m->interrupts) {
+        fprintf(stderr, " interrupts=%" PRIu64, m->interrupts);
+    }
+    fprintf(stderr, " loaded=%zu", loaded);
     switch (m->halt) {
     case HALT_DONE:
         fprintf(stderr, " done=%08" PRIx32, m->done_word);

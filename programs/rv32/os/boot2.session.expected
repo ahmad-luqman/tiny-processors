@@ -1,0 +1,15 @@
+kernel: tiny-processors RV32 machine, hart 0
+kernel: devices console clint plic input display g1 g2 disk
+kernel: 14 programs
+kernel: disk 256 sectors, tfs
+sh: ls, NAME [ARGS] [&], wait, halt [CODE]
+$ files
+welcome 83
+bars.out 0
+life.out 0
+scores 7
+$ cat scores
+pong 1
+$ halt
+kernel: halt, 2 exits
+PASS 455b9c97

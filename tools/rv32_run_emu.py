@@ -20,7 +20,7 @@ from tools.rv32_run_qemu import classify  # noqa: E402
 DEFAULT_EMULATOR = "build/rv32/rv32emu"
 EMULATOR_SOURCES = (ROOT / "tools" / "rv32emu.c", ROOT / "tools" / "rv32_gdb.c", ROOT / "tools" / "rv32emu_core.c", ROOT / "tools" / "rv32_simd4.c", ROOT / "tools" / "rv32_gpu.c", ROOT / "tools" / "rv32_g3d.c")
 EMULATOR_CFLAGS = ("-std=c11", "-O2", "-Wall", "-Wextra", "-Werror")  # the Makefile's RV32EMU_CFLAGS
-COUNTERS = ("steps", "retired", "traps", "loaded")
+COUNTERS = ("steps", "retired", "traps", "interrupts", "loaded")
 
 
 def floating_objects():
@@ -111,7 +111,7 @@ def halt_line(stderr, prefix="rv32emu:"):
 
 
 def emulator_command(emulator, image, trace=None, state=None, limit=None, checkpoints=None, input_script=None,
-                     frames=None, allow_lost_events=False):
+                     frames=None, allow_lost_events=False, console_input=None, disk=None):
     command = [str(emulator), "--image", str(image)]
     if trace is not None:
         command += ["--trace", str(trace)]
@@ -127,6 +127,10 @@ def emulator_command(emulator, image, trace=None, state=None, limit=None, checkp
         command += ["--frames", str(frames)]
     if allow_lost_events:
         command.append("--allow-lost-events")
+    if console_input is not None:
+        command += ["--console-input", str(console_input)]
+    if disk is not None:
+        command += ["--disk", str(disk)]
     return command
 
 

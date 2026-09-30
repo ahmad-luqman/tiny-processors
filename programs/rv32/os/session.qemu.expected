@@ -1,0 +1,110 @@
+kernel: riscv-virtio,qemu, hart 0
+kernel: devices console clint plic disk
+kernel: 14 programs
+kernel: disk 256 sectors, tfs
+sh: ls, NAME [ARGS] [&], wait, halt [CODE]
+$ ls
+sh
+hello
+primes
+pong
+tetris
+menu
+syscheck
+fault
+cat
+write
+files
+bars
+life
+fill
+$ hello
+hello from pid 2
+$ hello a b c
+hello from pid 3, args: a b c
+$ primes
+primes: 2262 below 20000, largest 19997
+$ primes 100
+primes: 25 below 100, largest 97
+$ primes 2
+primes: N must be 3..100000
+sh: primes exited 1
+$ nosuch
+sh: nosuch: cannot run
+$ syscheck
+syscheck: pointers
+syscheck: sbrk
+hello from pid 8, args: from syscheck
+syscheck: processes
+syscheck: list
+syscheck: time
+syscheck: ok
+$ fault load
+kernel: pid 9 fault killed: cause 5 at fault+0x18 tval 00200000
+sh: fault exited 133
+$ fault illegal
+kernel: pid 10 fault killed: cause 2 at fault+0x20 tval c0001073
+sh: fault exited 130
+$ fault kernel
+kernel: pid 11 fault killed: cause 7 at fault+0x2c tval 80000000
+sh: fault exited 135
+$ fault shell
+kernel: pid 12 fault killed: cause 7 at fault+0x38 tval 80100000
+sh: fault exited 135
+$ fault csr
+kernel: pid 13 fault killed: cause 2 at fault+0x40 tval 30002573
+sh: fault exited 130
+$ fault read
+kernel: pid 14 fault killed: cause 5 at fault+0x4c tval 80000000
+sh: fault exited 133
+$ fault exec
+kernel: pid 15 fault killed: cause 1 at 80000000 tval 80000000
+sh: fault exited 129
+$ hello still here
+hello from pid 16, args: still here
+$ files
+welcome 83
+bars.out 0
+life.out 0
+$ cat welcome
+Welcome to the tiny computer.
+ls lists the programs, files the files on this disk.
+$ write note hello disk
+$ cat note
+hello disk
+$ cat nosuch
+cat: nosuch: no such file
+sh: cat exited 1
+$ fill long 704
+fill: long holds 704 of 704 bytes
+$ cat long
+0000abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefg
+0001bcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefgh
+0002cdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghi
+0003defghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghij
+0004efghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijk
+0005fghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijkl
+0006ghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklm
+0007hijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmn
+0008ijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmno
+0009jklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnop
+0010klmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopq
+$ write note hi
+$ cat note
+hi
+$ fill big 5000
+fill: big holds 4096 of 5000 bytes
+sh: fill exited 1
+$ write abcdefghijklmnopqrstuvwxyz hi
+write: a name is at most 19 bytes
+sh: write exited 1
+$ files
+welcome 83
+bars.out 0
+life.out 0
+note 3
+long 704
+big 4096
+$ halt
+kernel: halt, 27 exits
+PASS dc3c1f20

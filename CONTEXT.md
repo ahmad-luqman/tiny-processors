@@ -58,8 +58,24 @@ The state every backend gives a program at its first instruction: the hart id in
 _Avoid_: a bootloader, firmware parameters, a hard-coded device-tree address.
 
 **CLINT**:
-The core-local interruptor at 0x0200_0000, virt's address: msip, mtimecmp and the 64-bit mtime, which counts device ticks and which the time CSR reads. It replaced the M5 timer in Track 1; nothing acts on msip or mtimecmp until O1 gives the core interrupts.
+The core-local interruptor at 0x0200_0000, virt's address: msip, mtimecmp and the 64-bit mtime, which counts device ticks and which the time CSR reads. It replaced the M5 timer in Track 1; since O1 msip raises the machine software interrupt and mtime >= mtimecmp the timer interrupt.
 _Avoid_: the timer (M5's), a PLIC, an interrupt controller for external devices.
+
+**PLIC**:
+The platform-level interrupt controller at 0x0c00_0000, virt's address and register layout, for one context (hart 0, machine mode): source priorities, a pending word (each source's request latched until claimed), enables, a threshold and claim/complete; it raises mip.MEIP (Track 2, O1). The input queue is source 12. See [the contract](docs/rv32.md#plic-at-0x0c00_0000).
+_Avoid_: an interrupt vector table, the CLINT.
+
+**Step ticks**:
+The RTL's deterministic tick mode (`+ticks=steps`, `--ticks steps`): mtime and cycle advance once per step (an instruction retired or trapped, or an interrupt taken) as on the emulator, and wfi never waits, so timer reads and interrupts land on the same instruction on both backends and traces stay comparable. Accelerators still advance per clock.
+_Avoid_: a faster simulation, a host-time mode.
+
+**User mode**:
+The hart's less privileged mode (Track 2, O5), entered with mret when mstatus.MPP is 0. Programs under the kernel run in it: machine CSRs, mret and wfi are illegal there, ecall is cause 8, and PMP decides what memory it may touch. Interrupts are always enabled in it.
+_Avoid_: supervisor mode, a process (a process runs in user mode; the mode is the hart's).
+
+**PMP**:
+Physical memory protection (Track 2, O5): eight entries (pmpcfg0-1, pmpaddr0-7) of OFF, TOR, NA4 or NAPOT regions with R, W, X and a lock, checked before an access reaches the bus. User mode needs an entry that allows the access; machine mode only obeys locked entries. The kernel grants the running process its slots, the framebuffer and, if it drives them, the accelerators. See [the contract](docs/rv32.md#o5-protection).
+_Avoid_: an MMU, virtual memory, page tables, the bus decoder's access faults (those are for addresses nothing is mapped at).
 
 **SAP8**:
 The project's SAP-inspired teaching CPU and its instruction set.

@@ -38,7 +38,7 @@ static uint32_t present_word = 1;
 static volatile uint32_t trap_count;
 static volatile uint32_t trap_cause[TRAPS], trap_tval[TRAPS];
 
-uint32_t diag_trap(uint32_t cause, uint32_t tval, uint32_t epc)
+uint32_t trap_handler(uint32_t cause, uint32_t tval, uint32_t epc)
 {
     if (trap_count < TRAPS) {
         trap_cause[trap_count] = cause;
@@ -48,7 +48,7 @@ uint32_t diag_trap(uint32_t cause, uint32_t tval, uint32_t epc)
     return epc + 4;
 }
 
-extern void diag_trap_entry(void);
+extern void trap_entry(void);
 
 static int fail(unsigned code)
 {
@@ -197,7 +197,7 @@ static int start_faulting_simd(void)
 
 int main(void)
 {
-    __asm__ volatile("csrw mtvec, %0" : : "r"(diag_trap_entry));
+    __asm__ volatile("csrw mtvec, %0" : : "r"(trap_entry));
     const struct g3d_scene *scene = &g3d_scenes[0];
     gpu_reset();
     g3d_reset();

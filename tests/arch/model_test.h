@@ -4,14 +4,14 @@
  * The suite's test files include this header and then arch_test.h, which
  * expands the RVMODEL_* macros below around each test. What they do here:
  *
- * - Boot installs a trap handler. The machine has no mstatus (docs/rv32.md:
- *   the floating-point unit is always on), and the one place the I, M and F
- *   suites touch it is RVTEST_FP_ENABLE's `csrs mstatus, a0`, which sets FS so
- *   F instructions work on a machine that can turn them off. That word traps
- *   as illegal here; the handler checks that it is exactly that word and skips
- *   it. Any other trap fails the test (done code 2): no selected test is meant
- *   to trap. The handler has no scratch CSR, so it swaps t0 and t1 through
- *   mtval and mcause, which it has finished reading by then.
+ * - Boot installs a trap handler, and any trap fails the test (done code 2):
+ *   no selected test is meant to trap. The one place the I, M and F suites
+ *   touch a privileged CSR is RVTEST_FP_ENABLE's `csrs mstatus, a0`, which sets
+ *   FS so F instructions work on a machine that can turn them off. Until
+ *   Track 2 the machine had no mstatus and the handler skipped exactly that
+ *   word; since O1 mstatus exists, FS reads 3 whatever is written (floating
+ *   state is always on, docs/rv32.md), and the write simply retires, as on
+ *   QEMU.
  * - Halt prints the signature (begin_signature to end_signature) on the
  *   console, one line per 32-bit word: the word's value as eight lowercase hex
  *   digits, most significant first, the format the suite's reference
@@ -58,19 +58,6 @@
 7775: j 7775b; \
     .align 2; \
 rvmodel_trap: \
-    csrrw t0, mtval, t0; \
-    csrrw t1, mcause, t1; \
-    addi t1, t1, -2; \
-    bnez t1, rvmodel_trap_fail; \
-    li t1, 0x30052073; \
-    bne t0, t1, rvmodel_trap_fail; \
-    csrr t0, mepc; \
-    addi t0, t0, 4; \
-    csrw mepc, t0; \
-    csrrw t0, mtval, t0; \
-    csrrw t1, mcause, t1; \
-    mret; \
-rvmodel_trap_fail: \
     li t0, 0x00100000; \
     li t1, 0x00023333; \
     sw t1, 0(t0); \

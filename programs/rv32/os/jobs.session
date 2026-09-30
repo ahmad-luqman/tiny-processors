@@ -1,0 +1,6 @@
+bars &
+life &
+wait
+cat bars.out
+cat life.out
+halt

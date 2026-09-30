@@ -1,8 +1,8 @@
 """The architectural-test model (tests/arch/model_test.h) on its own, without the suite.
 
 Tiny programs use the model's macros the way the suite's tests do: the halt prints the
-signature, the boot's trap handler skips exactly the suite's `csrs mstatus, a0` and fails any
-other trap, and the optional asserts fail a wrong result. Each runs on the emulator and, as the
+signature, the suite's `csrs mstatus, a0` retires (the machine has mstatus since Track 2), the
+boot's trap handler fails any trap, and the optional asserts fail a wrong result. Each runs on the emulator and, as the
 reference, on QEMU, whose virt board has the same console and done register. RunnerTest drives
 the runner's per-test comparison on stubbed backends, so each rejection is shown without a suite.
 """
@@ -82,9 +82,9 @@ class ModelTest(unittest.TestCase):
         self.assertEqual(signature_lines(console), ["12345678", "deadbeef", "00000000", "00000000"])
         self.assertEqual(self.run_qemu(elf), (console, 0))
 
-    def test_the_fp_enable_write_is_skipped_and_registers_survive(self):
-        # The suite's RVTEST_FP_ENABLE: set FS in mstatus. The handler must return past it with
-        # t0 and t1 intact, which the signature records.
+    def test_the_fp_enable_write_retires_and_registers_survive(self):
+        # The suite's RVTEST_FP_ENABLE: set FS in mstatus. Since O1 the write retires without a
+        # trap, as on QEMU, with t0 and t1 intact, which the signature records.
         body = """li t0, 0x11
     li t1, 0x22
     li a0, 0x2000
@@ -95,12 +95,12 @@ class ModelTest(unittest.TestCase):
     sw t1, 12(a1)"""
         elf, image = self.build("fp_enable", body)
         console, halt = self.run_emulator(image)
-        self.assertEqual((halt["halt"], halt["outcome"], halt["traps"]), ("done", "pass", 1))
+        self.assertEqual((halt["halt"], halt["outcome"], halt["traps"]), ("done", "pass", 0))
         self.assertEqual(signature_lines(console)[2:], ["00000011", "00000022"])
-        self.assertEqual(self.run_qemu(elf), (console, 0), "QEMU has mstatus: no trap, same signature")
+        self.assertEqual(self.run_qemu(elf), (console, 0), "QEMU: no trap either, same signature")
 
     def test_any_other_trap_fails_with_code_2(self):
-        for name, body in (("ecall", "ecall"), ("other_mstatus", "csrw mstatus, a0"), ("illegal", ".word 0")):
+        for name, body in (("ecall", "ecall"), ("missing_csr", "csrw 0x7c0, a0"), ("illegal", ".word 0")):
             with self.subTest(name=name):
                 _, image = self.build(name, body)
                 console, halt = self.run_emulator(image)

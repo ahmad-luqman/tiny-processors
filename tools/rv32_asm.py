@@ -18,6 +18,17 @@ CLINT = 0x02000000     # Track 1: virt's CLINT replaced the M5 timer at 0x2000_0
 MSIP = CLINT + 0x0000
 MTIMECMP = CLINT + 0x4000   # low word; the high word is MTIMECMP + 4
 MTIME = CLINT + 0xBFF8      # low word; the high word is MTIME + 4
+PLIC = 0x0c000000       # O1: virt's PLIC, one context (hart 0, machine mode)
+PLIC_SIZE = 0x600000
+PLIC_PENDING = PLIC + 0x1000
+PLIC_ENABLE = PLIC + 0x2000
+PLIC_THRESHOLD = PLIC + 0x200000
+PLIC_CLAIM = PLIC + 0x200004
+PLIC_SOURCE_INPUT = 12  # the input queue's interrupt line
+PLIC_SOURCE_VIRTIO = 1  # O3: virtio-blk's, virt's number for its first virtio slot
+VIRTIO = 0x10001000     # O3: virtio-blk in virt's first virtio-mmio slot
+VIRTIO_SIZE = 0x200
+VIRTIO_DISK_SIZE = 0x20000  # 128 KiB: the RTL's DISK_WORDS, the emulator's disk file
 BOOTROM = 0x00001000
 INPUT = 0x11001000
 DISPLAY = 0x11002000
@@ -197,6 +208,7 @@ def FENCE(): return i_type(0x0F, 0, 0, 0, 0x0FF)
 def ECALL(): return 0x00000073
 def EBREAK(): return 0x00100073
 def MRET(): return 0x30200073
+def WFI(): return 0x10500073
 def CSRRW(rd, csr, rs1): return i_type(0x73, rd, 1, rs1, csr)
 def CSRRS(rd, csr, rs1): return i_type(0x73, rd, 2, rs1, csr)
 def CSRRC(rd, csr, rs1): return i_type(0x73, rd, 3, rs1, csr)
@@ -204,6 +216,11 @@ def CSRRWI(rd, csr, uimm): return i_type(0x73, rd, 5, uimm, csr)
 def CSRRSI(rd, csr, uimm): return i_type(0x73, rd, 6, uimm, csr)
 def CSRRCI(rd, csr, uimm): return i_type(0x73, rd, 7, uimm, csr)
 MTVEC, MEPC, MCAUSE, MTVAL, MSTATUS = 0x305, 0x341, 0x342, 0x343, 0x300
+MCOUNTEREN, PMPCFG0, PMPCFG1, PMPADDR0 = 0x306, 0x3A0, 0x3A1, 0x3B0  # O5: pmpaddr n is PMPADDR0 + n
+MIE_CSR, MIP_CSR, MSCRATCH, FCSR = 0x304, 0x344, 0x340, 0x003  # O1's interrupt CSRs; F2's fcsr
+MSTATUS_RESET = 0x80007800  # SD and FS = 3 read as constants; MPP = 3 (machine) from reset
+MSTATUS_MPP = 0x1800        # O5: WARL, machine (3) or user (0); mret leaves it user
+MSTATUS_USER = MSTATUS_RESET & ~MSTATUS_MPP
 # Zicntr: read-only counters; `rdcycle rd` is `csrrs rd, cycle, x0`.
 CYCLE, TIME, INSTRET, CYCLEH, TIMEH, INSTRETH = 0xC00, 0xC01, 0xC02, 0xC80, 0xC81, 0xC82
 def RDCYCLE(rd): return CSRRS(rd, CYCLE, 0)

@@ -1,0 +1,29 @@
+ls
+hello
+hello a b c
+primes
+primes 100
+primes 2
+nosuch
+syscheck
+fault load
+fault illegal
+fault kernel
+fault shell
+fault csr
+fault read
+fault exec
+hello still here
+files
+cat welcome
+write note hello disk
+cat note
+cat nosuch
+fill long 704
+cat long
+write note hi
+cat note
+fill big 5000
+write abcdefghijklmnopqrstuvwxyz hi
+files
+halt
