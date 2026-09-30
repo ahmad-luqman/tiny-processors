@@ -334,7 +334,8 @@ def main():
     parser.add_argument("--allow-counters", action="store_true", help="admit reads of the Zicntr counters (cycle, time, instret)")
     parser.add_argument("--allow-system", action="store_true",
                         help="implies --allow-privileged: also the interrupt CSRs (mstatus, mie, mip, mscratch), "
-                             "mcounteren, scounteren, pmpcfg0-1, pmpaddr0-7, wfi and ecall (Track 2)")
+                             "mcounteren, scounteren, pmpcfg0-1, pmpaddr0-7, wfi and ecall (Track 2); since issue #20 also "
+                             "medeleg, mideleg, the supervisor CSRs, satp, sret and sfence.vma")
     parser.add_argument("--allow-user", action="store_true",
                         help="implies --allow-counters: also ecall and unimp, what a user-mode program runs (Track 2, O5)")
     parser.add_argument("--require-m", action="store_true",

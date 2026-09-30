@@ -572,9 +572,10 @@ kernel rewrites the entries only when a different process is about to run.
 It runs in machine mode with no locked entry, so PMP never stops it: system
 calls still copy to and from the caller's memory after `user_range()` has
 checked the pointer. `mcounteren` is 7, so programs may read the counters; on
-a hart with S-mode (QEMU's) a user counter read also needs `scounteren`, so
-the kernel writes that too, with `mtvec` pointed past the write for the
-moment, since on our machine the CSR does not exist and the write traps.
+a hart with S-mode a user counter read also needs `scounteren`, so the kernel
+writes that too. Until issue #20 gave our hart S-mode only QEMU's had it, and
+the kernel pointed `mtvec` past the write for the moment, since on ours the
+CSR did not exist and the write trapped.
 
 Entries 4 and 5 opened a hole PMP cannot close. G1 and G2 read and write RAM
 by DMA wherever their registers point (G2's depth buffer, G1's blit source),

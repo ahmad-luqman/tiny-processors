@@ -58,14 +58,14 @@ EXCLUDED = {
     "F_Zfa": "no Zfa",
     "K": "no scalar cryptography",
     "P_unratified": "no packed SIMD",
-    "Svadu": "no virtual memory",
+    "Svadu": "Sv32 sets no A or D bits in hardware: a clear one faults (Svade, issue #20)",
     "Zacas": "no A extension",
     "Zcmop": "no compressed instructions",
     "Zfh": "no half precision",
     "Zicond": "no Zicond",
     "Zifencei": "fence.i is an illegal instruction in our contract (docs/rv32.md)",
     "Zimop": "no may-be-operations",
-    "privilege": "needs S-mode, misa and the suite's full trap-handler harness; Track 2 added only mstatus, mie, mip, mscratch (O1), U-mode, mcounteren and PMP (O5)",
+    "privilege": "needs misa and the suite's full trap-handler harness; S-mode and Sv32 (issue #20) are checked by mmucheck against QEMU and by tests/test_rv32_mmu.py instead",
 }
 BACKENDS = ("emulator", "qemu", "icarus", "verilator")
 DEFAULT_QEMU_CPU = "rv32,c=false,d=false"  # generic RV32 with C and D off: IMAF plus Zicsr

@@ -1237,6 +1237,7 @@ test-rv32-mmu: $(RV32EMU) $(RV32_TB_VERILATOR)
 	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_mmu.py' -v
 test-rv32-mmu-icarus: $(RV32EMU) $(RV32_TB_VVP)
 	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VVP) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_mmu.py' -v
+test-rv32: run-rv32-mmu-qemu run-rv32-mmu-emu run-rv32-mmu-rtl run-rv32-mmu-rtl-verilator run-rv32-mmu-rtl-steps test-rv32-mmu test-rv32-mmu-icarus
 
 test-rv32-irq: $(RV32EMU) $(RV32_TB_VERILATOR)
 	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_irq.py' -v
