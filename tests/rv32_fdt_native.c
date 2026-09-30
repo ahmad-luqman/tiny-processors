@@ -4,6 +4,7 @@
  *
  *   rv32_fdt_native FILE model                       -> the root's model, or "error N"
  *   rv32_fdt_native FILE PROPERTY VALUE INDEX        -> "BASE SIZE" in hex, or "error N"
+ *   rv32_fdt_native FILE PROPERTY VALUE NAME INDEX   -> fdt_cell's cell in hex, or "error N" (O1)
  *
  * The file is copied into a heap buffer of exactly its size (a file shorter
  * than the 40-byte header is refused before the reader sees it), so a read
@@ -16,8 +17,8 @@
 
 int main(int argc, char **argv)
 {
-    if (argc != 3 && argc != 5) {
-        fprintf(stderr, "usage: %s FILE model | FILE PROPERTY VALUE INDEX\n", argv[0]);
+    if (argc != 3 && argc != 5 && argc != 6) {
+        fprintf(stderr, "usage: %s FILE model | FILE PROPERTY VALUE INDEX | FILE PROPERTY VALUE NAME INDEX\n", argv[0]);
         return 2;
     }
     FILE *in = fopen(argv[1], "rb");
@@ -53,6 +54,8 @@ int main(int argc, char **argv)
     const char *model = 0;
     if (status == FDT_OK && argc == 3) {
         status = fdt_root_string(&t, "model", &model);
+    } else if (status == FDT_OK && argc == 6) {
+        status = fdt_cell(&t, argv[2], argv[3], argv[4], (uint32_t)strtoul(argv[5], 0, 10), &base);
     } else if (status == FDT_OK) {
         status = fdt_find(&t, argv[2], argv[3], (uint32_t)strtoul(argv[4], 0, 10), &base, &size);
     }
@@ -60,6 +63,8 @@ int main(int argc, char **argv)
         printf("error %d\n", status);
     } else if (model) {
         printf("%s\n", model);
+    } else if (argc == 6) {
+        printf("%08x\n", base);
     } else {
         printf("%08x %08x\n", base, size);
     }

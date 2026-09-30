@@ -65,7 +65,7 @@ EXCLUDED = {
     "Zicond": "no Zicond",
     "Zifencei": "fence.i is an illegal instruction in our contract (docs/rv32.md)",
     "Zimop": "no may-be-operations",
-    "privilege": "needs mstatus, mscratch and the full trap-handler harness; O1 adds the privileged state",
+    "privilege": "needs S-mode, misa and the suite's full trap-handler harness; O1 added only mstatus, mie, mip and mscratch",
 }
 BACKENDS = ("emulator", "qemu", "icarus", "verilator")
 DEFAULT_QEMU_CPU = "rv32,c=false,d=false"  # generic RV32 with C and D off: IMAF plus Zicsr

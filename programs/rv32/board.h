@@ -53,11 +53,25 @@
  * counter, read and written a word at a time. One tick is one clock cycle on
  * the RTL, one executed instruction on the emulator and 100 ns on QEMU, so
  * only monotonicity may be relied on. The `time` CSR reads the same count.
- * msip and mtimecmp hold their values; nothing acts on them until O1. */
+ * Since O1 mip.MTIP is mtime >= mtimecmp and mip.MSIP is msip. */
 #define RV32_CLINT_BASE        0x02000000
 #define RV32_CLINT_MSIP        0x0
 #define RV32_CLINT_MTIMECMP    0x4000
 #define RV32_CLINT_MTIME       0xbff8
+
+/* PLIC (O1, at QEMU virt's address): one context, hart 0 in machine mode.
+ * Word access only. PRIORITY(n) is source n's priority (3 bits), PENDING the
+ * pending word, ENABLE context 0's enable word, THRESHOLD its threshold, and
+ * CLAIM returns the best pending source (0 for none) and takes its number
+ * back to complete it. The input queue is source RV32_PLIC_SOURCE_INPUT;
+ * find it through the device tree's `interrupts`, never by this number. */
+#define RV32_PLIC_BASE         0x0c000000
+#define RV32_PLIC_PRIORITY(n)  (4 * (n))
+#define RV32_PLIC_PENDING      0x1000
+#define RV32_PLIC_ENABLE       0x2000
+#define RV32_PLIC_THRESHOLD    0x200000
+#define RV32_PLIC_CLAIM        0x200004
+#define RV32_PLIC_SOURCE_INPUT 12
 
 /* Boot convention (Track 1): at reset a0 holds the hart id and a1 the address
  * of a flattened device tree. On our backends the tree is in this boot ROM;

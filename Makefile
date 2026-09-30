@@ -87,7 +87,7 @@ RV32WIN := build/rv32/rv32win
 SDL3_CFLAGS = $(shell pkg-config --cflags sdl3 2>/dev/null)
 SDL3_LIBS = $(shell pkg-config --libs sdl3 2>/dev/null)
 RV32_RTL := rtl/rv32/rv32_fregfile.v rtl/rv32/rv32_fdecode.v $(FP32_RTL) rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32_muldiv.v rtl/rv32/rv32.v
-RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_clint.v rtl/rv32/rv32_bootrom.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
+RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_clint.v rtl/rv32/rv32_plic.v rtl/rv32/rv32_bootrom.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
 RV32_TB := tests/rv32_tb.sv
 RV32_TB_VVP := build/rv32/rv32_tb.vvp
 RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
@@ -1152,3 +1152,41 @@ test-rv32-platform: check-rv32-platcheck-image
 	HOST_CC=$(HOST_CC) QEMU_RV32=$(QEMU_RV32) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_platform.py' -v
 
 test-rv32: check-rv32-dtb check-rv32-virt-map test-rv32-platform run-rv32-platform-qemu run-rv32-platform-emu run-rv32-platform-rtl run-rv32-platform-rtl-verilator
+
+# Track 2 (docs/rv32-os.md, plan docs/planning/track2-os.md). O1: interrupts. irqcheck takes
+# CLINT and PLIC interrupts and runs unmodified on QEMU virt, the emulator and the RTL; the RTL is
+# compared at the results level with cycle ticks and trace for trace in step-tick mode.
+.PHONY: check-rv32-irqcheck-image run-rv32-irq-qemu run-rv32-irq-emu run-rv32-irq-rtl run-rv32-irq-rtl-verilator run-rv32-irq-rtl-steps test-rv32-irq
+RV32_IRQCHECK_OBJS := build/rv32/irqcheck.o build/rv32/trap_entry.o build/rv32/fdt.o $(RV32_COMMON_OBJS)
+RV32_IRQCHECK_HEX := 133cab46
+RV32_IRQ_ARGS := --image build/rv32/irqcheck.bin --input programs/rv32/irqcheck.input --expect-last-line "PASS $(RV32_IRQCHECK_HEX)" --expect-console-file programs/rv32/irqcheck.expected
+
+build/rv32/irqcheck.o: programs/rv32/csr.h programs/rv32/fdt.h
+
+build/rv32/irqcheck.elf: $(RV32_IRQCHECK_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(RV32_IRQCHECK_OBJS)
+
+check-rv32-irqcheck-image: build/rv32/irqcheck.elf build/rv32/irqcheck.lst build/rv32/irqcheck.bin
+	$(PYTHON) tools/rv32_image.py build/rv32/irqcheck.elf --listing build/rv32/irqcheck.lst --bin build/rv32/irqcheck.bin --hex build/rv32/irqcheck.hex --allow-system
+
+run-rv32-irq-qemu: check-rv32-irqcheck-image
+	$(PYTHON) tools/rv32_run_qemu.py build/rv32/irqcheck.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --last-line --timeout 20 --expect-hex $(RV32_IRQCHECK_HEX) --transcript build/rv32/irqcheck.qemu.transcript --qemu-log build/rv32/irqcheck.qemu.log
+	diff -u programs/rv32/irqcheck.qemu.expected build/rv32/irqcheck.qemu.transcript
+
+run-rv32-irq-emu: check-rv32-irqcheck-image $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_IRQ_ARGS) --compare results --backend emulator --emulator $(RV32EMU) --out build/rv32/irq-emu
+
+run-rv32-irq-rtl: check-rv32-irqcheck-image $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_IRQ_ARGS) --compare results --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/irq-icarus
+
+run-rv32-irq-rtl-verilator: check-rv32-irqcheck-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_IRQ_ARGS) --compare results --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/irq-verilator
+
+# Step ticks: the same program, trace-identical with the emulator, interrupt lines included.
+run-rv32-irq-rtl-steps: check-rv32-irqcheck-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_IRQ_ARGS) --ticks steps --allow-traps --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --seed 5 --out build/rv32/irq-steps
+
+test-rv32-irq: $(RV32EMU) $(RV32_TB_VERILATOR)
+	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_irq.py' -v
+
+test-rv32: run-rv32-irq-qemu run-rv32-irq-emu run-rv32-irq-rtl run-rv32-irq-rtl-verilator run-rv32-irq-rtl-steps test-rv32-irq

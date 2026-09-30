@@ -313,9 +313,9 @@ def unterminated_last_name(blob):
     """The blob with the NUL of its last property name removed and the file ending right there."""
     header = list(struct.unpack(">10I", blob[:40]))
     end = header[3] + header[8]
-    assert blob[end - 1] == 0 and end == len(blob)
-    header[1] -= 1   # totalsize
-    header[8] -= 1   # size_dt_strings
+    assert blob[end - 1] == 0 and end <= len(blob) and not any(blob[end:])  # at most the padding follows
+    header[1] = end - 1  # totalsize: the file ends where the NUL was
+    header[8] -= 1       # size_dt_strings
     return struct.pack(">10I", *header) + blob[40:end - 1]
 
 
@@ -356,6 +356,23 @@ class FirmwareReaderTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
         return result.stdout.strip()
+
+    def test_cells(self):
+        """fdt_cell (O1): the input's PLIC source and the interrupt wiring, in our tree and QEMU's."""
+        blob = rv32_dtb.build(rv32_dtb.MACHINE)
+        cases = {("compatible", "tiny-processors,input", "interrupts", "0"): f"{rv32_dtb.INPUT_IRQ:08x}",
+                 ("compatible", "tiny-processors,input", "interrupt-parent", "0"): f"{rv32_dtb.PLIC_PHANDLE:08x}",
+                 ("compatible", "riscv,plic0", "riscv,ndev", "0"): "0000001f",
+                 ("compatible", "riscv,clint0", "interrupts-extended", "3"): "00000007",
+                 ("compatible", "riscv,clint0", "interrupts-extended", "4"): "error 4",   # past the last cell
+                 ("compatible", "tiny-processors,console", "interrupts", "0"): "error 7",  # no such property
+                 ("compatible", "tiny-processors,none", "interrupts", "0"): "error 4"}    # no such node
+        for args, expected in cases.items():
+            with self.subTest(args):
+                self.assertEqual(self.query(blob, *args), expected)
+        virt = (ROOT / "tests/fixtures/qemu-8.2.2-virt-4M.dtb").read_bytes()
+        self.assertEqual(self.query(virt, "compatible", "ns16550a", "interrupts", "0"), "0000000a")
+        self.assertEqual(self.query(virt, "compatible", "riscv,plic0", "riscv,ndev", "0"), "0000005f")
 
     def test_our_tree(self):
         blob = rv32_dtb.build(rv32_dtb.MACHINE)
@@ -459,12 +476,15 @@ class FirmwareReaderTest(unittest.TestCase):
 
     def test_unterminated_name_under_every_query(self):
         """Each query compares property names with a different string; none may run off the end.
-        The bad name belongs to /soc's `ranges`, so a query answered on the root (the model) never
-        reaches it; every query that walks past it is refused."""
+        The bad name is the input node's `interrupts` (the last name first used, since O1), so a
+        query answered before it (the model, the CLINT) never reaches it; every query that walks
+        past it is refused."""
         self.require_sanitizers()
         bad = unterminated_last_name(rv32_dtb.build(rv32_dtb.MACHINE))
-        for args, expected in ((("model",), "tiny-processors RV32 machine"), (("ranges", "", "0"), "error 3"),
-                               (("compatible", "riscv,clint0", "0"), "error 3")):
+        for args, expected in ((("model",), "tiny-processors RV32 machine"),
+                               (("compatible", "riscv,clint0", "0"), "02000000 00010000"),
+                               (("compatible", "tiny-processors,display", "0"), "error 3"),
+                               (("compatible", "tiny-processors,g2", "0"), "error 3")):
             with self.subTest(args):
                 self.assertEqual(self.query(bad, *args), expected)
 
@@ -480,7 +500,7 @@ class FirmwareReaderTest(unittest.TestCase):
             "truncated file": (blob[: len(blob) // 2], "error 3"),
             "struct cut short": (blob[:36] + struct.pack(">I", size_struct // 2) + blob[40:], "error 3"),
             "bad token": (blob[:56] + struct.pack(">I", 7) + blob[60:], "error 3"),
-            # The last property name, "ranges", loses its NUL and the blob ends there: comparing
+            # The last property name ("interrupts" since O1) loses its NUL and the blob ends there: comparing
             # it with a query must not read past the strings block (review on PR #18).
             "unterminated name": (unterminated_last_name(blob), "error 3"),
             "name offset wraps": (with_word(blob, name_offset, 0xFFFFFFF0), "error 3"),

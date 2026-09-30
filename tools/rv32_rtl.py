@@ -26,14 +26,14 @@ from tools.rv32_run_emu import DEFAULT_EMULATOR, emulator_command, halt_line, la
 
 RTL_SOURCES = [ROOT / "rtl" / "rv32" / name
                for name in ("rv32_fregfile.v", "rv32_fdecode.v", "rv32_regfile.v", "rv32_alu.v", "rv32_decode.v", "rv32_muldiv.v", "rv32.v",
-                            "rv32_bus.v", "rv32_ram.v", "rv32_console.v", "rv32_done.v", "rv32_clint.v", "rv32_bootrom.v", "rv32_input.v", "rv32_display.v", "rv32_soc.v", "rv32_gpu.v", "rv32_g3d.v", "rv32_g3d_core.v", "rv32_simd4.v")]
+                            "rv32_bus.v", "rv32_ram.v", "rv32_console.v", "rv32_done.v", "rv32_clint.v", "rv32_plic.v", "rv32_bootrom.v", "rv32_input.v", "rv32_display.v", "rv32_soc.v", "rv32_gpu.v", "rv32_g3d.v", "rv32_g3d_core.v", "rv32_simd4.v")]
 RTL_SOURCES.extend([ROOT / "rtl/fp32/fp32.v", ROOT / "rtl/simd4/simd4.v"])
 TESTBENCH = ROOT / "tests" / "rv32_tb.sv"
 DEFAULT_SIMULATOR = "build/rv32/rv32_tb.vvp"
 DEFAULT_OUT = "build/rv32/rtl"
 BENCH_SEED = 7
 COUNTERS = ("cycles", "steps", "stalls", "transfers")
-DECIMAL = COUNTERS + ("cause", "fp_waits", "md_waits")
+DECIMAL = COUNTERS + ("cause", "fp_waits", "md_waits", "interrupts")
 HEX = ("done", "tval", "pc", "word")
 # The keys each halt reason carries besides the counters and the outcome (docs/rv32-rtl.md).
 REQUIRED = {"done": ("done",), "double-fault": ("cause", "tval"), "limit": ()}
@@ -55,7 +55,8 @@ def compile_testbench(output, iverilog="iverilog", params=None):
 
 
 def simulator_command(simulator, image, trace=None, console=None, wave=None, stall=None, seed=None, max_cycles=None,
-                      checkpoints=None, input_script=None, reset_at=None, allow_lost_events=False, simd_stall=None, simd_seed=None, gpu_stall=None, gpu_seed=None):
+                      checkpoints=None, input_script=None, reset_at=None, allow_lost_events=False, simd_stall=None, simd_seed=None, gpu_stall=None, gpu_seed=None,
+                      ticks=None, console_input=None):
     """The command line for a compiled testbench: `vvp` for a .vvp file, else a Verilator binary."""
     simulator = Path(simulator)
     if simulator.suffix == ".vvp":
@@ -89,6 +90,10 @@ def simulator_command(simulator, image, trace=None, console=None, wave=None, sta
     if gpu_seed is not None: command.append(f"+gpu-seed={gpu_seed}")
     if allow_lost_events:
         command.append("+allow-lost-events")
+    if ticks is not None:
+        command.append(f"+ticks={ticks}")
+    if console_input is not None:
+        command.append(f"+console-input={console_input}")
     return command
 
 
@@ -107,7 +112,7 @@ def rtl_halt_line(stderr):
     if reason not in REQUIRED:
         raise ValueError(f"unknown halt reason {reason!r} in {line!r}")
     expected = {"halt", "outcome", *COUNTERS, *REQUIRED[reason]}
-    for waits, unit in (("fp_waits", "FPU"), ("md_waits", "multiply/divide")):
+    for waits, unit in (("fp_waits", "FPU"), ("md_waits", "multiply/divide"), ("interrupts", "interrupt")):
         if waits in fields:
             expected.add(waits)
             if fields[waits] < 0: raise ValueError(f"negative {unit} wait count")
@@ -167,7 +172,8 @@ def run_backend(command, trace, parse_halt, timeout, console=None, checkpoints=N
 
 
 def run_rtl(simulator, image_hex, trace, stall=None, seed=None, wave=None, max_cycles=None, timeout=120,
-            checkpoints=None, input_script=None, reset_at=None, allow_lost_events=False, simd_stall=None, simd_seed=None, gpu_stall=None, gpu_seed=None):
+            checkpoints=None, input_script=None, reset_at=None, allow_lost_events=False, simd_stall=None, simd_seed=None, gpu_stall=None, gpu_seed=None,
+            ticks=None, console_input=None):
     """Run the testbench on a hex image with the documented plusargs; the console goes next to the
     trace, or next to the image (`<image>.console`) when `trace` is None and no trace is written."""
     if trace is not None:
@@ -177,16 +183,18 @@ def run_rtl(simulator, image_hex, trace, stall=None, seed=None, wave=None, max_c
     command = simulator_command(simulator, image_hex, trace=trace, console=console, wave=wave,
                                 stall=stall, seed=seed, max_cycles=max_cycles, checkpoints=checkpoints,
                                 input_script=input_script, reset_at=reset_at, allow_lost_events=allow_lost_events,
-                                simd_stall=simd_stall, simd_seed=simd_seed, gpu_stall=gpu_stall, gpu_seed=gpu_seed)
+                                simd_stall=simd_stall, simd_seed=simd_seed, gpu_stall=gpu_stall, gpu_seed=gpu_seed, ticks=ticks,
+                                console_input=console_input)
     return run_backend(command, trace, rtl_halt_line, timeout, console=console, checkpoints=checkpoints)
 
 
 def run_emulator(emulator, image_bin, trace, limit=None, timeout=120, checkpoints=None, input_script=None,
-                 frames=None, allow_lost_events=False):
+                 frames=None, allow_lost_events=False, console_input=None):
     """Run the emulator on a flat image the same way tools/rv32_run_emu.py does, with a trace
     unless `trace` is None."""
     command = emulator_command(emulator, image_bin, trace=trace, limit=limit, checkpoints=checkpoints,
-                               input_script=input_script, frames=frames, allow_lost_events=allow_lost_events)
+                               input_script=input_script, frames=frames, allow_lost_events=allow_lost_events,
+                               console_input=console_input)
     return run_backend(command, trace, halt_line, timeout, checkpoints=checkpoints)
 
 
@@ -242,8 +250,15 @@ def has_value_changes(vcd):
 
 def trap_records(trace):
     """The trace's trap lines without their step numbers: PC, word, cause, and value, in order. Device
-    time moves the step numbers between backends; it never moves a fault or changes its cause."""
+    time moves the step numbers between backends; it never moves a fault or changes its cause.
+    Interrupt entries (O1) are not trap lines: device time decides where they land."""
     return [line.split(" ", 1)[1] for line in trace if " trap " in line]
+
+
+def takes_interrupts(trace):
+    """Whether a trace has an interrupt entry (O1): with cycle ticks it lands on a
+    backend-dependent instruction, so only step ticks keep trace comparison."""
+    return any(" interrupt " in line for line in trace)
 
 
 from tools import rv32_asm as asm  # noqa: E402
@@ -361,7 +376,7 @@ def cycle_relation(rtl):
     makes the formula inapplicable (a trap costs the cycles up to the state that raised it)."""
     steps = len(rtl.trace)
     memory = sum("mem[" in line for line in rtl.trace)
-    traps = sum(" trap " in line for line in rtl.trace)
+    traps = sum(" trap " in line or " interrupt " in line for line in rtl.trace)
     halt = rtl.halt
     expected = 4 * (steps - memory) + 5 * memory + halt["stalls"] + halt.get("fp_waits", 0) + halt.get("md_waits", 0)
     text = (f"cycles {halt['cycles']} = 4 x {steps - memory} + 5 x {memory} + {halt['stalls']} stalls; "
@@ -399,6 +414,9 @@ def main():
     parser.add_argument("--input", type=Path,
                         help="input script delivered to both backends (docs/rv32.md, Input); not a file under --out")
     parser.add_argument("--frames", type=Path, help="directory for the emulator's frame-NNNN.ppm pictures")
+    parser.add_argument("--console-input", type=Path,
+                        help="bytes both backends' consoles receive, all waiting from reset (O2); not a file under --out")
+    parser.add_argument("--limit", type=int, help="the emulator's instruction limit (default: its own)")
     gpu_delay = parser.add_mutually_exclusive_group()
     gpu_delay.add_argument("--gpu-stall",type=int,help="fixed waits per graphics memory transfer")
     gpu_delay.add_argument("--gpu-seed",type=int,help="seeded 0..3 graphics memory waits")
@@ -410,6 +428,9 @@ def main():
                              "console, outcome, and checkpoints, for a program that reads the timer, the cycle/time counters or accelerator registers (device time)")
     parser.add_argument("--compare-stores", action="store_true",
                         help="also compare ordered stores in results mode; firmware must have timing-independent stores")
+    parser.add_argument("--ticks", choices=("cycles", "steps"), default="cycles",
+                        help="the RTL's device tick: `cycles` (the default) or `steps`, the deterministic mode in which mtime "
+                             "and cycle advance once per step as on the emulator, so timer reads and interrupts keep trace comparison")
     parser.add_argument("--backend", choices=("both", "emulator"), default="both",
                         help="`emulator` runs and checks the emulator only")
     parser.add_argument("--allow-traps", action="store_true",
@@ -452,6 +473,8 @@ def main():
     name = args.image.stem if args.image is not None else args.program
     if args.input is not None:
         refuse_aliased_input(args.input, out, name, args.frames)
+    if args.console_input is not None:
+        refuse_aliased_input(args.console_input, out, name, args.frames, option="--console-input")
     if args.expect_checkpoints is not None:
         if not args.expect_checkpoints.exists():
             parser.error(f"{args.expect_checkpoints} does not exist")
@@ -474,18 +497,24 @@ def main():
             stale.unlink()
     emulator = run_emulator(args.emulator, bin_path, out / f"{name}.emu.trace", timeout=args.timeout,
                             checkpoints=out / f"{name}.emu.checkpoints", input_script=args.input, frames=args.frames,
-                            allow_lost_events=args.allow_lost_events)
+                            allow_lost_events=args.allow_lost_events, console_input=args.console_input, limit=args.limit)
     check_passed(emulator, "emulator")
     # Device time differs for timers and asynchronous accelerators. Compare guest
     # results and trap records when either interface makes the CPU trace timing-dependent.
-    reads_timer = reads_device_time(emulator.trace)
+    # In step-tick mode the RTL counts device time as the emulator does, so timer reads and interrupts
+    # stay trace-comparable; accelerators still run per clock.
+    reads_timer = reads_device_time(emulator.trace) and args.ticks == "cycles"
+    interrupted = takes_interrupts(emulator.trace) and args.ticks == "cycles"
     if args.compare == "trace" and reads_timer:
-        sys.exit("this program reads the timer or the cycle/time counters, so its traces differ by design; use --compare results")
+        sys.exit("this program reads the timer or the cycle/time counters, so its traces differ by design; use --compare results or --ticks steps")
+    if args.compare == "trace" and interrupted:
+        sys.exit("this program takes interrupts, which land on backend-dependent instructions; use --compare results or --ticks steps")
     uses_simd = uses_accelerator(emulator.trace)
     if args.compare == "trace" and uses_simd:
         sys.exit("this program accesses accelerator registers; use --compare results")
-    if args.compare == "results" and not (reads_timer or uses_simd):
-        sys.exit("--compare results is for a program that reads the timer, the cycle/time counters or accelerator registers; this one never did, use --compare trace")
+    if args.compare == "results" and not (reads_timer or uses_simd or interrupted):
+        sys.exit("--compare results is for a program that reads the timer, the cycle/time counters or accelerator registers, "
+                 "or takes interrupts, with cycle ticks; this one does not, use --compare trace")
     if args.expect_console_file is not None:
         args.expect_console = args.expect_console_file.read_text().rstrip("\n")
     if args.expect_console is not None and emulator.console.rstrip("\n") != args.expect_console:
@@ -507,7 +536,8 @@ def main():
         for stall, seed in [(0, None), (1, None), (2, None), (3, None), (None, seed)]:
             rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=seed,
                           timeout=args.timeout, max_cycles=args.max_cycles, checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input,
-                          allow_lost_events=args.allow_lost_events, simd_stall=args.simd_stall, simd_seed=args.simd_seed, gpu_stall=args.gpu_stall, gpu_seed=args.gpu_seed)
+                          allow_lost_events=args.allow_lost_events, simd_stall=args.simd_stall, simd_seed=args.simd_seed, gpu_stall=args.gpu_stall, gpu_seed=args.gpu_seed,
+                          ticks=args.ticks, console_input=args.console_input)
             check_passed(rtl)
             check_fp_waits(rtl, args.expect_fp_waits)
             mismatch = compare_backends(rtl, emulator, args.compare, compare_stores=args.compare_stores)  # the same agreement as a check run
@@ -532,7 +562,8 @@ def main():
     wave = out / f"{name}.vcd" if args.mode == "waves" else None
     rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=args.seed, wave=wave,
                   timeout=args.timeout, max_cycles=args.max_cycles, checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input,
-                  allow_lost_events=args.allow_lost_events, simd_stall=args.simd_stall, simd_seed=args.simd_seed, gpu_stall=args.gpu_stall, gpu_seed=args.gpu_seed)
+                  allow_lost_events=args.allow_lost_events, simd_stall=args.simd_stall, simd_seed=args.simd_seed, gpu_stall=args.gpu_stall, gpu_seed=args.gpu_seed,
+                          ticks=args.ticks, console_input=args.console_input)
     print(emulator.stderr.strip().splitlines()[-1])
     print(rtl.stderr.strip().splitlines()[-1] if rtl.stderr.strip() else "rv32_tb: no halt line")
     check_passed(rtl)

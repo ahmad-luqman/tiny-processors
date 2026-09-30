@@ -262,7 +262,7 @@ class EmulatorTest(unittest.TestCase):
                 ([0x00000000], 2, 0),
                 ([r_type(0x33, 1, 0, 2, 3, 2)], 2, r_type(0x33, 1, 0, 2, 3, 2)),   # OP with an unused funct7
                 ([i_type(0x0F, 0, 1, 0, 0)], 2, i_type(0x0F, 0, 1, 0, 0)),         # fence.i
-                ([CSRRS(1, MSTATUS, 0)], 2, CSRRS(1, MSTATUS, 0)),                 # unimplemented CSR
+                ([CSRRS(1, 0x7C0, 0)], 2, CSRRS(1, 0x7C0, 0)),                     # unimplemented CSR
                 ([i_type(0x13, 1, 1, 0, 0x420)], 2, i_type(0x13, 1, 1, 0, 0x420)),  # slli with funct7 set
                 ([r_type(0x33, 1, 1, 2, 3, 0x20)], 2, r_type(0x33, 1, 1, 2, 3, 0x20)),  # sll with sub bit
                 ([b_type(2, 0, 0, 8)], 2, b_type(2, 0, 0, 8)),                     # unused branch funct3
@@ -299,7 +299,7 @@ class EmulatorTest(unittest.TestCase):
             ([SB(1, 2, 0)], 0x7FFFFFFF, 7, 0x7FFFFFFF),     # one byte below RAM
             ([SW(1, 2, 0)], 0xFFFFFFFC, 7, 0xFFFFFFFC),     # top of the address space
             ([LW(1, 2, 0)], 0xFFFFFFFC, 5, 0xFFFFFFFC),
-            ([LBU(1, 2, 0)], CONSOLE, 5, CONSOLE),          # console TX is write-only
+            ([LHU(1, 2, 0)], CONSOLE, 5, CONSOLE),          # RBR (O2) is a byte
             ([LBU(1, 2, 1)], CONSOLE, 5, CONSOLE + 1),      # other console offsets
             ([LHU(1, 2, 4)], CONSOLE, 5, CONSOLE + 4),      # console status is byte-only
             ([LW(1, 2, 0)], CONSOLE, 5, CONSOLE),
@@ -320,7 +320,10 @@ class EmulatorTest(unittest.TestCase):
             ([SB(1, 2, 0)], BOOTROM, 7, BOOTROM),           # the boot ROM is read-only
             ([SW(1, 2, 0)], BOOTROM + 0xFFC, 7, BOOTROM + 0xFFC),
             ([LW(1, 2, 0)], BOOTROM + 0x1000, 5, BOOTROM + 0x1000),  # past the ROM
-            ([LW(1, 2, 0)], 0x0C000000, 5, 0x0C000000),     # virt's PLIC: reserved for O1, unmapped
+            ([LB(1, 2, 0)], PLIC, 5, PLIC),                 # the PLIC (O1) takes words only
+            ([SW(1, 2, 0)], PLIC_PENDING, 7, PLIC_PENDING), # and its pending word is read-only
+            ([LW(1, 2, 0)], PLIC + 0x80, 5, PLIC + 0x80),   # between the priorities and the pending word
+            ([LW(1, 2, 0)], PLIC + 0x600000, 5, PLIC + 0x600000),  # past the 6 MiB window
             ([LW(1, 2, 0)], 0x10001000, 5, 0x10001000),     # virt's first virtio-mmio slot: reserved for O3
             ([LW(1, 2, 2)], MTIME, 4, MTIME + 2),           # misalignment is decided before the window
             ([LHU(1, 2, 2)], MTIME, 5, MTIME + 2),          # an aligned halfword inside the window is refused by it
@@ -377,6 +380,21 @@ class EmulatorTest(unittest.TestCase):
         result = self.run_words(words)
         self.assertEqual((result.state.traps, result.state.mcause, result.state.mepc), (2, 3, handler_at + 8))
         self.assertEqual(result.state.halt, "double-fault", "the second trap vectors to 0 and cannot be delivered")
+
+    def test_console_receive(self):
+        """O2: --console-input's bytes wait from reset; LSR.DR says one is waiting, RBR takes it, and
+        RBR reads 0 once they are gone."""
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "in.txt"
+            source.write_bytes(b"AB")
+            words = LI(5, CONSOLE) + [LBU(6, 5, 5), LBU(7, 5, 0), LBU(8, 5, 5), LBU(9, 5, 0), LBU(10, 5, 5), LBU(11, 5, 0)]
+            x = self.run_pass(words, extra=("--console-input", str(source))).state.x
+            self.assertEqual(x[6:12], [0x21, ord("A"), 0x21, ord("B"), 0x20, 0])
+            x = self.run_pass(words).state.x
+            self.assertEqual(x[6:12], [0x20, 0, 0x20, 0, 0x20, 0], "no input: nothing waits")
+        result = self.run_words(FINISH(), extra=("--console-input", "/nonexistent/in.txt"))
+        self.assertEqual(result.status, 2)
+        self.assertIn("cannot open console input", result.stderr)
 
     def test_console_and_done_register(self):
         words = LI(5, CONSOLE) + [LBU(6, 5, 5)] + LI(7, ord("H")) + [SB(7, 5, 0)] + LI(7, ord("i")) + [SB(7, 5, 0)]

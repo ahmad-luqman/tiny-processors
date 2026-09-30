@@ -11,7 +11,15 @@
 // replaced, so a read accepted n cycles later returns it plus n. The count
 // also leaves on `mtime` for the core's `time` CSR. Every other offset and
 // every byte or halfword access is refused. msip and mtimecmp are plain
-// registers until the core takes interrupts (O1): nothing reads them yet.
+// registers of the interrupt levels since O1: `mtip` is mtime >= mtimecmp and
+// `msip_level` is msip, and the core reads both through mip.
+//
+// Deterministic tick mode (O1): with `step_ticks` set, the count advances once
+// per step instead of once per cycle. `step` is the core's registered
+// retirement or trap pulse, high in the cycle after an instruction retires, traps
+// or an interrupt is taken, and the count of that cycle already includes it, so
+// every instruction reads the steps completed before it, exactly as on the
+// emulator (docs/rv32.md, "Device time").
 module rv32_clint (
     input  wire        clk,
     input  wire        reset,
@@ -23,7 +31,11 @@ module rv32_clint (
     output wire [31:0] rdata,
     output wire        ready,
     output wire        error,
-    output wire [63:0] mtime
+    output wire [63:0] mtime,
+    input  wire        step_ticks,
+    input  wire        step,
+    output wire        mtip,
+    output wire        msip_level
 );
     // Register offsets within the 64 KiB window (tests/test_rv32_tools.py pins them to board.h).
     localparam [15:0] MSIP = 16'h0000, MTIMECMP = 16'h4000, MTIME = 16'hbff8;
@@ -37,7 +49,10 @@ module rv32_clint (
     wire known = at_msip || at_cmp_lo || at_cmp_hi || at_time_lo || at_time_hi;
     wire write = valid && we && word;
 
-    assign mtime = elapsed + 64'd1;
+    wire tick = step_ticks ? step : 1'b1;
+    assign mtime = elapsed + {63'd0, tick};
+    assign mtip = mtime >= mtimecmp;
+    assign msip_level = msip;
     assign ready = valid;
     // Like every slave's, `error` describes the presented address whether or not `valid` is set:
     // the bus reads it only through `clint_sel`, and only when it also sees `ready`.
@@ -58,7 +73,7 @@ module rv32_clint (
             else if (write && at_time_hi)
                 elapsed <= {wdata, mtime[31:0]};
             else
-                elapsed <= elapsed + 64'd1;
+                elapsed <= elapsed + {63'd0, tick};
             if (write && at_cmp_lo) mtimecmp[31:0] <= wdata;
             if (write && at_cmp_hi) mtimecmp[63:32] <= wdata;
             if (write && at_msip) msip <= wdata[0];

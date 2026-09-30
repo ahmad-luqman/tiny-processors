@@ -285,7 +285,7 @@ class GdbStubTest(unittest.TestCase):
         self.assertEqual({n: int(fpu[n].get("regnum")) for n in ("fflags", "frm", "fcsr")},
                          {"fflags": 66, "frm": 67, "fcsr": 68})
         csr = {r.get("name"): int(r.get("regnum")) for r in features["org.gnu.gdb.riscv.csr"]}
-        self.assertEqual(csr, {"mtvec": 65 + 0x305, "mepc": 65 + 0x341, "mcause": 65 + 0x342, "mtval": 65 + 0x343,
+        self.assertEqual(csr, {"mstatus": 65 + 0x300, "mie": 65 + 0x304, "mscratch": 65 + 0x340, "mip": 65 + 0x344, "mtvec": 65 + 0x305, "mepc": 65 + 0x341, "mcause": 65 + 0x342, "mtval": 65 + 0x343,
                                "cycle": 65 + 0xC00, "time": 65 + 0xC01, "instret": 65 + 0xC02,
                                "cycleh": 65 + 0xC80, "timeh": 65 + 0xC81, "instreth": 65 + 0xC82})
         client.send("k")
@@ -312,7 +312,8 @@ class GdbStubTest(unittest.TestCase):
         self.assertEqual(client.ask("qNoSuchThing"), "")
         self.assertEqual(client.ask("Z2,80000000,4"), "", "watchpoints are not supported")
         self.assertEqual(client.ask("p9999"), "E01")
-        self.assertEqual(client.ask(f"p{REG_CSR0 + 0x300:x}"), "E01", "mstatus does not exist")
+        self.assertEqual(client.ask(f"p{REG_CSR0 + 0x7C0:x}"), "E01", "no CSR 0x7c0")
+        self.assertEqual(client.reg(REG_CSR0 + 0x300), 0x80007800, "mstatus at reset: MPP, FS and SD read as constants")
         client.send("k")
         self.assert_exit(session, 2, "stopped")
 
@@ -661,7 +662,10 @@ class GdbStubTest(unittest.TestCase):
                          (0xFF, 0x1F, 7))
         self.assertEqual(client.ask(f"P{REG_CSR0 + 2:x}={reg_hex(0)}"), "OK")
         self.assertEqual(client.reg(REG_CSR0 + 3), 0x1F)
-        self.assertEqual(client.ask(f"P{REG_CSR0 + 0x300:x}={reg_hex(0)}"), "E01", "mstatus does not exist")
+        self.assertEqual(client.ask(f"P{REG_CSR0 + 0x7C0:x}={reg_hex(0)}"), "E01", "no CSR 0x7c0")
+        self.assertEqual(client.ask(f"P{REG_CSR0 + 0x300:x}={reg_hex(0xFFFFFFFF)}"), "OK")
+        self.assertEqual(client.reg(REG_CSR0 + 0x300), 0x80007888, "only MIE and MPIE are writable")
+        self.assertEqual(client.ask(f"P{REG_CSR0 + 0x300:x}={reg_hex(0)}"), "OK")
         self.assertEqual(client.ask(f"P5={reg_hex(1)[:6]}"), "E01", "short value")
         # G writes the whole block: keep everything but x7.
         regs = client.registers()

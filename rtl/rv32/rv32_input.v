@@ -8,7 +8,8 @@
 // `ready` low, so a burst of events lands whole before the guest can see
 // any of it: the emulator queues a frame's events in one step, and this is
 // how the sequence the guest reads stays identical. A push into a full
-// queue is ignored; `full` lets the host report the drop.
+// queue is ignored; `full` lets the host report the drop. `nonempty` is the
+// input's interrupt line into the PLIC (source 12, O1).
 module rv32_input (
     input  wire        clk,
     input  wire        reset,
@@ -22,7 +23,8 @@ module rv32_input (
     output wire        error,
     input  wire        push,
     input  wire [31:0] push_event,
-    output wire        full
+    output wire        full,
+    output wire        nonempty // the PLIC line (O1): an event is waiting
 );
     reg [31:0] queue [0:15];
     reg [3:0] head, tail;
@@ -35,6 +37,7 @@ module rv32_input (
     wire empty = (count == 5'd0);
 
     assign full = (count == 5'd16);
+    assign nonempty = !empty;
     assign ready = valid && !push;
     assign error = !read_ok;
     assign rdata = (which == 2'd0) ? (empty ? 32'd0 : queue[head]) :

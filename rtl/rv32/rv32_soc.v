@@ -16,6 +16,8 @@ module rv32_soc #(
     input  wire        clk,
     input  wire        reset,
     input  wire        mem_hold,
+    // Deterministic tick mode (O1): mtime and `cycle` advance once per step, as on the emulator.
+    input  wire        step_ticks,
     input  wire        simd_memory_hold,
     input  wire        gpu_memory_hold,
     // Core memory port, observed.
@@ -41,6 +43,7 @@ module rv32_soc #(
     output wire        retire_fcsr_we,
     output wire [7:0]  retire_fcsr,
     output wire        trap,
+    output wire        trap_interrupt,
     output wire [3:0]  trap_cause,
     output wire [31:0] trap_value,
     output wire        halted,
@@ -53,6 +56,9 @@ module rv32_soc #(
     // Device side effects for the host.
     output wire        console_valid,
     output wire [7:0]  console_byte,
+    input  wire        console_rx_valid,
+    input  wire [7:0]  console_rx_byte,
+    output wire        console_rx_take,
     output wire        done_valid,
     output wire [31:0] done_wdata,
     output wire        display_present,
@@ -90,6 +96,9 @@ module rv32_soc #(
     wire [31:0] fb_rdata;
 
     wire [63:0] mtime;
+    wire mtip, msip_level, meip, input_nonempty;
+    wire plic_valid, plic_ready, plic_error;
+    wire [31:0] plic_rdata;
     wire rom_valid, rom_ready, rom_error;
     wire [31:0] rom_rdata;
 
@@ -103,7 +112,9 @@ module rv32_soc #(
         .retire_fd_we(retire_fd_we), .retire_fd(retire_fd), .retire_fd_value(retire_fd_value),
         .retire_fcsr_we(retire_fcsr_we), .retire_fcsr(retire_fcsr),
         .trap_value(trap_value), .halted(halted), .state(state), .pc(pc),
-        .mtvec(mtvec), .mepc(mepc), .mcause(mcause), .mtval(mtval), .time_now(mtime)
+        .mtvec(mtvec), .mepc(mepc), .mcause(mcause), .mtval(mtval), .time_now(mtime),
+        .irq_software(msip_level), .irq_timer(mtip), .irq_external(meip), .step_ticks(step_ticks),
+        .trap_interrupt(trap_interrupt)
     );
 
     rv32_bus #(.RAM_WORDS(RAM_WORDS), .FB_WORDS(FB_WORDS)) bus (
@@ -113,6 +124,7 @@ module rv32_soc #(
         .console_valid(con_valid), .console_ready(con_ready), .console_error(con_error), .console_rdata(con_rdata),
         .done_valid(dn_valid), .done_ready(dn_ready), .done_error(dn_error), .done_rdata(dn_rdata),
         .clint_valid(clint_valid), .clint_ready(clint_ready), .clint_error(clint_error), .clint_rdata(clint_rdata),
+        .plic_valid(plic_valid), .plic_ready(plic_ready), .plic_error(plic_error), .plic_rdata(plic_rdata),
         .rom_valid(rom_valid), .rom_ready(rom_ready), .rom_error(rom_error), .rom_rdata(rom_rdata),
         .input_valid(in_valid), .input_ready(in_ready), .input_error(in_error), .input_rdata(in_rdata),
         .display_valid(dp_valid), .display_ready(dp_ready), .display_error(dp_error), .display_rdata(dp_rdata),
@@ -207,7 +219,8 @@ module rv32_soc #(
     rv32_console #(.BUSY_CYCLES(CONSOLE_BUSY)) console (
         .clk(clk), .reset(reset), .valid(con_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
         .wdata(mem_wdata), .rdata(con_rdata), .ready(con_ready), .error(con_error),
-        .tx_valid(console_valid), .tx_byte(console_byte)
+        .tx_valid(console_valid), .tx_byte(console_byte),
+        .rx_valid(console_rx_valid), .rx_byte(console_rx_byte), .rx_take(console_rx_take)
     );
 
     rv32_done done (
@@ -218,7 +231,15 @@ module rv32_soc #(
 
     rv32_clint clint (
         .clk(clk), .reset(reset), .valid(clint_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
-        .wdata(mem_wdata), .rdata(clint_rdata), .ready(clint_ready), .error(clint_error), .mtime(mtime)
+        .wdata(mem_wdata), .rdata(clint_rdata), .ready(clint_ready), .error(clint_error), .mtime(mtime),
+        .step_ticks(step_ticks), .step(retire || trap), .mtip(mtip), .msip_level(msip_level)
+    );
+
+    // The PLIC (O1): source 12 is the input queue's nonempty line.
+    rv32_plic plic (
+        .clk(clk), .reset(reset), .valid(plic_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
+        .wdata(mem_wdata), .rdata(plic_rdata), .ready(plic_ready), .error(plic_error),
+        .lines({19'd0, input_nonempty, 12'd0}), .meip(meip)
     );
 
     // The boot ROM holds the machine's device tree; the core starts with its address in a1.
@@ -229,7 +250,7 @@ module rv32_soc #(
     rv32_input input_device (
         .clk(clk), .reset(reset), .valid(in_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
         .wdata(mem_wdata), .rdata(in_rdata), .ready(in_ready), .error(in_error),
-        .push(in_push), .push_event(in_event), .full(in_full)
+        .push(in_push), .push_event(in_event), .full(in_full), .nonempty(input_nonempty)
     );
 
     wire display_device_ready, display_device_error;

@@ -37,6 +37,9 @@ FORBIDDEN_MNEMONIC = re.compile(r"\A(mul\w*|div\w*|rem\w*|csr\w*|fence\.i|c\.\w+
 # four trap CSRs (the operand is checked below), and mret.
 PRIVILEGED_MNEMONIC = re.compile(r"\A(csr\w*|mret)\Z")
 TRAP_CSR = re.compile(r"\b(mtvec|mepc|mcause|mtval)\b")
+# What a system image may use in addition (Track 2): the interrupt CSRs, wfi and ecall (O1, O2).
+SYSTEM_CSR = re.compile(r"\b(mstatus|mie|mip|mscratch)\b")
+SYSTEM_MNEMONIC = re.compile(r"\A(wfi|ecall)\Z")
 # What an RV32IM image may use in addition (Track 0): exactly the eight M-extension instructions.
 M_MNEMONIC = re.compile(r"\A(mul|mulh|mulhsu|mulhu|div|divu|rem|remu)\Z")
 # The Zicntr counters (cycle, time, instret and their high halves). Only reads exist; objdump
@@ -129,12 +132,14 @@ def listing_word(encoded):
     return int(encoded, 16) if len(encoded) == 8 else None
 
 
-def check_listing(text, allow_privileged=False, allow_f=False, allow_m=False, allow_counters=False):
+def check_listing(text, allow_privileged=False, allow_f=False, allow_m=False, allow_counters=False, allow_system=False):
     """Return problems found in an objdump disassembly listing; `allow_privileged` admits the CSR
     instructions and mret that a trap handler needs; `allow_f` admits only valid RV32F
     encodings and floating CSR accesses; `allow_m` admits the M extension's eight instructions;
-    `allow_counters` admits reads (never writes) of the Zicntr counters. Every gate requires a
+    `allow_counters` admits reads (never writes) of the Zicntr counters; `allow_system` (which implies
+    `allow_privileged`) admits the interrupt CSRs, wfi and ecall of Track 2. Every gate requires a
     listing to inspect."""
+    allow_privileged = allow_privileged or allow_system
     problems = []
     instructions = 0
     for number, line in enumerate(text.splitlines(), 1):
@@ -164,8 +169,10 @@ def check_listing(text, allow_privileged=False, allow_f=False, allow_m=False, al
                 and word & 127 == 0x33 and word >> 25 == 1:
             continue
         if match and FORBIDDEN_MNEMONIC.match(match.group(3)):
+            if allow_system and SYSTEM_MNEMONIC.match(match.group(3)):
+                continue
             if allow_privileged and PRIVILEGED_MNEMONIC.match(match.group(3)):
-                if match.group(3) == "mret" or TRAP_CSR.search(line):
+                if match.group(3) == "mret" or TRAP_CSR.search(line) or (allow_system and SYSTEM_CSR.search(line)):
                     continue
                 problems.append(f"listing line {number}: CSR other than the four trap CSRs: {line.strip()}")
                 continue
@@ -191,7 +198,7 @@ def check_m_build(elf, listing):
 
 
 def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, entry=None, allow_privileged=False, allow_f=False,
-                allow_m=False, allow_counters=False):
+                allow_m=False, allow_counters=False, allow_system=False):
     """Return a list of contract violations; an empty list means the image is acceptable."""
     entry = ram_base if entry is None else entry
     ram_end = ram_base + ram_size
@@ -260,7 +267,7 @@ def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, e
     if elf.undefined:
         problems.append("undefined symbols: " + ", ".join(sorted(elf.undefined)))
     if listing is not None:
-        problems.extend(check_listing(listing, allow_privileged, allow_f, allow_m, allow_counters))
+        problems.extend(check_listing(listing, allow_privileged, allow_f, allow_m, allow_counters, allow_system))
     return problems
 
 
@@ -314,18 +321,20 @@ def main():
     parser.add_argument("--allow-f", action="store_true", help="admit RV32F and floating CSRs, retaining ILP32")
     parser.add_argument("--allow-m", action="store_true", help="admit the M extension's multiply and divide instructions")
     parser.add_argument("--allow-counters", action="store_true", help="admit reads of the Zicntr counters (cycle, time, instret)")
+    parser.add_argument("--allow-system", action="store_true",
+                        help="implies --allow-privileged: also the interrupt CSRs (mstatus, mie, mip, mscratch), wfi and ecall (Track 2)")
     parser.add_argument("--require-m", action="store_true",
                         help="implies --allow-m: the listing must use M instructions and the image must not contain the "
                              "software multiply/divide routines (an RV32IM build that really retired rt/muldiv.c)")
     args = parser.parse_args()
     args.allow_m = args.allow_m or args.require_m
-    if (args.allow_f or args.allow_privileged or args.allow_m or args.allow_counters) and args.listing is None:
-        parser.error("--allow-f, --allow-m, --allow-counters and --allow-privileged require --listing")
+    if (args.allow_f or args.allow_privileged or args.allow_m or args.allow_counters or args.allow_system) and args.listing is None:
+        parser.error("--allow-f, --allow-m, --allow-counters, --allow-privileged and --allow-system require --listing")
     try:
         elf = parse_elf(args.elf.read_bytes())
         listing = args.listing.read_text() if args.listing else None
         problems = check_image(elf, listing, args.ram_base, args.ram_size, allow_privileged=args.allow_privileged, allow_f=args.allow_f,
-                               allow_m=args.allow_m, allow_counters=args.allow_counters)
+                               allow_m=args.allow_m, allow_counters=args.allow_counters, allow_system=args.allow_system)
         if args.require_m:
             problems.extend(check_m_build(elf, listing))
         image = flatten(elf, args.ram_base)

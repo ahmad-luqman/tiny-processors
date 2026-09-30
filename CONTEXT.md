@@ -58,8 +58,16 @@ The state every backend gives a program at its first instruction: the hart id in
 _Avoid_: a bootloader, firmware parameters, a hard-coded device-tree address.
 
 **CLINT**:
-The core-local interruptor at 0x0200_0000, virt's address: msip, mtimecmp and the 64-bit mtime, which counts device ticks and which the time CSR reads. It replaced the M5 timer in Track 1; nothing acts on msip or mtimecmp until O1 gives the core interrupts.
+The core-local interruptor at 0x0200_0000, virt's address: msip, mtimecmp and the 64-bit mtime, which counts device ticks and which the time CSR reads. It replaced the M5 timer in Track 1; since O1 msip raises the machine software interrupt and mtime >= mtimecmp the timer interrupt.
 _Avoid_: the timer (M5's), a PLIC, an interrupt controller for external devices.
+
+**PLIC**:
+The platform-level interrupt controller at 0x0c00_0000, virt's address and register layout, for one context (hart 0, machine mode): source priorities, a pending word, enables, a threshold and claim/complete; it raises mip.MEIP (Track 2, O1). The input queue is source 12. See [the contract](docs/rv32.md#plic-at-0x0c00_0000).
+_Avoid_: an interrupt vector table, the CLINT.
+
+**Step ticks**:
+The RTL's deterministic tick mode (`+ticks=steps`, `--ticks steps`): mtime and cycle advance once per step (an instruction retired or trapped, or an interrupt taken) as on the emulator, and wfi never waits, so timer reads and interrupts land on the same instruction on both backends and traces stay comparable. Accelerators still advance per clock.
+_Avoid_: a faster simulation, a host-time mode.
 
 **SAP8**:
 The project's SAP-inspired teaching CPU and its instruction set.

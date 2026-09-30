@@ -15,7 +15,7 @@ module rv32_tb;
 
     reg clk = 0;
     reg reset = 1;
-    wire mem_valid, mem_we, mem_fetch, mem_ready, mem_error, retire, retire_rd_we, trap, halted;
+    wire mem_valid, mem_we, mem_fetch, mem_ready, mem_error, retire, retire_rd_we, trap, trap_interrupt, halted;
     wire [31:0] mem_addr, mem_wdata, mem_rdata, retire_pc, retire_insn, retire_rd_value, trap_value, pc;
     wire [31:0] mtvec, mepc, mcause, mtval;
     wire [3:0] mem_strb, trap_cause;
@@ -24,10 +24,17 @@ module rv32_tb;
     wire [31:0] retire_fd_value;
     wire [7:0] retire_fcsr;
     wire [3:0] state;
-    wire console_valid, done_valid, display_present, in_full;
+    wire console_valid, done_valid, display_present, in_full, console_rx_take;
     wire [7:0] console_byte;
     wire [31:0] done_wdata, display_frames;
     reg in_push = 0;
+    reg step_ticks = 0;
+    // Console input (+console-input=FILE, O2): every byte of the file is waiting from reset.
+    byte console_in [];
+    integer console_in_next = 0;
+    wire console_rx_valid = console_in_next < console_in.size();
+    wire [7:0] console_rx_byte = console_rx_valid ? console_in[console_in_next] : 8'd0;
+    always @(posedge clk) if (!reset && console_rx_take) console_in_next <= console_in_next + 1; // +ticks=steps: the deterministic tick mode (docs/rv32.md, "Device time")
     reg [31:0] in_event = 0;
 
     // The input script (+input=FILE): `frame N down|up KEY` lines, delivered in
@@ -133,7 +140,7 @@ module rv32_tb;
         end
     end
 
-    integer cycles = 0, steps = 0, stalls = 0, transfers = 0;
+    integer cycles = 0, steps = 0, stalls = 0, transfers = 0, interrupts = 0;
     integer max_cycles = 10000000; // +max-cycles=N; the diagnostic needs ~2M, stalled M7 requests 20M
     integer reset_at = 0;       // +reset-at=N: assert reset again after counted cycle N
     reg reset_done = 0;         // that second reset happened
@@ -248,6 +255,7 @@ module rv32_tb;
                 $fatal(1, "+reset-at=%0d was never reached: the run ended at cycle %0d", reset_at, cycles);
             $fwrite(STDERR, "rv32_tb: halt=%0s cycles=%0d steps=%0d stalls=%0d transfers=%0d",
                     halt_name, cycles, steps, stalls, transfers);
+            if (interrupts != 0) $fwrite(STDERR, " interrupts=%0d", interrupts);
             if (fp_waits != 0) $fwrite(STDERR, " fp_waits=%0d", fp_waits);
             if (md_waits != 0) $fwrite(STDERR, " md_waits=%0d", md_waits);
             if (halt_name == "done") begin
@@ -383,7 +391,12 @@ module rv32_tb;
                 end
                 pending = 0;
             end
-            if (trap) begin
+            if (trap && trap_interrupt) begin
+                steps = steps + 1; // an interrupt entry is a step, as in the emulator
+                interrupts = interrupts + 1;
+                if (trace_fd != 0)
+                    $fwrite(trace_fd, "%0d %h 00000000 interrupt %0d\n", steps, retire_pc, trap_cause);
+            end else if (trap) begin
                 steps = steps + 1; // a trap counts as a step, as in the emulator
                 if (trace_fd != 0)
                     $fwrite(trace_fd, "%0d %h %h trap %0d %h\n", steps, retire_pc, retire_insn, trap_cause, trap_value);
@@ -572,10 +585,35 @@ module rv32_tb;
         end
     endtask
 
+    // The console input file, byte by byte ($fgetc works the same on both simulators).
+    task read_console_input;
+        input string path;
+        integer fd, c, n;
+        begin
+            fd = $fopen(path, "rb");
+            if (fd == 0) $fatal(1, "Cannot open console input %0s", path);
+            n = 0;
+            c = $fgetc(fd);
+            while (c != -1) begin
+                if (n == console_in.size()) console_in = new[n == 0 ? 256 : 2 * n](console_in);
+                console_in[n] = c[7:0];
+                n = n + 1;
+                c = $fgetc(fd);
+            end
+            $fclose(fd);
+            console_in = new[n](console_in);
+        end
+    endtask
+
     initial begin
         if (!$value$plusargs("image=%s", image_path)) $fatal(1, "Missing +image=FILE");
         if ($value$plusargs("input=%s", input_path)) read_input_script(input_path);
         if ($test$plusargs("allow-lost-events")) allow_lost_events = 1;
+        if ($value$plusargs("console-input=%s", text)) read_console_input(text);
+        if ($value$plusargs("ticks=%s", text)) begin
+            if (text == "steps") step_ticks = 1;
+            else if (text != "cycles") $fatal(1, "+ticks=%0s must be steps or cycles", text);
+        end
         if ($value$plusargs("stall=%s", text)) begin
             stall = plusarg_count("stall", text, 0);
             stall_given = 1;

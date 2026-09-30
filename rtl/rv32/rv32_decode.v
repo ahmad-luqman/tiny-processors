@@ -26,6 +26,7 @@ module rv32_decode (
     output wire        is_mret,
     output wire        is_ecall,
     output wire        is_ebreak,
+    output wire        is_wfi,
     output wire        writes_rd,
     output reg         illegal
 );
@@ -42,9 +43,11 @@ module rv32_decode (
     assign rs2 = insn[24:20];
     assign funct3 = insn[14:12];
 
-    // Four trap CSRs, the three floating aliases, and the six Zicntr counters
-    // (cycle, time, instret and their high halves); other numbers are illegal.
+    // The trap CSRs, the interrupt CSRs of O1 (mstatus, mie, mscratch, mip), the three
+    // floating aliases, and the six Zicntr counters (cycle, time, instret and their high
+    // halves); other numbers are illegal.
     wire csr_exists = (csr == 12'h001) || (csr == 12'h002) || (csr == 12'h003) || (csr == 12'h305) || (csr == 12'h341) || (csr == 12'h342) || (csr == 12'h343) ||
+                      (csr == 12'h300) || (csr == 12'h304) || (csr == 12'h340) || (csr == 12'h344) ||
                       (csr == 12'hc00) || (csr == 12'hc01) || (csr == 12'hc02) || (csr == 12'hc80) || (csr == 12'hc81) || (csr == 12'hc82);
     // CSR numbers with bits [11:10] set are read-only; csrrw always writes, and
     // csrrs/csrrc (and the immediate forms) write when the rs1 field is nonzero.
@@ -65,6 +68,7 @@ module rv32_decode (
     assign is_csr = (opcode == OP_SYSTEM) && (funct3 != 3'd0) && !illegal;
     assign is_ecall = (insn == 32'h00000073);
     assign is_ebreak = (insn == 32'h00100073);
+    assign is_wfi = (insn == 32'h10500073);
     assign writes_rd = is_lui || is_auipc || is_alu_imm || is_alu_reg || is_muldiv || (is_load && opcode == OP_LOAD) || is_jal || is_jalr || is_csr;
 
     // Immediates: each format places the sign bit at insn[31], so every
@@ -94,7 +98,7 @@ module rv32_decode (
             OP_REG: illegal = !(funct7 == 7'd0 || funct7 == 7'd1 ||                      // funct7 1 is the M extension
                                 (funct7 == 7'h20 && (funct3 == 3'd0 || funct3 == 3'd5)));
             OP_FENCE: illegal = (funct3 != 3'd0);                                      // fence.i and the rest
-            OP_SYSTEM: illegal = (funct3 == 3'd0) ? !(is_ecall || is_ebreak || is_mret) // wfi, sret, odd fields
+            OP_SYSTEM: illegal = (funct3 == 3'd0) ? !(is_ecall || is_ebreak || is_mret || is_wfi) // sret, odd fields
                                                    : (funct3 == 3'd4 || !csr_exists ||  // CSR ops on missing CSRs
                                                       csr_write_to_read_only);          // and writes to the counters
             default: illegal = 1'b1;

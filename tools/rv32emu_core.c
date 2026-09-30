@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -37,8 +38,19 @@ enum cause {
 /* The only CSRs that exist; every other number is an illegal instruction. The six Zicntr
  * counters (0xc00-0xc02 and their high halves at 0xc80-0xc82) are read-only: numbers with
  * bits [11:10] set are, by the CSR address convention, and a write to one is illegal. */
-enum csr { CSR_FFLAGS = 0x001, CSR_FRM = 0x002, CSR_FCSR = 0x003, CSR_MTVEC = 0x305, CSR_MEPC = 0x341, CSR_MCAUSE = 0x342, CSR_MTVAL = 0x343,
+enum csr { CSR_FFLAGS = 0x001, CSR_FRM = 0x002, CSR_FCSR = 0x003, CSR_MSTATUS = 0x300, CSR_MIE = 0x304, CSR_MTVEC = 0x305,
+           CSR_MSCRATCH = 0x340, CSR_MEPC = 0x341, CSR_MCAUSE = 0x342, CSR_MTVAL = 0x343, CSR_MIP = 0x344,
            CSR_CYCLE = 0xc00, CSR_TIME = 0xc01, CSR_INSTRET = 0xc02, CSR_CYCLEH = 0xc80, CSR_TIMEH = 0xc81, CSR_INSTRETH = 0xc82 };
+/* mstatus and the interrupt bits (O1, docs/rv32.md "Behavior fixed in Track 2"). MPP reads 3 (machine
+ * mode is the only mode), FS reads 3 and SD 1 because floating state is always on. */
+#define MSTATUS_MIE 0x8u
+#define MSTATUS_MPIE 0x80u
+#define MSTATUS_CONSTANT 0x80007800u /* SD, FS = 3, MPP = 3 */
+#define IRQ_MSI 3u
+#define IRQ_MTI 7u
+#define IRQ_MEI 11u
+#define MIE_MASK ((1u << IRQ_MSI) | (1u << IRQ_MTI) | (1u << IRQ_MEI))
+#define INTERRUPT 0x80000000u
 typedef enum { ACC_OK, ACC_FAULT, ACC_MISALIGNED } mem_access; /* not `access`: unistd.h owns that name */
 
 /* Every window of the memory map is a region with a load and a store
@@ -87,14 +99,50 @@ static mem_access ram_store(machine *m, uint32_t offset, int width, uint32_t val
     return ACC_OK;
 }
 
+/* Interactive console input: take whatever stdin has now, without waiting. */
+static void console_poll_stdin(machine *m)
+{
+    if (!m->console_stdin || m->console_in_next < m->console_in_len) {
+        return;
+    }
+    struct pollfd p = {STDIN_FILENO, POLLIN, 0};
+    if (poll(&p, 1, 0) <= 0 || !(p.revents & (POLLIN | POLLHUP))) {
+        return;
+    }
+    uint8_t buffer[256];
+    ssize_t n = read(STDIN_FILENO, buffer, sizeof buffer);
+    if (n <= 0) {
+        m->console_stdin = false; /* end of input: nothing more will arrive */
+        return;
+    }
+    free(m->console_in);
+    m->console_in = malloc((size_t)n);
+    if (!m->console_in) {
+        fprintf(stderr, "%s: cannot allocate console input\n", emu_prog);
+        exit(EXIT_EMULATOR_ERROR);
+    }
+    memcpy(m->console_in, buffer, (size_t)n);
+    m->console_in_len = (size_t)n;
+    m->console_in_next = 0;
+}
+
+/* The console (docs/rv32.md, "Console"): a 16550's transmit and line-status registers, and since O2
+ * its receive buffer: a byte read of +0 takes the next received byte (0 when there is none) and
+ * LSR bit 0 says one is waiting. */
 static mem_access console_load(machine *m, uint32_t offset, int width, uint32_t *value)
 {
-    (void)m;
     if (width == 1 && offset == CONSOLE_STATUS) {
-        *value = CONSOLE_TX_READY; /* always ready: every byte is accepted at once */
+        console_poll_stdin(m);
+        /* always ready to transmit: every byte is accepted at once */
+        *value = CONSOLE_TX_READY | (m->console_in_next < m->console_in_len ? CONSOLE_RX_READY : 0u);
         return ACC_OK;
     }
-    return ACC_FAULT; /* TX is write-only; the status is a byte; other offsets do not exist */
+    if (width == 1 && offset == CONSOLE_TX) {
+        console_poll_stdin(m);
+        *value = m->console_in_next < m->console_in_len ? m->console_in[m->console_in_next++] : 0u;
+        return ACC_OK;
+    }
+    return ACC_FAULT; /* the status and RBR are bytes; other offsets do not exist */
 }
 
 static mem_access console_store(machine *m, uint32_t offset, int width, uint32_t value)
@@ -169,6 +217,85 @@ static mem_access rom_load(machine *m, uint32_t offset, int width, uint32_t *val
     }
     *value = v;
     return ACC_OK;
+}
+
+/* PLIC (O1; docs/rv32.md, "PLIC"): one context, hart 0 in machine mode. A wired source is pending
+ * while its line is high and it is not claimed; a claim returns the pending, enabled source with the
+ * highest priority above the threshold (ties to the lowest number) and marks it claimed until its
+ * number is written back. Unwired sources hold no priority or enable. */
+static uint32_t plic_lines(const machine *m)
+{
+    return m->count ? 1u << PLIC_SOURCE_INPUT : 0u;
+}
+
+static uint32_t plic_pending(const machine *m)
+{
+    return plic_lines(m) & PLIC_WIRED & ~m->plic_claimed;
+}
+
+/* The source a claim would return now, or 0. */
+static uint32_t plic_best(const machine *m)
+{
+    uint32_t candidates = m->plic_enable ? plic_pending(m) & m->plic_enable : 0u, best = 0, best_priority = m->plic_threshold;
+    for (uint32_t id = 1; id < PLIC_SOURCES; id++) {
+        if ((candidates >> id) & 1u && m->plic_priority[id] > best_priority) {
+            best = id;
+            best_priority = m->plic_priority[id];
+        }
+    }
+    return best;
+}
+
+static mem_access plic_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    if (width != 4) {
+        return ACC_FAULT;
+    }
+    if (offset < 4 * PLIC_SOURCES) {
+        *value = m->plic_priority[offset / 4];
+    } else if (offset == PLIC_PENDING) {
+        *value = plic_pending(m);
+    } else if (offset == PLIC_ENABLE) {
+        *value = m->plic_enable;
+    } else if (offset == PLIC_THRESHOLD) {
+        *value = m->plic_threshold;
+    } else if (offset == PLIC_CLAIM) {
+        *value = plic_best(m);
+        m->plic_claimed |= (1u << *value) & ~1u;
+    } else {
+        return ACC_FAULT;
+    }
+    return ACC_OK;
+}
+
+static mem_access plic_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    if (width != 4) {
+        return ACC_FAULT;
+    }
+    if (offset < 4 * PLIC_SOURCES) {
+        if ((PLIC_WIRED >> (offset / 4)) & 1u) {
+            m->plic_priority[offset / 4] = (uint8_t)(value & 7u);
+        }
+    } else if (offset == PLIC_ENABLE) {
+        m->plic_enable = value & PLIC_WIRED;
+    } else if (offset == PLIC_THRESHOLD) {
+        m->plic_threshold = (uint8_t)(value & 7u);
+    } else if (offset == PLIC_CLAIM) {
+        if (value < PLIC_SOURCES && (m->plic_enable >> value) & 1u) {
+            m->plic_claimed &= ~(1u << value); /* a completion for a disabled source is ignored */
+        }
+    } else {
+        return ACC_FAULT; /* the pending word is read-only */
+    }
+    return ACC_OK;
+}
+
+/* mip: the live interrupt levels from the CLINT and the PLIC. */
+static uint32_t mip_now(const machine *m)
+{
+    return (m->msip ? 1u << IRQ_MSI : 0u) | (mtime_now(m) >= m->mtimecmp ? 1u << IRQ_MTI : 0u) |
+           (plic_best(m) ? 1u << IRQ_MEI : 0u);
 }
 
 /* Input (docs/rv32.md): the host queues an event when its frame is reached,
@@ -369,6 +496,7 @@ static const region REGIONS[] = {
     {"done", DONE_ADDR, 4, NULL, done_store},
     {"console", CONSOLE_BASE, 8, console_load, console_store},
     {"clint", CLINT_BASE, CLINT_SIZE, clint_load, clint_store},
+    {"plic", PLIC_BASE, PLIC_SIZE, plic_load, plic_store},
     {"bootrom", RV32_DTB_ROM_BASE, RV32_DTB_ROM_SIZE, rom_load, NULL},
     {"input", INPUT_BASE, 16, input_load, NULL},
     {"display", DISPLAY_BASE, 16, display_load, display_store},
@@ -444,6 +572,17 @@ static void trace_effects(const machine *m)
     }
 }
 
+/* Trap entry, shared by exceptions and interrupts: mepc is the instruction not executed, MPIE takes
+ * MIE and MIE clears (MPP is always machine mode until O5). */
+static void enter_handler(machine *m, uint32_t cause, uint32_t tval)
+{
+    m->mepc = m->pc;
+    m->mcause = cause;
+    m->mtval = tval;
+    m->mstatus = (m->mstatus & MSTATUS_MIE) ? MSTATUS_MPIE : 0u;
+    m->pc = m->mtvec;
+}
+
 /* Deliver a trap for the instruction at m->pc. The instruction does not
  * retire. If the previous trap's handler has not yet retired an instruction,
  * the machine cannot make progress (the M1 firmware leaves mtvec at 0, so its
@@ -466,10 +605,29 @@ static void trap(machine *m, uint32_t word, uint32_t cause, uint32_t tval)
     }
     m->in_trap = true;
     m->traps++;
-    m->mepc = m->pc;
-    m->mcause = cause;
-    m->mtval = tval;
-    m->pc = m->mtvec;
+    enter_handler(m, cause, tval);
+}
+
+/* Take an interrupt instead of executing the instruction at m->pc (O1): a step and a device tick
+ * like a trap, with its own trace line and no instruction word. */
+static void take_interrupt(machine *m, uint32_t code)
+{
+    simd_tick(&m->simd, false);
+    gpu_tick(&m->gpu,m->ram,RAM_SIZE,m->fb,false);
+    g3d_tick(&m->g3d,m->ram,RAM_SIZE,m->fb,false);
+    m->steps++;
+    if (m->trace) {
+        fprintf(m->trace, "%" PRIu64 " %08" PRIx32 " 00000000 interrupt %" PRIu32 "\n", m->steps, m->pc, code);
+    }
+    if (m->in_trap) { /* unreachable while trap entry clears MIE; kept as the double-fault rule */
+        m->halt = HALT_DOUBLE_FAULT;
+        m->second_cause = INTERRUPT | code;
+        m->second_tval = 0;
+        return;
+    }
+    m->in_trap = true;
+    m->interrupts++;
+    enter_handler(m, INTERRUPT | code, 0);
 }
 
 static bool csr_read(const machine *m, uint32_t number, uint32_t *value)
@@ -478,6 +636,10 @@ static bool csr_read(const machine *m, uint32_t number, uint32_t *value)
     case CSR_FFLAGS: *value = m->fcsr & 31u; return true;
     case CSR_FRM: *value = m->fcsr >> 5; return true;
     case CSR_FCSR: *value = m->fcsr; return true;
+    case CSR_MSTATUS: *value = m->mstatus | MSTATUS_CONSTANT; return true;
+    case CSR_MIE: *value = m->mie; return true;
+    case CSR_MIP: *value = mip_now(m); return true;
+    case CSR_MSCRATCH: *value = m->mscratch; return true;
     case CSR_MTVEC: *value = m->mtvec; return true;
     case CSR_MEPC: *value = m->mepc; return true;
     case CSR_MCAUSE: *value = m->mcause; return true;
@@ -508,6 +670,10 @@ static void csr_write(machine *m, uint32_t number, uint32_t value)
     case CSR_FFLAGS: m->fcsr = (m->fcsr & 0xe0u) | (value & 31u); m->wr_fcsr = true; break;
     case CSR_FRM: m->fcsr = (m->fcsr & 31u) | ((value & 7u) << 5); m->wr_fcsr = true; break;
     case CSR_FCSR: m->fcsr = value & 255u; m->wr_fcsr = true; break;
+    case CSR_MSTATUS: m->mstatus = value & (MSTATUS_MIE | MSTATUS_MPIE); break;
+    case CSR_MIE: m->mie = value & MIE_MASK; break;
+    case CSR_MIP: break; /* MSIP, MTIP and MEIP are read-only: the write is legal and does nothing */
+    case CSR_MSCRATCH: m->mscratch = value; break;
     case CSR_MTVEC: m->mtvec = value & ~3u; break; /* direct mode only (WARL) */
     case CSR_MEPC: m->mepc = value & ~3u; break;   /* IALIGN is 32 */
     case CSR_MCAUSE: m->mcause = value; break;
@@ -574,6 +740,12 @@ static void step(machine *m)
     m->wr_reg = m->wr_freg = -1;
     m->wr_fcsr = false;
     m->mem_read = m->mem_write = false;
+    /* An enabled, pending interrupt is taken before the instruction (O1): MEI, then MSI, then MTI. */
+    uint32_t pending = (m->mstatus & MSTATUS_MIE) && m->mie ? mip_now(m) & m->mie : 0u;
+    if (pending) {
+        take_interrupt(m, (pending >> IRQ_MEI) & 1u ? IRQ_MEI : (pending >> IRQ_MSI) & 1u ? IRQ_MSI : IRQ_MTI);
+        return;
+    }
     if (pc & 3u) { /* unreachable through the checked paths, kept as a guard */
         trap(m, 0, CAUSE_FETCH_MISALIGNED, pc);
         return;
@@ -813,8 +985,12 @@ static void step(machine *m)
                 trap(m, word, CAUSE_BREAKPOINT, pc);
                 return;
             }
-            if (word == 0x30200073u) { /* MRET: machine mode only, so just return */
+            if (word == 0x30200073u) { /* MRET: MIE from MPIE, MPIE set; machine mode only, so just return */
+                m->mstatus = MSTATUS_MPIE | ((m->mstatus & MSTATUS_MPIE) ? MSTATUS_MIE : 0u);
                 next = m->mepc;
+                break;
+            }
+            if (word == 0x10500073u) { /* WFI: retires at once; programs wait in a loop (O1) */
                 break;
             }
             goto illegal;
@@ -883,6 +1059,8 @@ void emu_dump_state(const machine *m, FILE *out)
     }
     for (int i = 0; i < 32; ++i) fprintf(out, "f%d %08" PRIx32 "\n", i, m->f[i]);
     fprintf(out, "fcsr %02x\n", m->fcsr);
+    fprintf(out, "mstatus %08" PRIx32 "\nmie %08" PRIx32 "\nmip %08" PRIx32 "\nmscratch %08" PRIx32 "\n",
+            m->mstatus | MSTATUS_CONSTANT, m->mie, mip_now(m), m->mscratch);
     fprintf(out, "mtvec %08" PRIx32 "\nmepc %08" PRIx32 "\nmcause %08" PRIx32 "\nmtval %08" PRIx32 "\n",
             m->mtvec, m->mepc, m->mcause, m->mtval);
     fprintf(out, "steps %" PRIu64 "\nretired %" PRIu64 "\ntraps %" PRIu64 "\nframes %" PRIu32 "\nevents %u\nhalt %s\n",
@@ -1146,6 +1324,37 @@ void emu_read_input_script(machine *m, const char *path)
     fclose(in);
 }
 
+void emu_read_console_input(machine *m, const char *path)
+{
+    if (strcmp(path, "-") == 0) {
+        m->console_stdin = true;
+        return;
+    }
+    FILE *in = fopen(path, "rb");
+    if (!in) {
+        fprintf(stderr, "%s: cannot open console input %s\n", emu_prog, path);
+        exit(EXIT_EMULATOR_ERROR);
+    }
+    size_t capacity = 0;
+    int c;
+    while ((c = fgetc(in)) != EOF) {
+        if (m->console_in_len == capacity) {
+            capacity = capacity ? 2 * capacity : 256;
+            m->console_in = realloc(m->console_in, capacity);
+            if (!m->console_in) {
+                fprintf(stderr, "%s: cannot allocate console input\n", emu_prog);
+                exit(EXIT_EMULATOR_ERROR);
+            }
+        }
+        m->console_in[m->console_in_len++] = (uint8_t)c;
+    }
+    if (ferror(in)) { /* a directory opens but does not read */
+        fprintf(stderr, "%s: cannot read console input %s: %s\n", emu_prog, path, strerror(errno));
+        exit(EXIT_EMULATOR_ERROR);
+    }
+    fclose(in);
+}
+
 void emu_init(machine *m)
 {
     memset(m, 0, sizeof *m);
@@ -1207,6 +1416,8 @@ void emu_free(machine *m)
     free(m->ram);
     free(m->fb);
     free(m->script);
+    free(m->console_in);
+    m->console_in = NULL;
     m->ram = m->fb = NULL;
     m->script = NULL;
 }
@@ -1266,8 +1477,12 @@ int emu_report_halt(const machine *m, size_t loaded)
                 m->scripted - m->next_scripted, m->script[m->next_scripted].frame);
     }
     int status = EXIT_EMULATOR_ERROR;
-    fprintf(stderr, "%s: halt=%s steps=%" PRIu64 " retired=%" PRIu64 " traps=%" PRIu64 " loaded=%zu", emu_prog,
-            emu_halt_name(m->halt), m->steps, m->retired, m->traps, loaded);
+    fprintf(stderr, "%s: halt=%s steps=%" PRIu64 " retired=%" PRIu64 " traps=%" PRIu64, emu_prog,
+            emu_halt_name(m->halt), m->steps, m->retired, m->traps);
+    if (m->interrupts) {
+        fprintf(stderr, " interrupts=%" PRIu64, m->interrupts);
+    }
+    fprintf(stderr, " loaded=%zu", loaded);
     switch (m->halt) {
     case HALT_DONE:
         fprintf(stderr, " done=%08" PRIx32, m->done_word);

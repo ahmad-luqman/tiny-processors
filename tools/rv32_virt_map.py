@@ -6,8 +6,8 @@ given with --dtb) and our machine's tree from tools/rv32_dtb.py, then checks:
 
 - every device the two machines share sits at the same address: the done
   register inside virt's `sifive,test0`, the console at its `ns16550a`, the
-  CLINT window equal to virt's `riscv,clint0`, and memory at the same base
-  with the same size;
+  CLINT window equal to virt's `riscv,clint0`, the PLIC's (O1) equal to its
+  `riscv,plic0`, and memory at the same base with the same size;
 - every other window of ours is disjoint from every `reg` and `ranges`
   entry virt describes, so an access to one of our devices on QEMU is an
   access fault rather than a read of flash, PCIe or a virtio slot.
@@ -32,7 +32,8 @@ from tools import rv32_dtb  # noqa: E402
 
 # The nodes our tree shares with virt: our node's name, virt's compatible string, and how our
 # window must relate to virt's: "equal" to one of its windows, or "inside" one.
-SHARED = (("test", "sifive,test0", "inside"), ("console", "ns16550a", "inside"), ("clint", "riscv,clint0", "equal"))
+SHARED = (("test", "sifive,test0", "inside"), ("console", "ns16550a", "inside"), ("clint", "riscv,clint0", "equal"),
+          ("plic", "riscv,plic0", "equal"))
 
 
 def dump_virt(qemu: str, memory: int = rv32_dtb.RAM_SIZE) -> bytes:

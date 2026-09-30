@@ -16,6 +16,12 @@ module rv32 #(
     input  wire        reset,
     // The platform's mtime (the CLINT's count), which the `time` CSR shadows.
     input  wire [63:0] time_now,
+    // Interrupt levels (O1): mip.MSIP and mip.MTIP from the CLINT, mip.MEIP from the PLIC.
+    input  wire        irq_software,
+    input  wire        irq_timer,
+    input  wire        irq_external,
+    // Deterministic tick mode (O1): `cycle` counts steps, not clock cycles, and wfi never waits.
+    input  wire        step_ticks,
     // Memory port (docs/rv32.md, "Memory transaction contract").
     output wire        mem_valid,
     output wire [31:0] mem_addr,
@@ -39,6 +45,7 @@ module rv32 #(
     output reg         retire_fcsr_we,
     output reg [7:0]   retire_fcsr,
     output reg         trap,
+    output reg         trap_interrupt, // the trap was an interrupt entry: no instruction, trap_cause is its code
     output reg  [3:0]  trap_cause,
     output reg  [31:0] trap_value,
     output reg         halted,
@@ -51,14 +58,15 @@ module rv32 #(
 );
     localparam [3:0] FETCH = 4'd0, DECODE = 4'd1, EXECUTE = 4'd2,
                      MEM = 4'd3, WRITEBACK = 4'd4, HALT = 4'd5, FP_ISSUE = 4'd6, FP_WAIT = 4'd7,
-                     MD_WAIT = 4'd8;
+                     MD_WAIT = 4'd8, WFI_WAIT = 4'd9;
     localparam [3:0] CAUSE_TARGET_MISALIGNED = 4'd0, CAUSE_FETCH_FAULT = 4'd1,
                      CAUSE_ILLEGAL = 4'd2, CAUSE_BREAKPOINT = 4'd3,
                      CAUSE_LOAD_MISALIGNED = 4'd4, CAUSE_LOAD_FAULT = 4'd5,
                      CAUSE_STORE_MISALIGNED = 4'd6, CAUSE_STORE_FAULT = 4'd7,
                      CAUSE_ECALL = 4'd11;
     localparam [11:0] CSR_MTVEC = 12'h305, CSR_MEPC = 12'h341, CSR_MCAUSE = 12'h342,
-                      CSR_MTVAL = 12'h343, CSR_FFLAGS = 12'h001, CSR_FRM = 12'h002, CSR_FCSR = 12'h003,
+                      CSR_MTVAL = 12'h343, CSR_MSTATUS = 12'h300, CSR_MIE = 12'h304, CSR_MSCRATCH = 12'h340,
+                      CSR_MIP = 12'h344, CSR_FFLAGS = 12'h001, CSR_FRM = 12'h002, CSR_FCSR = 12'h003,
                       CSR_CYCLE = 12'hc00, CSR_TIME = 12'hc01, CSR_INSTRET = 12'hc02,
                       CSR_CYCLEH = 12'hc80, CSR_TIMEH = 12'hc81, CSR_INSTRETH = 12'hc82;
     localparam [2:0] DIRECT_NONE=3'd0, DIRECT_SIGN=3'd1, DIRECT_CLASS=3'd3;
@@ -75,20 +83,33 @@ module rv32 #(
     // `time` reads the CLINT's mtime (time_now), as on QEMU virt, so a write
     // to mtime moves it (docs/rv32.md, "CLINT").
     reg [63:0] cycle_count, instret_count;
+    // Interrupts (O1): mstatus.MIE/MPIE, the three enables of mie (MSIE, MTIE, MEIE), mscratch.
+    reg mstatus_mie, mstatus_mpie;
+    reg [2:0] mie_bits; // {MEIE, MTIE, MSIE}
+    reg [31:0] mscratch;
+    reg fetch_waiting;  // this FETCH has presented its request, so it can no longer be replaced
 
     // Decoded fields, combinational from ir.
     wire [4:0] rd, rs1, rs2;
     wire [2:0] funct3;
     wire [31:0] imm;
     wire is_lui, is_auipc, is_alu_imm, is_alu_reg, is_muldiv, alu_alt, is_load, is_store;
-    wire is_branch, is_jal, is_jalr, is_csr, is_mret, is_ecall, is_ebreak, writes_rd, illegal;
+    wire is_branch, is_jal, is_jalr, is_csr, is_mret, is_ecall, is_ebreak, is_wfi, writes_rd, illegal;
 
     rv32_decode decode (
         .insn(ir), .rd(rd), .rs1(rs1), .rs2(rs2), .funct3(funct3), .imm(imm),
         .is_lui(is_lui), .is_auipc(is_auipc), .is_alu_imm(is_alu_imm), .is_alu_reg(is_alu_reg), .is_muldiv(is_muldiv),
         .alu_alt(alu_alt), .is_load(is_load), .is_store(is_store), .is_branch(is_branch),
         .is_jal(is_jal), .is_jalr(is_jalr), .is_csr(is_csr), .is_mret(is_mret),
-        .is_ecall(is_ecall), .is_ebreak(is_ebreak), .writes_rd(writes_rd), .illegal(illegal));
+        .is_ecall(is_ecall), .is_ebreak(is_ebreak), .is_wfi(is_wfi), .writes_rd(writes_rd), .illegal(illegal));
+
+    // mip is the live levels; an interrupt is enabled when mie has it and mstatus.MIE is set.
+    // It is taken in place of a fetch that has not been presented yet, so a request on the bus
+    // is never withdrawn: MEI first, then MSI, then MTI.
+    wire [31:0] mip = {20'd0, irq_external, 3'd0, irq_timer, 3'd0, irq_software, 3'd0};
+    wire [2:0] irq_ready = {irq_external, irq_timer, irq_software} & mie_bits;
+    wire irq_take = (state == FETCH) && !fetch_waiting && mstatus_mie && (irq_ready != 3'd0);
+    wire [3:0] irq_code = irq_ready[2] ? 4'd11 : irq_ready[0] ? 4'd3 : 4'd7;
 
     wire fp_valid, fp_to_integer, fp_from_integer;
     wire [4:0] fp_op;
@@ -172,6 +193,10 @@ module rv32 #(
         (csr_addr == CSR_MTVEC) ? mtvec :
         (csr_addr == CSR_MEPC) ? mepc :
         (csr_addr == CSR_MCAUSE) ? mcause :
+        (csr_addr == CSR_MSTATUS) ? {24'h80_0078, mstatus_mpie, 3'd0, mstatus_mie, 3'd0} :
+        (csr_addr == CSR_MIE) ? {20'd0, mie_bits[2], 3'd0, mie_bits[1], 3'd0, mie_bits[0], 3'd0} :
+        (csr_addr == CSR_MIP) ? mip :
+        (csr_addr == CSR_MSCRATCH) ? mscratch :
         (csr_addr == CSR_CYCLE) ? cycle_count[31:0] :
         (csr_addr == CSR_CYCLEH) ? cycle_count[63:32] :
         (csr_addr == CSR_TIME) ? time_now[31:0] :
@@ -233,7 +258,7 @@ module rv32 #(
     // Memory port: a fetch in FETCH, a data access in MEM, nothing otherwise
     // and nothing while reset is asserted (the state register already says
     // FETCH then, so the gate is explicit).
-    assign mem_valid = !reset && ((state == FETCH) || (state == MEM));
+    assign mem_valid = !reset && ((state == FETCH && !irq_take) || (state == MEM));
     assign mem_fetch = mem_valid && (state == FETCH);
     assign mem_addr = mem_fetch ? pc : alu_out;
     assign mem_we = mem_valid && (state == MEM) && is_store;
@@ -245,11 +270,13 @@ module rv32 #(
     // unless the previous trap's handler has not retired yet, which halts
     // the core with the CSRs of the first trap intact.
     task take_trap;
+        input interrupt;
         input [3:0] cause;
         input [31:0] value;
         input [31:0] epc;
         begin
             trap <= 1'b1;
+            trap_interrupt <= interrupt;
             trap_cause <= cause;
             trap_value <= value;
             if (in_trap) begin
@@ -258,7 +285,9 @@ module rv32 #(
             end else begin
                 in_trap <= 1'b1;
                 mepc <= epc;
-                mcause <= {28'd0, cause};
+                mcause <= {interrupt, 27'd0, cause};
+                mstatus_mpie <= mstatus_mie;
+                mstatus_mie <= 1'b0;
                 mtval <= value;
                 pc <= mtvec;
                 state <= FETCH;
@@ -281,6 +310,12 @@ module rv32 #(
             retire_fd_we <= 1'b0; retire_fd <= 5'd0; retire_fd_value <= 32'd0;
             retire_fcsr_we <= 1'b0; retire_fcsr <= 8'd0;
             in_trap <= 1'b0;
+            mstatus_mie <= 1'b0;
+            mstatus_mpie <= 1'b0;
+            mie_bits <= 3'd0;
+            mscratch <= 32'd0;
+            fetch_waiting <= 1'b0;
+            trap_interrupt <= 1'b0;
             cycle_count <= 64'd0;
             instret_count <= 64'd0;
             mtvec <= 32'd0;
@@ -300,15 +335,21 @@ module rv32 #(
         end else begin
             retire <= 1'b0;
             trap <= 1'b0;
-            cycle_count <= cycle_count + 64'd1;
+            // In step-tick mode a tick is the pulse of the step completed in the previous cycle.
+            cycle_count <= cycle_count + (step_ticks ? {63'd0, retire || trap} : 64'd1);
+            fetch_waiting <= (state == FETCH) && mem_valid && !mem_ready;
             case (state)
-                FETCH: if (mem_ready) begin
+                FETCH: if (irq_take) begin
+                    retire_pc <= pc;
+                    retire_insn <= 32'd0;
+                    take_trap(1'b1, irq_code, 32'd0, pc);
+                end else if (mem_ready) begin
                     ir <= mem_rdata;
                     ir_pc <= pc;
                     retire_pc <= pc;
                     retire_insn <= mem_error ? 32'd0 : mem_rdata;
                     if (mem_error)
-                        take_trap(CAUSE_FETCH_FAULT, pc, pc);
+                        take_trap(1'b0, CAUSE_FETCH_FAULT, pc, pc);
                     else
                         state <= DECODE;
                 end
@@ -318,11 +359,11 @@ module rv32 #(
                     fa <= fp_from_integer ? rs1_value : f1;
                     fb <= f2; fc <= f3; fp_flags <= 5'd0;
                     if (illegal && !fp_valid)
-                        take_trap(CAUSE_ILLEGAL, ir, ir_pc);
+                        take_trap(1'b0, CAUSE_ILLEGAL, ir, ir_pc);
                     else if (is_ecall)
-                        take_trap(CAUSE_ECALL, 32'd0, ir_pc);
+                        take_trap(1'b0, CAUSE_ECALL, 32'd0, ir_pc);
                     else if (is_ebreak)
-                        take_trap(CAUSE_BREAKPOINT, ir_pc, ir_pc);
+                        take_trap(1'b0, CAUSE_BREAKPOINT, ir_pc, ir_pc);
                     else
                         state <= EXECUTE;
                 end
@@ -330,9 +371,9 @@ module rv32 #(
                     alu_out <= execute_out;
                     taken <= branch_taken;
                     if (access_misaligned)
-                        take_trap(is_load ? CAUSE_LOAD_MISALIGNED : CAUSE_STORE_MISALIGNED, alu_result, ir_pc);
+                        take_trap(1'b0, is_load ? CAUSE_LOAD_MISALIGNED : CAUSE_STORE_MISALIGNED, alu_result, ir_pc);
                     else if (target_misaligned)
-                        take_trap(CAUSE_TARGET_MISALIGNED, execute_out, ir_pc);
+                        take_trap(1'b0, CAUSE_TARGET_MISALIGNED, execute_out, ir_pc);
                     else if (fp_valid) begin
                         if (fp_direct != DIRECT_NONE) begin
                             alu_out <= direct_result;
@@ -341,6 +382,8 @@ module rv32 #(
                     end
                     else if (md_start)
                         state <= MD_WAIT;
+                    else if (is_wfi && !step_ticks && (irq_ready == 3'd0))
+                        state <= WFI_WAIT;
                     else if (is_load || is_store)
                         state <= MEM;
                     else
@@ -349,13 +392,15 @@ module rv32 #(
                 FP_ISSUE: if (fp_ready) state <= FP_WAIT;
                 FP_WAIT: if (fp_done) begin
                     // Defensive guard: legal decode never issues an invalid op/rm.
-                    if (fp_error) take_trap(CAUSE_ILLEGAL, ir, ir_pc);
+                    if (fp_error) take_trap(1'b0, CAUSE_ILLEGAL, ir, ir_pc);
                     else begin
                         alu_out <= fp_result;
                         fp_flags <= fp_result_flags;
                         state <= WRITEBACK;
                     end
                 end
+                // wfi waits for any enabled interrupt level, whatever mstatus.MIE says.
+                WFI_WAIT: if (irq_ready != 3'd0) state <= WRITEBACK;
                 MD_WAIT: if (md_valid) begin
                     alu_out <= md_result;
                     state <= WRITEBACK;
@@ -363,7 +408,7 @@ module rv32 #(
                 MEM: if (mem_ready) begin
                     mdr <= mem_rdata;
                     if (mem_error)
-                        take_trap(is_load ? CAUSE_LOAD_FAULT : CAUSE_STORE_FAULT, alu_out, ir_pc);
+                        take_trap(1'b0, is_load ? CAUSE_LOAD_FAULT : CAUSE_STORE_FAULT, alu_out, ir_pc);
                     else
                         state <= WRITEBACK;
                 end
@@ -383,8 +428,16 @@ module rv32 #(
                             CSR_MEPC: mepc <= {csr_new[31:2], 2'b00};   // IALIGN is 32
                             CSR_MCAUSE: mcause <= csr_new;
                             CSR_MTVAL: mtval <= csr_new;
+                            CSR_MSTATUS: begin mstatus_mie <= csr_new[3]; mstatus_mpie <= csr_new[7]; end
+                            CSR_MIE: mie_bits <= {csr_new[11], csr_new[7], csr_new[3]};
+                            CSR_MSCRATCH: mscratch <= csr_new;
+                            // mip's bits are read-only: the write is legal and does nothing.
                             default: begin end // Floating CSRs were handled above.
                         endcase
+                    end
+                    if (is_mret) begin
+                        mstatus_mie <= mstatus_mpie;
+                        mstatus_mpie <= 1'b1;
                     end
                     in_trap <= 1'b0;
                     instret_count <= instret_count + 64'd1;
@@ -395,7 +448,7 @@ module rv32 #(
                     state <= FETCH;
                 end
                 HALT: begin end // hold until reset
-                // Encodings 9-15 are never entered; should the state register
+                // Encodings 10-15 are never entered; should the state register
                 // ever hold one, stop the way a double fault does rather than
                 // hang with `halted` low.
                 default: begin
