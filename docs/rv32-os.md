@@ -647,32 +647,34 @@ into the caller's memory.
 
 ### Evidence (O5)
 
-- **Directed tests:** `make test-rv32-pmp` runs seven programs (user-mode
-  entry and `ecall`, the instructions and CSRs user mode may not use and the
-  `mcounteren` gate, every PMP address mode with the permission bits and entry
-  priority, locked entries holding machine mode, MPP's WARL values, a timer
-  interrupt taken in user mode with MIE clear, and seeded memory stalls) on
-  the emulator and the RTL in step-tick mode: identical traces on Verilator
-  and on Icarus, and every cause, `mtval`, `mepc` and `mstatus` equal to the
-  values written into the test by hand. `test-rv32-irq` now expects MPP to
-  read user after `mret`.
-- **Console session with the new faults:** `PASS 91219bd0` on QEMU `virt`
-  (the same three fault lines, pinned in
-  [session.qemu.expected](../programs/rv32/os/session.qemu.expected)), the
-  emulator (1,168,545 steps) and Verilator with a stall per request
-  (7,011,061 cycles), results-identical over 78 console lines and 552
-  exception records, with identical disks; Icarus agrees too (5,276,984
-  cycles).
+Measured after the track's review, from a clean `build/rv32/os`:
+
+- **Directed tests:** `test-rv32-pmp` (nine programs: user-mode entry and
+  `ecall`, the instructions and CSRs user mode may not use, each `mcounteren`
+  setting, every PMP address mode with the permission bits and entry
+  priority, misalignment before PMP, locked entries holding machine mode,
+  MPP's WARL values, a timer interrupt in user mode with MIE clear, refused
+  accesses to the console, CLINT, done register and PLIC with the devices
+  found untouched, and seeded memory stalls) and `test-rv32-irq` (fourteen,
+  the PLIC gateway's latch among them) give identical emulator and RTL traces
+  in step-tick mode on Verilator and on Icarus, with every cause, `mtval`,
+  `mepc` and `mstatus` equal to the values written into the tests by hand.
+- **Console session** (the O2 steps, five `fault`s since O5, the file steps
+  and `fill`): `PASS dc3c1f20` on QEMU `virt` (transcript pinned; its disk
+  byte for byte the emulator's, and a reboot finds the files), the emulator
+  (1,633,862 steps), Verilator with a stall per request (9,872,399 cycles) and
+  Icarus (7,431,551 cycles), results-identical over 110 console lines and
+  833 exception records, with identical disks; trace-identical in step-tick
+  mode (`test-rv32-os`).
 - **Earlier sessions in user mode:** Pong keeps its 200 checkpoints and
-  `PASS 814f72be` on the emulator and is trace-identical to Verilator in
-  step-tick mode (1,165,956 lines); the second boot (`PASS 455b9c97`) is
-  results-identical between the emulator and Verilator; the jobs session
-  gives `PASS 408a6738` on QEMU, the emulator and Verilator (41,568,246
-  cycles, 40 presents, identical disks) and is trace-identical between the
-  emulator and Verilator in step-tick mode (6,675,686 lines); the S1 menu
-  session, which drives G1, G2 and SIMD4 from user mode through entries 4 and
-  5, keeps its 185 checkpoints on the emulator and on Verilator with seeded
-  waits (135,312,338 cycles). `test-rv32-os` passes.
+  `PASS 814f72be` and is trace-identical to Verilator in step-tick mode
+  (1,183,387 lines); the second boot (`PASS 455b9c97`) is results-identical;
+  the jobs session gives `PASS 408a6738` on QEMU, the emulator and Verilator
+  (43,699,500 cycles, 40 presents, identical disks) and is trace-identical in
+  step-tick mode (6,734,204 lines), with each job running 40 to 60 % of the
+  instructions while both run; the S1 menu session, which drives G1, G2 and
+  SIMD4 from user mode through entries 4 and 5, keeps its 185 checkpoints on
+  the emulator and on Verilator with seeded waits (138,934,924 cycles).
 - **Cost:** the core grows from 51,542 to 56,096 generic cells (Yosys 0.33,
   `synth -top rv32`), 4,554 cells for the eight entries' 320 flip-flops, the
   checker's comparators and the mode logic; still latch-free.
