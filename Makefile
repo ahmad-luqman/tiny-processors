@@ -24,6 +24,12 @@ RV32_OBJCOPY ?= $(RV32_LLVM)/llvm-objcopy
 RV32_READELF ?= $(RV32_LLVM)/llvm-readelf
 RV32_NM ?= $(RV32_LLVM)/llvm-nm
 QEMU_RV32 ?= qemu-system-riscv32
+# Icarus interprets the RTL, so its runs take minutes (the capstone about 510 s, the OS console
+# session about 305 s and gfxcheck about 670 s on an Apple Silicon Mac, and about twice that in a
+# Linux container). Each run is already bounded by --max-cycles or the testbench's 10M default, so
+# the Icarus recipes give the simulator alone (--rtl-timeout) this wall-clock limit to catch a hang;
+# the emulator reference keeps the target's --timeout. Override it for a slow host.
+RV32_ICARUS_TIMEOUT ?= 3600
 HOST_CC ?= cc
 RV32_ARCH := --target=riscv32-unknown-elf -march=rv32i -mabi=ilp32 -mcmodel=medlow -mno-relax
 RV32_CFLAGS := $(RV32_ARCH) -std=c11 -ffreestanding -fno-builtin -nostdlib -O2 -g -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Wextra -Werror -Iprograms/rv32
@@ -369,20 +375,20 @@ synth-rv32-soc: | build
 	yosys -Q -T -l build/rv32-soc-synth.log -p 'read_verilog -Irtl/fp32 $(RV32_SOC_RTL); chparam -set RAM_WORDS 64 -set FB_WORDS 64 -set DISK_WORDS 64 rv32_soc; synth -top rv32_soc; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32-soc.json'
 
 waves-rv32: $(RV32_TB_VVP) $(RV32EMU)
-	$(PYTHON) -m tools.rv32_rtl --mode waves --program loop --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
-	$(PYTHON) -m tools.rv32_rtl --mode waves --program full --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
-	$(PYTHON) -m tools.rv32_rtl --mode waves --program devices --stall 0 --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
+	$(PYTHON) -m tools.rv32_rtl --mode waves --program loop --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/rv32/rtl
+	$(PYTHON) -m tools.rv32_rtl --mode waves --program full --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/rv32/rtl
+	$(PYTHON) -m tools.rv32_rtl --mode waves --program devices --stall 0 --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/rv32/rtl
 	@echo "Open build/rv32/rtl/loop.vcd, full.vcd, or devices.vcd in Surfer: https://app.surfer-project.org/"
 
 run-rv32-rtl: check-rv32-image $(RV32_TB_VVP) $(RV32EMU)
-	$(PYTHON) -m tools.rv32_rtl --image build/rv32/selfcheck.bin --expect-console "PASS $(RV32_SELFCHECK_HEX)" --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
+	$(PYTHON) -m tools.rv32_rtl --image build/rv32/selfcheck.bin --expect-console "PASS $(RV32_SELFCHECK_HEX)" --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/rv32/rtl
 
 # Each runner target has its own output directory, so `make -j` cannot interleave two runs' traces.
 run-rv32-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl --image build/rv32/selfcheck.bin --expect-console "PASS $(RV32_SELFCHECK_HEX)" --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --out build/rv32/rtl-verilator --stall 1
 
 bench-rv32-rtl: $(RV32_TB_VVP) $(RV32EMU)
-	$(PYTHON) -m tools.rv32_rtl --mode bench --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
+	$(PYTHON) -m tools.rv32_rtl --mode bench --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/rv32/rtl
 
 # The device diagnostic reads the timer, so the two backends are compared at the results level
 # (console, outcome, checkpoints, and the trap records in order), not trace for trace
@@ -390,11 +396,13 @@ bench-rv32-rtl: $(RV32_TB_VVP) $(RV32EMU)
 run-rv32-diag-emu: check-rv32-image $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_DIAG_ARGS) --backend emulator --frames build/rv32/frames --emulator $(RV32EMU) --out build/rv32/emu
 
+# llvm@22's diag runs 406k steps (2.1M cycles at stall 1); clang 18's runs 3.8M (about 19M cycles),
+# past the testbench's 10M default, so the budget is explicit and leaves room for either.
 run-rv32-diag-rtl: check-rv32-image $(RV32_TB_VVP) $(RV32EMU)
-	$(PYTHON) -m tools.rv32_rtl $(RV32_DIAG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
+	$(PYTHON) -m tools.rv32_rtl $(RV32_DIAG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --max-cycles 40000000 --out build/rv32/rtl
 
 run-rv32-diag-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR) $(RV32EMU)
-	$(PYTHON) -m tools.rv32_rtl $(RV32_DIAG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/rtl-verilator
+	$(PYTHON) -m tools.rv32_rtl $(RV32_DIAG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --max-cycles 40000000 --out build/rv32/rtl-verilator
 
 # Pong never reads the timer, so its scripted session is compared trace for trace on the RTL, and
 # the 200 checkpoints of programs/rv32/pong.expected come from the same C run natively
@@ -415,7 +423,7 @@ frames-rv32-pong: check-rv32-image $(RV32EMU)
 	@echo "frames: build/rv32/pong-frames/frame-NNNN.ppm"
 
 run-rv32-pong-rtl: check-rv32-image $(RV32_TB_VVP) $(RV32EMU)
-	$(PYTHON) -m tools.rv32_rtl $(RV32_PONG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
+	$(PYTHON) -m tools.rv32_rtl $(RV32_PONG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/rv32/rtl
 
 run-rv32-pong-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_PONG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/rtl-verilator
@@ -452,7 +460,7 @@ run-rv32-capstone-emu: check-rv32-image $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_CAPSTONE_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32/emu
 
 run-rv32-capstone-rtl: check-rv32-image $(RV32_TB_VVP) $(RV32EMU)
-	$(PYTHON) -m tools.rv32_rtl $(RV32_CAPSTONE_ARGS) --max-cycles 20000000 --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
+	$(PYTHON) -m tools.rv32_rtl $(RV32_CAPSTONE_ARGS) --max-cycles 20000000 --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/rv32/rtl
 
 run-rv32-capstone-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_CAPSTONE_ARGS) --max-cycles 20000000 --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/rtl-verilator
@@ -632,13 +640,13 @@ run-rv32-simd4-emu: check-rv32-simd4-image $(RV32EMU)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_SIMD4_ARGS) --backend emulator --out build/rv32/simd4-emu
 
 run-rv32-simd4-rtl: check-rv32-simd4-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_SIMD4_ARGS) --simulator $(RV32_TB_VVP) --out build/rv32/simd4-icarus
+	$(PYTHON) tools/rv32_rtl.py $(RV32_SIMD4_ARGS) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/rv32/simd4-icarus
 
 run-rv32-simd4-rtl-verilator: check-rv32-simd4-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_SIMD4_ARGS) --simulator $(RV32_TB_VERILATOR) --out build/rv32/simd4-verilator
 
 waves-rv32-simd4: check-rv32-simd4-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_SIMD4_ARGS) --simulator $(RV32_TB_VVP) --mode waves --out build/rv32/simd4-waves
+	$(PYTHON) tools/rv32_rtl.py $(RV32_SIMD4_ARGS) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --mode waves --out build/rv32/simd4-waves
 
 build/rv32/simd4-protocol.vvp: rtl/rv32/rv32_simd4.v $(SIMD4_RTL) tests/rv32_simd4_tb.sv | build/rv32
 	iverilog -g2012 -Wall -s rv32_simd4_tb -o $@ tests/rv32_simd4_tb.sv rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
@@ -672,13 +680,13 @@ test-rv32-gfx-verilator: $(RV32EMU) $(RV32_TB_VERILATOR)
 run-rv32-gfx-emu: check-rv32-gfx-image $(RV32EMU)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_ARGS) --backend emulator --out build/gfx/emu
 run-rv32-gfx-rtl: check-rv32-gfx-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_ARGS) --max-cycles $(RV32_GFX_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/gfx/icarus
+	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_ARGS) --max-cycles $(RV32_GFX_MAX_CYCLES) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/gfx/icarus
 run-rv32-gfx-rtl-verilator: check-rv32-gfx-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_ARGS) --max-cycles $(RV32_GFX_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --stall 1 --gpu-stall 2 --out build/gfx/verilator
 run-rv32-gfx-menu-emu: check-rv32-image $(RV32EMU)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_MENU_ARGS) --backend emulator --out build/gfx/menu-emu
 run-rv32-gfx-menu-rtl: check-rv32-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_MENU_ARGS) --max-cycles $(RV32_GFX_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/gfx/menu-icarus
+	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_MENU_ARGS) --max-cycles $(RV32_GFX_MAX_CYCLES) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/gfx/menu-icarus
 run-rv32-gfx-menu-rtl-verilator: check-rv32-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_MENU_ARGS) --max-cycles $(RV32_GFX_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --seed 17 --gpu-seed 31 --out build/gfx/menu-verilator
 lint-rv32-gfx:
@@ -777,7 +785,7 @@ accuracy-rv32-digit:
 run-rv32-digit-emu: check-rv32-digit-image $(RV32EMU)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_ARGS) --backend emulator --out build/digit/emu
 run-rv32-digit-rtl: check-rv32-digit-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_ARGS) --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/digit/icarus
+	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_ARGS) --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/digit/icarus
 run-rv32-digit-rtl-verilator: check-rv32-digit-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_ARGS) --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --stall 1 --simd-stall 2 --out build/digit/verilator
 
@@ -793,7 +801,7 @@ RV32_DIGIT_MENU_ARGS = --image build/rv32/capstone.bin --input programs/rv32/dig
 run-rv32-digit-menu-emu: check-rv32-image $(RV32EMU)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_MENU_ARGS) --backend emulator --out build/digit/menu-emu
 run-rv32-digit-menu-rtl: check-rv32-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_MENU_ARGS) --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/digit/menu-icarus
+	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_MENU_ARGS) --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/digit/menu-icarus
 run-rv32-digit-menu-rtl-verilator: check-rv32-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_DIGIT_MENU_ARGS) --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --stall 1 --simd-stall 2 --out build/digit/menu-verilator
 test-rv32: test-rv32-digit accuracy-rv32-digit run-rv32-digit-emu run-rv32-digit-rtl-verilator
@@ -818,7 +826,7 @@ bench-rv32-digit: $(RV32_DIGIT_BENCH_BINS) $(RV32EMU) $(RV32_TB_VERILATOR)
 waves-rv32-digit: build/rv32/digitbench_hw_1.bin $(RV32EMU) $(RV32_TB_VVP)
 	$(PYTHON) tools/rv32_rtl.py --image build/rv32/digitbench_hw_1.bin --compare results \
 	  --expect-last-line "bench 00001b54" --emulator $(RV32EMU) --timeout 900 \
-	  --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VVP) --mode waves --out build/digit/waves
+	  --max-cycles $(RV32_DIGIT_MAX_CYCLES) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --mode waves --out build/digit/waves
 
 # G2: programmable 3D. The Python oracle, the guest C reference, the emulator
 # device and the RTL are compared bit for bit; g3dcheck checks the device from
@@ -848,7 +856,7 @@ test-rv32-3d-verilator: $(RV32EMU) $(RV32_TB_VERILATOR) | build
 run-rv32-3d-emu: check-rv32-3d-image $(RV32EMU)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_G3D_ARGS) --backend emulator --out build/g3d/emu
 run-rv32-3d-rtl: check-rv32-3d-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_G3D_ARGS) --max-cycles $(RV32_G3D_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/g3d/icarus
+	$(PYTHON) tools/rv32_rtl.py $(RV32_G3D_ARGS) --max-cycles $(RV32_G3D_MAX_CYCLES) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/g3d/icarus
 run-rv32-3d-rtl-verilator: check-rv32-3d-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_G3D_ARGS) --max-cycles $(RV32_G3D_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --stall 1 --gpu-stall 2 --out build/g3d/verilator
 .PHONY: test-rv32-3d-verilator run-rv32-3d-rtl run-rv32-3d-rtl-verilator lint-rv32-3d synth-rv32-3d
@@ -866,7 +874,7 @@ RV32_3D_MENU_ARGS = --image build/rv32/capstone.bin --input programs/rv32/g3d.in
 run-rv32-3d-menu-emu: check-rv32-image $(RV32EMU)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_3D_MENU_ARGS) --backend emulator --out build/g3d/menu-emu
 run-rv32-3d-menu-rtl: check-rv32-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_3D_MENU_ARGS) --max-cycles $(RV32_G3D_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/g3d/menu-icarus
+	$(PYTHON) tools/rv32_rtl.py $(RV32_3D_MENU_ARGS) --max-cycles $(RV32_G3D_MAX_CYCLES) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/g3d/menu-icarus
 run-rv32-3d-menu-rtl-verilator: check-rv32-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_3D_MENU_ARGS) --max-cycles $(RV32_G3D_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --seed 17 --gpu-seed 31 --out build/g3d/menu-verilator
 test-rv32: run-rv32-3d-menu-emu run-rv32-3d-menu-rtl-verilator
@@ -913,7 +921,7 @@ check-rv32-soc-image: build/rv32/soccheck.bin build/rv32/soccheck.lst
 run-rv32-soc-emu: check-rv32-soc-image $(RV32EMU)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_SOC_ARGS) --backend emulator --out build/soc/emu
 run-rv32-soc-rtl: check-rv32-soc-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_SOC_ARGS) --max-cycles $(RV32_SOC_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/soc/icarus
+	$(PYTHON) tools/rv32_rtl.py $(RV32_SOC_ARGS) --max-cycles $(RV32_SOC_MAX_CYCLES) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/soc/icarus
 # Both stall groups at once: CPU memory, the shared engine port and the SIMD4 buffers.
 run-rv32-soc-rtl-verilator: check-rv32-soc-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_SOC_ARGS) --max-cycles $(RV32_SOC_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --stall 1 --gpu-stall 2 --simd-stall 2 --out build/soc/verilator
@@ -927,7 +935,7 @@ RV32_SOC_MENU_ARGS = --image build/rv32/capstone.bin --input programs/rv32/soc.i
 run-rv32-soc-menu-emu: check-rv32-image $(RV32EMU)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_SOC_MENU_ARGS) --backend emulator --out build/soc/menu-emu
 run-rv32-soc-menu-rtl: check-rv32-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_rtl.py $(RV32_SOC_MENU_ARGS) --max-cycles $(RV32_SOC_MAX_CYCLES) --simulator $(RV32_TB_VVP) --out build/soc/menu-icarus
+	$(PYTHON) tools/rv32_rtl.py $(RV32_SOC_MENU_ARGS) --max-cycles $(RV32_SOC_MAX_CYCLES) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/soc/menu-icarus
 run-rv32-soc-menu-rtl-verilator: check-rv32-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_SOC_MENU_ARGS) --max-cycles $(RV32_SOC_MAX_CYCLES) --simulator $(RV32_TB_VERILATOR) --seed 17 --gpu-seed 31 --simd-seed 43 --out build/soc/menu-verilator
 test-rv32: run-rv32-soc-menu-emu run-rv32-soc-menu-rtl-verilator
@@ -992,8 +1000,8 @@ run-rv32m-emu: check-rv32m-image $(RV32EMU)
 # Icarus runs the self-check and the diagnostic, Verilator all four (Pong and the capstone
 # with a stalled bus), as the RV32I targets split them.
 run-rv32m-rtl: check-rv32m-image $(RV32_TB_VVP) $(RV32EMU)
-	$(PYTHON) -m tools.rv32_rtl $(RV32M_SELFCHECK_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32m/rtl
-	$(PYTHON) -m tools.rv32_rtl $(RV32M_DIAG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32m/rtl
+	$(PYTHON) -m tools.rv32_rtl $(RV32M_SELFCHECK_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/rv32m/rtl
+	$(PYTHON) -m tools.rv32_rtl $(RV32M_DIAG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/rv32m/rtl
 run-rv32m-rtl-verilator: check-rv32m-image $(RV32_TB_VERILATOR) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32M_SELFCHECK_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32m/rtl-verilator
 	$(PYTHON) -m tools.rv32_rtl $(RV32M_DIAG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --out build/rv32m/rtl-verilator
@@ -1143,7 +1151,7 @@ run-rv32-platform-emu: check-rv32-platcheck-image $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_PLATFORM_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32/platform-emu
 
 run-rv32-platform-rtl: check-rv32-platcheck-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) -m tools.rv32_rtl $(RV32_PLATFORM_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/platform-icarus
+	$(PYTHON) -m tools.rv32_rtl $(RV32_PLATFORM_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/rv32/platform-icarus
 
 run-rv32-platform-rtl-verilator: check-rv32-platcheck-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_PLATFORM_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/platform-verilator
@@ -1177,7 +1185,7 @@ run-rv32-irq-emu: check-rv32-irqcheck-image $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_IRQ_ARGS) --compare results --backend emulator --emulator $(RV32EMU) --out build/rv32/irq-emu
 
 run-rv32-irq-rtl: check-rv32-irqcheck-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) -m tools.rv32_rtl $(RV32_IRQ_ARGS) --compare results --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/irq-icarus
+	$(PYTHON) -m tools.rv32_rtl $(RV32_IRQ_ARGS) --compare results --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/rv32/irq-icarus
 
 run-rv32-irq-rtl-verilator: check-rv32-irqcheck-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_IRQ_ARGS) --compare results --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/irq-verilator
@@ -1209,7 +1217,7 @@ test-rv32: run-rv32-irq-qemu run-rv32-irq-emu run-rv32-irq-rtl run-rv32-irq-rtl-
 .PHONY: run-rv32-os-qemu-reboot print-rv32-os-layout
 RV32_OS := programs/rv32/os
 RV32_OS_CFLAGS := $(RV32_CFLAGS) -I$(RV32_OS) -Ibuild/rv32
-RV32_OS_HEADERS := $(RV32_OS)/sys.h $(RV32_OS)/ulib.h $(RV32_OS)/fs.h $(RV32_OS)/virtio.h $(RV32_OS)/score.h $(RV32_OS)/report.h programs/rv32/csr.h programs/rv32/fdt.h programs/rv32/clint.h programs/rv32/virtio_mmio.h $(RV32_HEADERS)
+RV32_OS_HEADERS := $(RV32_OS)/sys.h $(RV32_OS)/ulib.h $(RV32_OS)/udecimal.h $(RV32_OS)/fs.h $(RV32_OS)/virtio.h $(RV32_OS)/score.h $(RV32_OS)/report.h programs/rv32/csr.h programs/rv32/fdt.h programs/rv32/clint.h programs/rv32/virtio_mmio.h $(RV32_HEADERS)
 RV32_OS_PROGRAMS := sh hello primes pong tetris menu syscheck fault cat write files bars life fill
 # Slots of 128 KiB from 0x8010_0000 (programs/rv32/os/sys.h and tools/rv32_ramdisk.py, which
 # test-rv32-os holds to these values); a program's span is 1 slot unless given.
@@ -1238,7 +1246,7 @@ rv32_os_size = $$(printf '0x%x' $$(($(call rv32_os_span,$(1)) * $(RV32_OS_SLOT_S
 # reads mstatus on purpose, to be killed for it.
 rv32_os_gate = $(or $(RV32_OS_GATE_$(1)),--allow-user)
 RV32_OS_GATE_fault := --allow-system
-RV32_OS_USER := build/rv32/os/ustart.o build/rv32/os/ulib.o build/rv32/os/mem.o build/rv32/muldiv.o
+RV32_OS_USER := build/rv32/os/ustart.o build/rv32/os/ulib.o build/rv32/os/udecimal.o build/rv32/os/mem.o build/rv32/muldiv.o
 RV32_OS_OBJS_sh := build/rv32/os/sh.o
 RV32_OS_OBJS_hello := build/rv32/os/hello.o
 RV32_OS_OBJS_primes := build/rv32/os/primes.o
@@ -1307,21 +1315,25 @@ print-rv32-os-slot-%:
 print-rv32-os-layout:
 	@echo $(RV32_OS_SLOT_BASE) $(RV32_OS_SLOT_SIZE)
 
+# QEMU's mtime follows host time unless told otherwise, and a fast host then finishes a job inside
+# the kernel's 100 us quantum ("preempted no"). The OS sessions count instructions instead: 2^3 ns
+# of virtual time each makes the quantum 12,500 instructions, near the emulator's 10,000 (issue #20).
+RV32_OS_QEMU_ICOUNT ?= 3
 run-rv32-os-qemu: check-rv32-os-image
 	cp $(RV32_OS_DISK) build/rv32/os/session.qemu.disk
-	$(PYTHON) tools/rv32_run_qemu.py build/rv32/os/kernel.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --stdin $(RV32_OS)/session.txt --drive build/rv32/os/session.qemu.disk --last-line --timeout 30 --transcript build/rv32/os/session.qemu.transcript
+	$(PYTHON) tools/rv32_run_qemu.py build/rv32/os/kernel.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --icount $(RV32_OS_QEMU_ICOUNT) --stdin $(RV32_OS)/session.txt --drive build/rv32/os/session.qemu.disk --last-line --timeout 30 --transcript build/rv32/os/session.qemu.transcript
 	diff -u $(RV32_OS)/session.qemu.expected build/rv32/os/session.qemu.transcript
 # O3 on QEMU as well: the disk QEMU's session left is byte for byte the emulator's, and QEMU boots
 # from it again and finds what the session wrote.
 run-rv32-os-qemu-reboot: run-rv32-os-qemu run-rv32-os-emu
 	cmp build/rv32/os/session.qemu.disk build/rv32/os/emu/kernel.emu.disk
-	$(PYTHON) tools/rv32_run_qemu.py build/rv32/os/kernel.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --stdin $(RV32_OS)/reboot.session --drive build/rv32/os/session.qemu.disk --last-line --timeout 30 --transcript build/rv32/os/reboot.qemu.transcript
+	$(PYTHON) tools/rv32_run_qemu.py build/rv32/os/kernel.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --icount $(RV32_OS_QEMU_ICOUNT) --stdin $(RV32_OS)/reboot.session --drive build/rv32/os/session.qemu.disk --last-line --timeout 30 --transcript build/rv32/os/reboot.qemu.transcript
 	diff -u $(RV32_OS)/reboot.session.qemu.expected build/rv32/os/reboot.qemu.transcript
 	test "$$($(PYTHON) tools/rv32_mkfs.py build/rv32/os/session.qemu.disk --cat note)" = hi
 run-rv32-os-emu: check-rv32-os-image $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32/os/emu
 run-rv32-os-rtl: check-rv32-os-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --timeout 1800 --max-cycles 50000000 --out build/rv32/os/icarus
+	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --max-cycles 50000000 --out build/rv32/os/icarus
 run-rv32-os-rtl-verilator: check-rv32-os-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --max-cycles 50000000 --out build/rv32/os/verilator
 # Pong under the kernel gives the standalone image's 200 checkpoints and PASS word, trace for trace
@@ -1352,7 +1364,7 @@ RV32_OS_JOBS_ARGS := --image build/rv32/os/kernel.bin --console-input $(RV32_OS)
 .PHONY: run-rv32-os-jobs-qemu run-rv32-os-jobs-emu run-rv32-os-jobs-rtl-verilator run-rv32-os-jobs-rtl-steps
 run-rv32-os-jobs-qemu: check-rv32-os-image
 	cp $(RV32_OS_DISK) build/rv32/os/jobs.qemu.disk
-	$(PYTHON) tools/rv32_run_qemu.py build/rv32/os/kernel.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --stdin $(RV32_OS)/jobs.session --drive build/rv32/os/jobs.qemu.disk --last-line --timeout 60 --transcript build/rv32/os/jobs.qemu.transcript
+	$(PYTHON) tools/rv32_run_qemu.py build/rv32/os/kernel.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --icount $(RV32_OS_QEMU_ICOUNT) --stdin $(RV32_OS)/jobs.session --drive build/rv32/os/jobs.qemu.disk --last-line --timeout 60 --transcript build/rv32/os/jobs.qemu.transcript
 	diff -u $(RV32_OS)/jobs.session.qemu.expected build/rv32/os/jobs.qemu.transcript
 run-rv32-os-jobs-emu: check-rv32-os-image $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_JOBS_ARGS) --compare results --backend emulator --emulator $(RV32EMU) --out build/rv32/os/jobs-emu
@@ -1386,7 +1398,7 @@ run-rv32-virtio-qemu: check-rv32-virtiocheck-image
 run-rv32-virtio-emu: check-rv32-virtiocheck-image $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_VIRTIO_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32/virtio-emu
 run-rv32-virtio-rtl: check-rv32-virtiocheck-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) -m tools.rv32_rtl $(RV32_VIRTIO_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/virtio-icarus
+	$(PYTHON) -m tools.rv32_rtl $(RV32_VIRTIO_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/rv32/virtio-icarus
 run-rv32-virtio-rtl-verilator: check-rv32-virtiocheck-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_VIRTIO_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --seed 3 --gpu-seed 5 --out build/rv32/virtio-verilator
 # The same check in step-tick mode with seeded stalls: the disk transfers keep the trace comparable.

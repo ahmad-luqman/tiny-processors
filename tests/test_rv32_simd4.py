@@ -19,7 +19,7 @@ from tools.rv32_asm import (SIMD_BASE as BASE, SIMD_PROGRAM as PROGRAM, SIMD_DAT
     SIMD_COMMAND as COMMAND, SIMD_STATUS as STATUS, SIMD_ENTRY as ENTRY,
     SIMD_CYCLES as CYCLES, SIMD_STALLS as STALLS, SIMD_TRANSFERS as TRANSFERS,
     SIMD_INSTRUCTIONS as INSTRUCTIONS, SIMD_BUSY as BUSY, SIMD_DONE as DONE,
-    SIMD_FAULT as FAULT, SIMD_START as START, SIMD_RESET as RESET)
+    SIMD_START as START, SIMD_RESET as RESET)
 
 OUT = Path('build/rv32/simd4-tests')
 # Inspection bridge indices in rv32_simd4_native.c; registers 0..15, accumulators 16..19.

@@ -39,22 +39,6 @@ void u_puts(const char *s)
     (void)sys_write(1, s, u_strlen(s));
 }
 
-uint32_t u_decimal(uint32_t value, char digits[11])
-{
-    uint32_t i = 10;
-    digits[i] = 0;
-    do {
-        uint32_t q = 0, r = value;
-        while (r >= 10) { /* no divide: RV32I programs would call the software routine for every digit */
-            r -= 10;
-            q++;
-        }
-        digits[--i] = (char)('0' + r);
-        value = q;
-    } while (value);
-    return i;
-}
-
 void u_putdec(uint32_t value)
 {
     char digits[11];

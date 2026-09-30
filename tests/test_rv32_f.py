@@ -2,7 +2,6 @@
 
 These tests compare full CPU retirement on both simulators, not just the FPU.
 """
-from pathlib import Path
 import random
 import subprocess
 import unittest
