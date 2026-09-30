@@ -170,7 +170,8 @@ refuses. [tools/rv32_ramdisk.py](../tools/rv32_ramdisk.py) checks the rules
 program per slot) and packs the programs into a RAM disk that
 [kentry.S](../programs/rv32/os/kentry.S) includes with `.incbin`; the
 kernel checks the table again at boot, since `spawn` trusts it. An entry's
-flag says the program drives the accelerators itself (only the menu). While
+flag says the program drives the accelerators itself (the menu, and since
+issue #20 `dmaprobe`). While
 G1 or G2 is busy it owns the framebuffer, so only such a program is scheduled
 then and a `present` from anyone waits for the engines; O5 grants the flagged
 program the engines' windows.
@@ -254,12 +255,13 @@ from writing kernel memory yet; that is O5.
 | 2 | [primes](../programs/rv32/os/primes.c) | A sieve on `sbrk` memory |
 | 3 | [pong](../programs/rv32/os/pong.c) | [pong.c](../programs/rv32/pong.c) on system calls |
 | 4 | [tetris](../programs/rv32/os/tetris.c) | The M7 Tetris, Q quits |
-| 5–6 | [menu](../programs/rv32/os/menu.c) | The capstone runtime (menu, games, 2D, 3D, digit screen) on system calls, accelerators direct |
+| 5 | [dmaprobe](../programs/rv32/os/dmaprobe.c) | The DMA window: engine jobs that reach outside its slot are refused (issue #20) |
 | 7 | [syscheck](../programs/rv32/os/syscheck.c) | System-call edge cases |
 | 8 | [fault](../programs/rv32/os/fault.c) | A load from an unmapped address, or an illegal instruction; since O5 also kernel and other-slot accesses and a machine CSR |
 | 9, 10, 11 | [cat](../programs/rv32/os/cat.c), [write](../programs/rv32/os/write.c), [files](../programs/rv32/os/files.c) | Print a file, write one, list them (O3) |
 | 12, 13 | [bars](../programs/rv32/os/bars.c), [life](../programs/rv32/os/life.c) | Two programs that share the screen (O4) |
 | 14 | [fill](../programs/rv32/os/fill.c) | Numbered lines into a file, to a given size (after O5's review) |
+| 15–17 | [menu](../programs/rv32/os/menu.c) | The capstone runtime (menu, games, 2D, 3D, digit screen) on system calls, accelerators direct; slots 5–6 until issue #20 gave it room for its own depth buffer |
 
 The user library ([ulib.c](../programs/rv32/os/ulib.c)) also defines
 `console.h`'s functions and `rv32_exit` on top of system calls, so the game
@@ -561,7 +563,7 @@ Before resuming a process the kernel points PMP at it, in three TOR pairs:
 | --- | --- | --- |
 | 0, 1 | the process's slots, `base` to `base + span` | read, write, execute |
 | 2, 3 | the framebuffer, from the tree | read, write |
-| 4, 5 | the accelerators' windows, SIMD4 to G2, from the tree | read, write, only for a program flagged `accelerators` (the menu) |
+| 4, 5 | the accelerators' windows, SIMD4 to G2, from the tree | read, write, only for a program flagged `accelerators` (the menu, `dmaprobe`) |
 
 Nothing else matches, so every other address, the kernel's MiB, other slots,
 the console, the CLINT, the PLIC and the disk, is refused in user mode. The
@@ -573,12 +575,23 @@ a hart with S-mode (QEMU's) a user counter read also needs `scounteren`, so
 the kernel writes that too, with `mtvec` pointed past the write for the
 moment, since on our machine the CSR does not exist and the write traps.
 
-Entries 4 and 5 are a hole PMP cannot close. G1 and G2 read and write RAM by
-DMA wherever their registers point (G2's depth buffer, G1's blit source), and
-PMP holds only the CPU, so the menu could reach the kernel or another slot
-through the engines. A program flagged `accelerators` is therefore trusted,
-as a driver would be; closing the hole would take the kernel starting every
-engine job itself, or bounds in the engines.
+Entries 4 and 5 opened a hole PMP cannot close. G1 and G2 read and write RAM
+by DMA wherever their registers point (G2's depth buffer, G1's blit source),
+and PMP holds only the CPU, so at O5 the menu could reach the kernel or
+another slot through the engines, and a program flagged `accelerators` was
+trusted, as a driver would be. Issue #20 closed the hole with bounds in the
+engines: the [DMA window](rv32.md#dma-window-at-0x1100_a000) at
+`0x1100_a000` holds the RAM they may reach, and `protect()` sets it to the
+process's slots whenever it sets up PMP. The window's page lies outside
+entries 4 and 5, so a program cannot move it, and the kernel refuses to boot
+if a tree ever put it inside them. The menu used to give G2 a depth buffer at
+`0x8004_0000`, inside the kernel's MiB (unused there, but the kernel's); it now
+keeps one in its own `.bss` and takes three slots.
+[dmaprobe](../programs/rv32/os/dmaprobe.c) checks the rest from the menu
+session: a zero-sized G1 blit from its own memory is accepted, blits and G2
+depth-buffer clears aimed at the kernel or the shell's slot are refused, and a
+load from the window itself kills it (cause 5). QEMU has no engines or window,
+and the kernel skips both there.
 
 A fault in user mode was already fatal to the process (O2); now there are
 more ways to earn one. [fault.c](../programs/rv32/os/fault.c) gains five:

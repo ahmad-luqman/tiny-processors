@@ -32,20 +32,26 @@ static void draw_demo(void)
 /* The 3D screen renders on the device: G1 clears the frame, G2 clears depth and
  * draws. The native model renders the same job with the C reference, and the
  * pinned menu checkpoints hold both to the same pixels. A device failure ends
- * the run: the checkpoints could not be trusted after it. */
+ * the run: the checkpoints could not be trusted after it.
+ *
+ * The depth buffer is the menu's own: the kernel's DMA window (issue #20) lets
+ * G2 reach only the menu's slots, and the bare machine's G3D_DEMO_ZBASE lies in
+ * the kernel's memory here. */
+static uint32_t depth[320 * 240 / 2];
 static uint32_t hardware_render(void *context, const struct g3d_job *job, const struct gfx_surface *s)
 {
     (void)context; (void)s;
+    uint32_t zbase = (uint32_t)depth;
     struct gpu_command c;
     gpu_command_init(&c,GPU_FILL,G3D_DEMO_BACKGROUND); c.p[GP_W]=320; c.p[GP_H]=240;
     if (!gpu_run(&c,2000000)) rv32_exit(83);
-    if (!g3d_run(G3D_CLEAR_Z,0,0,job->zbase,0,200000)) rv32_exit(84);
+    if (!g3d_run(G3D_CLEAR_Z,0,0,zbase,0,200000)) rv32_exit(84);
     if (!g3d_load_program(job->program,job->program_words) || !g3d_load(G3D_CONST,job->consts,G3D_CONSTS) ||
         !g3d_load(G3D_VERTEX,job->inputs[0],job->vcount*G3D_SLOTS) || !g3d_load(G3D_TRIANGLE,job->triangles,job->tcount)) {
         rv32_puts("G2 load refused\n");
         rv32_exit(85);
     }
-    if (!g3d_run(G3D_START,job->vcount,job->tcount,job->zbase,job->limit,2000000)) rv32_exit(86);
+    if (!g3d_run(G3D_START,job->vcount,job->tcount,zbase,job->limit,2000000)) rv32_exit(86);
     return 0;
 }
 

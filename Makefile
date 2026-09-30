@@ -1225,7 +1225,7 @@ test-rv32: run-rv32-irq-qemu run-rv32-irq-emu run-rv32-irq-rtl run-rv32-irq-rtl-
 RV32_OS := programs/rv32/os
 RV32_OS_CFLAGS := $(RV32_CFLAGS) -I$(RV32_OS) -Ibuild/rv32
 RV32_OS_HEADERS := $(RV32_OS)/sys.h $(RV32_OS)/ulib.h $(RV32_OS)/udecimal.h $(RV32_OS)/fs.h $(RV32_OS)/virtio.h $(RV32_OS)/score.h $(RV32_OS)/report.h programs/rv32/csr.h programs/rv32/fdt.h programs/rv32/clint.h programs/rv32/virtio_mmio.h $(RV32_HEADERS)
-RV32_OS_PROGRAMS := sh hello primes pong tetris menu syscheck fault cat write files bars life fill
+RV32_OS_PROGRAMS := sh hello primes pong tetris menu syscheck fault cat write files bars life fill dmaprobe
 # Slots of 128 KiB from 0x8010_0000 (programs/rv32/os/sys.h and tools/rv32_ramdisk.py, which
 # test-rv32-os holds to these values); a program's span is 1 slot unless given.
 RV32_OS_SLOT_BASE := 0x80100000
@@ -1235,8 +1235,11 @@ RV32_OS_SLOT_hello := 1
 RV32_OS_SLOT_primes := 2
 RV32_OS_SLOT_pong := 3
 RV32_OS_SLOT_tetris := 4
-RV32_OS_SLOT_menu := 5
-RV32_OS_SPAN_menu := 2
+# The menu keeps its G2 depth buffer (150 KiB) in its own slots, where the DMA window lets G2
+# reach (issue #20), so it needs three; slots 5 and 6 are free for smaller programs.
+RV32_OS_SLOT_menu := 15
+RV32_OS_SPAN_menu := 3
+RV32_OS_SLOT_dmaprobe := 5
 RV32_OS_SLOT_syscheck := 7
 RV32_OS_SLOT_fault := 8
 RV32_OS_SLOT_cat := 9
@@ -1265,6 +1268,7 @@ RV32_OS_OBJS_files := build/rv32/os/files.o
 RV32_OS_OBJS_bars := build/rv32/os/bars.o build/rv32/os/report.o
 RV32_OS_OBJS_life := build/rv32/os/life.o build/rv32/os/report.o
 RV32_OS_OBJS_fill := build/rv32/os/fill.o
+RV32_OS_OBJS_dmaprobe := build/rv32/os/dmaprobe.o
 RV32_OS_OBJS_pong := build/rv32/os/pong.o build/rv32/os/score.o build/rv32/pong_game.o build/rv32/gfx.o
 RV32_OS_OBJS_tetris := build/rv32/os/tetris.o build/rv32/os/score.o build/rv32/tetris_game.o build/rv32/gfx.o build/rv32/gfx_text.o
 RV32_OS_OBJS_menu := build/rv32/os/menu.o $(filter-out build/rv32/capstone.o $(RV32_COMMON_OBJS),$(RV32_CAPSTONE_OBJS))
@@ -1295,7 +1299,7 @@ $(RV32_OS_ELFS:.elf=.lst) build/rv32/os/kernel.lst: build/rv32/os/%.lst: build/r
 build/rv32/os/kernel.bin: build/rv32/os/%.bin: build/rv32/os/%.elf
 	$(RV32_OBJCOPY) -O binary $< $@
 build/rv32/os/ramdisk.img: $(RV32_OS_ELFS) tools/rv32_ramdisk.py
-	$(PYTHON) tools/rv32_ramdisk.py --out $@ --accelerators menu $(RV32_OS_ELFS)
+	$(PYTHON) tools/rv32_ramdisk.py --out $@ --accelerators menu --accelerators dmaprobe $(RV32_OS_ELFS)
 build/rv32/os/kentry.o: $(RV32_OS)/kentry.S build/rv32/os/ramdisk.img programs/rv32/board.h | build/rv32/os
 	$(RV32_CC) $(RV32_OS_CFLAGS) -DRAMDISK_IMAGE='"build/rv32/os/ramdisk.img"' -c -o $@ $<
 build/rv32/os/kernel.elf: $(RV32_OS_KERNEL_OBJS) $(RV32_OS)/kernel.ld

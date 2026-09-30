@@ -25,12 +25,13 @@
  * held by PMP, so system calls still read and write the caller's memory.
  *
  * PMP holds the CPU, not the accelerators: G1 and G2 read and write memory by
- * DMA wherever their registers point (G2's depth buffer, G1's blit source), so
- * a program flagged `accelerators` could reach the kernel or another slot
- * through them. Such a program is trusted, as a driver would be; only the menu
- * is flagged. While an engine is busy it owns the framebuffer (a present or a
- * CPU store to it faults), so only a flagged program runs until the engines
- * are idle again, and nobody else can fault on its behalf.
+ * DMA wherever their registers point (G2's depth buffer, G1's blit source). So
+ * the kernel also sets the DMA window (issue #20) to the running process's
+ * slots, and the engines refuse a job that would reach the kernel or another
+ * slot. The window's page lies outside the accelerators' PMP region, so a
+ * program cannot move it. While an engine is busy it owns the framebuffer (a
+ * present or a CPU store to it faults), so only a flagged program runs until
+ * the engines are idle again, and nobody else can fault on its behalf.
  *
  * Blocking is by retry: a call that cannot finish yet (read with no byte
  * waiting, wait for a child still running) leaves the process's pc on its
@@ -112,6 +113,7 @@ static uint32_t next_pid = 1, exits, exit_sum;
 static uint32_t console, done_register, clint, plic;
 static uint32_t input, input_source, display, framebuffer, framebuffer_size, gpu, g3d, disk;
 static uint32_t accelerators, accelerators_end; /* O5: the window PMP grants a PROGRAM_ACCELERATORS program */
+static uint32_t dma_window;                     /* issue #20: the engines' DMA bound, 0 where there is none (QEMU) */
 static uint32_t protected_pid;                  /* O5: the process PMP is set up for */
 static char model[48];
 static uint32_t tick = KERNEL_TICK; /* O4: 100 µs where the tree gives a timebase (QEMU), else KERNEL_TICK */
@@ -324,6 +326,11 @@ static void discover(uintptr_t address)
                 accelerators_end = base + size;
             }
         }
+    }
+    /* The DMA window must stay outside the region PMP grants, or a program could widen it. */
+    dma_window = find(&t, "tiny-processors,dma-window", 0, 0);
+    if (dma_window && accelerators_end && dma_window + 8u > accelerators && dma_window < accelerators_end) {
+        panic("the DMA window inside the accelerators' region");
     }
     uint32_t timebase;
     if (fdt_cell(&t, "@name", "cpus", "timebase-frequency", 0, &timebase) == FDT_OK && timebase >= 10000u) {
@@ -651,6 +658,12 @@ static void protect(const struct proc *p)
     csr_write(CSR_PMPADDR5, accelerators_end >> 2);
     csr_write(CSR_PMPCFG0, tor_rwx << 8 | (framebuffer ? tor_rw << 24 : 0u));
     csr_write(CSR_PMPCFG1, (p->flags & PROGRAM_ACCELERATORS) && accelerators_end ? tor_rw << 8 : 0u);
+    /* The engines may reach only this process's slots. A job validated earlier keeps running
+     * (a flagged program's, while the switch goes to another flagged one or the idle loop). */
+    if (dma_window) {
+        mmio_write32(dma_window + RV32_DMA_WINDOW_START, p->base);
+        mmio_write32(dma_window + RV32_DMA_WINDOW_END, p->base + p->span);
+    }
 }
 
 static struct frame *schedule(void)
@@ -969,6 +982,7 @@ _Noreturn void kernel_main(uint32_t hart, uintptr_t tree)
     kputs(display ? " display" : "");
     kputs(gpu ? " g1" : "");
     kputs(g3d ? " g2" : "");
+    kputs(dma_window ? " dma" : "");
     kputs(disk ? " disk" : "");
     uint32_t count;
     check_programs();

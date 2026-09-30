@@ -1,11 +1,20 @@
 kernel: tiny-processors RV32 machine, hart 0
-kernel: devices console clint plic input display g1 g2 disk
-kernel: 14 programs
+kernel: devices console clint plic input display g1 g2 dma disk
+kernel: 15 programs
 kernel: disk 256 sectors, no file system
 sh: ls, NAME [ARGS] [&], wait, halt [CODE]
+$ dmaprobe
+dmaprobe: G1 blit from its own memory accepted
+dmaprobe: G1 blit from the kernel refused, error 1
+dmaprobe: G1 blit from the shell refused, error 1
+dmaprobe: G2 depth buffer in the kernel refused, error 1
+dmaprobe: G2 depth buffer in the shell refused, error 1
+$ dmaprobe window
+kernel: pid 3 dmaprobe killed: cause 5 at dmaprobe+0x18 tval 1100a000
+sh: dmaprobe exited 133
 $ menu
 digit 1 margin 5117
 PASS c76cd363
 $ halt
-kernel: halt, 1 exits
-PASS 99e4dd3a
+kernel: halt, 3 exits
+PASS 53e2ea5f
