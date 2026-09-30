@@ -1,0 +1,10 @@
+kernel: tiny-processors RV32 machine, hart 0
+kernel: devices console clint plic input display g1 g2
+kernel: 8 programs
+sh: ls, NAME [ARGS] [&], wait, halt [CODE]
+$ menu
+digit 1 margin 5117
+PASS c76cd363
+$ halt
+kernel: halt, 1 exits
+PASS 99e4dd3a

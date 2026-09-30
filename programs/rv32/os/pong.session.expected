@@ -1,0 +1,9 @@
+kernel: tiny-processors RV32 machine, hart 0
+kernel: devices console clint plic input display g1 g2
+kernel: 8 programs
+sh: ls, NAME [ARGS] [&], wait, halt [CODE]
+$ pong
+PASS 8fef54bc
+$ halt
+kernel: halt, 1 exits
+PASS 7adb16b7

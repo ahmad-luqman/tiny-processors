@@ -177,6 +177,9 @@ class ImageCheckerTests(unittest.TestCase):
                 self.assertEqual(len(check_listing(base + line, allow_privileged=True)), 1)
                 self.assertEqual(check_listing(base + line, allow_system=True), [])
         self.assertEqual(check_listing(base + "80000004: 30200073     \tmret", allow_system=True), [])
+        unimp = base + "80000004: c0001073     \tunimp"  # the canonical illegal instruction, for a program that traps on purpose
+        self.assertEqual(len(check_listing(unimp, allow_counters=True)), 1)
+        self.assertEqual(check_listing(unimp, allow_system=True), [])
         for line in ("80000004: 3b051073     \tcsrw\tpmpaddr0, a0", "80000004: 10200073     \tsret"):
             with self.subTest(line=line):
                 self.assertEqual(len(check_listing(base + line, allow_system=True)), 1)

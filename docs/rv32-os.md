@@ -150,6 +150,173 @@ Yosys 0.33.
   trace; the architectural tests' `csrs mstatus` now retires on every backend
   as on QEMU, so the model's handler skips nothing and fails on any trap.
 
+## O2: a kernel and system calls
+
+### The layout
+
+| Range | What |
+| --- | --- |
+| `0x8000_0000`–`0x800F_FFFF` | The kernel: code, data, the RAM disk, a 16 KiB stack at the top ([kernel.ld](../programs/rv32/os/kernel.ld)) |
+| `0x8010_0000 + 0x4_0000 × n`, n = 0..11 | Program slot n: code, data and `.bss` from the bottom, the heap above them, a 32 KiB stack at the top ([user.ld](../programs/rv32/os/user.ld)) |
+
+Each program is linked for its own slot (`--defsym SLOT_BASE=...`), so any
+set of programs can be resident at once with no relocation and no MMU; the
+price is that one program cannot run twice at the same time, which `spawn`
+refuses. [tools/rv32_ramdisk.py](../tools/rv32_ramdisk.py) checks the rules
+(one load segment at a slot base, entry at the base, room for the stack, one
+program per slot) and packs the programs into a RAM disk that
+[kentry.S](../programs/rv32/os/kentry.S) includes with `.incbin`. An entry's
+flag says the program drives the accelerators itself (only the menu); the
+kernel waits for their engines before that program's present, and O5 will
+grant it their windows.
+
+### Contexts and traps
+
+Every context the machine runs, each process and the kernel's idle loop, has
+a `struct frame`: the 31 registers, the pc and `mstatus`. While a context
+runs, `mscratch` holds its frame's address. The trap vector swaps `sp` with
+`mscratch`, stores every register and `mepc`/`mstatus` into the frame,
+switches to the kernel's one stack and calls `kernel_trap(frame)`; whatever
+frame that returns, `kernel_resume` loads into `mscratch`, `mepc`, `mstatus`
+and the registers, and `mret` runs it. A process's `mstatus` holds MPIE set,
+so it always runs with interrupts on; the kernel always runs with them off
+(trap entry clears MIE) and never traps itself, so a kernel bug is a double
+fault and stops the machine with both traps reported, as the contract has
+done since M2.
+
+The idle context is a frame whose pc is `kernel_idle: wfi; j kernel_idle` on a
+small stack. When nothing is ready, `schedule()` returns it; an interrupt
+brings the kernel back.
+
+### System calls
+
+`ecall` with the number in `a7` and arguments in `a0`–`a5`; the result comes
+back in `a0` ([sys.h](../programs/rv32/os/sys.h)):
+
+| Call | Does |
+| --- | --- |
+| `exit(code)` | Ends the process; a waiting parent gets the code |
+| `write(fd, buf, len)`, `read(fd, buf, len)` | The console: fds 1 and 2 out, fd 0 in; `read` waits for at least one byte |
+| `event()`, `keys()` | The next input event from the kernel's buffer, and the held-key mask |
+| `present()`, `display()` | Show the framebuffer; its address, or 0 on a platform without a display |
+| `sbrk(n)` | Grow the heap; it stops below the stack |
+| `spawn(name, args)`, `wait(pid)`, `list(i, buf, len)` | Run a program from the RAM disk, wait for a child, list the RAM disk |
+| `yield()`, `sleep(ticks)`, `time()`, `getpid()`, `halt(code)` | Scheduling and time; `halt` stops the machine |
+
+Every pointer must lie inside the caller's slot, and every call that cannot
+be served returns `0xffff_ffff`. [syscheck.c](../programs/rv32/os/syscheck.c)
+checks those refusals and the heap, process and list calls on every backend.
+
+**Blocking is by retry.** A call that cannot finish yet (`read` with no byte
+waiting, `wait` for a child still running) leaves the pc on the `ecall` and
+marks the process blocked. `wake_blocked()` runs before every scheduling
+decision and makes a process ready when its condition may hold; the `ecall`
+then runs again and finds its byte or its zombie child. No call has to be
+resumed halfway, so the kernel keeps no per-call state beyond the reason a
+process sleeps. A timer interrupt every 10,000 device ticks makes sure a
+blocked reader is looked at even while the machine idles (the console raises
+no interrupt).
+
+### Input, display and faults
+
+The kernel owns the input queue: the PLIC interrupt handler (source from the
+tree's `interrupts`) drains `EVENT` into a 64-event buffer, and `event()`
+pops it. Events still arrive with the present that reaches their frame, and
+the interrupt is taken right after that present's `ecall` returns, so a
+program sees exactly the sequence the bare image saw. The framebuffer is
+left to the programs, which get its address from `display()`; on QEMU it is 0
+and Pong says `pong: no display`.
+
+A program that faults is killed: the kernel prints
+`kernel: pid 9 fault killed: cause 5 at 802c0074 tval 00200000`, the exit
+code is 128 plus the cause, and the shell carries on. Nothing stops a program
+from writing kernel memory yet; that is O5.
+
+### Programs
+
+| Slot | Program | What |
+| --- | --- | --- |
+| 0 | [sh](../programs/rv32/os/sh.c) | The shell, pid 1: `ls`, `NAME [ARGS]`, `NAME &`, `wait`, `halt [CODE]`; it echoes each line, since the host does not |
+| 1 | [hello](../programs/rv32/os/hello.c) | Its pid and arguments |
+| 2 | [primes](../programs/rv32/os/primes.c) | A sieve on `sbrk` memory |
+| 3 | [pong](../programs/rv32/os/pong.c) | [pong.c](../programs/rv32/pong.c) on system calls |
+| 4 | [tetris](../programs/rv32/os/tetris.c) | The M7 Tetris, Q quits |
+| 5 | [menu](../programs/rv32/os/menu.c) | The capstone runtime (menu, games, 2D, 3D, digit screen) on system calls, accelerators direct |
+| 6 | [syscheck](../programs/rv32/os/syscheck.c) | System-call edge cases |
+| 7 | [fault](../programs/rv32/os/fault.c) | A load from an unmapped address, or an illegal instruction |
+
+The user library ([ulib.c](../programs/rv32/os/ulib.c)) also defines
+`console.h`'s functions and `rv32_exit` on top of system calls, so the game
+and demo sources link unchanged.
+
+### Three platforms
+
+The kernel finds its devices only through the tree: the console
+(`tiny-processors,console`, else `ns16550a`), the done register
+(`sifive,test0`), the CLINT and PLIC, and our input, display and engines where
+listed. QEMU puts its tree at `0x8020_0000`, inside slot 4, so the kernel reads
+everything it needs (including the model string) before loading the first
+program. The same `kernel.elf` then runs the console session on QEMU `virt`:
+
+```
+kernel: riscv-virtio,qemu, hart 0
+kernel: devices console clint plic
+kernel: 8 programs
+sh: ls, NAME [ARGS] [&], wait, halt [CODE]
+$ ls
+...
+$ fault load
+kernel: pid 9 fault killed: cause 5 at 802c0074 tval 00200000
+sh: fault exited 133
+...
+$ halt
+kernel: halt, 10 exits
+PASS 34b7bb53
+```
+
+and our backends print the same lines but the first two. The PASS word is a
+sum over every process that exited of a hash of its name xor its exit code:
+a sum, so the order processes finish in does not change it (O4).
+
+### Evidence (O2)
+
+- **Console session** ([session.txt](../programs/rv32/os/session.txt): `ls`,
+  `hello` with and without arguments, `primes`, a failing `primes 2`, an
+  unknown name, `syscheck`, both `fault`s, `hello` again, `halt`):
+  `PASS 34b7bb53` on QEMU `virt` (transcript pinned in
+  [session.qemu.expected](../programs/rv32/os/session.qemu.expected)), the
+  emulator (1,034,560 steps) and Verilator with a stall per request
+  (7,326,810 cycles), results-identical over 45 console lines and 303
+  exception records; in step-tick mode with seeded stalls the emulator and
+  Verilator traces are identical (`test-rv32-os`).
+- **Pong from the shell:** the standalone image's 200 checkpoints and
+  `PASS 8fef54bc`, with the kernel's timer and keyboard interrupts in between;
+  trace-identical between the emulator and Verilator in step-tick mode,
+  1,421,567 lines.
+- **The menu from the shell:** S1's 185-frame session gives S1's 185
+  checkpoints and `PASS c76cd363` on the emulator and on Verilator with seeded
+  waits on CPU memory, the graphics engines and SIMD4 (187,160,127 cycles);
+  M7's capstone session gives its checkpoints and `PASS ea60197e` on the
+  emulator.
+- **Tools:** `test-rv32-os` checks the RAM disk round trip and its refusals
+  (two programs in one slot, one name twice, a name too long, an unknown
+  accelerator program, an image outside the slots, four malformed disks) and
+  the console's receive side on both backends, trace for trace.
+
+## Exercises (O2)
+
+1. **Blocking by retry.** Run the console session with `--trace` and find a
+   `read` ecall that executes more than once. What changed between the two
+   executions, and which function made the process ready again?
+2. **Where the tree is.** Link `tetris` at slot 4 and run the session on QEMU
+   with the kernel's `discover()` moved after the first `spawn`. Which line
+   of the banner goes wrong, and why only on QEMU?
+3. **A second shell.** Try `sh` from the shell. Which check in `spawn()`
+   refuses it, and what would it take to run two programs linked for the same
+   slot?
+4. **The input buffer.** Make `KEY_BUFFER` 4 and replay Pong's session. Which
+   events are lost, and why does the standalone Pong not have this problem?
+
 ## Exercises (O1)
 
 1. **Where does it land?** Run `make run-rv32-irq-rtl-verilator` and

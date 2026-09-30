@@ -40,6 +40,7 @@ TRAP_CSR = re.compile(r"\b(mtvec|mepc|mcause|mtval)\b")
 # What a system image may use in addition (Track 2): the interrupt CSRs, wfi and ecall (O1, O2).
 SYSTEM_CSR = re.compile(r"\b(mstatus|mie|mip|mscratch)\b")
 SYSTEM_MNEMONIC = re.compile(r"\A(wfi|ecall)\Z")
+UNIMP = 0xC0001073  # `unimp`: csrrw x0, cycle, x0, illegal everywhere since cycle is read-only
 # What an RV32IM image may use in addition (Track 0): exactly the eight M-extension instructions.
 M_MNEMONIC = re.compile(r"\A(mul|mulh|mulhsu|mulhu|div|divu|rem|remu)\Z")
 # The Zicntr counters (cycle, time, instret and their high halves). Only reads exist; objdump
@@ -154,6 +155,8 @@ def check_listing(text, allow_privileged=False, allow_f=False, allow_m=False, al
             if not allow_f or not valid_f_word(word):
                 problems.append(f"listing line {number}: floating instruction outside selected ISA: {line.strip()}")
             continue
+        if allow_system and word == UNIMP:
+            continue  # the canonical illegal instruction: a program that traps on purpose
         if word is not None and word & 127 == 0x73 and (word >> 12) & 7:
             csr = word >> 20
             if csr in (1, 2, 3):
@@ -247,7 +250,7 @@ def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, e
     for name in REQUIRED_SECTIONS:
         if name not in by_name:
             problems.append(f"missing section {name}")
-        elif by_name[name].size == 0:
+        elif by_name[name].size == 0 and name == ".text":  # a program may have no data (Track 2's small ones)
             problems.append(f"section {name} is empty")
     for section in elf.sections:
         if section.flags & SHF_ALLOC and section.size and section.name not in REQUIRED_SECTIONS:

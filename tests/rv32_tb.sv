@@ -30,10 +30,12 @@ module rv32_tb;
     reg in_push = 0;
     reg step_ticks = 0;
     // Console input (+console-input=FILE, O2): every byte of the file is waiting from reset.
-    byte console_in [];
-    integer console_in_next = 0;
-    wire console_rx_valid = console_in_next < console_in.size();
-    wire [7:0] console_rx_byte = console_rx_valid ? console_in[console_in_next] : 8'd0;
+    // A fixed array rather than a dynamic one: Icarus cannot drive a net from a dynamic array.
+    localparam integer CONSOLE_IN_MAX = 65536;
+    reg [7:0] console_in [0:CONSOLE_IN_MAX-1];
+    integer console_in_len = 0, console_in_next = 0;
+    wire console_rx_valid = console_in_next < console_in_len;
+    wire [7:0] console_rx_byte = console_rx_valid ? console_in[console_in_next[15:0]] : 8'd0;
     always @(posedge clk) if (!reset && console_rx_take) console_in_next <= console_in_next + 1; // +ticks=steps: the deterministic tick mode (docs/rv32.md, "Device time")
     reg [31:0] in_event = 0;
 
@@ -595,13 +597,13 @@ module rv32_tb;
             n = 0;
             c = $fgetc(fd);
             while (c != -1) begin
-                if (n == console_in.size()) console_in = new[n == 0 ? 256 : 2 * n](console_in);
+                if (n == CONSOLE_IN_MAX) $fatal(1, "Console input %0s is longer than %0d bytes", path, CONSOLE_IN_MAX);
                 console_in[n] = c[7:0];
                 n = n + 1;
                 c = $fgetc(fd);
             end
             $fclose(fd);
-            console_in = new[n](console_in);
+            console_in_len = n;
         end
     endtask
 

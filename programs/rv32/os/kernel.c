@@ -1,0 +1,665 @@
+/* The kernel (Track 2, O2; docs/rv32-os.md).
+ *
+ * It boots from the device tree it is given in a1, loads programs from the RAM
+ * disk bundled into its image into fixed 256 KiB slots, and serves their
+ * system calls (sys.h). Every context, each process and the idle loop, has a
+ * frame; kentry.S saves the running one on every trap and resumes whichever
+ * kernel_trap returns. The kernel runs with interrupts off and never traps
+ * itself: a fault in the kernel is a double fault and stops the machine.
+ *
+ * Devices come only from the tree: the console, the done register, the CLINT
+ * and the PLIC on every platform, and our input, display and accelerators
+ * where the tree lists them. On QEMU the tree lies in RAM a program slot
+ * covers, so everything is read from it before the first program is loaded.
+ *
+ * Blocking is by retry: a call that cannot finish yet (read with no byte
+ * waiting, wait for a child still running) leaves the process's pc on its
+ * ecall and marks it blocked; wake_blocked() makes it ready again when the
+ * condition may hold, and the ecall runs again. A timer interrupt every
+ * KERNEL_TICK device ticks makes sure a blocked process is looked at even
+ * while the machine idles.
+ */
+#include <stddef.h>
+#include <stdint.h>
+
+#include "board.h"
+#include "csr.h"
+#include "fdt.h"
+#include "g3d.h"
+#include "gpu.h"
+#include "mmio.h"
+#include "sys.h"
+
+#define MAX_PROCS 8
+#define KERNEL_TICK 10000u      /* device ticks between timer interrupts */
+#define KEY_BUFFER 64u          /* input events waiting for a program */
+#define ARGS_MAX 64u            /* bytes of argument string, NUL included */
+#define MSTATUS_MPP_M 0x1800u
+#define MSTATUS_FS_INITIAL 0x2000u /* QEMU's FPU is off until FS is set; ours is always on */
+#define CAUSE_ECALL_M 11u
+#define CAUSE_ECALL_U 8u
+#define RAMDISK_MAGIC 0x4b534452u /* "RDSK" */
+
+/* A context: kentry.S knows these offsets. */
+struct frame {
+    uint32_t x[32]; /* x[0] is never read */
+    uint32_t pc;
+    uint32_t mstatus;
+};
+_Static_assert(offsetof(struct frame, pc) == 128 && offsetof(struct frame, mstatus) == 132, "kentry.S offsets");
+
+enum state { FREE, READY, RUNNING, BLOCKED_READ, BLOCKED_WAIT, BLOCKED_SLEEP, ZOMBIE };
+
+struct proc {
+    struct frame f;
+    enum state state;
+    uint32_t pid, parent, slot, brk, exit_code, wait_pid, flags;
+    uint64_t wake;
+    char name[24];
+};
+
+/* A RAM disk entry (tools/rv32_ramdisk.py). */
+struct program {
+    char name[24];
+    uint32_t load, entry, file_size, memory_size, offset, flags;
+};
+#define PROGRAM_ACCELERATORS 1u /* it drives SIMD4, G1 and G2 itself */
+
+extern void trap_vector(void);
+extern void kernel_idle(void);
+extern _Noreturn void kernel_resume(struct frame *f);
+extern const uint8_t ramdisk[], ramdisk_end[];
+
+static struct proc procs[MAX_PROCS];
+static struct proc *current; /* 0 while the idle loop runs */
+static struct frame idle_frame;
+static uint32_t idle_stack[64];
+static uint32_t next_pid = 1, exits, exit_sum;
+
+static uint32_t console, done_register, clint, plic;
+static uint32_t input, input_source, display, framebuffer, gpu, g3d;
+static char model[48];
+
+static uint32_t keys[KEY_BUFFER];
+static uint32_t key_head, key_count, keys_dropped;
+
+void *memcpy(void *dst, const void *src, size_t n)
+{
+    uint8_t *d = dst;
+    const uint8_t *s = src;
+    while (n--) {
+        *d++ = *s++;
+    }
+    return dst;
+}
+
+void *memset(void *dst, int value, size_t n)
+{
+    uint8_t *d = dst;
+    while (n--) {
+        *d++ = (uint8_t)value;
+    }
+    return dst;
+}
+
+/* The console, polled: LSR bit 5 before each byte, as on a 16550. */
+static void kputc(char c)
+{
+    while (!(mmio_read8(console + RV32_CONSOLE_STATUS) & RV32_CONSOLE_TX_READY)) {
+    }
+    mmio_write8(console + RV32_CONSOLE_TX, (uint8_t)c);
+}
+
+static void kputs(const char *s)
+{
+    while (*s) {
+        kputc(*s++);
+    }
+}
+
+static void kputdec(uint32_t value)
+{
+    char text[11];
+    int i = 10;
+    text[i] = 0;
+    do {
+        text[--i] = (char)('0' + value % 10u);
+        value /= 10u;
+    } while (value);
+    kputs(text + i);
+}
+
+static void kputhex(uint32_t value)
+{
+    for (int shift = 28; shift >= 0; shift -= 4) {
+        uint32_t digit = (value >> shift) & 15u;
+        kputc((char)(digit < 10 ? '0' + digit : 'a' + digit - 10));
+    }
+}
+
+static int console_ready(void)
+{
+    return mmio_read8(console + RV32_CONSOLE_STATUS) & 1u; /* LSR.DR */
+}
+
+static uint64_t mtime(void)
+{
+    uint32_t hi, lo;
+    do {
+        hi = mmio_read32(clint + RV32_CLINT_MTIME + 4);
+        lo = mmio_read32(clint + RV32_CLINT_MTIME);
+    } while (hi != mmio_read32(clint + RV32_CLINT_MTIME + 4));
+    return (uint64_t)hi << 32 | lo;
+}
+
+static void set_timer(uint64_t when)
+{
+    mmio_write32(clint + RV32_CLINT_MTIMECMP, 0xffffffffu);
+    mmio_write32(clint + RV32_CLINT_MTIMECMP + 4, (uint32_t)(when >> 32));
+    mmio_write32(clint + RV32_CLINT_MTIMECMP, (uint32_t)when);
+}
+
+static uint32_t fold_name(const char *s)
+{
+    uint32_t h = 2166136261u;
+    while (*s) {
+        h = (h ^ (uint8_t)*s++) * 16777619u;
+    }
+    return h;
+}
+
+/* ---- Stopping the machine ---- */
+
+static _Noreturn void halt(uint32_t code)
+{
+    if (code == 0) {
+        kputs("kernel: halt, ");
+        kputdec(exits);
+        kputs(" exits\nPASS ");
+        kputhex(exit_sum);
+        kputc('\n');
+        mmio_write32(done_register, RV32_DONE_PASS);
+    } else {
+        kputs("kernel: halt ");
+        kputdec(code);
+        kputc('\n');
+        mmio_write32(done_register, (code & 0xffu) << 16 | RV32_DONE_FAIL);
+    }
+    for (;;) {
+    }
+}
+
+static _Noreturn void panic(const char *why)
+{
+    kputs("kernel: panic: ");
+    kputs(why);
+    kputc('\n');
+    halt(255);
+}
+
+/* ---- The device tree, read once at boot ---- */
+
+static uint32_t find(const fdt *t, const char *compatible, uint32_t index, int required)
+{
+    uint32_t base = 0, size;
+    fdt_status status = fdt_find(t, "compatible", compatible, index, &base, &size);
+    if (status == FDT_NOT_FOUND && !required) {
+        return 0;
+    }
+    if (status != FDT_OK) {
+        kputs("kernel: device tree: ");
+        kputs(compatible);
+        kputs(" status ");
+        kputdec((uint32_t)status);
+        kputc('\n');
+        panic("device tree");
+    }
+    return base;
+}
+
+static void discover(uintptr_t address)
+{
+    fdt t;
+    if (fdt_open(&t, address) != FDT_OK) {
+        /* No console yet: the done register is the only way to say so, at virt's address. */
+        mmio_write32(RV32_DONE, 254u << 16 | RV32_DONE_FAIL);
+        for (;;) {
+        }
+    }
+    done_register = find(&t, "sifive,test0", 0, 1);
+    console = find(&t, "tiny-processors,console", 0, 0);
+    if (!console) {
+        console = find(&t, "ns16550a", 0, 1);
+    }
+    clint = find(&t, "riscv,clint0", 0, 1);
+    plic = find(&t, "riscv,plic0", 0, 1);
+    input = find(&t, "tiny-processors,input", 0, 0);
+    if (input && fdt_cell(&t, "compatible", "tiny-processors,input", "interrupts", 0, &input_source) != FDT_OK) {
+        panic("input without interrupts");
+    }
+    display = find(&t, "tiny-processors,display", 0, 0);
+    framebuffer = display ? find(&t, "tiny-processors,display", 1, 1) : 0;
+    gpu = find(&t, "tiny-processors,g1", 0, 0);
+    g3d = find(&t, "tiny-processors,g2", 0, 0);
+    const char *name = "unknown";
+    (void)fdt_root_string(&t, "model", &name);
+    uint32_t i = 0;
+    for (; name[i] && i + 1 < sizeof model; i++) {
+        model[i] = name[i];
+    }
+    model[i] = 0;
+}
+
+/* ---- Processes ---- */
+
+static struct proc *proc_of(struct frame *f)
+{
+    return f == &idle_frame ? 0 : (struct proc *)((uint8_t *)f - offsetof(struct proc, f));
+}
+
+static uint32_t slot_base(const struct proc *p)
+{
+    return OS_SLOT_BASE + p->slot * OS_SLOT_SIZE;
+}
+
+/* A user range is `len` bytes inside the process's own slot. */
+static int user_range(const struct proc *p, uint32_t address, uint32_t len)
+{
+    uint32_t base = slot_base(p);
+    return address >= base && len <= OS_SLOT_SIZE && address - base <= OS_SLOT_SIZE - len;
+}
+
+/* A NUL-terminated user string of at most `max` bytes, copied out; 0 on a bad pointer or length. */
+static int user_string(const struct proc *p, uint32_t address, char *out, uint32_t max)
+{
+    for (uint32_t i = 0; i < max; i++) {
+        if (!user_range(p, address + i, 1)) {
+            return 0;
+        }
+        out[i] = *(const char *)(uintptr_t)(address + i);
+        if (!out[i]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static const struct program *programs(uint32_t *count)
+{
+    const uint32_t *header = (const uint32_t *)ramdisk;
+    if ((uint32_t)(ramdisk_end - ramdisk) < 16 || header[0] != RAMDISK_MAGIC) {
+        panic("no RAM disk");
+    }
+    *count = header[1];
+    return (const struct program *)(ramdisk + 16);
+}
+
+static const struct program *program_named(const char *name)
+{
+    uint32_t count;
+    const struct program *list = programs(&count);
+    for (uint32_t i = 0; i < count; i++) {
+        if (fdt_same(list[i].name, name)) {
+            return &list[i];
+        }
+    }
+    return 0;
+}
+
+static int alive(const struct proc *p)
+{
+    return p->state != FREE && p->state != ZOMBIE;
+}
+
+/* Load a program into its slot and make it ready; returns the process or 0. */
+static struct proc *spawn(const char *name, const char *args, uint32_t parent)
+{
+    const struct program *program = program_named(name);
+    if (!program) {
+        return 0;
+    }
+    uint32_t slot = (program->load - OS_SLOT_BASE) / OS_SLOT_SIZE;
+    struct proc *p = 0;
+    for (uint32_t i = 0; i < MAX_PROCS; i++) {
+        if (alive(&procs[i]) && procs[i].slot == slot) {
+            return 0; /* its slot is in use: one instance at a time */
+        }
+        if (!p && procs[i].state == FREE) {
+            p = &procs[i];
+        }
+    }
+    if (!p) {
+        return 0;
+    }
+    memset(p, 0, sizeof *p);
+    p->slot = slot;
+    p->flags = program->flags;
+    uint8_t *base = (uint8_t *)(uintptr_t)program->load;
+    memcpy(base, ramdisk + program->offset, program->file_size);
+    memset(base + program->file_size, 0, program->memory_size - program->file_size);
+    uint32_t top = slot_base(p) + OS_SLOT_SIZE;
+    char *copy = (char *)(uintptr_t)(top - ARGS_MAX);
+    uint32_t i = 0;
+    for (; args[i] && i + 1 < ARGS_MAX; i++) {
+        copy[i] = args[i];
+    }
+    copy[i] = 0;
+    p->f.x[2] = (top - ARGS_MAX - 16u) & ~15u; /* sp */
+    p->f.x[10] = (uint32_t)(uintptr_t)copy;      /* a0: the arguments */
+    p->f.pc = program->entry;
+    p->f.mstatus = MSTATUS_MPP_M | MSTATUS_MPIE | MSTATUS_FS_INITIAL;
+    p->brk = (program->load + program->memory_size + 15u) & ~15u;
+    p->pid = next_pid++;
+    p->parent = parent;
+    p->state = READY;
+    for (i = 0; program->name[i] && i + 1 < sizeof p->name; i++) {
+        p->name[i] = program->name[i];
+    }
+    return p;
+}
+
+static void finish(struct proc *p, uint32_t code)
+{
+    p->exit_code = code;
+    exits++;
+    exit_sum += fold_name(p->name) ^ code; /* a sum: the same whatever order processes finish in */
+    struct proc *parent = 0;
+    for (uint32_t i = 0; i < MAX_PROCS; i++) {
+        if (alive(&procs[i]) && procs[i].pid == p->parent) {
+            parent = &procs[i];
+        }
+    }
+    if (!parent) {
+        if (p->pid == 1) {
+            halt(code); /* the first program, the shell, ended the session */
+        }
+        p->state = FREE; /* nobody will wait for it */
+        return;
+    }
+    p->state = ZOMBIE;
+    if (parent->state == BLOCKED_WAIT && parent->wait_pid == p->pid) {
+        parent->state = READY;
+    }
+}
+
+/* ---- Input ---- */
+
+static void drain_input(void)
+{
+    for (uint32_t event = mmio_read32(input + RV32_INPUT_EVENT); event; event = mmio_read32(input + RV32_INPUT_EVENT)) {
+        if (key_count == KEY_BUFFER) {
+            keys_dropped++;
+            continue;
+        }
+        keys[(key_head + key_count) % KEY_BUFFER] = event;
+        key_count++;
+    }
+}
+
+static void external_interrupt(void)
+{
+    uint32_t source = mmio_read32(plic + RV32_PLIC_CLAIM);
+    if (source && input && source == input_source) {
+        drain_input();
+    }
+    if (source) {
+        mmio_write32(plic + RV32_PLIC_CLAIM, source);
+    }
+}
+
+/* ---- Scheduling ---- */
+
+/* Blocked processes whose condition may hold become ready; their ecall runs again. */
+static void wake_blocked(void)
+{
+    uint64_t now = 0;
+    int ready = -1;
+    for (uint32_t i = 0; i < MAX_PROCS; i++) {
+        struct proc *p = &procs[i];
+        if (p->state == BLOCKED_READ) {
+            if (ready < 0) {
+                ready = console_ready();
+            }
+            if (ready) {
+                p->state = READY;
+            }
+        } else if (p->state == BLOCKED_SLEEP) {
+            if (!now) {
+                now = mtime();
+            }
+            if (now >= p->wake) {
+                p->state = READY;
+            }
+        }
+    }
+}
+
+/* The next ready process after `after` in table order, round robin, or 0. */
+static struct proc *next_ready(const struct proc *after)
+{
+    uint32_t start = after ? (uint32_t)(after - procs) + 1 : 0;
+    for (uint32_t k = 0; k < MAX_PROCS; k++) {
+        struct proc *p = &procs[(start + k) % MAX_PROCS];
+        if (p->state == READY) {
+            return p;
+        }
+    }
+    return 0;
+}
+
+static struct frame *schedule(void)
+{
+    wake_blocked();
+    if (current && current->state == RUNNING) {
+        return &current->f;
+    }
+    struct proc *p = next_ready(current);
+    current = p;
+    if (!p) {
+        return &idle_frame;
+    }
+    p->state = RUNNING;
+    return &p->f;
+}
+
+/* ---- System calls ---- */
+
+static uint32_t engines_busy(void)
+{
+    return (gpu && (mmio_read32(gpu + GPU_STATUS) & GPU_BUSY)) || (g3d && (mmio_read32(g3d + G3D_STATUS) & G3D_BUSY));
+}
+
+/* Returns 1 when the call finished (pc moves past the ecall), 0 to run it again later. */
+static int syscall(struct proc *p)
+{
+    struct frame *f = &p->f;
+    uint32_t a0 = f->x[10], a1 = f->x[11], a2 = f->x[12], result = SYS_ERROR;
+    char name[24], args[ARGS_MAX];
+    switch (f->x[17]) {
+    case SYS_EXIT:
+        finish(p, a0);
+        return 1;
+    case SYS_WRITE:
+        if ((a0 == 1 || a0 == 2) && user_range(p, a1, a2)) {
+            for (uint32_t i = 0; i < a2; i++) {
+                kputc(*(const char *)(uintptr_t)(a1 + i));
+            }
+            result = a2;
+        }
+        break;
+    case SYS_READ:
+        if (a0 == 0 && a2 && user_range(p, a1, a2)) {
+            if (!console_ready()) {
+                p->state = BLOCKED_READ;
+                return 0;
+            }
+            result = 0;
+            while (result < a2 && console_ready()) {
+                *(uint8_t *)(uintptr_t)(a1 + result++) = mmio_read8(console + RV32_CONSOLE_TX);
+            }
+        }
+        break;
+    case SYS_EVENT:
+        result = 0;
+        if (key_count) {
+            result = keys[key_head];
+            key_head = (key_head + 1) % KEY_BUFFER;
+            key_count--;
+        }
+        break;
+    case SYS_KEYS:
+        result = input ? mmio_read32(input + RV32_INPUT_KEYS) : 0;
+        break;
+    case SYS_PRESENT:
+        /* A present while an engine owns the framebuffer faults, and the kernel must not fault:
+         * for a program that drives the engines, wait until they finish. */
+        if (display && !((p->flags & PROGRAM_ACCELERATORS) && engines_busy())) {
+            mmio_write32(display + RV32_DISPLAY_PRESENT, 1);
+            result = mmio_read32(display + RV32_DISPLAY_FRAMES);
+        }
+        break;
+    case SYS_SBRK:
+        if (a0 <= slot_base(p) + OS_SLOT_SIZE - OS_STACK_SIZE - p->brk) {
+            result = p->brk;
+            p->brk += a0;
+        }
+        break;
+    case SYS_SPAWN:
+        if (user_string(p, a0, name, sizeof name) && user_string(p, a1, args, sizeof args)) {
+            struct proc *child = spawn(name, args, p->pid);
+            result = child ? child->pid : SYS_ERROR;
+        }
+        break;
+    case SYS_WAIT:
+        for (uint32_t i = 0; i < MAX_PROCS; i++) {
+            struct proc *child = &procs[i];
+            if (child->state == FREE || child->pid != a0 || child->parent != p->pid) {
+                continue;
+            }
+            if (child->state != ZOMBIE) {
+                p->state = BLOCKED_WAIT;
+                p->wait_pid = a0;
+                return 0;
+            }
+            result = child->exit_code;
+            child->state = FREE;
+        }
+        break;
+    case SYS_LIST: {
+        uint32_t count;
+        const struct program *list = programs(&count);
+        if (a0 < count && user_range(p, a1, a2)) {
+            uint32_t n = 0;
+            while (list[a0].name[n]) {
+                n++;
+            }
+            if (n < a2) {
+                memcpy((void *)(uintptr_t)a1, list[a0].name, n + 1);
+                result = n;
+            }
+        }
+        break;
+    }
+    case SYS_YIELD:
+        p->state = READY;
+        result = 0;
+        break;
+    case SYS_SLEEP:
+        p->wake = mtime() + a0;
+        p->state = BLOCKED_SLEEP;
+        result = 0;
+        break;
+    case SYS_HALT:
+        halt(a0);
+    case SYS_TIME:
+        result = (uint32_t)mtime();
+        break;
+    case SYS_GETPID:
+        result = p->pid;
+        break;
+    case SYS_DISPLAY:
+        result = framebuffer;
+        break;
+    default:
+        break; /* an unknown call fails */
+    }
+    f->x[10] = result;
+    return 1;
+}
+
+static void kill(struct proc *p, uint32_t cause, uint32_t tval)
+{
+    kputs("kernel: pid ");
+    kputdec(p->pid);
+    kputc(' ');
+    kputs(p->name);
+    kputs(" killed: cause ");
+    kputdec(cause);
+    kputs(" at ");
+    kputhex(p->f.pc);
+    kputs(" tval ");
+    kputhex(tval);
+    kputc('\n');
+    finish(p, 128u + cause);
+}
+
+/* Called by kentry.S with the frame it saved; returns the frame to resume. */
+struct frame *kernel_trap(struct frame *f)
+{
+    uint32_t cause = csr_read(CSR_MCAUSE), tval = csr_read(CSR_MTVAL);
+    struct proc *p = proc_of(f);
+    current = p;
+    if (cause & MCAUSE_INTERRUPT) {
+        uint32_t code = cause & 0x1fu;
+        if (code == IRQ_MEI) {
+            external_interrupt();
+        } else if (code == IRQ_MTI) {
+            set_timer(mtime() + KERNEL_TICK);
+        }
+    } else if (!p) {
+        panic("trap in the idle loop");
+    } else if (cause == CAUSE_ECALL_M || cause == CAUSE_ECALL_U) {
+        if (syscall(p)) {
+            f->pc += 4;
+        }
+    } else {
+        kill(p, cause, tval);
+    }
+    return schedule(); /* O2 has no preemption: a running process keeps the machine */
+}
+
+_Noreturn void kernel_main(uint32_t hart, uintptr_t tree)
+{
+    discover(tree);
+    kputs("kernel: ");
+    kputs(model);
+    kputs(", hart ");
+    kputdec(hart);
+    kputs("\nkernel: devices console clint plic");
+    kputs(input ? " input" : "");
+    kputs(display ? " display" : "");
+    kputs(gpu ? " g1" : "");
+    kputs(g3d ? " g2" : "");
+    uint32_t count;
+    (void)programs(&count);
+    kputs("\nkernel: ");
+    kputdec(count);
+    kputs(" programs\n");
+
+    csr_write(CSR_MTVEC, (uint32_t)(uintptr_t)trap_vector);
+    if (input) {
+        mmio_write32(plic + RV32_PLIC_PRIORITY(input_source), 1);
+        mmio_write32(plic + RV32_PLIC_ENABLE, 1u << input_source);
+        mmio_write32(plic + RV32_PLIC_THRESHOLD, 0);
+    }
+    set_timer(mtime() + KERNEL_TICK);
+    csr_write(CSR_MIE, MIP_MEIP | MIP_MTIP);
+
+    idle_frame.x[2] = (uint32_t)(uintptr_t)&idle_stack[64];
+    idle_frame.pc = (uint32_t)(uintptr_t)kernel_idle;
+    idle_frame.mstatus = MSTATUS_MPP_M | MSTATUS_MPIE;
+    if (!spawn("sh", "", 0)) {
+        panic("no shell");
+    }
+    kernel_resume(schedule());
+}

@@ -1,0 +1,12 @@
+ls
+hello
+hello a b c
+primes
+primes 100
+primes 2
+nosuch
+syscheck
+fault load
+fault illegal
+hello still here
+halt
