@@ -22,6 +22,9 @@ contract:
   (`run-rv32-os-qemu-reboot`), not a mid-run reset on the RTL.
 - The file calls are `open`, `read`, `write`, `close` and `files`; there is
   no seek, and opening for writing truncates.
+- PLIC sources latch their requests in a gateway until claimed (the PLIC
+  specification, QEMU 11), rather than being pending only while the line is
+  high as item 6 of O1 says.
 - O5 grants the framebuffer to every process and the accelerators only to a
   program flagged for them, which is trusted: the engines' DMA is not held by
   PMP.

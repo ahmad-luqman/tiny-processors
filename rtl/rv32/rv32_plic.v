@@ -9,11 +9,13 @@
 //   +0x200000            context 0's threshold, 3 bits
 //   +0x200004            claim (read) / complete (write)
 // Only the WIRED sources hold a priority and an enable; the others read 0
-// and ignore writes. Sources are level-triggered, as QEMU's are: a source is
-// pending while its line is high and it is not claimed. A claim returns the
-// pending, enabled source with the highest priority above the threshold,
-// ties to the lowest number, or 0, and marks it claimed; writing its number
-// back while it is enabled completes it. `meip` is set while a claim would
+// and ignore writes. Each wired source has a gateway, as in the PLIC
+// specification and QEMU: its pending bit is set on a clock where its line is
+// high and it is not claimed, and then stays set, whatever the line does,
+// until a claim clears it. A claim returns the pending, enabled source with
+// the highest priority above the threshold, ties to the lowest number, or 0,
+// and marks it claimed; writing its number back while it is enabled completes
+// it, and a line still high then sets the pending bit again. `meip` is set while a claim would
 // return nonzero. Every other offset and every byte or halfword access is
 // refused.
 module rv32_plic #(
@@ -36,7 +38,7 @@ module rv32_plic #(
     localparam [22:0] PENDING = 23'h00_1000, ENABLE = 23'h00_2000, THRESHOLD = 23'h20_0000, CLAIM = 23'h20_0004;
 
     reg [2:0] prio [0:31];
-    reg [31:0] enable, claimed;
+    reg [31:0] enable, claimed, pending;
     reg [2:0] threshold;
 
     wire [22:0] offset = addr[22:0];
@@ -46,7 +48,6 @@ module rv32_plic #(
     wire at_threshold = offset == THRESHOLD, at_claim = offset == CLAIM;
     wire known = at_priority || (at_pending && !we) || at_enable || at_threshold || at_claim;
 
-    wire [31:0] pending = lines & WIRED & ~claimed;
     wire [31:0] candidates = pending & enable;
 
     // The claim: a priority encoder over the enabled pending sources, strictly
@@ -80,13 +81,22 @@ module rv32_plic #(
             for (k = 0; k < 32; k = k + 1) prio[k] <= 3'd0;
             enable <= 32'd0;
             claimed <= 32'd0;
+            pending <= 32'd0;
             threshold <= 3'd0;
-        end else if (accept) begin
-            if (we && at_priority && WIRED[offset[6:2]]) prio[offset[6:2]] <= wdata[2:0];
-            if (we && at_enable) enable <= wdata & WIRED;
-            if (we && at_threshold) threshold <= wdata[2:0];
-            if (we && at_claim && wdata[31:5] == 27'd0 && enable[wdata[4:0]]) claimed[wdata[4:0]] <= 1'b0;
-            if (!we && at_claim && best != 5'd0) claimed[best] <= 1'b1;
+        end else begin
+            // The gateways: a request latches while the line is high and the source is not claimed.
+            // A claim below clears its bit in the same clock, which wins over the latch.
+            pending <= pending | (lines & WIRED & ~claimed);
+            if (accept) begin
+                if (we && at_priority && WIRED[offset[6:2]]) prio[offset[6:2]] <= wdata[2:0];
+                if (we && at_enable) enable <= wdata & WIRED;
+                if (we && at_threshold) threshold <= wdata[2:0];
+                if (we && at_claim && wdata[31:5] == 27'd0 && enable[wdata[4:0]]) claimed[wdata[4:0]] <= 1'b0;
+                if (!we && at_claim && best != 5'd0) begin
+                    claimed[best] <= 1'b1;
+                    pending[best] <= 1'b0;
+                end
+            end
         end
     end
 

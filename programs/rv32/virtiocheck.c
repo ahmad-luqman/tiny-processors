@@ -6,10 +6,10 @@
  * checks: a sector written and read back; two requests made available before
  * one notify both complete; a read past the end of the disk is IOERR, and so
  * is a two-sector write from the last sector, which leaves that sector as it
- * was; an unknown request type (6) is UNSUPP; InterruptStatus and the device's PLIC
- * source report completion until acknowledged. Every value it folds into the
- * PASS word is one the virtio specification fixes, so all three platforms
- * print the same word. The disk's sector 3 is overwritten.
+ * was; an unknown request type (6) is UNSUPP; InterruptStatus reports
+ * completion until acknowledged, and the device's PLIC source is pending until
+ * claimed. Every value it folds into the PASS word is one the virtio and PLIC
+ * specifications fix, so all three platforms print the same word. The disk's sector 3 is overwritten.
  *
  * On our machine (root compatible "tiny-processors,rv32-machine") it goes on
  * to what our contract adds and QEMU does differently: a buffer that is not
@@ -264,12 +264,24 @@ int main(uint32_t hart, uintptr_t tree_address)
     check("used length of a read", used.ring[(seen - 1) % QUEUE].len, SECTOR + 1);
     rv32_puts("virtiocheck: sector 3 written and read\n");
 
-    /* The interrupt: InterruptStatus and the PLIC's pending bit until acknowledged. */
+    /* The interrupt: InterruptStatus, and the PLIC's pending bit, which a claim clears (the gateway
+     * holds a request until it is claimed, whatever the line does meanwhile). Acknowledged at the
+     * device and completed at the PLIC, the source stays quiet. */
     check("interrupt status", mmio_read32(base + VIRTIO_REG_INTERRUPT_STATUS) & 1u, 1);
     check("PLIC pending", (mmio_read32(plic + RV32_PLIC_PENDING) >> source) & 1u, 1);
+    mmio_write32(plic + RV32_PLIC_PRIORITY(source), 1);
+    mmio_write32(plic + RV32_PLIC_THRESHOLD, 0);
+    mmio_write32(plic + RV32_PLIC_ENABLE, 1u << source);
+    uint32_t claimed = mmio_read32(plic + RV32_PLIC_CLAIM);
+    check("claim", claimed, source);
+    check("claimed, not pending", (mmio_read32(plic + RV32_PLIC_PENDING) >> source) & 1u, 0);
     mmio_write32(base + VIRTIO_REG_INTERRUPT_ACK, 1);
     check("acknowledged", mmio_read32(base + VIRTIO_REG_INTERRUPT_STATUS) & 1u, 0);
+    mmio_write32(plic + RV32_PLIC_CLAIM, claimed);
     check("PLIC quiet", (mmio_read32(plic + RV32_PLIC_PENDING) >> source) & 1u, 0);
+    check("nothing to claim", mmio_read32(plic + RV32_PLIC_CLAIM), 0);
+    mmio_write32(plic + RV32_PLIC_ENABLE, 0);
+    fold(claimed);
     rv32_puts("virtiocheck: interrupt\n");
 
     /* Two requests, one notify. */

@@ -57,9 +57,12 @@ forever: it retires at once. Both are allowed, and both run the same loop,
 ### The PLIC
 
 [rv32_plic.v](../rtl/rv32/rv32_plic.v) is a priority encoder and three small
-register sets. Pending is combinational, `lines & WIRED & ~claimed`, because
-QEMU's PLIC treats our kind of source as level-triggered and drops a request
-whose line falls. The claim is a loop over 31 sources that keeps the first
+register sets. Each source's pending bit is a gateway: it latches while the
+line is high and the source is not claimed, and only a claim clears it, as the
+PLIC specification says and QEMU 11 does. (O1 first made pending follow the
+line, `lines & WIRED & ~claimed`, which the QEMU 8 used then also did; the
+review of the track changed it when a newer QEMU kept a request the device
+had already withdrawn.) The claim is a loop over 31 sources that keeps the first
 strictly greater priority, so the lowest number wins a tie, starting from the
 threshold, so only priorities above it count. A read of the claim register
 marks the answer claimed at acceptance; writing the number back while it is
@@ -235,8 +238,11 @@ left to the programs, which get its address from `display()`; on QEMU it is 0
 and Pong says `pong: no display`.
 
 A program that faults is killed: the kernel prints
-`kernel: pid 9 fault killed: cause 5 at 80200074 tval 00200000`, the exit
-code is 128 plus the cause, and the shell carries on. Nothing stops a program
+`kernel: pid 9 fault killed: cause 5 at 80200074 tval 00200000` (since the
+track's review, a pc inside the program's own slots is printed relative to
+its load address, `at fault+0x18`, and fault.c's faulting instructions are
+assembly at fixed offsets, so the transcripts do not depend on the compiler),
+the exit code is 128 plus the cause, and the shell carries on. Nothing stops a program
 from writing kernel memory yet; that is O5.
 
 ### Programs
@@ -382,12 +388,12 @@ and takes the first whose DeviceID is 2.
 ### Evidence (O3)
 
 - **virtiocheck** ([virtiocheck.c](../programs/rv32/virtiocheck.c)): set up;
-  sector 3 out and back; `InterruptStatus` and the PLIC's pending bit until
-  acknowledged; two requests served by one notify; a read past the disk is
+  sector 3 out and back; `InterruptStatus` until acknowledged and the PLIC's
+  pending bit until claimed; two requests served by one notify; a read past the disk is
   IOERR and type 6 is UNSUPP (and, since O5's review, a two-sector write from
   the last sector is IOERR and leaves it blank, and a descriptor index past
-  the queue's size needs a reset). `PASS 16fc0878` (`edec4a52` before the
-  review added the crossing write) on QEMU `virt`, the emulator,
+  the queue's size needs a reset). `PASS e0cd1a7f` (`edec4a52` before the
+  review added the crossing write and the claim) on QEMU `virt`, the emulator,
   Icarus and Verilator (with seeded stalls on the CPU's bus and the graphics
   port), the traces identical and every backend's final disk the same
   131,072 bytes as QEMU's. On our machine it also checks what QEMU does
@@ -564,16 +570,16 @@ more ways to earn one. [fault.c](../programs/rv32/os/fault.c) gains five:
 
 ```
 $ fault kernel
-kernel: pid 11 fault killed: cause 7 at 80200074 tval 80000000
+kernel: pid 11 fault killed: cause 7 at fault+0x2c tval 80000000
 sh: fault exited 135
 $ fault shell
-kernel: pid 12 fault killed: cause 7 at 80200094 tval 80100000
+kernel: pid 12 fault killed: cause 7 at fault+0x38 tval 80100000
 sh: fault exited 135
 $ fault csr
-kernel: pid 13 fault killed: cause 2 at 80200108 tval 30002573
+kernel: pid 13 fault killed: cause 2 at fault+0x40 tval 30002573
 sh: fault exited 130
 $ fault read
-kernel: pid 14 fault killed: cause 5 at 80200114 tval 80000000
+kernel: pid 14 fault killed: cause 5 at fault+0x4c tval 80000000
 sh: fault exited 133
 $ fault exec
 kernel: pid 15 fault killed: cause 1 at 80000000 tval 80000000
@@ -722,9 +728,9 @@ into the caller's memory.
 2. **A fetch in flight.** In [rv32.v](../rtl/rv32/rv32.v), what would go wrong
    if `irq_take` ignored `fetch_waiting`? Run the directed tests with
    `--seed` stalls after removing it and read the testbench's complaint.
-3. **Level or edge.** Make the PLIC latch pending instead of following the
-   line. Which `irqcheck` step behaves differently if the handler drains the
-   queue without claiming?
+3. **Latched or level.** Make the PLIC's pending bit follow the line again
+   (`lines & WIRED & ~claimed`). Which directed test fails, and what would a
+   handler that drains the input queue before claiming then see?
 4. **Priority.** Give the input priority 1 and the threshold 1. Where does the
    specification say this masks the source, and which line of `rv32_plic.v`
    implements it?

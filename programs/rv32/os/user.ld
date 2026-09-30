@@ -15,6 +15,7 @@ SECTIONS
     . = SLOT_BASE;
     .text : {
         KEEP(*(.text.init))
+        KEEP(*(.text.fault)) /* fault.c's faulting instructions, at a fixed place */
         *(.text .text.*)
     } :slot
     .rodata : {

@@ -1262,18 +1262,22 @@ RV32_OS_PONG_ARGS := --image build/rv32/os/kernel.bin --console-input $(RV32_OS)
 
 build/rv32/os:
 	mkdir -p $@
-build/rv32/os/%.o: $(RV32_OS)/%.c $(RV32_OS_HEADERS) $(RV32_DIGIT_GENERATED) $(RV32_G3D_GENERATED) | build/rv32/os
+# Static pattern rules: GNU Make 3.81 (macOS's /usr/bin/make) takes the first pattern rule that
+# matches, not the most specific, so a plain `build/rv32/os/%.o` rule would lose to
+# `build/rv32/%.o` above and compile the OS sources without their flags and headers.
+RV32_OS_C_OBJS := $(patsubst $(RV32_OS)/%.c,build/rv32/os/%.o,$(wildcard $(RV32_OS)/*.c))
+$(RV32_OS_C_OBJS): build/rv32/os/%.o: $(RV32_OS)/%.c $(RV32_OS_HEADERS) $(RV32_DIGIT_GENERATED) $(RV32_G3D_GENERATED) | build/rv32/os
 	$(RV32_CC) $(RV32_OS_CFLAGS) -c -o $@ $<
 build/rv32/os/ustart.o: $(RV32_OS)/ustart.S $(RV32_OS)/sys.h | build/rv32/os
 	$(RV32_CC) $(RV32_OS_CFLAGS) -c -o $@ $<
 .SECONDEXPANSION:
-build/rv32/os/%.elf: $$(RV32_OS_OBJS_$$*) $(RV32_OS_USER) $(RV32_OS)/user.ld
+$(RV32_OS_ELFS): build/rv32/os/%.elf: $$(RV32_OS_OBJS_$$*) $(RV32_OS_USER) $(RV32_OS)/user.ld
 	$(RV32_CC) $(RV32_ARCH) -nostdlib -static --ld-path=$(RV32_LD) -Wl,-T,$(RV32_OS)/user.ld \
 		-Wl,--defsym=SLOT_BASE=$(call rv32_os_base,$*) -Wl,--defsym=SLOT_SPAN=$(call rv32_os_size,$*) \
 		-Wl,-Map,$(@:.elf=.map) -o $@ $(RV32_OS_OBJS_$*) $(RV32_OS_USER)
-build/rv32/os/%.lst: build/rv32/os/%.elf
+$(RV32_OS_ELFS:.elf=.lst) build/rv32/os/kernel.lst: build/rv32/os/%.lst: build/rv32/os/%.elf
 	$(RV32_OBJDUMP) -d -S $< > $@
-build/rv32/os/%.bin: build/rv32/os/%.elf
+build/rv32/os/kernel.bin: build/rv32/os/%.bin: build/rv32/os/%.elf
 	$(RV32_OBJCOPY) -O binary $< $@
 build/rv32/os/ramdisk.img: $(RV32_OS_ELFS) tools/rv32_ramdisk.py
 	$(PYTHON) tools/rv32_ramdisk.py --out $@ --accelerators menu $(RV32_OS_ELFS)
@@ -1366,7 +1370,7 @@ test-rv32: run-rv32-os-qemu run-rv32-os-qemu-reboot run-rv32-os-emu run-rv32-os-
 # backends leave. The kernel's file system (tfs) comes from tools/rv32_mkfs.py.
 .PHONY: check-rv32-virtiocheck-image run-rv32-virtio-qemu run-rv32-virtio-emu run-rv32-virtio-rtl run-rv32-virtio-rtl-verilator run-rv32-virtio-rtl-steps
 RV32_VIRTIOCHECK_OBJS := build/rv32/virtiocheck.o build/rv32/trap.o build/rv32/fdt.o $(RV32_COMMON_OBJS)
-RV32_VIRTIOCHECK_HEX := 16fc0878
+RV32_VIRTIOCHECK_HEX := e0cd1a7f
 RV32_VIRTIO_ARGS := --image build/rv32/virtiocheck.bin --disk build/rv32/blank.disk --allow-traps --expect-last-line "PASS $(RV32_VIRTIOCHECK_HEX)" --expect-console-file programs/rv32/virtiocheck.expected
 build/rv32/virtiocheck.o: programs/rv32/fdt.h programs/rv32/virtio_mmio.h
 build/rv32/virtiocheck.elf: $(RV32_VIRTIOCHECK_OBJS) programs/rv32/link.ld

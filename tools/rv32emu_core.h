@@ -110,6 +110,7 @@ typedef struct {
     uint32_t pmpaddr[8];
     uint8_t plic_priority[PLIC_SOURCES]; /* the PLIC (O1): priorities of the wired sources */
     uint32_t plic_enable, plic_claimed;  /* context 0's enables; sources claimed and not completed */
+    uint32_t plic_pending;               /* the gateways' latched requests */
     uint8_t plic_threshold;
     uint64_t interrupts; /* interrupts taken */
     virtio_blk *virtio;  /* the block device (O3), allocated by emu_alloc */

@@ -62,7 +62,7 @@ The core-local interruptor at 0x0200_0000, virt's address: msip, mtimecmp and th
 _Avoid_: the timer (M5's), a PLIC, an interrupt controller for external devices.
 
 **PLIC**:
-The platform-level interrupt controller at 0x0c00_0000, virt's address and register layout, for one context (hart 0, machine mode): source priorities, a pending word, enables, a threshold and claim/complete; it raises mip.MEIP (Track 2, O1). The input queue is source 12. See [the contract](docs/rv32.md#plic-at-0x0c00_0000).
+The platform-level interrupt controller at 0x0c00_0000, virt's address and register layout, for one context (hart 0, machine mode): source priorities, a pending word (each source's request latched until claimed), enables, a threshold and claim/complete; it raises mip.MEIP (Track 2, O1). The input queue is source 12. See [the contract](docs/rv32.md#plic-at-0x0c00_0000).
 _Avoid_: an interrupt vector table, the CLINT.
 
 **Step ticks**:

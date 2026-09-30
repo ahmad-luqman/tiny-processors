@@ -206,6 +206,19 @@ class InterruptTest(StepTicksCase):
         self.assertEqual(records, [["5", f"{PLIC_CLAIM:08x}"], ["7", f"{PLIC_PENDING:08x}"], ["5", f"{PLIC + 0x3000:08x}"],
                                    ["5", f"{PLIC + PLIC_SIZE:08x}"], ["7", f"{PLIC_THRESHOLD:08x}"]])
 
+    def test_pending_latches_until_claimed(self):
+        # The gateway (PLIC specification, QEMU): the input's request stays pending after its line
+        # drops (the queue drained), a claim still returns it and clears it, and completing it with
+        # the line low leaves nothing pending.
+        words = LI(1, PLIC + 4 * PLIC_SOURCE_INPUT) + LI(2, 1) + [SW(2, 1, 0)]
+        words += LI(1, PLIC_ENABLE) + LI(2, 1 << PLIC_SOURCE_INPUT) + [SW(2, 1, 0)]
+        words += LI(10, PLIC_CLAIM) + LI(11, PLIC_PENDING) + LI(12, INPUT)
+        words += [LW(13, 12, 0), BNE(13, 0, -4)]                       # drain the queue: the line drops
+        words += [LW(3, 11, 0), CSRRS(4, MIP_CSR, 0), LW(5, 10, 0), LW(6, 11, 0), SW(5, 10, 0), LW(7, 11, 0), LW(8, 10, 0)]
+        emulator, rtl = self.assert_same(words + dump(3, 4, 5, 6, 7, 8), input_script="frame 0 down A\n")
+        got = [stored(rtl.trace, SAVE + 0x40 + 4 * i) for i in range(6)]
+        self.assertEqual(got, [1 << PLIC_SOURCE_INPUT, 1 << 11, PLIC_SOURCE_INPUT, 0, 0, 0])
+
     def test_claim_complete_protocol(self):
         # A claimed source is not pending until completed, even while its line stays high; a
         # completion for a disabled source is ignored; completing the enabled one re-pends it.

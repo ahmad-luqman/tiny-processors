@@ -165,6 +165,19 @@ static void kputhex(uint32_t value)
     }
 }
 
+/* Hexadecimal without leading zeros. */
+static void kputhex_short(uint32_t value)
+{
+    int shift = 28;
+    while (shift > 0 && !(value >> shift)) {
+        shift -= 4;
+    }
+    for (; shift >= 0; shift -= 4) {
+        uint32_t digit = (value >> shift) & 15u;
+        kputc((char)(digit < 10 ? '0' + digit : 'a' + digit - 10));
+    }
+}
+
 static int console_ready(void)
 {
     return mmio_read8(console + RV32_CONSOLE_STATUS) & 1u; /* LSR.DR */
@@ -871,7 +884,13 @@ static void kill(struct proc *p, uint32_t cause, uint32_t tval)
     kputs(" killed: cause ");
     kputdec(cause);
     kputs(" at ");
-    kputhex(p->f.pc);
+    if (user_range(p, p->f.pc, 4)) { /* inside its own code: relative to where it was loaded */
+        kputs(p->name);
+        kputs("+0x");
+        kputhex_short(p->f.pc - p->base);
+    } else {
+        kputhex(p->f.pc);
+    }
     kputs(" tval ");
     kputhex(tval);
     kputc('\n');

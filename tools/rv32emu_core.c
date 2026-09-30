@@ -234,18 +234,27 @@ static mem_access rom_load(machine *m, uint32_t offset, int width, uint32_t *val
     return ACC_OK;
 }
 
-/* PLIC (O1; docs/rv32.md, "PLIC"): one context, hart 0 in machine mode. A wired source is pending
- * while its line is high and it is not claimed; a claim returns the pending, enabled source with the
- * highest priority above the threshold (ties to the lowest number) and marks it claimed until its
- * number is written back. Unwired sources hold no priority or enable. */
+/* PLIC (O1; docs/rv32.md, "PLIC"): one context, hart 0 in machine mode. Each wired source has a
+ * gateway, as in the PLIC specification and QEMU: its pending bit is set while its line is high and
+ * it is not claimed, and then stays set, whatever the line does, until a claim clears it; a
+ * completion ends the claim, and a line still high sets the bit again. A claim returns the pending,
+ * enabled source with the highest priority above the threshold (ties to the lowest number). Unwired
+ * sources hold no priority or enable. The gateways sample the lines before every step, which is
+ * what the RTL's per-clock sampling amounts to: a line only changes through a device access or an
+ * input event, and an instruction takes more than one clock. */
 static uint32_t plic_lines(const machine *m)
 {
     return (m->count ? 1u << PLIC_SOURCE_INPUT : 0u) | (m->virtio->interrupt ? 1u << PLIC_SOURCE_VIRTIO : 0u);
 }
 
+static void plic_sample(machine *m)
+{
+    m->plic_pending |= plic_lines(m) & PLIC_WIRED & ~m->plic_claimed;
+}
+
 static uint32_t plic_pending(const machine *m)
 {
-    return plic_lines(m) & PLIC_WIRED & ~m->plic_claimed;
+    return m->plic_pending;
 }
 
 /* The source a claim would return now, or 0. */
@@ -277,6 +286,7 @@ static mem_access plic_load(machine *m, uint32_t offset, int width, uint32_t *va
     } else if (offset == PLIC_CLAIM) {
         *value = plic_best(m);
         m->plic_claimed |= (1u << *value) & ~1u;
+        m->plic_pending &= ~(1u << *value); /* the claim takes the gateway's request */
     } else {
         return ACC_FAULT;
     }
@@ -1079,6 +1089,7 @@ static void step(machine *m)
     m->mem_read = m->mem_write = false;
     /* An enabled, pending interrupt is taken before the instruction (O1): MEI, then MSI, then MTI. */
     /* In user mode interrupts are always enabled (O5). */
+    plic_sample(m);
     uint32_t pending = ((m->mstatus & MSTATUS_MIE) || m->priv == PRIV_U) && m->mie ? mip_now(m) & m->mie : 0u;
     if (pending) {
         take_interrupt(m, (pending >> IRQ_MEI) & 1u ? IRQ_MEI : (pending >> IRQ_MSI) & 1u ? IRQ_MSI : IRQ_MTI);
