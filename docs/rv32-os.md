@@ -572,14 +572,18 @@ PMP now refuses it before the bus decoder could.
   [session.qemu.expected](../programs/rv32/os/session.qemu.expected)), the
   emulator (1,168,545 steps) and Verilator with a stall per request
   (7,011,061 cycles), results-identical over 78 console lines and 552
-  exception records, with identical disks.
+  exception records, with identical disks; Icarus agrees too (5,276,984
+  cycles).
 - **Earlier sessions in user mode:** Pong keeps its 200 checkpoints and
   `PASS 814f72be` on the emulator and is trace-identical to Verilator in
   step-tick mode (1,165,956 lines); the second boot (`PASS 455b9c97`) is
   results-identical between the emulator and Verilator; the jobs session
-  gives `PASS 408a6738` on QEMU and the emulator; the S1 menu session, which
-  drives G1, G2 and SIMD4 from user mode through entries 4 and 5, keeps its
-  185 checkpoints on the emulator.
+  gives `PASS 408a6738` on QEMU, the emulator and Verilator (41,568,246
+  cycles, 40 presents, identical disks) and is trace-identical between the
+  emulator and Verilator in step-tick mode (6,675,686 lines); the S1 menu
+  session, which drives G1, G2 and SIMD4 from user mode through entries 4 and
+  5, keeps its 185 checkpoints on the emulator and on Verilator with seeded
+  waits (135,312,338 cycles). `test-rv32-os` passes.
 - **Cost:** the core grows from 51,542 to 56,096 generic cells (Yosys 0.33,
   `synth -top rv32`), 4,554 cells for the eight entries' 320 flip-flops, the
   checker's comparators and the mode logic; still latch-free.
