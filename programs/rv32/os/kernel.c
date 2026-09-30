@@ -25,10 +25,12 @@
 #include "board.h"
 #include "csr.h"
 #include "fdt.h"
+#include "fs.h"
 #include "g3d.h"
 #include "gpu.h"
 #include "mmio.h"
 #include "sys.h"
+#include "virtio.h"
 
 #define MAX_PROCS 8
 #define KERNEL_TICK 10000u      /* device ticks between timer interrupts */
@@ -39,6 +41,7 @@
 #define CAUSE_ECALL_M 11u
 #define CAUSE_ECALL_U 8u
 #define RAMDISK_MAGIC 0x4b534452u /* "RDSK" */
+#define OPEN_FILES 4u              /* descriptors 3..6 */
 
 /* A context: kentry.S knows these offsets. */
 struct frame {
@@ -50,8 +53,15 @@ _Static_assert(offsetof(struct frame, pc) == 128 && offsetof(struct frame, mstat
 
 enum state { FREE, READY, RUNNING, BLOCKED_READ, BLOCKED_WAIT, BLOCKED_SLEEP, ZOMBIE };
 
+struct open_file {
+    uint32_t mode; /* 0 (closed), O_READ or O_WRITE */
+    int file;      /* fs.c's index */
+    uint32_t position;
+};
+
 struct proc {
     struct frame f;
+    struct open_file files[OPEN_FILES];
     enum state state;
     uint32_t pid, parent, slot, brk, exit_code, wait_pid, flags;
     uint64_t wake;
@@ -77,7 +87,7 @@ static uint32_t idle_stack[64];
 static uint32_t next_pid = 1, exits, exit_sum;
 
 static uint32_t console, done_register, clint, plic;
-static uint32_t input, input_source, display, framebuffer, gpu, g3d;
+static uint32_t input, input_source, display, framebuffer, gpu, g3d, disk;
 static char model[48];
 
 static uint32_t keys[KEY_BUFFER];
@@ -239,6 +249,22 @@ static void discover(uintptr_t address)
     }
     display = find(&t, "tiny-processors,display", 0, 0);
     framebuffer = display ? find(&t, "tiny-processors,display", 1, 1) : 0;
+    /* The disk: the first "virtio,mmio" node with a block device behind it. QEMU lists all eight
+     * of virt's slots, most of them empty (DeviceID 0); our tree lists the one we have. */
+    for (uint32_t node = 0;; node++) {
+        uint32_t base, size;
+        fdt_status status = fdt_find_nth(&t, "compatible", "virtio,mmio", node, 0, &base, &size);
+        if (status == FDT_NOT_FOUND) {
+            break;
+        }
+        if (status != FDT_OK) {
+            panic("virtio node");
+        }
+        if (mmio_read32(base + 8) == 2) {
+            disk = base;
+            break;
+        }
+    }
     gpu = find(&t, "tiny-processors,g1", 0, 0);
     g3d = find(&t, "tiny-processors,g2", 0, 0);
     const char *name = "unknown";
@@ -358,8 +384,18 @@ static struct proc *spawn(const char *name, const char *args, uint32_t parent)
     return p;
 }
 
+static uint32_t close_file(struct open_file *o)
+{
+    uint32_t mode = o->mode;
+    o->mode = 0;
+    return mode == O_WRITE && !fs_flush() ? SYS_ERROR : 0; /* a written file's size reaches the disk */
+}
+
 static void finish(struct proc *p, uint32_t code)
 {
+    for (uint32_t i = 0; i < OPEN_FILES; i++) {
+        (void)close_file(&p->files[i]);
+    }
     p->exit_code = code;
     exits++;
     exit_sum += fold_name(p->name) ^ code; /* a sum: the same whatever order processes finish in */
@@ -480,7 +516,11 @@ static int syscall(struct proc *p)
         finish(p, a0);
         return 1;
     case SYS_WRITE:
-        if ((a0 == 1 || a0 == 2) && user_range(p, a1, a2)) {
+        if (a0 >= 3 && a0 < 3 + OPEN_FILES && p->files[a0 - 3].mode == O_WRITE && user_range(p, a1, a2)) {
+            struct open_file *o = &p->files[a0 - 3];
+            result = fs_write(o->file, o->position, (const uint8_t *)(uintptr_t)a1, a2);
+            o->position += result;
+        } else if ((a0 == 1 || a0 == 2) && user_range(p, a1, a2)) {
             for (uint32_t i = 0; i < a2; i++) {
                 kputc(*(const char *)(uintptr_t)(a1 + i));
             }
@@ -488,7 +528,11 @@ static int syscall(struct proc *p)
         }
         break;
     case SYS_READ:
-        if (a0 == 0 && a2 && user_range(p, a1, a2)) {
+        if (a0 >= 3 && a0 < 3 + OPEN_FILES && p->files[a0 - 3].mode == O_READ && user_range(p, a1, a2)) {
+            struct open_file *o = &p->files[a0 - 3];
+            result = fs_read(o->file, o->position, (uint8_t *)(uintptr_t)a1, a2);
+            o->position += result;
+        } else if (a0 == 0 && a2 && user_range(p, a1, a2)) {
             if (!console_ready()) {
                 p->state = BLOCKED_READ;
                 return 0;
@@ -580,6 +624,45 @@ static int syscall(struct proc *p)
     case SYS_DISPLAY:
         result = framebuffer;
         break;
+    case SYS_OPEN: {
+        uint32_t mode = a1 & (O_READ | O_WRITE);
+        if ((mode == O_READ || mode == O_WRITE) && !(a1 & ~(O_READ | O_WRITE | O_CREATE)) &&
+            user_string(p, a0, name, FS_NAME)) {
+            int file = fs_open(name, (a1 & O_CREATE) && mode == O_WRITE);
+            for (uint32_t i = 0; file >= 0 && i < OPEN_FILES; i++) {
+                if (!p->files[i].mode) {
+                    p->files[i] = (struct open_file){mode, file, 0};
+                    if (mode == O_WRITE) {
+                        fs_truncate(file); /* writing replaces the contents */
+                    }
+                    result = 3 + i;
+                    break;
+                }
+            }
+        }
+        break;
+    }
+    case SYS_CLOSE:
+        if (a0 >= 3 && a0 < 3 + OPEN_FILES && p->files[a0 - 3].mode) {
+            result = close_file(&p->files[a0 - 3]);
+        }
+        break;
+    case SYS_FILES: {
+        char file_name[FS_NAME];
+        uint32_t size;
+        if (fs_name(a0, file_name, &size) && user_range(p, a1, a2)) {
+            uint32_t n = 0;
+            while (n < FS_NAME && file_name[n]) {
+                n++;
+            }
+            if (n < a2) {
+                memcpy((void *)(uintptr_t)a1, file_name, n);
+                *(char *)(uintptr_t)(a1 + n) = 0;
+                result = size;
+            }
+        }
+        break;
+    }
     default:
         break; /* an unknown call fails */
     }
@@ -640,11 +723,19 @@ _Noreturn void kernel_main(uint32_t hart, uintptr_t tree)
     kputs(display ? " display" : "");
     kputs(gpu ? " g1" : "");
     kputs(g3d ? " g2" : "");
+    kputs(disk ? " disk" : "");
     uint32_t count;
     (void)programs(&count);
     kputs("\nkernel: ");
     kputdec(count);
     kputs(" programs\n");
+    if (disk) {
+        uint32_t sectors = virtio_init(disk);
+        int mounted = sectors && fs_mount();
+        kputs("kernel: disk ");
+        kputdec(sectors);
+        kputs(mounted ? " sectors, tfs\n" : " sectors, no file system\n");
+    }
 
     csr_write(CSR_MTVEC, (uint32_t)(uintptr_t)trap_vector);
     if (input) {

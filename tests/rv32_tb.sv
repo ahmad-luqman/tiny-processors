@@ -154,6 +154,7 @@ module rv32_tb;
     reg done_pending = 0;
     reg [31:0] done_word;
 
+    string disk_path, disk_out_path; // +disk=, +disk-out=: the virtio-blk disk as hex words (O3)
     string image_path, trace_path, wave_path, console_path, checkpoints_path, input_path, text;
     integer trace_fd = 0, console_fd = 0, checkpoints_fd = 0;
     integer image_words = 0;
@@ -299,6 +300,7 @@ module rv32_tb;
                         events - next_event, event_frame[next_event]);
             if (trace_fd != 0) $fclose(trace_fd);
             if (console_fd != 0) $fclose(console_fd);
+            if (disk_out_path != "") $writememh(disk_out_path, dut.virtio.disk);
             if (checkpoints_fd != 0) $fclose(checkpoints_fd);
             finished = 1;
             // The script and the program disagreed: the guest's pass says nothing about the events it
@@ -677,6 +679,16 @@ module rv32_tb;
             dut.accelerator.data_mem[i] = 0;
         end
         $readmemh(image_path, dut.ram.mem, 0, image_words - 1);
+        // The disk: zero unless +disk gives its words (exactly DISK_WORDS of them, as the emulator
+        // requires a disk file of exactly its size); it survives a +reset-at reset, as a disk would.
+        for (i = 0; i < dut.DISK_WORDS; i = i + 1)
+            dut.virtio.disk[i] = 32'd0;
+        if ($value$plusargs("disk=%s", disk_path)) begin
+            if (count_words(disk_path) != dut.DISK_WORDS)
+                $fatal(1, "Disk %0s must hold %0d words", disk_path, dut.DISK_WORDS);
+            $readmemh(disk_path, dut.virtio.disk);
+        end
+        if (!$value$plusargs("disk-out=%s", disk_out_path)) disk_out_path = "";
         repeat (2) @(posedge clk);
         #1 reset = 0;
         // A second reset in the middle of the run, two edges long like the first: the

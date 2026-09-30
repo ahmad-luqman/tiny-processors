@@ -111,7 +111,7 @@ def halt_line(stderr, prefix="rv32emu:"):
 
 
 def emulator_command(emulator, image, trace=None, state=None, limit=None, checkpoints=None, input_script=None,
-                     frames=None, allow_lost_events=False, console_input=None):
+                     frames=None, allow_lost_events=False, console_input=None, disk=None):
     command = [str(emulator), "--image", str(image)]
     if trace is not None:
         command += ["--trace", str(trace)]
@@ -129,6 +129,8 @@ def emulator_command(emulator, image, trace=None, state=None, limit=None, checkp
         command.append("--allow-lost-events")
     if console_input is not None:
         command += ["--console-input", str(console_input)]
+    if disk is not None:
+        command += ["--disk", str(disk)]
     return command
 
 

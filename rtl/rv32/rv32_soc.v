@@ -11,7 +11,8 @@
 module rv32_soc #(
     parameter integer RAM_WORDS = 1048576,
     parameter integer FB_WORDS = 19200, // 320 x 240 one-byte pixels, as 32-bit words
-    parameter integer CONSOLE_BUSY = 0
+    parameter integer CONSOLE_BUSY = 0,
+    parameter integer DISK_WORDS = 32768  // the virtio-blk disk (O3): 128 KiB
 ) (
     input  wire        clk,
     input  wire        reset,
@@ -99,6 +100,11 @@ module rv32_soc #(
     wire mtip, msip_level, meip, input_nonempty;
     wire plic_valid, plic_ready, plic_error;
     wire [31:0] plic_rdata;
+    wire virtio_valid, virtio_ready, virtio_error, virtio_irq, virtio_busy;
+    wire [31:0] virtio_rdata;
+    wire vio_valid, vio_we;
+    wire [31:0] vio_addr, vio_wdata;
+    wire [3:0] vio_strb;
     wire rom_valid, rom_ready, rom_error;
     wire [31:0] rom_rdata;
 
@@ -125,6 +131,7 @@ module rv32_soc #(
         .done_valid(dn_valid), .done_ready(dn_ready), .done_error(dn_error), .done_rdata(dn_rdata),
         .clint_valid(clint_valid), .clint_ready(clint_ready), .clint_error(clint_error), .clint_rdata(clint_rdata),
         .plic_valid(plic_valid), .plic_ready(plic_ready), .plic_error(plic_error), .plic_rdata(plic_rdata),
+        .virtio_valid(virtio_valid), .virtio_ready(virtio_ready), .virtio_error(virtio_error), .virtio_rdata(virtio_rdata),
         .rom_valid(rom_valid), .rom_ready(rom_ready), .rom_error(rom_error), .rom_rdata(rom_rdata),
         .input_valid(in_valid), .input_ready(in_ready), .input_error(in_error), .input_rdata(in_rdata),
         .display_valid(dp_valid), .display_ready(dp_ready), .display_error(dp_error), .display_rdata(dp_rdata),
@@ -183,7 +190,14 @@ module rv32_soc #(
     // RAM is immediate once granted. A held graphics request retains its grant;
     // after an acceptance simultaneous requests alternate, so neither starves.
     reg prefer_gpu, gpu_grant_held;
-    wire grant_gpu=gm_ram && (gpu_grant_held || !ram_valid || prefer_gpu);
+    // The CPU's side of the RAM port: the CPU's own requests, or virtio-blk's DMA while it serves
+    // a notify, since the CPU is then stalled on that store and presents nothing to RAM (O3).
+    wire side_valid = virtio_busy ? vio_valid : ram_valid;
+    wire side_we = virtio_busy ? vio_we : mem_we;
+    wire [31:0] side_addr = virtio_busy ? vio_addr : mem_addr;
+    wire [3:0] side_strb = virtio_busy ? vio_strb : mem_strb;
+    wire [31:0] side_wdata = virtio_busy ? vio_wdata : mem_wdata;
+    wire grant_gpu=gm_ram && (gpu_grant_held || !side_valid || prefer_gpu);
     // CPU writes fault inside G1's blit source or G2's depth buffer while that engine runs.
     wire [31:0] lock_begin = g3d_busy ? g3d_zbase : gpu_source_begin;
     wire [31:0] lock_end = g3d_busy ? g3d_zbase + 32'd153600 : gpu_source_end;
@@ -194,9 +208,11 @@ module rv32_soc #(
         assign source_byte_locked[lane]=mem_strb[lane] && byte_addr>=lock_begin && byte_addr<lock_end;
     end endgenerate
     wire ram_cpu_fault=ram_valid && mem_we && (gpu_source_lock || g3d_busy) && |source_byte_locked;
-    wire ram_physical_valid=grant_gpu ? !gpu_memory_hold : ram_valid && !ram_cpu_fault;
+    // (virtio's DMA is not checked against the engines' locks; the CPU is stalled while it runs.)
+    wire ram_physical_valid=grant_gpu ? !gpu_memory_hold : side_valid && !ram_cpu_fault;
     wire ram_physical_ready, ram_physical_error;
     wire [31:0] ram_physical_rdata;
+    wire vio_ready = virtio_busy && vio_valid && !grant_gpu && ram_physical_ready;
     assign ram_ready=ram_valid && (ram_cpu_fault || (!grant_gpu && ram_physical_ready));
     assign ram_error=ram_cpu_fault || ram_physical_error;
     assign ram_rdata=ram_physical_rdata;
@@ -206,13 +222,13 @@ module rv32_soc #(
             gpu_grant_held<=grant_gpu && gpu_memory_hold;
             if(grant_gpu)begin
                 if(!gpu_memory_hold)prefer_gpu<=0;
-            end else if(ram_valid && ram_ready)prefer_gpu<=1;
+            end else if((ram_valid && ram_ready) || vio_ready)prefer_gpu<=1;
         end
     end
     // Memory BASE values repeat the bus decode; cross-language tests pin both.
     rv32_ram #(.WORDS(RAM_WORDS), .BASE(RAM_BASE)) ram (
-        .clk(clk), .reset(reset), .valid(ram_physical_valid), .we(grant_gpu ? em_we : mem_we),
-        .addr(grant_gpu?em_addr:mem_addr), .strb(grant_gpu?em_strb:mem_strb), .wdata(grant_gpu?em_wdata:mem_wdata),
+        .clk(clk), .reset(reset), .valid(ram_physical_valid), .we(grant_gpu ? em_we : side_we),
+        .addr(grant_gpu?em_addr:side_addr), .strb(grant_gpu?em_strb:side_strb), .wdata(grant_gpu?em_wdata:side_wdata),
         .rdata(ram_physical_rdata), .ready(ram_physical_ready), .error(ram_physical_error)
     );
 
@@ -235,11 +251,19 @@ module rv32_soc #(
         .step_ticks(step_ticks), .step(retire || trap), .mtip(mtip), .msip_level(msip_level)
     );
 
-    // The PLIC (O1): source 12 is the input queue's nonempty line.
-    rv32_plic plic (
+    // The PLIC (O1): source 12 is the input queue's nonempty line, source 1 virtio-blk's (O3).
+    rv32_plic #(.WIRED(32'h0000_1002)) plic (
         .clk(clk), .reset(reset), .valid(plic_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
         .wdata(mem_wdata), .rdata(plic_rdata), .ready(plic_ready), .error(plic_error),
-        .lines({19'd0, input_nonempty, 12'd0}), .meip(meip)
+        .lines({19'd0, input_nonempty, 10'd0, virtio_irq, 1'b0}), .meip(meip)
+    );
+
+    // virtio-blk at virt's first virtio slot (O3); the testbench loads and saves its disk.
+    rv32_virtio_blk #(.DISK_WORDS(DISK_WORDS), .RAM_WORDS(RAM_WORDS), .RAM_BASE(RAM_BASE)) virtio (
+        .clk(clk), .reset(reset), .valid(virtio_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
+        .wdata(mem_wdata), .rdata(virtio_rdata), .ready(virtio_ready), .error(virtio_error),
+        .busy(virtio_busy), .dma_valid(vio_valid), .dma_we(vio_we), .dma_addr(vio_addr), .dma_strb(vio_strb),
+        .dma_wdata(vio_wdata), .dma_rdata(ram_physical_rdata), .dma_ready(vio_ready), .irq(virtio_irq)
     );
 
     // The boot ROM holds the machine's device tree; the core starts with its address in a1.

@@ -324,7 +324,11 @@ class EmulatorTest(unittest.TestCase):
             ([SW(1, 2, 0)], PLIC_PENDING, 7, PLIC_PENDING), # and its pending word is read-only
             ([LW(1, 2, 0)], PLIC + 0x80, 5, PLIC + 0x80),   # between the priorities and the pending word
             ([LW(1, 2, 0)], PLIC + 0x600000, 5, PLIC + 0x600000),  # past the 6 MiB window
-            ([LW(1, 2, 0)], 0x10001000, 5, 0x10001000),     # virt's first virtio-mmio slot: reserved for O3
+            ([LB(1, 2, 0)], VIRTIO, 5, VIRTIO),             # virtio-blk (O3) takes words only
+            ([SW(1, 2, 0)], VIRTIO, 7, VIRTIO),             # MagicValue is read-only
+            ([LW(1, 2, 0x50)], VIRTIO, 5, VIRTIO + 0x50),   # QueueNotify is write-only
+            ([LW(1, 2, 0)], VIRTIO + 0x200, 5, VIRTIO + 0x200),  # past its 512 bytes
+            ([LW(1, 2, 0)], 0x10002000, 5, 0x10002000),     # virt's second virtio slot: unmapped here
             ([LW(1, 2, 2)], MTIME, 4, MTIME + 2),           # misalignment is decided before the window
             ([LHU(1, 2, 2)], MTIME, 5, MTIME + 2),          # an aligned halfword inside the window is refused by it
             ([LW(1, 2, 0)], 0x11003000, 5, 0x11003000),     # the palette window reserved for M6 is unmapped in M5

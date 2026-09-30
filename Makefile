@@ -87,7 +87,7 @@ RV32WIN := build/rv32/rv32win
 SDL3_CFLAGS = $(shell pkg-config --cflags sdl3 2>/dev/null)
 SDL3_LIBS = $(shell pkg-config --libs sdl3 2>/dev/null)
 RV32_RTL := rtl/rv32/rv32_fregfile.v rtl/rv32/rv32_fdecode.v $(FP32_RTL) rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32_muldiv.v rtl/rv32/rv32.v
-RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_clint.v rtl/rv32/rv32_plic.v rtl/rv32/rv32_bootrom.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
+RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_clint.v rtl/rv32/rv32_plic.v rtl/rv32/rv32_virtio_blk.v rtl/rv32/rv32_bootrom.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
 RV32_TB := tests/rv32_tb.sv
 RV32_TB_VVP := build/rv32/rv32_tb.vvp
 RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
@@ -366,7 +366,7 @@ lint-rv32-soc:
 # The memories are shrunk to 64 words so the count measures the decoder and
 # the devices; the core's own count is synth-rv32's.
 synth-rv32-soc: | build
-	yosys -Q -T -l build/rv32-soc-synth.log -p 'read_verilog -Irtl/fp32 $(RV32_SOC_RTL); chparam -set RAM_WORDS 64 -set FB_WORDS 64 rv32_soc; synth -top rv32_soc; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32-soc.json'
+	yosys -Q -T -l build/rv32-soc-synth.log -p 'read_verilog -Irtl/fp32 $(RV32_SOC_RTL); chparam -set RAM_WORDS 64 -set FB_WORDS 64 -set DISK_WORDS 64 rv32_soc; synth -top rv32_soc; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32-soc.json'
 
 waves-rv32: $(RV32_TB_VVP) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl --mode waves --program loop --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/rtl
@@ -1196,11 +1196,11 @@ test-rv32: run-rv32-irq-qemu run-rv32-irq-emu run-rv32-irq-rtl run-rv32-irq-rtl-
 # into the kernel image, which boots the shell. A console session is scripted with
 # --console-input (the emulator), +console-input= (the testbench) and stdin (QEMU).
 .PHONY: firmware-rv32-os check-rv32-os-image run-rv32-os-qemu run-rv32-os-emu run-rv32-os-rtl run-rv32-os-rtl-verilator
-.PHONY: run-rv32-os-pong-emu run-rv32-os-pong-rtl-steps run-rv32-os-menu-emu run-rv32-os-menu-rtl-verilator test-rv32-os
+.PHONY: run-rv32-os-pong-emu run-rv32-os-pong-rtl-steps run-rv32-os-boot2 run-rv32-os-menu-emu run-rv32-os-menu-rtl-verilator test-rv32-os
 RV32_OS := programs/rv32/os
 RV32_OS_CFLAGS := $(RV32_CFLAGS) -I$(RV32_OS) -Ibuild/rv32
-RV32_OS_HEADERS := $(RV32_OS)/sys.h $(RV32_OS)/ulib.h programs/rv32/csr.h programs/rv32/fdt.h $(RV32_HEADERS)
-RV32_OS_PROGRAMS := sh hello primes pong tetris menu syscheck fault
+RV32_OS_HEADERS := $(RV32_OS)/sys.h $(RV32_OS)/ulib.h $(RV32_OS)/fs.h $(RV32_OS)/virtio.h $(RV32_OS)/score.h programs/rv32/csr.h programs/rv32/fdt.h $(RV32_HEADERS)
+RV32_OS_PROGRAMS := sh hello primes pong tetris menu syscheck fault cat write files
 RV32_OS_SLOT_sh := 0
 RV32_OS_SLOT_hello := 1
 RV32_OS_SLOT_primes := 2
@@ -1209,19 +1209,26 @@ RV32_OS_SLOT_tetris := 4
 RV32_OS_SLOT_menu := 5
 RV32_OS_SLOT_syscheck := 6
 RV32_OS_SLOT_fault := 7
+RV32_OS_SLOT_cat := 8
+RV32_OS_SLOT_write := 9
+RV32_OS_SLOT_files := 10
 RV32_OS_USER := build/rv32/os/ustart.o build/rv32/os/ulib.o build/rv32/muldiv.o
 RV32_OS_OBJS_sh := build/rv32/os/sh.o
 RV32_OS_OBJS_hello := build/rv32/os/hello.o
 RV32_OS_OBJS_primes := build/rv32/os/primes.o
 RV32_OS_OBJS_syscheck := build/rv32/os/syscheck.o
 RV32_OS_OBJS_fault := build/rv32/os/fault.o
-RV32_OS_OBJS_pong := build/rv32/os/pong.o build/rv32/pong_game.o build/rv32/gfx.o
-RV32_OS_OBJS_tetris := build/rv32/os/tetris.o build/rv32/tetris_game.o build/rv32/gfx.o build/rv32/gfx_text.o
+RV32_OS_OBJS_cat := build/rv32/os/cat.o
+RV32_OS_OBJS_write := build/rv32/os/write.o
+RV32_OS_OBJS_files := build/rv32/os/files.o
+RV32_OS_OBJS_pong := build/rv32/os/pong.o build/rv32/os/score.o build/rv32/pong_game.o build/rv32/gfx.o
+RV32_OS_OBJS_tetris := build/rv32/os/tetris.o build/rv32/os/score.o build/rv32/tetris_game.o build/rv32/gfx.o build/rv32/gfx_text.o
 RV32_OS_OBJS_menu := build/rv32/os/menu.o $(filter-out build/rv32/capstone.o $(RV32_COMMON_OBJS),$(RV32_CAPSTONE_OBJS))
 RV32_OS_ELFS := $(foreach p,$(RV32_OS_PROGRAMS),build/rv32/os/$(p).elf)
-RV32_OS_KERNEL_OBJS := build/rv32/os/kentry.o build/rv32/os/kernel.o build/rv32/fdt.o build/rv32/muldiv.o
-RV32_OS_ARGS := --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/session.txt --compare results --expect-console-file $(RV32_OS)/session.expected
-RV32_OS_PONG_ARGS := --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/pong.session --input $(RV32_PONG_INPUT) \
+RV32_OS_KERNEL_OBJS := build/rv32/os/kentry.o build/rv32/os/kernel.o build/rv32/os/virtio.o build/rv32/os/fs.o build/rv32/fdt.o build/rv32/muldiv.o
+RV32_OS_DISK := build/rv32/os/disk.img
+RV32_OS_ARGS := --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/session.txt --disk $(RV32_OS_DISK) --compare results --expect-console-file $(RV32_OS)/session.expected
+RV32_OS_PONG_ARGS := --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/pong.session --input $(RV32_PONG_INPUT) --disk $(RV32_OS_DISK) \
 	--expect-checkpoints $(RV32_PONG_EXPECTED) --expect-console-file $(RV32_OS)/pong.session.expected --timeout 600
 
 build/rv32/os:
@@ -1251,7 +1258,10 @@ build/rv32/os/kernel.elf: $(RV32_OS_KERNEL_OBJS) $(RV32_OS)/kernel.ld
 firmware-rv32-os: build/rv32/os/kernel.elf build/rv32/os/kernel.bin build/rv32/os/kernel.lst $(RV32_OS_ELFS:.elf=.lst)
 
 # Every program is checked against its slot, the kernel against its 1 MiB.
-check-rv32-os-image: firmware-rv32-os
+# O3: the disk the sessions start from, a tfs file system holding one file.
+$(RV32_OS_DISK): tools/rv32_mkfs.py $(RV32_OS)/welcome.txt | build/rv32/os
+	$(PYTHON) tools/rv32_mkfs.py --new --add welcome=$(RV32_OS)/welcome.txt $@
+check-rv32-os-image: firmware-rv32-os $(RV32_OS_DISK)
 	@set -e; for p in $(RV32_OS_PROGRAMS); do \
 		base=$$(printf '0x%x' $$((0x80100000 + $$(make -s --no-print-directory print-rv32-os-slot-$$p) * 0x40000))); \
 		$(PYTHON) tools/rv32_image.py build/rv32/os/$$p.elf --listing build/rv32/os/$$p.lst --ram-base $$base --ram-size 0x40000 --allow-system > /dev/null || exit 1; \
@@ -1262,7 +1272,8 @@ print-rv32-os-slot-%:
 	@echo $(RV32_OS_SLOT_$*)
 
 run-rv32-os-qemu: check-rv32-os-image
-	$(PYTHON) tools/rv32_run_qemu.py build/rv32/os/kernel.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --stdin $(RV32_OS)/session.txt --last-line --timeout 30 --transcript build/rv32/os/session.qemu.transcript
+	cp $(RV32_OS_DISK) build/rv32/os/session.qemu.disk
+	$(PYTHON) tools/rv32_run_qemu.py build/rv32/os/kernel.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --stdin $(RV32_OS)/session.txt --drive build/rv32/os/session.qemu.disk --last-line --timeout 30 --transcript build/rv32/os/session.qemu.transcript
 	diff -u $(RV32_OS)/session.qemu.expected build/rv32/os/session.qemu.transcript
 run-rv32-os-emu: check-rv32-os-image $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32/os/emu
@@ -1275,7 +1286,13 @@ run-rv32-os-rtl-verilator: check-rv32-os-image $(RV32EMU) $(RV32_TB_VERILATOR)
 run-rv32-os-pong-emu: check-rv32-os-image $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_PONG_ARGS) --compare results --backend emulator --emulator $(RV32EMU) --out build/rv32/os/pong-emu
 run-rv32-os-pong-rtl-steps: check-rv32-os-image $(RV32EMU) $(RV32_TB_VERILATOR)
-	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_PONG_ARGS) --ticks steps --allow-traps --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --max-cycles 60000000 --out build/rv32/os/pong-steps
+	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_PONG_ARGS) --ticks steps --allow-traps --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --max-cycles 60000000 --out build/rv32/os/pong-steps --disk-out build/rv32/os/pong.disk
+# A second boot on the disk the Pong session left (O3): the score is still there, on both backends,
+# and the host tool reads the same file.
+run-rv32-os-boot2: run-rv32-os-pong-rtl-steps
+	$(PYTHON) -m tools.rv32_rtl --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/boot2.session --disk build/rv32/os/pong.disk \
+		--compare results --expect-console-file $(RV32_OS)/boot2.session.expected --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --out build/rv32/os/boot2
+	$(PYTHON) tools/rv32_mkfs.py build/rv32/os/pong.disk --cat scores | diff -u $(RV32_OS)/scores.expected -
 # The S1 menu session, the menu run from the shell: S1's 185 checkpoints and PASS word, on the
 # emulator and on Verilator at the results level (it drives the accelerators).
 RV32_OS_MENU_ARGS := --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/menu.session --input programs/rv32/soc.input \
@@ -1286,4 +1303,30 @@ run-rv32-os-menu-rtl-verilator: check-rv32-os-image $(RV32EMU) $(RV32_TB_VERILAT
 	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_MENU_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --seed 17 --gpu-seed 31 --simd-seed 43 --max-cycles 200000000 --out build/rv32/os/menu-verilator
 test-rv32-os: check-rv32-os-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) QEMU_RV32=$(QEMU_RV32) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_os.py' -v
-test-rv32: run-rv32-os-qemu run-rv32-os-emu run-rv32-os-rtl-verilator run-rv32-os-pong-emu run-rv32-os-pong-rtl-steps run-rv32-os-menu-emu run-rv32-os-menu-rtl-verilator test-rv32-os
+test-rv32: run-rv32-os-qemu run-rv32-os-emu run-rv32-os-rtl-verilator run-rv32-os-pong-emu run-rv32-os-pong-rtl-steps run-rv32-os-boot2 run-rv32-os-menu-emu run-rv32-os-menu-rtl-verilator test-rv32-os
+
+# O3: storage. virtiocheck drives the virtio-blk device directly on QEMU virt (a 128 KiB drive on
+# virtio-mmio-bus.0), the emulator (--disk) and the RTL (+disk); the runner compares the disks the
+# backends leave. The kernel's file system (tfs) comes from tools/rv32_mkfs.py.
+.PHONY: check-rv32-virtiocheck-image run-rv32-virtio-qemu run-rv32-virtio-emu run-rv32-virtio-rtl run-rv32-virtio-rtl-verilator run-rv32-virtio-rtl-steps
+RV32_VIRTIOCHECK_OBJS := build/rv32/virtiocheck.o build/rv32/trap_entry.o build/rv32/fdt.o $(RV32_COMMON_OBJS)
+RV32_VIRTIOCHECK_HEX := edec4a52
+RV32_VIRTIO_ARGS := --image build/rv32/virtiocheck.bin --disk build/rv32/blank.disk --allow-traps --expect-last-line "PASS $(RV32_VIRTIOCHECK_HEX)" --expect-console-file programs/rv32/virtiocheck.expected
+build/rv32/virtiocheck.o: programs/rv32/fdt.h
+build/rv32/virtiocheck.elf: $(RV32_VIRTIOCHECK_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(RV32_VIRTIOCHECK_OBJS)
+build/rv32/blank.disk: tools/rv32_mkfs.py | build/rv32
+	$(PYTHON) tools/rv32_mkfs.py --new $@
+check-rv32-virtiocheck-image: build/rv32/virtiocheck.elf build/rv32/virtiocheck.lst build/rv32/virtiocheck.bin build/rv32/blank.disk
+	$(PYTHON) tools/rv32_image.py build/rv32/virtiocheck.elf --listing build/rv32/virtiocheck.lst --bin build/rv32/virtiocheck.bin --hex build/rv32/virtiocheck.hex --allow-privileged
+run-rv32-virtio-qemu: check-rv32-virtiocheck-image
+	cp build/rv32/blank.disk build/rv32/virtio.qemu.disk
+	$(PYTHON) tools/rv32_run_qemu.py build/rv32/virtiocheck.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --drive build/rv32/virtio.qemu.disk --last-line --timeout 20 --expect-hex $(RV32_VIRTIOCHECK_HEX) --transcript build/rv32/virtiocheck.qemu.transcript
+	diff -u programs/rv32/virtiocheck.qemu.expected build/rv32/virtiocheck.qemu.transcript
+run-rv32-virtio-emu: check-rv32-virtiocheck-image $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_VIRTIO_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32/virtio-emu
+run-rv32-virtio-rtl: check-rv32-virtiocheck-image $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_VIRTIO_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/virtio-icarus
+run-rv32-virtio-rtl-verilator: check-rv32-virtiocheck-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_VIRTIO_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --seed 3 --gpu-seed 5 --out build/rv32/virtio-verilator
+test-rv32: run-rv32-virtio-qemu run-rv32-virtio-emu run-rv32-virtio-rtl run-rv32-virtio-rtl-verilator

@@ -164,7 +164,7 @@ static void skip_name(const fdt *t, uint32_t *at)
  * entry `index`, or with `cell_name` the `index`th 32-bit cell of that property instead. A node's
  * properties come before its children, so a node is decided at the first BEGIN_NODE, END_NODE or
  * END after its BEGIN_NODE. */
-static fdt_status find(const fdt *t, const char *property, const char *value, uint32_t index,
+static fdt_status find(const fdt *t, const char *property, const char *value, uint32_t node, uint32_t index,
                        uint32_t *base, uint32_t *size, const char *cell_name)
 {
     uint32_t address_cells[FDT_MAX_DEPTH], size_cells[FDT_MAX_DEPTH];
@@ -183,6 +183,10 @@ static fdt_status find(const fdt *t, const char *property, const char *value, ui
         at += 4;
         if (token == FDT_BEGIN_NODE || token == FDT_END_NODE || token == FDT_END) {
             /* The properties of the current node end here: decide on it. */
+            if (in_props && matched && node) {
+                node--; /* an earlier match: keep looking for the one asked for */
+                matched = 0;
+            }
             if (in_props && matched && cell_name) {
                 if (!has_named || named.length % 4 != 0) {
                     return FDT_NO_PROPERTY;
@@ -251,13 +255,19 @@ static fdt_status find(const fdt *t, const char *property, const char *value, ui
 fdt_status fdt_find(const fdt *t, const char *property, const char *value, uint32_t index,
                     uint32_t *base, uint32_t *size)
 {
-    return find(t, property, value, index, base, size, 0);
+    return find(t, property, value, 0, index, base, size, 0);
+}
+
+fdt_status fdt_find_nth(const fdt *t, const char *property, const char *value, uint32_t node, uint32_t index,
+                        uint32_t *base, uint32_t *size)
+{
+    return find(t, property, value, node, index, base, size, 0);
 }
 
 fdt_status fdt_cell(const fdt *t, const char *property, const char *value, const char *name, uint32_t index,
                     uint32_t *cell)
 {
-    return find(t, property, value, index, cell, 0, name);
+    return find(t, property, value, 0, index, cell, 0, name);
 }
 
 /* Only the root's own properties: they end at its first child's BEGIN_NODE or its END_NODE. */

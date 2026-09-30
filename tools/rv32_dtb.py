@@ -53,6 +53,7 @@ CLINT_BASE, CLINT_SIZE = rv32_asm.CLINT, 0x1_0000
 PLIC_BASE, PLIC_SIZE = rv32_asm.PLIC, rv32_asm.PLIC_SIZE
 PLIC_SOURCES = 31                                   # riscv,ndev: sources 1..31
 INPUT_IRQ = rv32_asm.PLIC_SOURCE_INPUT
+VIRTIO_BASE, VIRTIO_SIZE, VIRTIO_IRQ = rv32_asm.VIRTIO, rv32_asm.VIRTIO_SIZE, rv32_asm.PLIC_SOURCE_VIRTIO
 # Interrupt wiring (O1): phandles of the hart's local interrupt controller and of the PLIC, and the
 # mip bit numbers each connection raises.
 CPU_INTC, PLIC_PHANDLE = 1, 2
@@ -104,7 +105,8 @@ def device(name: str, base: int, compatible: tuple[str, ...], regs: tuple[tuple[
 # would fault and "ns16550a" is not claimed. Since O1 the hart has a
 # riscv,cpu-intc; the CLINT raises its software and timer interrupts, the PLIC
 # (a full SiFive PLIC for one context, so it claims the generic names) its
-# external interrupt, and the input queue is PLIC source 12.
+# external interrupt, and the input queue is PLIC source 12. Since O3 a
+# virtio-mmio block device sits in virt's first virtio slot, PLIC source 1.
 MACHINE = node("", {
     "#address-cells": u32(1), "#size-cells": u32(1),
     "compatible": string("tiny-processors,rv32-machine"),
@@ -126,6 +128,9 @@ MACHINE = node("", {
                 {"#address-cells": u32(0), "#interrupt-cells": u32(1), "interrupt-controller": b"",
                  "interrupts-extended": u32(CPU_INTC, IRQ_MEI), "riscv,ndev": u32(PLIC_SOURCES),
                  "phandle": u32(PLIC_PHANDLE)}),
+         node(f"virtio_mmio@{VIRTIO_BASE:x}", {"compatible": string("virtio,mmio"),
+                                               "reg": u32(VIRTIO_BASE, VIRTIO_SIZE),
+                                               "interrupt-parent": u32(PLIC_PHANDLE), "interrupts": u32(VIRTIO_IRQ)}),
          device("console", CONSOLE_BASE, ("tiny-processors,console",), ((CONSOLE_BASE, 8),)),
          device("input", INPUT_BASE, ("tiny-processors,input",), ((INPUT_BASE, 16),),
                 {"interrupt-parent": u32(PLIC_PHANDLE), "interrupts": u32(INPUT_IRQ)}),

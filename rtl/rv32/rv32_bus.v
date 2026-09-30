@@ -54,6 +54,11 @@ module rv32_bus #(
     input  wire        plic_ready,
     input  wire        plic_error,
     input  wire [31:0] plic_rdata,
+    // virtio-blk at 0x1000_1000 (512 bytes of virt's first 4 KiB virtio slot; O3).
+    output wire        virtio_valid,
+    input  wire        virtio_ready,
+    input  wire        virtio_error,
+    input  wire [31:0] virtio_rdata,
     // Boot ROM (the device tree) at 0x0000_1000, 4 KiB.
     output wire        rom_valid,
     input  wire        rom_ready,
@@ -95,6 +100,7 @@ module rv32_bus #(
     localparam [31:0] DONE_ADDR = 32'h0010_0000;
     localparam [31:0] CLINT_BASE = 32'h0200_0000;
     localparam [31:0] PLIC_BASE = 32'h0c00_0000;
+    localparam [31:0] VIRTIO_BASE = 32'h1000_1000;
     localparam [31:0] BOOTROM_BASE = 32'h0000_1000;
     localparam [31:0] INPUT_BASE = 32'h1100_1000;
     localparam [31:0] DISPLAY_BASE = 32'h1100_2000;
@@ -116,6 +122,7 @@ module rv32_bus #(
     wire clint_sel = !mem_fetch && (mem_addr[31:16] == CLINT_BASE[31:16]);
     // The PLIC's window is 6 MiB: the first three 2 MiB blocks above its base.
     wire plic_sel = !mem_fetch && (mem_addr[31:23] == PLIC_BASE[31:23]) && (mem_addr[22:21] != 2'b11);
+    wire virtio_sel = !mem_fetch && (mem_addr[31:9] == VIRTIO_BASE[31:9]);
     wire rom_sel = !mem_fetch && (mem_addr[31:12] == BOOTROM_BASE[31:12]);
     wire input_sel = !mem_fetch && (mem_addr[31:4] == INPUT_BASE[31:4]);
     wire display_sel = !mem_fetch && (mem_addr[31:4] == DISPLAY_BASE[31:4]);
@@ -125,7 +132,7 @@ module rv32_bus #(
                       ((mem_addr & 32'hffff_fc00) == SIMD4_DATA));
     wire gpu_sel = !mem_fetch && mem_addr[31:7]==GPU_BASE[31:7];
     wire g3d_sel = !mem_fetch && mem_addr[31:13] == G3D_BASE[31:13];   // 8 KiB
-    wire none_sel = !(ram_sel || console_sel || done_sel || clint_sel || plic_sel || rom_sel || input_sel || display_sel || fb_sel || simd_sel || gpu_sel || g3d_sel);
+    wire none_sel = !(ram_sel || console_sel || done_sel || clint_sel || plic_sel || virtio_sel || rom_sel || input_sel || display_sel || fb_sel || simd_sel || gpu_sel || g3d_sel);
 
     assign gpu_valid = req && gpu_sel;
     assign g3d_valid = req && g3d_sel;
@@ -135,21 +142,22 @@ module rv32_bus #(
     assign done_valid = req && done_sel;
     assign clint_valid = req && clint_sel;
     assign plic_valid = req && plic_sel;
+    assign virtio_valid = req && virtio_sel;
     assign rom_valid = req && rom_sel;
     assign input_valid = req && input_sel;
     assign display_valid = req && display_sel;
     assign fb_valid = req && fb_sel;
 
     assign mem_ready = req && ((ram_sel && ram_ready) || (console_sel && console_ready) ||
-                               (done_sel && done_ready) || (clint_sel && clint_ready) || (plic_sel && plic_ready) || (rom_sel && rom_ready) ||
+                               (done_sel && done_ready) || (clint_sel && clint_ready) || (plic_sel && plic_ready) || (virtio_sel && virtio_ready) || (rom_sel && rom_ready) ||
                                (input_sel && input_ready) || (display_sel && display_ready) ||
                                (fb_sel && fb_ready) || (simd_sel && simd_ready) || (gpu_sel && gpu_ready) || (g3d_sel && g3d_ready) || none_sel);
     assign mem_error = (ram_sel && ram_error) || (console_sel && console_error) ||
-                       (done_sel && done_error) || (clint_sel && clint_error) || (plic_sel && plic_error) || (rom_sel && rom_error) ||
+                       (done_sel && done_error) || (clint_sel && clint_error) || (plic_sel && plic_error) || (virtio_sel && virtio_error) || (rom_sel && rom_error) ||
                        (input_sel && input_error) || (display_sel && display_error) ||
                        (fb_sel && fb_error) || (simd_sel && simd_error) || (gpu_sel && gpu_error) || (g3d_sel && g3d_error) || none_sel;
     assign mem_rdata = ({32{ram_sel}} & ram_rdata) | ({32{console_sel}} & console_rdata) |
-                       ({32{done_sel}} & done_rdata) | ({32{clint_sel}} & clint_rdata) | ({32{plic_sel}} & plic_rdata) | ({32{rom_sel}} & rom_rdata) |
+                       ({32{done_sel}} & done_rdata) | ({32{clint_sel}} & clint_rdata) | ({32{plic_sel}} & plic_rdata) | ({32{virtio_sel}} & virtio_rdata) | ({32{rom_sel}} & rom_rdata) |
                        ({32{input_sel}} & input_rdata) | ({32{display_sel}} & display_rdata) |
                        ({32{fb_sel}} & fb_rdata) | ({32{simd_sel}} & simd_rdata) | ({32{gpu_sel}} & gpu_rdata) |
                        ({32{g3d_sel}} & g3d_rdata);

@@ -21,6 +21,7 @@ static void usage(void)
     fputs("usage: rv32emu --image FILE [--base ADDR] [--pc ADDR] [--trace FILE] [--dump-state FILE]\n"
           "               [--max-instructions N] [--checkpoints FILE] [--frames DIR] [--input FILE]\n"
           "               [--record FILE] [--allow-lost-events] [--gdb PORT] [--console-input FILE|-]\n"
+          "               [--disk FILE]\n"
           "Loads FILE at ADDR (default 0x80000000), starts at --pc (default 0x80000000), and runs\n"
           "until the done register is written. Console bytes go to stdout, the trace and state\n"
           "to their files, and a final 'rv32emu: halt=...' line to stderr. Each present appends\n"
@@ -31,7 +32,8 @@ static void usage(void)
           "queue as a script that replays the run. --gdb serves one GDB remote-protocol client on\n"
           "127.0.0.1:PORT (0 picks a free port; the chosen one is printed to stderr) with the\n"
           "machine stopped at the reset pc (docs/rv32-gdb.md). --console-input gives the console's\n"
-          "receive side every byte of FILE from reset, or stdin as it arrives with -.\n",
+          "receive side every byte of FILE from reset, or stdin as it arrives with -. --disk backs\n"
+          "the virtio-blk device with FILE (128 KiB), written through as the guest writes.\n",
           stderr);
     exit(EXIT_EMULATOR_ERROR);
 }
@@ -39,7 +41,7 @@ static void usage(void)
 int main(int argc, char **argv)
 {
     const char *image_path = NULL, *trace_path = NULL, *state_path = NULL, *checkpoints_path = NULL;
-    const char *input_path = NULL, *record_path = NULL, *frames_dir = NULL, *console_input = NULL;
+    const char *input_path = NULL, *record_path = NULL, *frames_dir = NULL, *console_input = NULL, *disk_path = NULL;
     uint32_t base = RAM_BASE, start = 0;
     bool start_given = false, allow_lost_events = false;
     int gdb_port = -1; /* --gdb: serve a debugger on this port (0 picks one) */
@@ -76,6 +78,8 @@ int main(int argc, char **argv)
             input_path = value;
         } else if (!strcmp(arg, "--record")) {
             record_path = value;
+        } else if (!strcmp(arg, "--disk")) {
+            disk_path = value;
         } else if (!strcmp(arg, "--console-input")) {
             console_input = value;
         } else if (!strcmp(arg, "--gdb")) {
@@ -96,7 +100,8 @@ int main(int argc, char **argv)
      * parsed, before any output is created: a refused run truncates nothing. The state file is
      * written after the run and is checked here too. */
     const char *inputs[][2] = {{image_path, "image"}, {input_path, "input script"},
-                               {console_input && strcmp(console_input, "-") ? console_input : NULL, "console input"}};
+                               {console_input && strcmp(console_input, "-") ? console_input : NULL, "console input"},
+                               {disk_path, "disk"}};
     const char *outputs[][2] = {{record_path, "record file"}, {trace_path, "trace file"}, {checkpoints_path, "checkpoints file"},
                                 {state_path, "state file"}, {frames_dir, "frames directory"}};
     for (size_t i = 0; i < sizeof outputs / sizeof outputs[0]; i++) {
@@ -119,6 +124,9 @@ int main(int argc, char **argv)
     }
     if (console_input) {
         emu_read_console_input(&m, console_input); /* exits on an unreadable file */
+    }
+    if (disk_path) {
+        emu_open_disk(&m, disk_path); /* exits on a missing or wrongly sized file */
     }
     if (record_path) { /* opened before frame 0's events are delivered, so they are recorded too */
         m.record = emu_open_output(record_path, "record file");

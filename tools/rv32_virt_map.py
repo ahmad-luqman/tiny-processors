@@ -33,7 +33,7 @@ from tools import rv32_dtb  # noqa: E402
 # The nodes our tree shares with virt: our node's name, virt's compatible string, and how our
 # window must relate to virt's: "equal" to one of its windows, or "inside" one.
 SHARED = (("test", "sifive,test0", "inside"), ("console", "ns16550a", "inside"), ("clint", "riscv,clint0", "equal"),
-          ("plic", "riscv,plic0", "equal"))
+          ("plic", "riscv,plic0", "equal"), ("virtio_mmio", "virtio,mmio", "inside"))
 
 
 def dump_virt(qemu: str, memory: int = rv32_dtb.RAM_SIZE) -> bytes:

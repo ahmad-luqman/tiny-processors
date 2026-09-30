@@ -244,6 +244,7 @@ from writing kernel memory yet; that is O5.
 | 5 | [menu](../programs/rv32/os/menu.c) | The capstone runtime (menu, games, 2D, 3D, digit screen) on system calls, accelerators direct |
 | 6 | [syscheck](../programs/rv32/os/syscheck.c) | System-call edge cases |
 | 7 | [fault](../programs/rv32/os/fault.c) | A load from an unmapped address, or an illegal instruction |
+| 8, 9, 10 | [cat](../programs/rv32/os/cat.c), [write](../programs/rv32/os/write.c), [files](../programs/rv32/os/files.c) | Print a file, write one, list them (O3) |
 
 The user library ([ulib.c](../programs/rv32/os/ulib.c)) also defines
 `console.h`'s functions and `rv32_exit` on top of system calls, so the game
@@ -302,6 +303,95 @@ a sum, so the order processes finish in does not change it (O4).
   (two programs in one slot, one name twice, a name too long, an unknown
   accelerator program, an image outside the slots, four malformed disks) and
   the console's receive side on both backends, trace for trace.
+
+## O3: storage
+
+### The device
+
+[rv32_virtio_blk.v](../rtl/rv32/rv32_virtio_blk.v) is a virtio-mmio version 2
+block device at `virt`'s first virtio slot, so one driver serves it and
+QEMU's; [docs/rv32.md](rv32.md#virtio-blk-at-0x1000_1000) has the register
+table. The interesting part is how it reaches RAM. A virtio device is a bus
+master: it reads the driver's rings and descriptors and moves the data
+itself. Ours does all of that while the notify store that started it waits.
+The bus contract lets any device hold `ready` low, so the device keeps the
+CPU's store pending, and since the CPU is then presenting nothing to RAM, the
+SoC hands the CPU's side of the RAM port to the device (`side_valid` and its
+fellows in [rv32_soc.v](../rtl/rv32/rv32_soc.v)); the arbitration with the
+graphics engines, which already alternated between the CPU side and the
+engines, needs no change. When the last available request is served the
+device lets the store be accepted. The testbench's stall generator never sees
+a DMA access, but it sees the notify wait: the cycle formula still holds, with
+the DMA cycles counted as that store's stalls.
+
+The device is a state machine of one access at a time: read the available
+index, read a ring entry, read three descriptors of four words each, read the
+header's type and sector, copy the data a word per access (the disk is a
+memory inside the device, one word per cycle), write the status byte with a
+byte strobe, write the used element, write the used index with a halfword
+strobe, and go round again. Any address outside RAM, and any chain that is
+not header, data, status with the right NEXT and WRITE flags, stops it with
+DEVICE_NEEDS_RESET. The emulator's `virtio_request()` performs the same reads
+in the same order, so the two agree even on which failure they report.
+
+### The kernel's driver and file system
+
+[virtio.c](../programs/rv32/os/virtio.c) sets the device up as the
+specification's driver initialization says (reset, ACKNOWLEDGE, DRIVER,
+`VIRTIO_F_VERSION_1`, FEATURES_OK, one queue of 8, DRIVER_OK) and sends one
+request at a time: three descriptors, one ring entry, a notify, then a wait
+for the used index. On our machine the wait is already over when the notify
+returns; on QEMU the request completes a little later; the loop is the same.
+The kernel polls: the device's interrupt (PLIC source 1) is there for a
+driver that sleeps, and `virtiocheck` tests it.
+
+The file system, `tfs` ([fs.c](../programs/rv32/os/fs.c),
+[rv32_mkfs.py](../tools/rv32_mkfs.py)), is the smallest that still is one: a
+superblock, one directory sector of sixteen 32-byte entries (name, first
+sector, capacity, size), and one contiguous extent per file, allocated at
+creation after the last extent in use with a capacity of 8 sectors. Writing a
+file replaces its contents from the start; the new size reaches the disk when
+the file is closed (or its process ends). Every transfer goes through one
+sector buffer, so a partial sector is read, changed and written back.
+Descriptors 3 to 6 of each process are its open files; `open`, `close`,
+`files`, and `read`/`write` on those descriptors are the calls.
+
+Pong and Tetris record their best scores in a file, `scores`, through
+[score.c](../programs/rv32/os/score.c): Pong keeps the winning side's points,
+Tetris its score.
+
+### The kernel finds the disk
+
+On QEMU the tree lists all eight of `virt`'s virtio slots and most are empty
+(DeviceID 0); ours lists the one we have. The kernel walks the `virtio,mmio`
+nodes with `fdt_find_nth` (the reader's new query for the nth matching node)
+and takes the first whose DeviceID is 2.
+
+### Evidence (O3)
+
+- **virtiocheck** ([virtiocheck.c](../programs/rv32/virtiocheck.c)): set up;
+  sector 3 out and back; `InterruptStatus` and the PLIC's pending bit until
+  acknowledged; two requests served by one notify; a read past the disk is
+  IOERR and type 6 is UNSUPP. `PASS edec4a52` on QEMU `virt`, the emulator,
+  Icarus and Verilator (with seeded stalls on the CPU's bus and the graphics
+  port), the traces identical and every backend's final disk the same
+  131,072 bytes as QEMU's. On our machine it also checks what QEMU does
+  differently: a misaligned buffer is IOERR, a broken chain and a queue
+  outside RAM set DEVICE_NEEDS_RESET and a reset recovers, and four register
+  misuses fault. (Type 5 was the first choice for "unknown"; QEMU masks the
+  OUT bit off the type and served it as a flush.)
+- **The console session** now also lists the disk's files, prints
+  `welcome`, writes `note` and reads it back, and fails to `cat` a missing
+  file: `PASS 8409efe3` on QEMU `virt` with a copy of the same disk image, the
+  emulator and Verilator, and the three disks are identical afterwards.
+- **Scores survive a boot:** the Pong session ends with `pong: best 1` and
+  `cat scores`; a second run of the kernel on the disk the first left (the
+  emulator's and the RTL's, found identical) lists `scores` and prints
+  `pong 1`, and `rv32_mkfs.py --cat scores` reads the same line on the host.
+  In step-tick mode the Pong session, disk writes included, is
+  trace-identical between the emulator and Verilator (1,507,642 lines).
+- **Cost:** the device is 5,153 generic cells with its disk shrunk to 64
+  words (Yosys 0.33), latch-free.
 
 ## Exercises (O2)
 

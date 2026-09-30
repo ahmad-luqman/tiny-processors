@@ -23,9 +23,12 @@ CPU_FALLBACKS = ("rv32i,zicsr=true", "rv32,m=false,a=false,f=false,d=false,c=fal
 Outcome = namedtuple("Outcome", "ok reason code checksum")
 
 
-def qemu_command(qemu, elf, cpu=DEFAULT_CPU, memory="4M", log=None):
+def qemu_command(qemu, elf, cpu=DEFAULT_CPU, memory="4M", log=None, drive=None):
     command = [qemu, "-M", "virt", "-cpu", cpu, "-bios", "none", "-kernel", str(elf), "-m", memory,
                "-nographic", "-monitor", "none", "-no-reboot"]
+    if drive is not None:  # O3: a virtio-blk disk in virt's first virtio slot, modern (version 2) transport
+        command += ["-global", "virtio-mmio.force-legacy=false", "-drive", f"file={drive},if=none,format=raw,id=disk0",
+                    "-device", "virtio-blk-device,drive=disk0,bus=virtio-mmio-bus.0"]
     if log is not None:
         command += ["-d", "guest_errors,unimp", "-D", str(log)]
     return command
@@ -85,8 +88,9 @@ def main():
     parser.add_argument("--expect-hex", help="checksum the PASS line must carry")
     parser.add_argument("--last-line", action="store_true", help="judge the last console line; earlier lines are a report")
     parser.add_argument("--stdin", type=Path, help="bytes the guest's UART receives (O2)")
+    parser.add_argument("--drive", type=Path, help="a raw disk image for virtio-blk (O3); the guest may write it")
     args = parser.parse_args()
-    command = qemu_command(args.qemu, args.elf, args.cpu, args.memory, args.qemu_log)
+    command = qemu_command(args.qemu, args.elf, args.cpu, args.memory, args.qemu_log, args.drive)
     try:
         status, transcript, diagnostics, timed_out = run(command, args.timeout, args.stdin)
     except OSError as error:

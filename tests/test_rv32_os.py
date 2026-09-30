@@ -12,13 +12,14 @@ import unittest
 from pathlib import Path
 
 import test_rv32_rtl as integer_tests
+from tools import rv32_mkfs as mkfs
 from tools import rv32_ramdisk
 from tools.rv32_asm import *  # noqa: F401,F403
 from tools.rv32_image import flatten, parse_elf
 from tools.rv32_rtl import ROOT, diff_traces, run_emulator, run_rtl, write_image
 
 OS = ROOT / "build/rv32/os"
-PROGRAMS = ("sh", "hello", "primes", "pong", "tetris", "menu", "syscheck", "fault")
+PROGRAMS = ("sh", "hello", "primes", "pong", "tetris", "menu", "syscheck", "fault", "cat", "write", "files")
 
 
 def elfs(*names):
@@ -67,6 +68,36 @@ class RamdiskTest(unittest.TestCase):
                 rv32_ramdisk.parse(bad)
 
 
+class FileSystemToolTest(unittest.TestCase):
+    """tools/rv32_mkfs.py: the layout the kernel's fs.c reads, and its refusals."""
+
+    def test_layout(self):
+        disk = mkfs.blank()
+        mkfs.add(disk, "one", b"x" * 700)
+        mkfs.add(disk, "two", b"hello")
+        self.assertEqual(mkfs.entries(disk), [("one", 2, 8, 700), ("two", 10, 8, 5)])
+        self.assertEqual(mkfs.read(disk, "two"), b"hello")
+        self.assertEqual(struct.unpack_from("<5I", disk, 0), (0x31534654, 256, 1, 2, 16))
+        self.assertEqual(disk[10 * 512:10 * 512 + 5], b"hello", "an extent starts on its sector")
+
+    def test_refusals(self):
+        disk = mkfs.blank()
+        mkfs.add(disk, "a", b"")
+        for name, action in (("duplicate", lambda: mkfs.add(disk, "a", b"")),
+                             ("long name", lambda: mkfs.add(disk, "x" * 20, b"")),
+                             ("too big", lambda: mkfs.add(disk, "big", bytes(0x20000))),
+                             ("missing", lambda: mkfs.read(disk, "nope")),
+                             ("not tfs", lambda: mkfs.entries(bytes(0x20000))),
+                             ("wrong size", lambda: mkfs.entries(bytes(512)))):
+            with self.subTest(name), self.assertRaises(mkfs.FsError):
+                action()
+        full = mkfs.blank()
+        for i in range(16):
+            mkfs.add(full, f"f{i}", b"", capacity=1)
+        with self.assertRaises(mkfs.FsError):
+            mkfs.add(full, "one-more", b"", capacity=1)
+
+
 class ConsoleReceiveTest(unittest.TestCase):
     """O2: the console's RBR and LSR.DR on both backends, trace for trace."""
     setUpClass = classmethod(integer_tests.RtlTest.setUpClass.__func__)
@@ -101,9 +132,14 @@ class KernelTest(unittest.TestCase):
             hex_path = Path(directory) / "kernel.hex"
             from tools.rv32_image import write_hex
             write_hex(hex_path, image.read_bytes())
-            emulator = run_emulator(self.emulator, image, Path(directory) / "emu.trace", console_input=session)
+            disks = [Path(directory) / name for name in ("emu.disk", "rtl.disk")]
+            for disk in disks:
+                shutil.copy(OS / "disk.img", disk)
+            emulator = run_emulator(self.emulator, image, Path(directory) / "emu.trace", console_input=session, disk=disks[0])
             rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", seed=11, ticks="steps",
-                          console_input=session, max_cycles=30000000, timeout=600)
+                          console_input=session, max_cycles=30000000, timeout=600, disk=disks[1])
+            self.assertEqual(disks[0].read_bytes(), disks[1].read_bytes(), "both backends leave the same disk")
+            self.assertEqual(mkfs.read(disks[1].read_bytes(), "note"), b"hello disk\n")
         self.assertEqual(rtl.halt["outcome"], "pass", rtl.stderr)
         self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
         self.assertEqual(rtl.console, (ROOT / "programs/rv32/os/session.expected").read_text())

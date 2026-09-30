@@ -9,4 +9,10 @@ syscheck
 fault load
 fault illegal
 hello still here
+files
+cat welcome
+write note hello disk
+cat note
+cat nosuch
+files
 halt

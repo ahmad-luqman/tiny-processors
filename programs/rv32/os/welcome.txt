@@ -1,0 +1,2 @@
+Welcome to the tiny computer.
+ls lists the programs, files the files on this disk.

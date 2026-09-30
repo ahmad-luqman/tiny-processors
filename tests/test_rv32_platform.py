@@ -357,6 +357,17 @@ class FirmwareReaderTest(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         return result.stdout.strip()
 
+    def test_nth_node(self):
+        """fdt_find_nth (O3): QEMU lists its eight virtio slots from the highest address down."""
+        virt = (ROOT / "tests/fixtures/qemu-8.2.2-virt-4M.dtb").read_bytes()
+        self.assertEqual(self.query(virt, "compatible", "virtio,mmio", "nth", "0", "0"), "10008000 00001000")
+        self.assertEqual(self.query(virt, "compatible", "virtio,mmio", "nth", "7", "0"), "10001000 00001000")
+        self.assertEqual(self.query(virt, "compatible", "virtio,mmio", "nth", "8", "0"), "error 4")
+        ours = rv32_dtb.build(rv32_dtb.MACHINE)
+        self.assertEqual(self.query(ours, "compatible", "virtio,mmio", "nth", "0", "0"), "10001000 00000200")
+        self.assertEqual(self.query(ours, "compatible", "virtio,mmio", "nth", "1", "0"), "error 4")
+        self.assertEqual(self.query(ours, "compatible", "tiny-processors,display", "nth", "0", "1"), "12000000 00012c00")
+
     def test_cells(self):
         """fdt_cell (O1): the input's PLIC source and the interrupt wiring, in our tree and QEMU's."""
         blob = rv32_dtb.build(rv32_dtb.MACHINE)

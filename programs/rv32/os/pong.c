@@ -1,7 +1,9 @@
 /* pong as a program (Track 2, O2): programs/rv32/pong.c on system calls.
  * The loop is the standalone image's, event for event and present for
- * present, so a session gives the same checkpoints and PASS word. */
+ * present, so a session gives the same checkpoints and PASS word. Since O3
+ * it records the winning side's points on the disk at the end. */
 #include "pong_game.h"
+#include "score.h"
 #include "ulib.h"
 
 static struct pong game;
@@ -23,6 +25,8 @@ int main(void)
             u_puts("PASS ");
             u_puthex(pong_checksum(&game));
             u_puts("\n");
+            /* O3: the winning side's points, kept on the disk */
+            score_record("pong", game.score_left > game.score_right ? game.score_left : game.score_right);
             return 0;
         }
         pong_frame(&game, sys_keys());

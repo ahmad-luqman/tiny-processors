@@ -1,9 +1,13 @@
 kernel: tiny-processors RV32 machine, hart 0
-kernel: devices console clint plic input display g1 g2
-kernel: 8 programs
+kernel: devices console clint plic input display g1 g2 disk
+kernel: 11 programs
+kernel: disk 256 sectors, tfs
 sh: ls, NAME [ARGS] [&], wait, halt [CODE]
 $ pong
 PASS 8fef54bc
+pong: best 1
+$ cat scores
+pong 1
 $ halt
-kernel: halt, 1 exits
-PASS 7adb16b7
+kernel: halt, 2 exits
+PASS 814f72be

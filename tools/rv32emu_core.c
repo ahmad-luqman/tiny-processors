@@ -225,7 +225,7 @@ static mem_access rom_load(machine *m, uint32_t offset, int width, uint32_t *val
  * number is written back. Unwired sources hold no priority or enable. */
 static uint32_t plic_lines(const machine *m)
 {
-    return m->count ? 1u << PLIC_SOURCE_INPUT : 0u;
+    return (m->count ? 1u << PLIC_SOURCE_INPUT : 0u) | (m->virtio->interrupt ? 1u << PLIC_SOURCE_VIRTIO : 0u);
 }
 
 static uint32_t plic_pending(const machine *m)
@@ -287,6 +287,232 @@ static mem_access plic_store(machine *m, uint32_t offset, int width, uint32_t va
         }
     } else {
         return ACC_FAULT; /* the pending word is read-only */
+    }
+    return ACC_OK;
+}
+
+/* virtio-blk (O3; rtl/rv32/rv32_virtio_blk.v runs the same steps). A notify of queue 0 with the
+ * queue ready and DRIVER_OK set serves every available request before the store completes; its
+ * DMA reads and writes RAM directly, like the RTL's, which goes around the engines' write locks. */
+#define VIRTIO_MAGIC 0x74726976u
+#define VIRTIO_VENDOR 0x594e4954u
+#define VIRTIO_QUEUE_MAX 8u
+#define VIRTIO_NEEDS_RESET 0x40u
+
+static bool dma_word(uint32_t addr)
+{
+    return addr >= RAM_BASE && addr - RAM_BASE < RAM_SIZE;
+}
+
+/* A DMA read of the word holding `addr` (the RAM ignores bits 1:0, as the RTL's does). */
+static bool dma_read(machine *m, uint32_t addr, uint32_t *value)
+{
+    if (!dma_word(addr)) {
+        return false;
+    }
+    *value = bytes_read(m->ram + ((addr & ~3u) - RAM_BASE), 4);
+    return true;
+}
+
+static bool dma_read16(machine *m, uint32_t addr, uint16_t *value)
+{
+    uint32_t word;
+    if (!dma_read(m, addr, &word)) {
+        return false;
+    }
+    *value = (uint16_t)((addr & 2u) ? word >> 16 : word);
+    return true;
+}
+
+/* A DMA write of the strobed bytes of the word holding `addr`. */
+static bool dma_write(machine *m, uint32_t addr, uint32_t value, uint32_t strobe)
+{
+    if (!dma_word(addr)) {
+        return false;
+    }
+    uint8_t *p = m->ram + ((addr & ~3u) - RAM_BASE);
+    for (int i = 0; i < 4; i++) {
+        if (strobe & (1u << i)) {
+            p[i] = (uint8_t)(value >> (8 * i));
+        }
+    }
+    return true;
+}
+
+static void virtio_disk_written(machine *m, uint32_t offset, uint32_t bytes)
+{
+    virtio_blk *v = m->virtio;
+    if (v->file && (fseek(v->file, (long)offset, SEEK_SET) != 0 || fwrite(v->disk + offset, 1, bytes, v->file) != bytes ||
+                    fflush(v->file) != 0)) {
+        v->write_error = true;
+    }
+}
+
+/* One request: false when the chain cannot be followed or an address is outside RAM. */
+static bool virtio_request(machine *m)
+{
+    virtio_blk *v = m->virtio;
+    uint32_t mask = v->queue_num - 1u;
+    uint16_t head, next = 0;
+    if (!dma_read16(m, v->driver_lo + 4u + 2u * (v->last_avail & mask), &head)) {
+        return false;
+    }
+    uint32_t address[3], length = 0, words[4];
+    bool data_write = false;
+    for (int which = 0; which < 3; which++) {
+        uint32_t base = v->desc_lo + 16u * (which == 0 ? head : next);
+        for (int w = 0; w < 4; w++) { /* the RTL stops at a nonzero high word before reading on */
+            if (!dma_read(m, base + 4u * (uint32_t)w, &words[w]) || (w == 1 && words[1] != 0)) {
+                return false;
+            }
+        }
+        bool has_next = words[3] & 1u, write = words[3] & 2u;
+        if (has_next != (which != 2) || (which == 0 && write) || (which == 2 && !write)) {
+            return false;
+        }
+        address[which] = words[0];
+        if (which == 1) {
+            length = words[2];
+            data_write = write;
+        }
+        next = (uint16_t)(words[3] >> 16);
+    }
+    uint32_t type, sector, sector_hi;
+    if (!dma_read(m, address[0], &type) || !dma_read(m, address[0] + 8u, &sector) || !dma_read(m, address[0] + 12u, &sector_hi)) {
+        return false;
+    }
+    const uint32_t sectors = VIRTIO_DISK_SIZE / 512u, words_total = VIRTIO_DISK_SIZE / 4u;
+    uint8_t result;
+    if (type > 1) {
+        result = 2; /* UNSUPP */
+    } else if (sector_hi != 0 || sector >= sectors || (length & 3u) || (address[1] & 3u) ||
+               (uint64_t)sector * 128u + (length >> 2) > words_total || data_write != (type == 0)) {
+        result = 1; /* IOERR */
+    } else {
+        for (uint32_t i = 0; i < length / 4u; i++) {
+            uint32_t at = sector * 512u + 4u * i, word;
+            if (type == 0) {
+                if (!dma_write(m, address[1] + 4u * i, bytes_read(v->disk + at, 4), 0xfu)) {
+                    return false;
+                }
+            } else {
+                if (!dma_read(m, address[1] + 4u * i, &word)) {
+                    return false;
+                }
+                bytes_write(v->disk + at, 4, word);
+            }
+        }
+        if (type == 1) {
+            virtio_disk_written(m, sector * 512u, length);
+        }
+        result = 0;
+    }
+    uint32_t used = v->device_lo + 4u + 8u * (v->used_idx & mask);
+    uint32_t written = (result == 0 && type == 0) ? length + 1u : 1u;
+    if (!dma_write(m, address[2], (uint32_t)result * 0x01010101u, 1u << (address[2] & 3u)) ||
+        !dma_write(m, used, head, 0xfu) || !dma_write(m, used + 4u, written, 0xfu) ||
+        !dma_write(m, v->device_lo + 2u, (uint32_t)(uint16_t)(v->used_idx + 1u) * 0x10001u, (v->device_lo & 2u) ? 0x3u : 0xcu)) {
+        return false;
+    }
+    v->used_idx++;
+    v->last_avail++;
+    v->interrupt = true;
+    return true;
+}
+
+static void virtio_serve(machine *m)
+{
+    virtio_blk *v = m->virtio;
+    if (v->desc_hi || v->driver_hi || v->device_hi || v->queue_num == 0) {
+        v->status |= VIRTIO_NEEDS_RESET;
+        return;
+    }
+    for (;;) {
+        uint16_t available;
+        if (!dma_read16(m, v->driver_lo + 2u, &available)) {
+            v->status |= VIRTIO_NEEDS_RESET;
+            return;
+        }
+        if (available == v->last_avail) {
+            return;
+        }
+        if (!virtio_request(m)) {
+            v->status |= VIRTIO_NEEDS_RESET;
+            return;
+        }
+    }
+}
+
+static mem_access virtio_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    virtio_blk *v = m->virtio;
+    if (width != 4) {
+        return ACC_FAULT;
+    }
+    switch (offset) {
+    case 0x000: *value = VIRTIO_MAGIC; break;
+    case 0x004: *value = 2; break;
+    case 0x008: *value = 2; break;
+    case 0x00c: *value = VIRTIO_VENDOR; break;
+    case 0x010: *value = v->features_sel ? 1u : 0u; break; /* feature 32: VIRTIO_F_VERSION_1 */
+    case 0x034: *value = v->queue_sel_zero ? VIRTIO_QUEUE_MAX : 0u; break;
+    case 0x044: *value = v->queue_ready; break;
+    case 0x060: *value = v->interrupt; break;
+    case 0x070: *value = v->status; break;
+    case 0x080: *value = v->desc_lo; break;
+    case 0x084: *value = v->desc_hi; break;
+    case 0x090: *value = v->driver_lo; break;
+    case 0x094: *value = v->driver_hi; break;
+    case 0x0a0: *value = v->device_lo; break;
+    case 0x0a4: *value = v->device_hi; break;
+    case 0x0fc: *value = 0; break;
+    case 0x100: *value = VIRTIO_DISK_SIZE / 512u; break;
+    case 0x104: *value = 0; break;
+    default: return ACC_FAULT; /* write-only registers and unused offsets */
+    }
+    return ACC_OK;
+}
+
+static mem_access virtio_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    virtio_blk *v = m->virtio;
+    if (width != 4) {
+        return ACC_FAULT;
+    }
+    switch (offset) {
+    case 0x014: v->features_sel = value == 1; break;
+    case 0x020: break; /* the driver's features are accepted and not used */
+    case 0x024: v->driver_features_sel = value == 1; break;
+    case 0x030: v->queue_sel_zero = value == 0; break;
+    case 0x038:
+        if (v->queue_sel_zero) {
+            v->queue_num = (value == 1 || value == 2 || value == 4 || value == 8) ? value : 0u;
+        }
+        break;
+    case 0x044: if (v->queue_sel_zero) { v->queue_ready = value & 1u; } break;
+    case 0x050:
+        if (value == 0 && v->queue_ready && (v->status & 4u) && !(v->status & VIRTIO_NEEDS_RESET)) {
+            virtio_serve(m);
+        }
+        break;
+    case 0x064: if (value & 1u) { v->interrupt = false; } break;
+    case 0x070:
+        v->status = (uint8_t)value;
+        if ((value & 0xffu) == 0) { /* a device reset: the queue starts again */
+            v->queue_ready = false;
+            v->queue_num = 0;
+            v->last_avail = v->used_idx = 0;
+            v->interrupt = false;
+            v->features_sel = false;
+        }
+        break;
+    case 0x080: if (v->queue_sel_zero) { v->desc_lo = value; } break;
+    case 0x084: if (v->queue_sel_zero) { v->desc_hi = value; } break;
+    case 0x090: if (v->queue_sel_zero) { v->driver_lo = value; } break;
+    case 0x094: if (v->queue_sel_zero) { v->driver_hi = value; } break;
+    case 0x0a0: if (v->queue_sel_zero) { v->device_lo = value; } break;
+    case 0x0a4: if (v->queue_sel_zero) { v->device_hi = value; } break;
+    default: return ACC_FAULT; /* read-only registers and unused offsets */
     }
     return ACC_OK;
 }
@@ -497,6 +723,7 @@ static const region REGIONS[] = {
     {"console", CONSOLE_BASE, 8, console_load, console_store},
     {"clint", CLINT_BASE, CLINT_SIZE, clint_load, clint_store},
     {"plic", PLIC_BASE, PLIC_SIZE, plic_load, plic_store},
+    {"virtio", VIRTIO_BASE, VIRTIO_SIZE, virtio_load, virtio_store},
     {"bootrom", RV32_DTB_ROM_BASE, RV32_DTB_ROM_SIZE, rom_load, NULL},
     {"input", INPUT_BASE, 16, input_load, NULL},
     {"display", DISPLAY_BASE, 16, display_load, display_store},
@@ -1355,6 +1582,21 @@ void emu_read_console_input(machine *m, const char *path)
     fclose(in);
 }
 
+void emu_open_disk(machine *m, const char *path)
+{
+    virtio_blk *v = m->virtio;
+    v->file = fopen(path, "r+b");
+    if (!v->file) {
+        fprintf(stderr, "%s: cannot open disk %s: %s\n", emu_prog, path, strerror(errno));
+        exit(EXIT_EMULATOR_ERROR);
+    }
+    size_t got = fread(v->disk, 1, VIRTIO_DISK_SIZE, v->file);
+    if (ferror(v->file) || got != VIRTIO_DISK_SIZE || fgetc(v->file) != EOF) {
+        fprintf(stderr, "%s: disk %s must be exactly %u bytes\n", emu_prog, path, VIRTIO_DISK_SIZE);
+        exit(EXIT_EMULATOR_ERROR);
+    }
+}
+
 void emu_init(machine *m)
 {
     memset(m, 0, sizeof *m);
@@ -1372,7 +1614,11 @@ bool emu_alloc(machine *m)
 {
     m->ram = calloc(RAM_SIZE, 1);
     m->fb = calloc(FB_SIZE, 1); /* unspecified by the contract; zero like the RTL testbench */
-    if (!m->ram || !m->fb) {
+    m->virtio = calloc(1, sizeof *m->virtio);
+    if (m->virtio) {
+        m->virtio->queue_sel_zero = true;
+    }
+    if (!m->ram || !m->fb || !m->virtio) {
         fprintf(stderr, "%s: cannot allocate memory\n", emu_prog);
         return false;
     }
@@ -1418,6 +1664,11 @@ void emu_free(machine *m)
     free(m->script);
     free(m->console_in);
     m->console_in = NULL;
+    if (m->virtio && m->virtio->file) {
+        fclose(m->virtio->file);
+    }
+    free(m->virtio);
+    m->virtio = NULL;
     m->ram = m->fb = NULL;
     m->script = NULL;
 }
@@ -1465,6 +1716,10 @@ bool emu_finish_outputs(machine *m, const char *trace_path, const char *checkpoi
     }
     m->trace = m->checkpoints = m->record = NULL;
     if (m->output_error) {
+        ok = false;
+    }
+    if (m->virtio && m->virtio->write_error) {
+        fprintf(stderr, "%s: error writing the disk\n", emu_prog);
         ok = false;
     }
     return ok;

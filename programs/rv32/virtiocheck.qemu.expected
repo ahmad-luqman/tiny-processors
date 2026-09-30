@@ -1,0 +1,7 @@
+virtiocheck: set up
+virtiocheck: sector 3 written and read
+virtiocheck: interrupt
+virtiocheck: two requests
+virtiocheck: refusals
+virtiocheck: our refusals skipped
+PASS edec4a52

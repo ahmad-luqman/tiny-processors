@@ -1,6 +1,7 @@
 /* tetris as a program (Track 2, O2): the M7 game on system calls. Q ends it
- * with `PASS <checksum>`, as Pong does. */
+ * with `PASS <checksum>`, as Pong does, and records the score on the disk (O3). */
 #include "board.h"
+#include "score.h"
 #include "tetris_game.h"
 #include "ulib.h"
 
@@ -28,6 +29,7 @@ int main(void)
             u_puts("PASS ");
             u_puthex(tetris_checksum(&game));
             u_puts("\n");
+            score_record("tetris", game.score); /* O3: kept on the disk */
             return 0;
         }
         tetris_frame(&game, sys_keys());

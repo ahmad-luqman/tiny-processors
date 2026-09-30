@@ -47,7 +47,11 @@
 #define PLIC_CLAIM 0x200004u
 #define PLIC_SOURCES 32u         /* sources 1..31; 0 means "none" */
 #define PLIC_SOURCE_INPUT 12u    /* the input queue: pending while COUNT is nonzero */
-#define PLIC_WIRED (1u << PLIC_SOURCE_INPUT)
+#define PLIC_SOURCE_VIRTIO 1u    /* virtio-blk (O3): pending while InterruptStatus is nonzero */
+#define PLIC_WIRED ((1u << PLIC_SOURCE_INPUT) | (1u << PLIC_SOURCE_VIRTIO))
+#define VIRTIO_BASE 0x10001000u  /* virt's first virtio-mmio slot (O3) */
+#define VIRTIO_SIZE 0x200u
+#define VIRTIO_DISK_SIZE 0x20000u /* 128 KiB, the RTL's DISK_WORDS: a disk file must be this size */
 #define INPUT_BASE 0x11001000u
 #define INPUT_EVENT 0x0u
 #define INPUT_COUNT 0x4u
@@ -64,6 +68,18 @@
 #define FB_COLUMNS 320u
 #define FB_ROWS 240u
 #define FB_SIZE (FB_COLUMNS * FB_ROWS)
+
+/* virtio-blk (O3, docs/rv32.md "virtio-blk"): the registers of one virtio-mmio version 2 block
+ * device and its disk, held in memory and written through to the file it came from. */
+typedef struct {
+    uint8_t status;
+    bool features_sel, driver_features_sel, queue_sel_zero, queue_ready, interrupt;
+    uint32_t queue_num, desc_lo, desc_hi, driver_lo, driver_hi, device_lo, device_hi;
+    uint16_t last_avail, used_idx;
+    uint8_t disk[VIRTIO_DISK_SIZE];
+    FILE *file;       /* --disk: written through on every OUT request, or NULL */
+    bool write_error;
+} virtio_blk;
 
 /* Why the run ended. HALT_STOPPED is the host's doing (the window was closed, or a
  * debugger killed the run or hung up); a plain headless run never produces it. */
@@ -92,6 +108,7 @@ typedef struct {
     uint32_t plic_enable, plic_claimed;  /* context 0's enables; sources claimed and not completed */
     uint8_t plic_threshold;
     uint64_t interrupts; /* interrupts taken */
+    virtio_blk *virtio;  /* the block device (O3), allocated by emu_alloc */
     uint8_t *ram;
     uint64_t steps;   /* instructions executed: retired plus trapped */
     uint64_t retired; /* instructions whose architectural effects committed */
@@ -150,6 +167,10 @@ void emu_read_input_script(machine *m, const char *path);
 /* Console input (O2): every byte of `path` is received before the first instruction; "-" instead
  * reads stdin as it arrives, for interactive use. Exits with a message on error. */
 void emu_read_console_input(machine *m, const char *path);
+/* The disk (O3): a file of exactly VIRTIO_DISK_SIZE bytes, read now and written through on every
+ * OUT request. Without one the disk is that many zero bytes that last only for the run. Exits with
+ * a message on error. */
+void emu_open_disk(machine *m, const char *path);
 void emu_deliver_events(machine *m);
 void emu_queue_event(machine *m, uint32_t frame, uint32_t event);
 int emu_key_code(const char *text);   /* a board.h key name (any case) or 0..31; -1 otherwise */

@@ -179,7 +179,7 @@ class InterruptTest(unittest.TestCase):
         regs.append(9)
         emulator, rtl = self.assert_same(words + dump(*regs))
         got = [stored(rtl.trace, SAVE + 0x40 + 4 * i) for i in range(len(regs))]
-        self.assertEqual(got, [7, 0, 1 << PLIC_SOURCE_INPUT, 6, 0, 0, 0])
+        self.assertEqual(got, [7, 0, (1 << PLIC_SOURCE_INPUT) | (1 << PLIC_SOURCE_VIRTIO), 6, 0, 0, 0])
 
     def test_plic_faults(self):
         # Byte access, a store to the pending word, an unimplemented offset and the byte past the

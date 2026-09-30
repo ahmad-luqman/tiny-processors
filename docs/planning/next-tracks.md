@@ -76,7 +76,11 @@ O1 and O3. Option 2 (a custom QEMU board) remains optional.
 [Track 2 record](../rv32-os.md). O1 is done: `mstatus`, `mie`, `mip`,
 `mscratch`, `wfi`, CLINT and PLIC interrupts on the emulator and the RTL, and
 the open question below answered both ways (results comparison, and a
-deterministic step-tick mode on the RTL that keeps trace comparison).
+deterministic step-tick mode on the RTL that keeps trace comparison). O2 is
+done: a kernel with system calls runs separately linked programs from a RAM
+disk and a shell, on QEMU, the emulator and the RTL. O3 is done: virtio-blk at
+`virt`'s first virtio slot, a tiny file system, and high scores that survive
+a boot.
 
 - **O1 interrupts.** `mstatus` (MIE/MPIE), `mie`, `mip`, a CLINT timer
   interrupt and `wfi`, on the RTL and the emulator.

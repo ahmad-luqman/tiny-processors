@@ -47,6 +47,11 @@ fdt_status fdt_open(fdt *t, uintptr_t address);
 fdt_status fdt_find(const fdt *t, const char *property, const char *value, uint32_t index,
                     uint32_t *base, uint32_t *size);
 
+/* fdt_find for the `node`th matching node (0 is the first), in tree order: QEMU's virt lists eight
+ * "virtio,mmio" slots, of which only the ones with a device behind them are of use (O3). */
+fdt_status fdt_find_nth(const fdt *t, const char *property, const char *value, uint32_t node, uint32_t index,
+                        uint32_t *base, uint32_t *size);
+
 /* The `index`th 32-bit cell of property `name` (e.g. "interrupts") of the first node whose `property`
  * matches `value`, found as fdt_find finds it; FDT_NOT_FOUND when no node matches or the property has
  * fewer cells (O1). */

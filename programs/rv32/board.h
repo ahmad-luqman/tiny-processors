@@ -72,6 +72,12 @@
 #define RV32_PLIC_THRESHOLD    0x200000
 #define RV32_PLIC_CLAIM        0x200004
 #define RV32_PLIC_SOURCE_INPUT 12
+#define RV32_PLIC_SOURCE_VIRTIO 1
+
+/* virtio-blk (O3): a virtio-mmio version 2 block device in virt's first slot,
+ * 512 bytes of registers, one queue of up to 8 entries, a 128 KiB disk. Find it
+ * through the device tree ("virtio,mmio" whose DeviceID reads 2). */
+#define RV32_VIRTIO_BASE       0x10001000
 
 /* Boot convention (Track 1): at reset a0 holds the hart id and a1 the address
  * of a flattened device tree. On our backends the tree is in this boot ROM;

@@ -759,7 +759,8 @@ class RtlTest(unittest.TestCase):
                 ("word between CLINT registers", LI(1, CLINT + 0x4008) + [LW(2, 1, 0)], 5, CLINT + 0x4008),
                 ("byte load of the PLIC's claim (O1)", LI(1, 0x0C200004) + [LBU(2, 1, 0)], 5, 0x0C200004),
                 ("past the PLIC's 6 MiB (O1)", LI(1, 0x0C600000) + [LW(2, 1, 0)], 5, 0x0C600000),
-                ("virt's virtio-mmio, reserved for O3", LI(1, 0x10001000) + [SW(2, 1, 0)], 7, 0x10001000)):
+                ("a store to virtio-blk's MagicValue (O3)", LI(1, 0x10001000) + [SW(2, 1, 0)], 7, 0x10001000),
+                ("virt's second virtio slot, unmapped here", LI(1, 0x10002000) + [LW(2, 1, 0)], 5, 0x10002000)):
             with self.subTest(name):
                 self.assert_same_double_fault(body, cause, value)
 

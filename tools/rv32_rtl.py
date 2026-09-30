@@ -26,7 +26,7 @@ from tools.rv32_run_emu import DEFAULT_EMULATOR, emulator_command, halt_line, la
 
 RTL_SOURCES = [ROOT / "rtl" / "rv32" / name
                for name in ("rv32_fregfile.v", "rv32_fdecode.v", "rv32_regfile.v", "rv32_alu.v", "rv32_decode.v", "rv32_muldiv.v", "rv32.v",
-                            "rv32_bus.v", "rv32_ram.v", "rv32_console.v", "rv32_done.v", "rv32_clint.v", "rv32_plic.v", "rv32_bootrom.v", "rv32_input.v", "rv32_display.v", "rv32_soc.v", "rv32_gpu.v", "rv32_g3d.v", "rv32_g3d_core.v", "rv32_simd4.v")]
+                            "rv32_bus.v", "rv32_ram.v", "rv32_console.v", "rv32_done.v", "rv32_clint.v", "rv32_plic.v", "rv32_virtio_blk.v", "rv32_bootrom.v", "rv32_input.v", "rv32_display.v", "rv32_soc.v", "rv32_gpu.v", "rv32_g3d.v", "rv32_g3d_core.v", "rv32_simd4.v")]
 RTL_SOURCES.extend([ROOT / "rtl/fp32/fp32.v", ROOT / "rtl/simd4/simd4.v"])
 TESTBENCH = ROOT / "tests" / "rv32_tb.sv"
 DEFAULT_SIMULATOR = "build/rv32/rv32_tb.vvp"
@@ -56,7 +56,7 @@ def compile_testbench(output, iverilog="iverilog", params=None):
 
 def simulator_command(simulator, image, trace=None, console=None, wave=None, stall=None, seed=None, max_cycles=None,
                       checkpoints=None, input_script=None, reset_at=None, allow_lost_events=False, simd_stall=None, simd_seed=None, gpu_stall=None, gpu_seed=None,
-                      ticks=None, console_input=None):
+                      ticks=None, console_input=None, disk=None, disk_out=None):
     """The command line for a compiled testbench: `vvp` for a .vvp file, else a Verilator binary."""
     simulator = Path(simulator)
     if simulator.suffix == ".vvp":
@@ -94,6 +94,10 @@ def simulator_command(simulator, image, trace=None, console=None, wave=None, sta
         command.append(f"+ticks={ticks}")
     if console_input is not None:
         command.append(f"+console-input={console_input}")
+    if disk is not None:
+        command.append(f"+disk={disk}")
+    if disk_out is not None:
+        command.append(f"+disk-out={disk_out}")
     return command
 
 
@@ -173,28 +177,40 @@ def run_backend(command, trace, parse_halt, timeout, console=None, checkpoints=N
 
 def run_rtl(simulator, image_hex, trace, stall=None, seed=None, wave=None, max_cycles=None, timeout=120,
             checkpoints=None, input_script=None, reset_at=None, allow_lost_events=False, simd_stall=None, simd_seed=None, gpu_stall=None, gpu_seed=None,
-            ticks=None, console_input=None):
+            ticks=None, console_input=None, disk=None):
     """Run the testbench on a hex image with the documented plusargs; the console goes next to the
     trace, or next to the image (`<image>.console`) when `trace` is None and no trace is written."""
     if trace is not None:
         console = Path(trace).with_name(Path(trace).name + ".console")
     else:
         console = Path(image_hex).with_suffix(".console")
+    disk_hex = disk_out = None
+    if disk is not None:  # `disk` is a disk image the run reads and then holds the run's final disk
+        disk_hex, disk_out = Path(f"{disk}.hex"), Path(f"{disk}.out.hex")
+        write_hex(disk_hex, Path(disk).read_bytes())
+        disk_out.unlink(missing_ok=True)
     command = simulator_command(simulator, image_hex, trace=trace, console=console, wave=wave,
                                 stall=stall, seed=seed, max_cycles=max_cycles, checkpoints=checkpoints,
                                 input_script=input_script, reset_at=reset_at, allow_lost_events=allow_lost_events,
                                 simd_stall=simd_stall, simd_seed=simd_seed, gpu_stall=gpu_stall, gpu_seed=gpu_seed, ticks=ticks,
-                                console_input=console_input)
-    return run_backend(command, trace, rtl_halt_line, timeout, console=console, checkpoints=checkpoints)
+                                console_input=console_input, disk=disk_hex, disk_out=disk_out)
+    run = run_backend(command, trace, rtl_halt_line, timeout, console=console, checkpoints=checkpoints)
+    if disk is not None:
+        # The testbench reads and writes the disk as hex words; the run's disk is the bytes again.
+        text = Path(disk_out).read_text() if Path(disk_out).exists() else ""
+        # Icarus's $writememh adds `// 0x...` address comments; Verilator writes words only.
+        words = [w for line in text.splitlines() if not line.lstrip().startswith("//") for w in line.split()]
+        Path(disk).write_bytes(b"".join(int(w, 16).to_bytes(4, "little") for w in words))
+    return run
 
 
 def run_emulator(emulator, image_bin, trace, limit=None, timeout=120, checkpoints=None, input_script=None,
-                 frames=None, allow_lost_events=False, console_input=None):
+                 frames=None, allow_lost_events=False, console_input=None, disk=None):
     """Run the emulator on a flat image the same way tools/rv32_run_emu.py does, with a trace
     unless `trace` is None."""
     command = emulator_command(emulator, image_bin, trace=trace, limit=limit, checkpoints=checkpoints,
                                input_script=input_script, frames=frames, allow_lost_events=allow_lost_events,
-                               console_input=console_input)
+                               console_input=console_input, disk=disk)
     return run_backend(command, trace, halt_line, timeout, checkpoints=checkpoints)
 
 
@@ -330,7 +346,8 @@ def generated_paths(out, name, frames=None):
     """Every file a run may write or truncate under `out` (and the frames directory), so an
     input script that names one of them can be refused before anything is written."""
     paths = {out / f"{name}.{suffix}" for suffix in ("hex", "bin", "input", "vcd", "emu.trace", "emu.checkpoints",
-                                                     "rtl.trace", "rtl.trace.console", "rtl.checkpoints")}
+                                                     "rtl.trace", "rtl.trace.console", "rtl.checkpoints", "emu.disk",
+                                                     "rtl.disk", "rtl.disk.hex", "rtl.disk.out.hex")}
     if frames is not None:
         paths |= set(frames.glob("frame-*.ppm"))
     return paths
@@ -417,6 +434,8 @@ def main():
     parser.add_argument("--console-input", type=Path,
                         help="bytes both backends' consoles receive, all waiting from reset (O2); not a file under --out")
     parser.add_argument("--limit", type=int, help="the emulator's instruction limit (default: its own)")
+    parser.add_argument("--disk", type=Path, help="the virtio-blk disk both backends start from (O3); never written")
+    parser.add_argument("--disk-out", type=Path, help="where the emulator's final disk goes, after the RTL's is found equal")
     gpu_delay = parser.add_mutually_exclusive_group()
     gpu_delay.add_argument("--gpu-stall",type=int,help="fixed waits per graphics memory transfer")
     gpu_delay.add_argument("--gpu-seed",type=int,help="seeded 0..3 graphics memory waits")
@@ -475,6 +494,8 @@ def main():
         refuse_aliased_input(args.input, out, name, args.frames)
     if args.console_input is not None:
         refuse_aliased_input(args.console_input, out, name, args.frames, option="--console-input")
+    if args.disk is not None:
+        refuse_aliased_input(args.disk, out, name, args.frames, option="--disk")
     if args.expect_checkpoints is not None:
         if not args.expect_checkpoints.exists():
             parser.error(f"{args.expect_checkpoints} does not exist")
@@ -495,9 +516,18 @@ def main():
         args.frames.mkdir(parents=True, exist_ok=True)
         for stale in args.frames.glob("frame-*.ppm"): # a previous run's frames must not survive this one
             stale.unlink()
+    def backend_disk(backend):
+        """A fresh copy of --disk for one backend's run, or None."""
+        if args.disk is None:
+            return None
+        copy = out / f"{name}.{backend}.disk"
+        copy.write_bytes(args.disk.read_bytes())
+        return copy
+
     emulator = run_emulator(args.emulator, bin_path, out / f"{name}.emu.trace", timeout=args.timeout,
                             checkpoints=out / f"{name}.emu.checkpoints", input_script=args.input, frames=args.frames,
-                            allow_lost_events=args.allow_lost_events, console_input=args.console_input, limit=args.limit)
+                            allow_lost_events=args.allow_lost_events, console_input=args.console_input, limit=args.limit,
+                            disk=backend_disk("emu"))
     check_passed(emulator, "emulator")
     # Device time differs for timers and asynchronous accelerators. Compare guest
     # results and trap records when either interface makes the CPU trace timing-dependent.
@@ -525,6 +555,8 @@ def main():
     if args.expect_checkpoint and emulator.checkpoints != args.expect_checkpoint:
         sys.exit(f"emulator checkpoints are not the expected ones: {first_checkpoint_difference(emulator.checkpoints, args.expect_checkpoint)}")
     if args.backend == "emulator":
+        if args.disk_out is not None:
+            args.disk_out.write_bytes((out / f"{name}.emu.disk").read_bytes())
         print(emulator.stderr.strip().splitlines()[-1])
         print(f"emulator: {len(emulator.trace)} trace lines, {len(emulator.checkpoints)} checkpoint(s), "
               f"console ends {last_line!r}")
@@ -537,7 +569,7 @@ def main():
             rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=seed,
                           timeout=args.timeout, max_cycles=args.max_cycles, checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input,
                           allow_lost_events=args.allow_lost_events, simd_stall=args.simd_stall, simd_seed=args.simd_seed, gpu_stall=args.gpu_stall, gpu_seed=args.gpu_seed,
-                          ticks=args.ticks, console_input=args.console_input)
+                          ticks=args.ticks, console_input=args.console_input, disk=backend_disk("rtl"))
             check_passed(rtl)
             check_fp_waits(rtl, args.expect_fp_waits)
             mismatch = compare_backends(rtl, emulator, args.compare, compare_stores=args.compare_stores)  # the same agreement as a check run
@@ -563,7 +595,7 @@ def main():
     rtl = run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=args.seed, wave=wave,
                   timeout=args.timeout, max_cycles=args.max_cycles, checkpoints=out / f"{name}.rtl.checkpoints", input_script=args.input,
                   allow_lost_events=args.allow_lost_events, simd_stall=args.simd_stall, simd_seed=args.simd_seed, gpu_stall=args.gpu_stall, gpu_seed=args.gpu_seed,
-                          ticks=args.ticks, console_input=args.console_input)
+                          ticks=args.ticks, console_input=args.console_input, disk=backend_disk("rtl"))
     print(emulator.stderr.strip().splitlines()[-1])
     print(rtl.stderr.strip().splitlines()[-1] if rtl.stderr.strip() else "rv32_tb: no halt line")
     check_passed(rtl)
@@ -571,6 +603,14 @@ def main():
     mismatch = compare_backends(rtl, emulator, args.compare, compare_stores=args.compare_stores)
     if mismatch:
         sys.exit(mismatch)
+    if args.disk is not None:  # what each backend left on its disk (O3)
+        emu_disk, rtl_disk = (out / f"{name}.emu.disk").read_bytes(), (out / f"{name}.rtl.disk").read_bytes()
+        if emu_disk != rtl_disk:
+            differs = next((i for i in range(min(len(emu_disk), len(rtl_disk))) if emu_disk[i] != rtl_disk[i]), None)
+            sys.exit(f"disk mismatch: {len(rtl_disk)} bytes on the RTL, {len(emu_disk)} on the emulator, first difference at {differs}")
+        print(f"disks identical: {len(emu_disk)} bytes")
+        if args.disk_out is not None:
+            args.disk_out.write_bytes(emu_disk)
     if args.compare == "results":
         # What the guest printed and presented agreed, and so did every fault it took: the same PC,
         # word, cause, and value in the same order, only the step numbers differing.
