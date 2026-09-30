@@ -26,8 +26,10 @@ Outcome = namedtuple("Outcome", "ok reason code checksum")
 def qemu_command(qemu, elf, cpu=DEFAULT_CPU, memory="4M", log=None, drive=None, icount=None):
     command = [qemu, "-M", "virt", "-cpu", cpu, "-bios", "none", "-kernel", str(elf), "-m", memory,
                "-nographic", "-monitor", "none", "-no-reboot"]
-    if icount is not None:  # mtime counts instructions (2**icount ns each), not host time: a golden that
-        # depends on how many timer interrupts a program sees (the OS's "preempted") holds on any host
+    # Virtual time advances 2**icount ns per instruction instead of following the host, and an idle
+    # wfi skips to the next deadline: whether the timer interrupts a program (the OS's "preempted")
+    # no longer depends on how fast the host is. Console input still arrives on host time.
+    if icount is not None:
         command += ["-icount", f"shift={icount},sleep=off"]
     if drive is not None:  # O3: a virtio-blk disk in virt's first virtio slot, modern (version 2) transport
         command += ["-global", "virtio-mmio.force-legacy=false", "-drive", f"file={drive},if=none,format=raw,id=disk0",
@@ -92,10 +94,11 @@ def main():
     parser.add_argument("--last-line", action="store_true", help="judge the last console line; earlier lines are a report")
     parser.add_argument("--stdin", type=Path, help="bytes the guest's UART receives (O2)")
     parser.add_argument("--drive", type=Path, help="a raw disk image for virtio-blk (O3); the guest may write it")
-    parser.add_argument("--icount", type=int, choices=range(0, 11), metavar="N",
-                        help="deterministic time: each instruction advances mtime by 2**N ns, and wfi skips ahead")
+    parser.add_argument("--icount", type=int, choices=range(11), metavar="N",
+                        help="instruction-counted time: each instruction advances virtual time 2**N ns, and wfi skips ahead")
     args = parser.parse_args()
-    command = qemu_command(args.qemu, args.elf, args.cpu, args.memory, args.qemu_log, args.drive, args.icount)
+    command = qemu_command(args.qemu, args.elf, cpu=args.cpu, memory=args.memory, log=args.qemu_log, drive=args.drive,
+                           icount=args.icount)
     try:
         status, transcript, diagnostics, timed_out = run(command, args.timeout, args.stdin)
     except OSError as error:

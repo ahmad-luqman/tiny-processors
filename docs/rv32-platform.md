@@ -221,7 +221,8 @@ self-check's pinned clang 22 trace length, the runner test that uses BSD
 diagnostic's Verilator target at the default 10-million-cycle limit (it passes
 at 30 million: 19,027,745 cycles), the host tests that link `-shared`
 libraries, and the QEMU runs of the self-check and `floatsoft`, which ask for
-the `rv32i` model QEMU 8.2 lacks (both pass with `--cpu rv32`).
+the `rv32i` model QEMU 8.2 lacks (both pass with `--cpu rv32`). Issue #20
+later fixed the first two and the diagnostic's cycle limit.
 
 ## After review
 

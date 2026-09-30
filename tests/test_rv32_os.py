@@ -153,6 +153,28 @@ class ConsoleReceiveTest(unittest.TestCase):
         self.assertEqual(loads, ["00000021", "0000006f", "00000021", "0000006b", "00000020", "00000000"])
 
 
+class DecimalTest(unittest.TestCase):
+    """u_decimal on the host: the sessions only print numbers up to five digits, so the long
+    division's top bits and ten-digit values are checked here against Python's own str()."""
+
+    def test_matches_str_across_the_range(self):
+        import ctypes
+        with tempfile.TemporaryDirectory() as directory:
+            library = Path(directory) / "udecimal.so"
+            subprocess.run([os.environ.get("HOST_CC", "cc"), "-shared", "-fPIC", "-O2", "-std=c11", "-Wall", "-Wextra",
+                            "-Werror", "-o", str(library), str(ROOT / "programs/rv32/os/udecimal.c")], check=True)
+            u_decimal = ctypes.CDLL(str(library)).u_decimal
+            u_decimal.restype, u_decimal.argtypes = ctypes.c_uint32, [ctypes.c_uint32, ctypes.c_char_p]
+            values = [0, 1, 9, 10, 11, 99, 100, 65535, 99999, 100000, 999999999, 10**9, 2**31 - 1, 2**31,
+                      2**32 - 6, 2**32 - 1] + [10**k - 1 for k in range(1, 10)] + [10**k for k in range(1, 10)]
+            values += [(0x9E3779B9 * i) & 0xffffffff for i in range(1, 2000)]
+            for value in values:
+                digits = ctypes.create_string_buffer(11)
+                start = u_decimal(value, digits)
+                self.assertEqual(digits.raw[start:10].decode(), str(value), value)
+                self.assertEqual(digits.raw[10], 0)
+
+
 class LayoutTest(unittest.TestCase):
     """The slot layout is written in three places: sys.h (the kernel and the programs), the
     Makefile (the link addresses) and tools/rv32_ramdisk.py (the RAM disk's checks)."""

@@ -160,7 +160,7 @@ def run_backend(command, trace, parse_halt, timeout, console=None, checkpoints=N
         completed = subprocess.run(command, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         partial = f" (a partial trace is in {trace})" if trace is not None else ""
-        sys.exit(f"{command[0]} did not finish within {timeout} s; raise --timeout or bound the run{partial}")
+        sys.exit(f"{command[0]} did not finish within {timeout} s; raise --timeout (--rtl-timeout for the simulator) or bound the run{partial}")
     stdout, stderr = decode(completed.stdout), decode(completed.stderr)
     try:
         halt = parse_halt(stderr)
@@ -488,6 +488,8 @@ def main():
     parser.add_argument("--simulator", help=f".vvp file or Verilator binary (default {DEFAULT_SIMULATOR}; unused with --backend emulator)")
     parser.add_argument("--out", default=DEFAULT_OUT, help="directory for the image, traces, and VCD")
     parser.add_argument("--timeout", type=float, default=120.0, help="seconds each backend may run (default 120)")
+    parser.add_argument("--rtl-timeout", type=float,
+                        help="seconds the RTL simulator may run, overriding --timeout for it alone (a slow simulator)")
     parser.add_argument("--max-cycles", type=int, help="RTL cycle budget (default: testbench budget of 10000000)")
     parser.add_argument("--stall", type=int, default=None, help="fixed stall cycles per request")
     parser.add_argument("--seed", type=int, default=None, help="random 0..3 stall cycles per request")
@@ -516,6 +518,8 @@ def main():
         parser.error("--max-cycles must be in 1..2147483647")
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
+    if args.rtl_timeout is not None and args.rtl_timeout <= 0:
+        parser.error("--rtl-timeout must be positive")
     if args.simulator is None and args.backend == "both":
         args.simulator = DEFAULT_SIMULATOR
     for path in (args.emulator, args.simulator):
@@ -599,7 +603,7 @@ def main():
     def run_rtl_as_asked(stall, seed, wave=None):
         """The RTL run every mode makes: the arguments given, with this stall setting."""
         return run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=seed, wave=wave,
-                       timeout=args.timeout, max_cycles=args.max_cycles, checkpoints=out / f"{name}.rtl.checkpoints",
+                       timeout=args.timeout if args.rtl_timeout is None else args.rtl_timeout, max_cycles=args.max_cycles, checkpoints=out / f"{name}.rtl.checkpoints",
                        input_script=args.input, allow_lost_events=args.allow_lost_events, simd_stall=args.simd_stall,
                        simd_seed=args.simd_seed, gpu_stall=args.gpu_stall, gpu_seed=args.gpu_seed, ticks=args.ticks,
                        console_input=args.console_input, disk=backend_disk("rtl"))

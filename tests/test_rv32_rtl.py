@@ -517,9 +517,11 @@ class RtlTest(unittest.TestCase):
             # The counts depend on the compiler that built the image, so they come from the emulator's
             # trace, which the RTL must match line for line: a fetch per step plus its data access,
             # 4 cycles a step and one more with a data access, plus the stalls on each transfer.
+            # The loose bounds still catch gross drift (clang 22 gives 32,610 steps and 8,055
+            # accesses, clang 18 33,226 steps); the stalled cycle checks add stalls == transfers.
             steps = len(emulator.trace)
             accesses = sum(" mem[" in line for line in emulator.trace)
-            self.assertGreater(accesses, 0)
+            self.assertTrue(25000 < steps < 45000 and steps // 8 < accesses < steps // 2, (steps, accesses))
             for stall, seed in ((0, None), (1, None), (None, SEED)):
                 with self.subTest(stall=stall, seed=seed):
                     rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", stall=stall, seed=seed)
@@ -1228,6 +1230,16 @@ class RunnerTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("did not finish within 0.5 s", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
+        # --rtl-timeout raises the simulator's limit alone: the emulator keeps --timeout.
+        for bad in ("0", "-1", "x"):
+            with self.subTest(rtl_timeout=bad):
+                result = self.run_results(self.emulator, "--rtl-timeout", bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("--rtl-timeout", result.stderr)
+        result = self.run_results(slow, "--timeout", "0.5", "--rtl-timeout", "60")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not finish within 0.5 s", result.stderr)
+        self.assertIn("results identical", self.run_results(self.emulator, "--timeout", "60", "--rtl-timeout", "60").stdout)
         # An empty or malformed expected file is refused, not compared vacuously.
         expected.write_text("# nothing here\n\n")
         result = self.run_results(self.emulator, "--expect-checkpoints", str(expected))

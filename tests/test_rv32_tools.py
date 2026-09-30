@@ -302,9 +302,21 @@ class QemuDriverTests(unittest.TestCase):
         self.assertEqual(command[command.index("-monitor") + 1], "none")
         self.assertNotIn("-d", command)
         self.assertIn("-D", qemu_command("q", "fw.elf", log="q.log"))
-        self.assertNotIn("-icount", command)  # host time unless asked, as the diff and arch-test runners want
-        timed = qemu_command("q", "fw.elf", icount=3)
-        self.assertEqual(timed[timed.index("-icount") + 1], "shift=3,sleep=off")
+        self.assertNotIn("-icount", command)  # host time unless asked; the diff and arch-test runners don't ask
+        for shift in (0, 3):  # 0 is a real shift, not "off"
+            timed = qemu_command("q", "fw.elf", icount=shift)
+            self.assertEqual(timed[timed.index("-icount") + 1], f"shift={shift},sleep=off")
+
+    def test_os_sessions_run_on_instruction_counted_time(self):
+        # A dropped --icount only shows in the jobs golden on a fast host, so pin the wiring here.
+        makefile = (ROOT / "Makefile").read_text()
+        for target in ("run-rv32-os-qemu", "run-rv32-os-qemu-reboot", "run-rv32-os-jobs-qemu"):
+            lines = makefile.split(f"\n{target}:", 1)[1].splitlines()[1:]
+            recipe = lines[:next((i for i, line in enumerate(lines) if not line.startswith("\t")), len(lines))]
+            runs = [line for line in recipe if "rv32_run_qemu.py" in line]
+            self.assertTrue(runs, target)
+            for line in runs:
+                self.assertIn("--icount $(RV32_OS_QEMU_ICOUNT)", line, target)
 
     def test_classify_pass_and_fail(self):
         self.assertEqual(classify(0, "PASS 807d9fad\n", False), (True, "pass", 0, "807d9fad"))

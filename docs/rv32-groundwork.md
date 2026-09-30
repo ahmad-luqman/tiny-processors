@@ -412,5 +412,8 @@ diagnostic and Pong image tests exceed the tests' 120-second timeout;
 limit after the same 1,995,674 instructions (clang 18's diagnostic runs longer); the host-side tests that build `-shared` libraries
 (`test_software_multiply_helper...`, `test-rv32-capstone`) fail to link on
 Linux; and `run-rv32-qemu` needs QEMU's `rv32i` CPU model, which QEMU 8.2 lacks.
+Issue #20 later fixed three of these: the self-check test derives its counts
+from the emulator's trace, the runner test edits with a portable `sed`, and
+the diagnostic's RTL targets pass `--max-cycles 40000000`.
 The native window (SDL3) and the long S1 runs were not run here.
 

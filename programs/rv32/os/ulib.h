@@ -1,6 +1,6 @@
 /* The user library (Track 2, O2): system call wrappers and the few string and
- * number helpers a program needs without a C library. Programs link ustart.S
- * and ulib.c; console.h's rv32_putc/rv32_puts/rv32_put_hex32/rv32_put_udec and
+ * number helpers a program needs without a C library. Programs link ustart.S,
+ * ulib.c and udecimal.c; console.h's rv32_putc/rv32_puts/rv32_put_hex32/rv32_put_udec and
  * board.h's rv32_exit are defined here too, on top of system calls, so code
  * written for the bare machine (the games, the digit screen) links unchanged. */
 #ifndef RV32_OS_ULIB_H
@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 #include "sys.h"
+#include "udecimal.h"
 
 static inline uint32_t syscall3(uint32_t number, uint32_t a, uint32_t b, uint32_t c)
 {
@@ -48,7 +49,6 @@ int u_strcmp(const char *a, const char *b);
 void *memcpy(void *dst, const void *src, size_t n); /* mem.c */
 void *memset(void *dst, int value, size_t n);
 void u_puts(const char *s);                        /* the string, no newline */
-uint32_t u_decimal(uint32_t value, char digits[11]); /* the digits end at digits[10] = 0; returns where they start */
 void u_putdec(uint32_t value);
 void u_puthex(uint32_t value);                     /* eight lowercase digits */
 uint32_t u_parse(const char *s, const char **end); /* a decimal number */
