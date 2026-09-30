@@ -710,19 +710,27 @@ Measured after the track's review, from a clean `build/rv32/os`:
 ### After issue #20
 
 `u_decimal` divided by repeated subtraction, which cost `life` and `bars`
-most of their run time; shift-and-subtract division shortened every session
-that prints numbers. With it and with QEMU on instruction-counted time
-(Apple Silicon macOS, QEMU 11.1.2, llvm@22):
+most of their run time; shift-and-subtract division (#21) shortened every
+session that prints numbers. QEMU's OS sessions run on instruction-counted
+time (#21), and the DMA window keeps the engines inside the running process's
+slots (the menu at 15–17, `dmaprobe` at 5). With all three (Apple Silicon
+macOS, QEMU 11.1.2, llvm@22):
 
 - **Jobs session:** `PASS 408a6738` on QEMU ten runs in a row, "preempted yes"
-  for both jobs each time; the emulator (1,854,978 steps, 151 interrupts),
-  Verilator with a stall per request (12,656,271 cycles, 40 presents,
+  for both jobs each time; the emulator (1,875,690 steps, 151 interrupts),
+  Verilator with a stall per request (12,832,708 cycles, 40 presents,
   identical disks) and step-tick mode with seeded stalls (traces identical,
-  1,854,978 lines).
-- **Console session:** `PASS dc3c1f20` on QEMU, the emulator (1,509,994
-  steps), Verilator with a stall per request (9,178,520 cycles) and Icarus
-  (6,890,066 cycles, about five minutes), results-identical over 110 console
-  lines with identical disks.
+  1,875,690 lines).
+- **Console session:** `PASS dc3c1f20` on QEMU, the emulator (1,532,083
+  steps), Verilator with a stall per request (9,305,012 cycles) and Icarus
+  (6,988,036 cycles), results-identical over 111 console lines with identical
+  disks.
+- **Menu session** (`dmaprobe`, `dmaprobe window`, then S1's menu):
+  `PASS 53e2ea5f` and S1's 185 checkpoints on the emulator (21,298,922 steps)
+  and on Verilator with seeded waits (122,242,097 cycles).
+- **Pong** stays trace-identical in step-tick mode (1,035,534 lines).
+- **Cost** (Yosys 0.69 generic cells): the window is 103 cells, and its test
+  adds 307 to G1 (52,097 to 52,404).
 
 ## Exercises (O5)
 
