@@ -53,6 +53,18 @@ typedef struct {
     uint32_t offset, length;
 } span;
 
+/* Is there a NUL in [at, end)? A property name must end inside the strings block before it is
+ * compared with anything, or the comparison could run past the blob. */
+static int terminated(const fdt *t, uint32_t at, uint32_t end)
+{
+    for (; at < end; at++) {
+        if (t->blob[at] == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* Does `value` (a NUL-separated list for "compatible") match? */
 static int matches(const fdt *t, span v, int list, const char *want)
 {
@@ -155,7 +167,8 @@ static int walk(const fdt *t, const char *property, const char *value, uint32_t 
             }
             span v = {at + 8, be32(t->blob + at)};
             uint32_t name = t->strings + be32(t->blob + at + 4);
-            if (v.offset + v.length > t->structs_end || v.offset + v.length < v.offset || name >= t->strings_end) {
+            if (v.offset + v.length > t->structs_end || v.offset + v.length < v.offset ||
+                name < t->strings || !terminated(t, name, t->strings_end)) {
                 return FDT_BAD_LAYOUT;
             }
             at = (v.offset + v.length + 3u) & ~3u;

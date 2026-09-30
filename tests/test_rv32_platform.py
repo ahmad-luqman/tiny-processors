@@ -99,6 +99,16 @@ class VirtMapTest(unittest.TestCase):
         self.assertIn("virtio_mmio@10001000", " ".join(problems))
 
 
+def unterminated_last_name(blob):
+    """The blob with the NUL of its last property name removed and the file ending right there."""
+    header = list(struct.unpack(">10I", blob[:40]))
+    end = header[3] + header[8]
+    assert blob[end - 1] == 0 and end == len(blob)
+    header[1] -= 1   # totalsize
+    header[8] -= 1   # size_dt_strings
+    return struct.pack(">10I", *header) + blob[40:end - 1]
+
+
 class FirmwareReaderTest(unittest.TestCase):
     """programs/rv32/fdt.c on the host, compared with the Python parser."""
 
@@ -156,6 +166,16 @@ class FirmwareReaderTest(unittest.TestCase):
         # A two-cell address whose high cell is zero fits in 32 bits.
         self.assertEqual(self.query(blob, "compatible", "pci-host-ecam-generic", "0"), "30000000 10000000")
 
+    def test_unterminated_name_under_every_query(self):
+        """Each query compares property names with a different string; none may run off the end.
+        The bad name belongs to /soc's `ranges`, so a query answered on the root (the model) never
+        reaches it; every query that walks past it is refused."""
+        bad = unterminated_last_name(rv32_dtb.build(rv32_dtb.MACHINE))
+        for args, expected in ((("model",), "tiny-processors RV32 machine"), (("ranges", "", "0"), "error 3"),
+                               (("compatible", "riscv,clint0", "0"), "error 3")):
+            with self.subTest(args):
+                self.assertEqual(self.query(bad, *args), expected)
+
     def test_malformed_blobs_are_refused(self):
         blob = rv32_dtb.build(rv32_dtb.MACHINE)
         size_struct = struct.unpack(">I", blob[36:40])[0]
@@ -166,6 +186,9 @@ class FirmwareReaderTest(unittest.TestCase):
             "truncated file": (blob[: len(blob) // 2], "error 3"),
             "struct cut short": (blob[:36] + struct.pack(">I", size_struct // 2) + blob[40:], "error 3"),
             "bad token": (blob[:56] + struct.pack(">I", 7) + blob[60:], "error 3"),
+            # The last property name, "ranges", loses its NUL and the blob ends there: comparing
+            # it with a query must not read past the strings block (review on PR #18).
+            "unterminated name": (unterminated_last_name(blob), "error 3"),
         }
         for name, (bad, expected) in cases.items():
             with self.subTest(name):

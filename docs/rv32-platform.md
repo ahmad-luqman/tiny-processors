@@ -116,7 +116,7 @@ emulator sets `x[11]` in `emu_init`.
 [platcheck.c](../programs/rv32/platcheck.c) receives `a0` and `a1` as `main`'s
 arguments ([start.S](../programs/rv32/start.S) never touches them) and learns
 the platform from the tree through [fdt.c](../programs/rv32/fdt.c), a
-200-line reader that checks the header, walks the structure block, decodes
+210-line reader that checks the header, walks the structure block, decodes
 `reg` with the parent's cell counts (QEMU uses two address cells, we use
 one) and reads the blob a byte at a time. On QEMU:
 
@@ -163,15 +163,17 @@ Verilator 5.040 built from their release tags, Yosys 0.33, dtc 1.7.
 - **Map:** `check-rv32-virt-map`: 12 windows against `virt`'s 22 regions,
   shared devices equal, the rest disjoint.
 - **platcheck:** `PASS b8a59113` on QEMU `virt` (exit status 0, transcript
-  equal to the pinned one), the emulator (102,221 instructions), Icarus
-  (431,651 cycles) and Verilator with one stall per request (556,639 cycles),
+  equal to the pinned one), the emulator (118,151 instructions), Icarus
+  (498,994 cycles) and Verilator with one stall per request (643,535 cycles),
   the RTL runs results-identical to the emulator (18 console lines).
-- **Unit tests:** `test-rv32-platform` 9 tests: the generator round-trips and
+- **Unit tests:** `test-rv32-platform` 11 tests: the generator round-trips and
   its copies are current, `dtc` agrees, malformed blobs are refused; the map
   checker passes ours and rejects the old input, a moved CLINT and a window on
   a virtio slot; `fdt.c` built natively under AddressSanitizer and UBSan gives
-  the Python parser's answers on our tree and QEMU's, and refuses six
-  malformed blobs without reading past them. `test-rv32-emu` 35 (new: CLINT
+  the Python parser's answers on our tree and QEMU's, and refuses seven
+  malformed blobs without reading past them, including a property name with
+  no NUL before the end of the blob (found in review: `fdt.c` now checks that a
+  name ends inside the strings block before comparing it). `test-rv32-emu` 35 (new: CLINT
   registers and `time`, boot registers and ROM, the reserved PLIC and virtio
   addresses fault); `test-rv32-rtl` on Verilator 41 (new: the same boot and
   CLINT program with identical traces with and without stalls, and six fault
