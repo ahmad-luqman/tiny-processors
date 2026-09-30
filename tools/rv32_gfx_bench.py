@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from tools.rv32_asm import GPU_BASE, GPU_PARAMS, GPU_STATUS, TIMER, FB, FB_SIZE
+from tools.rv32_asm import GPU_BASE, GPU_PARAMS, GPU_STATUS, MTIME, FB, FB_SIZE
 from tools.rv32_rtl import run_rtl,run_emulator,check_passed,write_image
 
 def main():
@@ -40,7 +40,8 @@ def main():
             if [j['op'] for j in jobs]!=[1,2,3,4] or not run.console.endswith('PASS BENCH\n'):raise RuntimeError('invalid benchmark output')
             intervals=[];active=None
             for line in run.trace:
-                if f'mem[{TIMER:08x}]->' in line:
+                # gfxbench.c brackets each operation with a read of mtime's low word only.
+                if f'mem[{MTIME:08x}]->' in line:
                     if active is None:active={'cpu_instructions':0,'register_stores':0,'status_reads':0,'framebuffer_reads':0,'framebuffer_writes':0}
                     else:intervals.append(active);active=None
                 elif active is not None:

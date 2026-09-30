@@ -84,11 +84,18 @@ The console (`0x1000_0000`), done register (`0x0010_0000`) and RAM
 ## Acceptance
 
 - `make check-rv32-virt-map` passes against the installed QEMU.
-- `make test-rv32-platform` passes: `platcheck` gives the same `PASS` word
-  on QEMU `virt`, the emulator, Icarus and Verilator; QEMU's transcript
-  reports our devices absent and ours report them present; the RTL runs are
-  compared with the emulator at the results level (they read `mtime`).
-- The generated blob, C array and ROM module are up to date (a unit test).
-- Every earlier program keeps its `PASS` word and its checkpoints, and every
-  trace comparison that held before still holds, on the emulator and on
-  Verilator (and Icarus where its runtime allows).
+- `make run-rv32-platform-qemu`, `run-rv32-platform-emu`,
+  `run-rv32-platform-rtl` and `run-rv32-platform-rtl-verilator` pass:
+  `platcheck` gives the same `PASS` word on QEMU `virt`, the emulator, Icarus
+  and Verilator; QEMU's transcript reports our devices absent and ours report
+  them present; the RTL runs are compared with the emulator at the results
+  level (they read `mtime`).
+- `make test-rv32-platform` passes: the generated blob, C array and ROM module
+  are up to date, the map checker and the firmware's FDT reader behave as
+  specified on good and malformed trees.
+- Every earlier program keeps its `PASS` word and its checkpoints, except the
+  diagnostic's word, which folds the address of its faulting timer read and
+  so changes from `8bd87e9a` to `efd4ec82` (derived, not copied, in
+  `tools/rv32_devices.py`); every trace comparison that held before still
+  holds, on the emulator and on Verilator (and Icarus where its runtime
+  allows).

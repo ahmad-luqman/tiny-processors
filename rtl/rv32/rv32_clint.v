@@ -25,17 +25,22 @@ module rv32_clint (
     output wire        error,
     output wire [63:0] mtime
 );
+    // Register offsets within the 64 KiB window (tests/test_rv32_tools.py pins them to board.h).
+    localparam [15:0] MSIP = 16'h0000, MTIMECMP = 16'h4000, MTIME = 16'hbff8;
+
     reg [63:0] elapsed, mtimecmp;
     reg msip;
     wire [15:0] offset = addr[15:0];
     wire word = strb == 4'b1111;
-    wire at_msip = offset == 16'h0000, at_cmp_lo = offset == 16'h4000, at_cmp_hi = offset == 16'h4004;
-    wire at_time_lo = offset == 16'hbff8, at_time_hi = offset == 16'hbffc;
+    wire at_msip = offset == MSIP, at_cmp_lo = offset == MTIMECMP, at_cmp_hi = offset == MTIMECMP + 16'd4;
+    wire at_time_lo = offset == MTIME, at_time_hi = offset == MTIME + 16'd4;
     wire known = at_msip || at_cmp_lo || at_cmp_hi || at_time_lo || at_time_hi;
     wire write = valid && we && word;
 
     assign mtime = elapsed + 64'd1;
     assign ready = valid;
+    // Like every slave's, `error` describes the presented address whether or not `valid` is set:
+    // the bus reads it only through `clint_sel`, and only when it also sees `ready`.
     assign error = !(known && word);
     assign rdata = at_msip ? {31'd0, msip} :
                    at_cmp_lo ? mtimecmp[31:0] :
@@ -60,5 +65,5 @@ module rv32_clint (
         end
     end
 
-    wire unused_ok = &{1'b0, addr[31:16], wdata[31:1] & 31'd0};
+    wire unused_ok = &{1'b0, addr[31:16], wdata[31:1]};
 endmodule

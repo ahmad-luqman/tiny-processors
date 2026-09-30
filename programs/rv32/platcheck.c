@@ -14,10 +14,15 @@
  *    listed at their board.h addresses; on another platform an unlisted one
  *    is reported absent and never touched.
  *
- * The PASS word folds only what every backend shares (the four shared
- * addresses, the memory size and the CLINT results), so QEMU, the emulator
- * and the RTL print the same word; the device lines in between differ, and
- * the runner checks them per platform.
+ * Only FDT_NOT_FOUND means absent. Any other error from the reader (a
+ * malformed tree, a node without a usable reg, a value too wide) is a
+ * failure on every platform, so a tree that is corrupt after the shared
+ * nodes cannot pass by making our devices look absent.
+ *
+ * The PASS word folds only what every backend shares (the hart id, the three
+ * shared addresses, memory's base and size, and the CLINT results), so QEMU,
+ * the emulator and the RTL print the same word; the device lines in between
+ * differ, and the runner checks them per platform.
  */
 #include <stdint.h>
 
@@ -27,7 +32,6 @@
 #include "gpu.h"
 #include "mmio.h"
 
-#define CSR_TIME 0xc01
 #define CSR_TIMEH 0xc81
 #define MACHINE "tiny-processors,rv32-machine"
 
@@ -39,15 +43,6 @@ static void fold(uint32_t value)
     checksum = (checksum ^ value) * 16777619u; /* FNV-1a, as the self-check and the diagnostic */
 }
 
-static int same(const char *a, const char *b)
-{
-    while (*a && *a == *b) {
-        a++;
-        b++;
-    }
-    return *a == *b;
-}
-
 static void fail(const char *what)
 {
     rv32_puts("platcheck: FAILED ");
@@ -56,29 +51,58 @@ static void fail(const char *what)
     failures++;
 }
 
-static void line(const char *name, uint32_t a, uint32_t b, int two)
+/* A reader error other than "not found": the tree is unusable for this query on any platform. */
+static void fail_status(const char *name, fdt_status status)
+{
+    rv32_puts("platcheck: FAILED ");
+    rv32_puts(name);
+    rv32_puts(", device tree error ");
+    rv32_put_udec((uint32_t)status);
+    rv32_putc('\n');
+    failures++;
+}
+
+static void begin_line(const char *name, uint32_t a)
 {
     rv32_puts("platcheck: ");
     rv32_puts(name);
     rv32_putc(' ');
     rv32_put_hex32(a);
-    if (two) {
-        rv32_putc(' ');
-        rv32_put_hex32(b);
-    }
+}
+
+/* "platcheck: NAME AAAAAAAA" */
+static void line1(const char *name, uint32_t a)
+{
+    begin_line(name, a);
     rv32_putc('\n');
 }
 
-/* The first node matching either compatible string, which must be at `expected`. */
+/* "platcheck: NAME AAAAAAAA BBBBBBBB" */
+static void line2(const char *name, uint32_t a, uint32_t b)
+{
+    begin_line(name, a);
+    rv32_putc(' ');
+    rv32_put_hex32(b);
+    rv32_putc('\n');
+}
+
+/* The first node matching our compatible string, else virt's, which must be at `expected`. */
 static int shared_device(const fdt *t, const char *name, const char *ours, const char *theirs, uint32_t expected)
 {
     uint32_t base = 0, size = 0;
-    if (fdt_find(t, "compatible", ours, 0, &base, &size) != FDT_OK &&
-        fdt_find(t, "compatible", theirs, 0, &base, &size) != FDT_OK) {
+    fdt_status status = fdt_find(t, "compatible", ours, 0, &base, &size);
+    if (status == FDT_NOT_FOUND) {
+        status = fdt_find(t, "compatible", theirs, 0, &base, &size);
+    }
+    if (status == FDT_NOT_FOUND) {
         fail(name);
         return 0;
     }
-    line(name, base, 0, 0);
+    if (status != FDT_OK) {
+        fail_status(name, status);
+        return 0;
+    }
+    line1(name, base);
     if (base != expected) {
         fail(name);
         return 0;
@@ -151,12 +175,14 @@ static void check_clint(void)
     }
 }
 
-/* One of our devices: absent is fine off our machine; present means at board.h's address. */
+/* One of our devices: absent is fine off our machine; present means at board.h's address. Only
+ * FDT_NOT_FOUND is absent; any other status fails whatever the platform. */
 static int own_device(const fdt *t, int ours, const char *name, const char *compatible,
                       uint32_t index, uint32_t expected)
 {
     uint32_t base = 0, size = 0;
-    if (fdt_find(t, "compatible", compatible, index, &base, &size) != FDT_OK) {
+    fdt_status status = fdt_find(t, "compatible", compatible, index, &base, &size);
+    if (status == FDT_NOT_FOUND) {
         rv32_puts("platcheck: ");
         rv32_puts(name);
         rv32_puts(" absent\n");
@@ -165,7 +191,11 @@ static int own_device(const fdt *t, int ours, const char *name, const char *comp
         }
         return 0;
     }
-    line(name, base, size, 1);
+    if (status != FDT_OK) {
+        fail_status(name, status);
+        return 0;
+    }
+    line2(name, base, size);
     if (base != expected) {
         fail(name);
         return 0;
@@ -207,25 +237,38 @@ int main(uint32_t hart, uintptr_t tree)
     rv32_put_udec(hart);
     rv32_putc('\n');
     fold(hart);
-    int status = fdt_open(&t, tree);
+    fdt_status status = fdt_open(&t, tree);
     if (status != FDT_OK) {
         rv32_puts("platcheck: no device tree in a1, error ");
         rv32_put_udec((uint32_t)status);
         rv32_puts("\nFAIL 1\n");
         return 1;
     }
-    const char *model = fdt_root_string(&t, "model");
+    const char *model = 0;
+    status = fdt_root_string(&t, "model", &model);
     rv32_puts("platcheck: model ");
-    rv32_puts(model ? model : "(none)");
+    rv32_puts(status == FDT_OK ? model : "(none)");
     rv32_putc('\n');
-    const char *machine = fdt_root_string(&t, "compatible"); /* the first entry of the list */
-    int ours = machine && same(machine, MACHINE);
+    if (status != FDT_OK && status != FDT_NOT_FOUND) {
+        fail_status("model", status);
+    }
+    /* Which machine this is: the first entry of the root's compatible list. A missing list is
+     * "not ours"; an unreadable one fails, since it would otherwise excuse missing devices. */
+    const char *machine = 0;
+    status = fdt_root_string(&t, "compatible", &machine);
+    int ours = status == FDT_OK && fdt_same(machine, MACHINE);
+    if (status != FDT_OK && status != FDT_NOT_FOUND) {
+        fail_status("root compatible", status);
+    }
     uint32_t base = 0, size = 0;
 
-    if (fdt_find(&t, "device_type", "memory", 0, &base, &size) != FDT_OK) {
+    status = fdt_find(&t, "device_type", "memory", 0, &base, &size);
+    if (status == FDT_NOT_FOUND) {
         fail("memory");
+    } else if (status != FDT_OK) {
+        fail_status("memory", status);
     } else {
-        line("memory", base, size, 1);
+        line2("memory", base, size);
         fold(base);
         fold(size);
         if (base != RV32_RAM_BASE || size != RV32_RAM_PLANNED_SIZE) {

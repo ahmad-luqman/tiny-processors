@@ -25,60 +25,75 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import rv32_dtb  # noqa: E402
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))  # run as a script, or imported as tools.rv32_virt_map
+from tools import rv32_dtb  # noqa: E402
 
-# Which of our nodes are shared with virt, and the compatible string virt uses for each.
-SHARED = {"test": "sifive,test0", "console": "ns16550a", "clint": "riscv,clint0"}
+# The nodes our tree shares with virt: our node's name, virt's compatible string, and how our
+# window must relate to virt's: "equal" to one of its windows, or "inside" one.
+SHARED = (("test", "sifive,test0", "inside"), ("console", "ns16550a", "inside"), ("clint", "riscv,clint0", "equal"))
 
 
-def dump_virt(qemu: str, memory: str = "4M") -> bytes:
+def dump_virt(qemu: str, memory: int = rv32_dtb.RAM_SIZE) -> bytes:
+    """virt's own tree, for a machine with the contract's RAM (4 MiB unless the contract changes)."""
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "virt.dtb"
-        subprocess.run([qemu, "-M", f"virt,dumpdtb={path}", "-bios", "none", "-m", memory,
-                        "-nographic", "-monitor", "none"], check=True, capture_output=True, timeout=60)
+        try:
+            subprocess.run([qemu, "-M", f"virt,dumpdtb={path}", "-bios", "none", "-m", f"{memory // 1024}K",
+                            "-nographic", "-monitor", "none"], check=True, capture_output=True, text=True, timeout=60)
+        except subprocess.CalledProcessError as error:
+            raise RuntimeError(f"{qemu} could not dump virt's tree (status {error.returncode}):\n{error.stderr}") from error
         return path.read_bytes()
 
 
-def find_compatible(root: rv32_dtb.Node, compatible: str) -> list[tuple[str, int, int]]:
-    """Regions of the nodes whose compatible list names `compatible`."""
-    paths = []
+def paths_with(root: rv32_dtb.Node, compatible: str) -> set[str]:
+    """The paths of the nodes whose compatible list names `compatible`, spelled as regions() spells them."""
+    paths = set()
 
     def visit(n: rv32_dtb.Node, path: str) -> None:
         if compatible in rv32_dtb.strings_of(n.props.get("compatible", b"")):
-            paths.append(path)
+            paths.add(path)
         for c in n.children:
             visit(c, path.rstrip("/") + "/" + c.name)
 
     visit(root, "/")
-    return [r for r in rv32_dtb.regions(root) if r[0] in paths]
+    return paths
 
 
 def check(virt: rv32_dtb.Node, ours: rv32_dtb.Node) -> list[str]:
-    """The problems found; empty when the maps agree."""
+    """The problems found; empty when the maps agree. Every shared node and memory must be in our
+    tree: a tree that lost one would otherwise pass for want of anything to compare."""
     problems = []
     virt_regions = rv32_dtb.regions(virt)
-    shared_paths = set()
+    virt_memory = [(b, s) for p, b, s in virt_regions if p.startswith("/memory@")]
+    shared = {name: (compatible, mode) for name, compatible, mode in SHARED}
+    seen = set()
     for path, base, size in rv32_dtb.regions(ours):
         leaf = path.rsplit("/", 1)[-1].split("@")[0]
         if leaf == "memory":
-            shared_paths.add(path)
-            if (base, size) not in [(b, s) for p, b, s in virt_regions if p.startswith("/memory@")]:
+            seen.add(leaf)
+            if (base, size) not in virt_memory:
                 problems.append(f"memory {base:#x}+{size:#x} differs from virt's")
             continue
-        if leaf in SHARED:
-            shared_paths.add(path)
-            theirs = find_compatible(virt, SHARED[leaf])
-            if leaf == "clint":
-                ok = (base, size) in [(b, s) for _, b, s in theirs]
+        if leaf in shared:
+            seen.add(leaf)
+            compatible, mode = shared[leaf]
+            theirs = [(b, s) for p, b, s in virt_regions if p in paths_with(virt, compatible)]
+            if mode == "equal":
+                ok = (base, size) in theirs
             else:
-                ok = any(b <= base and base + size <= b + s for _, b, s in theirs)
+                ok = any(b <= base and base + size <= b + s for b, s in theirs)
             if not ok:
-                problems.append(f"{path} {base:#x}+{size:#x} is not inside virt's {SHARED[leaf]}")
+                problems.append(f"{path} {base:#x}+{size:#x} is not {'equal to' if mode == 'equal' else 'inside'} "
+                                f"virt's {compatible}")
             continue
         for vpath, vbase, vsize in virt_regions:
             if base < vbase + vsize and vbase < base + size:
                 problems.append(f"{path} {base:#x}+{size:#x} overlaps virt's {vpath} {vbase:#x}+{vsize:#x}")
+    for name in ["memory", *shared]:
+        if name not in seen:
+            problems.append(f"our tree has no {name} node")
     return problems
 
 
@@ -96,8 +111,8 @@ def main(argv: list[str] | None = None) -> int:
         print("rv32_virt_map: " + p, file=sys.stderr)
     if problems:
         return 1
-    count = len(rv32_dtb.regions(ours))
-    print(f"rv32_virt_map: {count} windows checked against virt's {len(rv32_dtb.regions(virt))} regions: "
+    print(f"rv32_virt_map: {len(rv32_dtb.regions(ours))} windows checked against virt's "
+          f"{len(rv32_dtb.regions(virt))} regions: "
           "shared devices agree, the rest are disjoint")
     return 0
 

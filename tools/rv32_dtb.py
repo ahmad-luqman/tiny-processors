@@ -29,6 +29,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))  # run as a script, or imported with tools/ on the path
+
+from tools import rv32_asm  # noqa: E402  (the addresses; board.h, the bus and the emulator are pinned to it)
+
 C_HEADER = ROOT / "tools" / "rv32_dtb.h"
 VERILOG = ROOT / "rtl" / "rv32" / "rv32_bootrom.v"
 
@@ -36,25 +41,28 @@ MAGIC = 0xD00DFEED
 VERSION, LAST_COMPATIBLE = 17, 16
 BEGIN_NODE, END_NODE, PROP, NOP, END = 1, 2, 3, 4, 9
 
-ROM_BASE = 0x0000_1000
-ROM_SIZE = 0x1000
-
-# The contract's addresses (programs/rv32/board.h is the firmware's copy; a
-# test pins the two equal).
-RAM_BASE, RAM_SIZE = 0x8000_0000, 0x0040_0000
-DONE_BASE = 0x0010_0000
-CONSOLE_BASE = 0x1000_0000
-CLINT_BASE, CLINT_SIZE = 0x0200_0000, 0x1_0000
-INPUT_BASE = 0x1100_1000
-DISPLAY_BASE = 0x1100_2000
-SIMD4_BASE, SIMD4_PROGRAM, SIMD4_DATA = 0x1100_4000, 0x1100_5000, 0x1100_6000
-GPU_BASE = 0x1100_7000
-G3D_BASE, G3D_SIZE = 0x1100_8000, 0x2000
-FB_BASE, FB_SIZE = 0x1200_0000, 320 * 240
+# The contract's addresses come from tools/rv32_asm.py, the Python copy that
+# tests/test_rv32_tools.py pins to board.h, rv32emu_core.h and rv32_bus.v. The
+# window sizes are this module's: the same test checks the bus decoder's widths
+# and the emulator's region table against regions(MACHINE).
+ROM_BASE, ROM_SIZE = rv32_asm.BOOTROM, 0x1000
+RAM_BASE, RAM_SIZE = rv32_asm.RAM, rv32_asm.RAM_SIZE
+DONE_BASE = rv32_asm.DONE
+CONSOLE_BASE = rv32_asm.CONSOLE
+CLINT_BASE, CLINT_SIZE = rv32_asm.CLINT, 0x1_0000
+INPUT_BASE = rv32_asm.INPUT
+DISPLAY_BASE = rv32_asm.DISPLAY
+SIMD4_BASE, SIMD4_PROGRAM, SIMD4_DATA = rv32_asm.SIMD_BASE, rv32_asm.SIMD_PROGRAM, rv32_asm.SIMD_DATA
+GPU_BASE = rv32_asm.GPU_BASE
+G3D_BASE, G3D_SIZE = rv32_asm.G3D_BASE, rv32_asm.G3D_SIZE
+FB_BASE, FB_SIZE = rv32_asm.FB, rv32_asm.FB_SIZE
 
 
 @dataclass
 class Node:
+    """One node. Mutable so tests can derive variants, which they do on a private copy
+    (`parse(build(MACHINE))`); MACHINE itself must never be edited."""
+
     name: str
     props: dict[str, bytes] = field(default_factory=dict)
     children: list["Node"] = field(default_factory=list)
@@ -143,7 +151,8 @@ def build(root: Node) -> bytes:
 
 
 def parse(blob: bytes) -> Node:
-    """Parse a flattened tree; raises ValueError on anything malformed."""
+    """Parse a flattened tree; raises ValueError on anything malformed, including a block,
+    node name, property value or property name that lies outside the blob."""
     if len(blob) < 40:
         raise ValueError("shorter than an FDT header")
     magic, total, off_struct, off_strings, _, version, last, _, size_strings, size_struct = \
@@ -152,6 +161,9 @@ def parse(blob: bytes) -> Node:
         raise ValueError(f"bad magic {magic:08x}")
     if last > VERSION or version < LAST_COMPATIBLE or total > len(blob):
         raise ValueError("unsupported version or truncated blob")
+    if not (40 <= off_struct and off_struct % 4 == 0 and off_struct + size_struct <= total
+            and 40 <= off_strings and off_strings + size_strings <= total):
+        raise ValueError("a block lies outside the blob")
     strings = blob[off_strings:off_strings + size_strings]
     pos, end = off_struct, off_struct + size_struct
     stack: list[Node] = []
@@ -168,7 +180,9 @@ def parse(blob: bytes) -> Node:
     while True:
         token = word()
         if token == BEGIN_NODE:
-            stop = blob.index(b"\0", pos)
+            stop = blob.find(b"\0", pos, end)
+            if stop < 0:
+                raise ValueError("node name runs past the structure block")
             n = Node(blob[pos:stop].decode())
             pos = (stop + 4) & ~3
             if stack:
@@ -182,7 +196,11 @@ def parse(blob: bytes) -> Node:
             length, name_off = word(), word()
             if not stack:
                 raise ValueError("property outside a node")
-            stop = strings.index(b"\0", name_off)
+            if pos + length > end:
+                raise ValueError("property value runs past the structure block")
+            stop = strings.find(b"\0", name_off)
+            if name_off >= len(strings) or stop < 0:
+                raise ValueError("property name lies outside the strings block")
             stack[-1].props[strings[name_off:stop].decode()] = bytes(blob[pos:pos + length])
             pos += (length + 3) & ~3
         elif token == END_NODE:
@@ -210,7 +228,9 @@ def strings_of(value: bytes) -> list[str]:
 def regions(root: Node) -> list[tuple[str, int, int]]:
     """Every (path, base, size) a `reg` or a non-empty `ranges` describes, with each
     node's address and size cells taken from its parent (defaults 2 and 1). A `ranges`
-    entry contributes its parent-bus address and size."""
+    entry contributes its parent-bus address and size. A reg under #size-cells = <0> (a cpu's)
+    describes no address range and is skipped; a reg or ranges that is not a whole number of
+    entries raises ValueError."""
     out: list[tuple[str, int, int]] = []
 
     def number(words: list[int]) -> int:
@@ -222,13 +242,17 @@ def regions(root: Node) -> list[tuple[str, int, int]]:
     def visit(n: Node, path: str, ac: int, sc: int) -> None:
         my_ac = cells(n.props["#address-cells"])[0] if "#address-cells" in n.props else 2
         my_sc = cells(n.props["#size-cells"])[0] if "#size-cells" in n.props else 1
-        if "reg" in n.props and sc > 0 and not path.startswith("/cpus"):
+        if "reg" in n.props and sc > 0:
             w = cells(n.props["reg"])
+            if len(n.props["reg"]) % 4 or len(w) % (ac + sc):
+                raise ValueError(f"{path}: reg is not a whole number of {ac}+{sc}-cell entries")
             for i in range(0, len(w), ac + sc):
                 out.append((path, number(w[i:i + ac]), number(w[i + ac:i + ac + sc])))
         if n.props.get("ranges"):
             w = cells(n.props["ranges"])
             step = my_ac + ac + my_sc
+            if len(n.props["ranges"]) % 4 or len(w) % step:
+                raise ValueError(f"{path}: ranges is not a whole number of {step}-cell entries")
             for i in range(0, len(w), step):
                 parent = number(w[i + my_ac:i + my_ac + ac])
                 out.append((path + " ranges", parent, number(w[i + my_ac + ac:i + step])))
@@ -278,11 +302,15 @@ def c_header(blob: bytes) -> str:
 
 
 def verilog(blob: bytes) -> str:
-    cases = "\n".join(f"            10'd{i}: word = 32'h{w:08x};" for i, w in enumerate(words(blob)))
+    # The case index is the word address inside the window: bits [top:2] of the byte address.
+    assert ROM_SIZE & (ROM_SIZE - 1) == 0 and ROM_SIZE >= 8, "the ROM window must be a power of two"
+    top = ROM_SIZE.bit_length() - 2
+    width = top - 1
+    cases = "\n".join(f"            {width}'d{i}: word = 32'h{w:08x};" for i, w in enumerate(words(blob)))
     return f"""`timescale 1ns/1ps
 
 // Boot ROM (docs/rv32.md, "Boot convention"): the machine's device tree blob,
-// {len(blob)} bytes, at 0x{ROM_BASE:04x}_{ROM_BASE & 0xffff:04x} in a 4 KiB window. Reads of any width
+// {len(blob)} bytes, at 0x{ROM_BASE >> 16:04x}_{ROM_BASE & 0xffff:04x} in a {ROM_SIZE // 1024} KiB window. Reads of any width
 // return the aligned word (the CPU selects the strobed lanes); bytes past the
 // blob read 0; every write is refused, and the bus refuses fetches.
 // {GENERATED}
@@ -296,7 +324,7 @@ module rv32_bootrom (
 );
     reg [31:0] word;
     always @* begin
-        case (addr[11:2])
+        case (addr[{top}:2])
 {cases}
             default: word = 32'd0;
         endcase
@@ -306,7 +334,7 @@ module rv32_bootrom (
     assign ready = valid;
     assign error = we;
 
-    wire unused_ok = &{{1'b0, addr[31:12], addr[1:0]}};
+    wire unused_ok = &{{1'b0, addr[31:{top + 1}], addr[1:0]}};
 endmodule
 """
 

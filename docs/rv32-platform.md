@@ -115,10 +115,13 @@ emulator sets `x[11]` in `emu_init`.
 
 [platcheck.c](../programs/rv32/platcheck.c) receives `a0` and `a1` as `main`'s
 arguments ([start.S](../programs/rv32/start.S) never touches them) and learns
-the platform from the tree through [fdt.c](../programs/rv32/fdt.c), a
-210-line reader that checks the header, walks the structure block, decodes
-`reg` with the parent's cell counts (QEMU uses two address cells, we use
-one) and reads the blob a byte at a time. On QEMU:
+the platform from the tree through [fdt.c](../programs/rv32/fdt.c), a small
+reader that checks the header, walks the structure block, decodes `reg` with
+the parent's cell counts (QEMU uses two address cells, we use one; more than
+two is refused) and reads the blob a byte at a time. Every query returns a
+status ([fdt.h](../programs/rv32/fdt.h)): found, not found, a malformed tree,
+a value too wide for 32 bits, or a node that matches but has no usable `reg`.
+On QEMU:
 
 ```
 platcheck: hart 0
@@ -147,12 +150,15 @@ addresses and the CLINT results), so it is the same on all of them.
 [platcheck.expected](../programs/rv32/platcheck.expected) pin both
 transcripts. On our machine every device must be listed (the root's
 compatible says which machine it is); on any other, an unlisted device is
-reported and never touched.
+reported and never touched. Only "not found" reads as absent: any other
+status from the reader fails the run on every platform, so a tree that is
+corrupt after the shared nodes cannot pass by making our devices look absent
+(a QEMU run with such a tree, given through `-dtb`, is one of the tests).
 
 `rv32_run_qemu.py --last-line` judges the last console line, as the
 diagnostic's runner does. QEMU 8.2 has no bare `rv32i` CPU model, so the run
 uses the generic `rv32` (`RV32_PLATFORM_QEMU_CPU`); the image is RV32I with
-two `csrr`s.
+one `csrr` (of `timeh`).
 
 ## Evidence
 
@@ -166,18 +172,29 @@ Verilator 5.040 built from their release tags, Yosys 0.33, dtc 1.7.
   equal to the pinned one), the emulator (118,151 instructions), Icarus
   (498,994 cycles) and Verilator with one stall per request (643,535 cycles),
   the RTL runs results-identical to the emulator (18 console lines).
-- **Unit tests:** `test-rv32-platform` 11 tests: the generator round-trips and
-  its copies are current, `dtc` agrees, malformed blobs are refused; the map
-  checker passes ours and rejects the old input, a moved CLINT and a window on
-  a virtio slot; `fdt.c` built natively under AddressSanitizer and UBSan gives
-  the Python parser's answers on our tree and QEMU's, and refuses seven
-  malformed blobs without reading past them, including a property name with
-  no NUL before the end of the blob (found in review: `fdt.c` now checks that a
-  name ends inside the strings block before comparing it). `test-rv32-emu` 35 (new: CLINT
-  registers and `time`, boot registers and ROM, the reserved PLIC and virtio
-  addresses fault); `test-rv32-rtl` on Verilator 41 (new: the same boot and
-  CLINT program with identical traces with and without stalls, and six fault
-  cases).
+- **Unit tests:** `test-rv32-platform` 23 tests. The generator round-trips,
+  its copies are current, `dtc` agrees, and the Python parser refuses eleven
+  malformed blobs and partial `reg` entries. The map checker passes ours
+  against the installed QEMU and against a committed QEMU 8.2.2 tree
+  ([fixture](../tests/fixtures/qemu-8.2.2-virt-4M.dtb), so it also runs
+  without QEMU), and rejects the old input window, a moved CLINT or done
+  register, a window on a virtio slot, a resized memory and a missing shared
+  node. `fdt.c`, built natively under AddressSanitizer and UBSan (the tests
+  that exist to catch an out-of-bounds read are skipped, with the compiler's
+  reason, if that build fails), gives the answer a Python model of the
+  contract predicts for every compatible string in our tree and QEMU's at
+  four indices, and refuses eighteen malformed blobs without reading past
+  them. `platcheck` on QEMU passes with virt's own tree and fails, with the
+  reader's status, when a node of ours has no usable `reg` or an address
+  above 4 GiB. `test-rv32-emu` 36 and `test-rv32-rtl` 42 on Verilator cover
+  the CLINT registers (distinct `mtimecmp` halves, `msip` from all ones and
+  back to 0), the carry from `mtime`'s low word into the high word and `timeh`,
+  `cycle` unmoved by `mtime` writes, the boot registers and ROM (its last word
+  reads 0, the word past it faults) and the reserved PLIC and virtio
+  addresses. `test-rv32-tools` pins every window's base and size across the
+  device tree, the bus decoder's comparators, the emulator's region table and
+  headers, `board.h` and the SoC, and the CLINT's register offsets across the
+  RTL, the emulator, `board.h` and `rv32_asm.py`.
 - **Earlier results:** the self-check (`PASS 807d9fad`, traces identical on
   Icarus and Verilator), Pong (`PASS 8fef54bc`, 200 checkpoints), the
   diagnostic, and the Verilator runs of the F images, SIMD4, G1 (and its
@@ -193,7 +210,8 @@ Verilator 5.040 built from their release tags, Yosys 0.33, dtc 1.7.
   read of the timer, now `0x0200_bff8`. That value is recomputed in
   [rv32_devices.py](../tools/rv32_devices.py), not copied from a run.
 - **Cost (Yosys 0.33, `synth` per module):** the CLINT is 668 cells with 129
-  flip-flops (the two 64-bit registers and `msip`) against the timer's 156;
+  flip-flops (the two 64-bit registers and `msip`) against the M5 timer's 156
+  cells (Yosys 0.33 generic cells, the same `synth` run);
   the boot ROM is 1,278 cells of combinational logic.
 
 Failures that reproduce identically on the base commit in this container, as
@@ -204,6 +222,30 @@ diagnostic's Verilator target at the default 10-million-cycle limit (it passes
 at 30 million: 19,027,745 cycles), the host tests that link `-shared`
 libraries, and the QEMU runs of the self-check and `floatsoft`, which ask for
 the `rv32i` model QEMU 8.2 lacks (both pass with `--cpu rv32`).
+
+## After review
+
+The review of the pull request found no functional fault in the machine, but
+several in how the reader and platcheck reported problems. Each was
+reproduced before it was fixed:
+
+- A property name without a NUL before the end of the blob, and a huge
+  `#size-cells` with a matching `reg` of 16 bytes, both made `fdt.c` read
+  outside the blob (AddressSanitizer: heap-buffer-overflow in the name
+  comparison, SEGV in `be32`), and a reg index of 536,870,911 returned a
+  property header as an address. Names are now checked to end inside the
+  strings block, cell counts above two are `FDT_TOO_WIDE` before any
+  arithmetic, and an index is compared with the number of entries rather than
+  multiplied. 1.2 million random mutations of our tree and QEMU's then ran
+  clean under both sanitizers.
+- A matching node without a usable `reg` read as "not found", and platcheck
+  printed every reader error as "absent", which QEMU's run accepts: given a
+  tree with a broken node of ours, the old image printed `PASS b8a59113`.
+  Such a node is now `FDT_NO_REG` and platcheck fails on any status but "not
+  found".
+- The generated ROM module's header gave the ROM's address as `0x1000_1000`.
+- Window sizes were pinned only in the device tree; they are now pinned in
+  every copy (above).
 
 ## Exercises
 

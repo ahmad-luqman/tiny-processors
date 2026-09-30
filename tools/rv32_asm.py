@@ -14,12 +14,15 @@ a stalled store, and a call with `jalr`.
 RAM = 0x80000000
 CONSOLE = 0x10000000
 DONE = 0x00100000
-TIMER = 0x0200BFF8  # the CLINT's mtime low word (Track 1; was the M5 timer)
-CLINT = 0x02000000
+CLINT = 0x02000000     # Track 1: virt's CLINT replaced the M5 timer at 0x2000_0000
+MSIP = CLINT + 0x0000
+MTIMECMP = CLINT + 0x4000   # low word; the high word is MTIMECMP + 4
+MTIME = CLINT + 0xBFF8      # low word; the high word is MTIME + 4
 BOOTROM = 0x00001000
 INPUT = 0x11001000
 DISPLAY = 0x11002000
 FB = 0x12000000
+RAM_SIZE = 0x00400000
 FB_SIZE = 320 * 240
 UNMAPPED = 0x50000000  # no window: the probe address for "outside the map" tests
 SIMD_BASE = 0x11004000

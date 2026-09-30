@@ -36,6 +36,15 @@ def require(tool, hint):
         raise RuntimeError(f"missing {tool} ({hint})")
 
 
+def registers(trace):
+    """The last value each register was given in a trace: x1..x31 from the `xN=` effects."""
+    values = {}
+    for line in trace:
+        for number, value in re.findall(r"\bx(\d+)=([0-9a-f]{8})", line):
+            values[int(number)] = int(value, 16)
+    return values
+
+
 def effects(line):
     """What a trace line says after `step pc word`: the register and memory effects, or ''."""
     parts = line.split(" ", 3)
@@ -619,11 +628,11 @@ class RtlTest(unittest.TestCase):
             ("jal to a non-word target", [ADDI(1, 0, 1), JAL(0, 6)], 0, RAM + 4 + 6),
             ("taken branch to a non-word target", [ADDI(1, 0, 1), BEQ(1, 1, -2)], 0, RAM + 4 - 2),
             ("fetch outside RAM", [ADDI(1, 0, 1), JAL(0, -8)], 1, RAM - 4),
-            ("byte load of mtime", LI(1, TIMER) + [LBU(2, 1, 0)], 5, TIMER),
-            ("halfword store to mtime", LI(1, TIMER) + [SH(1, 1, 0)], 7, TIMER),
-            ("word load of an unimplemented CLINT offset", LI(1, TIMER) + [LW(2, 1, -4)], 5, TIMER - 4),
-            ("word store past mtime inside the CLINT window", LI(1, TIMER) + [SW(1, 1, 16)], 7, TIMER + 16),
-            ("fetch from mtime", LI(1, TIMER) + [JALR(0, 1, 0)], 1, TIMER),
+            ("byte load of mtime", LI(1, MTIME) + [LBU(2, 1, 0)], 5, MTIME),
+            ("halfword store to mtime", LI(1, MTIME) + [SH(1, 1, 0)], 7, MTIME),
+            ("word load of an unimplemented CLINT offset", LI(1, MTIME) + [LW(2, 1, -4)], 5, MTIME - 4),
+            ("word store past mtime inside the CLINT window", LI(1, MTIME) + [SW(1, 1, 16)], 7, MTIME + 16),
+            ("fetch from mtime", LI(1, MTIME) + [JALR(0, 1, 0)], 1, MTIME),
             ("read of the present register", LI(1, DISPLAY) + [LW(2, 1, 0)], 5, DISPLAY),
             ("write to the frame count", LI(1, DISPLAY) + [SW(1, 1, 4)], 7, DISPLAY + 4),
             ("byte read of the width", LI(1, DISPLAY) + [LBU(2, 1, 8)], 5, DISPLAY + 8),
@@ -637,8 +646,8 @@ class RtlTest(unittest.TestCase):
             ("byte read of an event", LI(1, INPUT) + [LBU(2, 1, 0)], 5, INPUT),
             ("halfword read of the count", LI(1, INPUT) + [LHU(2, 1, 4)], 5, INPUT + 4),
             ("read of an unimplemented input offset", LI(1, INPUT) + [LW(2, 1, 12)], 5, INPUT + 12),
-            ("misaligned load inside a device window", LI(1, TIMER + 2) + [LW(2, 1, 0)], 4, TIMER + 2),
-            ("aligned halfword inside a device window", LI(1, TIMER + 2) + [LHU(2, 1, 0)], 5, TIMER + 2),
+            ("misaligned load inside a device window", LI(1, MTIME + 2) + [LW(2, 1, 0)], 4, MTIME + 2),
+            ("aligned halfword inside a device window", LI(1, MTIME + 2) + [LHU(2, 1, 0)], 5, MTIME + 2),
             ("load from the palette window reserved for M6", LI(1, 0x11003000) + [LW(2, 1, 0)], 5, 0x11003000),
             ("store to the palette window reserved for M6", LI(1, 0x11003000) + [SW(1, 1, 0)], 7, 0x11003000),
             ("fetch from the first word past RAM", LI(1, RAM + 0x400000) + [JALR(0, 1, 0)], 1, RAM + 0x400000),
@@ -684,10 +693,10 @@ class RtlTest(unittest.TestCase):
                 self.assertEqual((emulator.halt["halt"], emulator.halt["outcome"]), ("done", outcome))
 
     def test_timer_ticks_are_clock_cycles(self):
-        """Device time (docs/rv32.md): on the RTL a TICKS read returns the number of the cycle that
-        accepts it, so the value is hand-computed from the state machine; the emulator reads its
+        """Device time (docs/rv32.md): on the RTL a read of mtime's low word (the M5 timer's TICKS
+        until Track 1) returns the number of the cycle that accepts it, so the value is hand-computed from the state machine; the emulator reads its
         instruction count instead, and that line is the only one the two traces may disagree on."""
-        read_twice = LI(1, TIMER) + [LW(2, 1, 0), LW(3, 1, 0)] + FINISH()
+        read_twice = LI(1, MTIME) + [LW(2, 1, 0), LW(3, 1, 0)] + FINISH()
         for stall in (0, 1):
             with self.subTest(stall=stall):
                 emulator, rtl = self.run_both(read_twice, stall=stall)
@@ -696,9 +705,9 @@ class RtlTest(unittest.TestCase):
                 # is then cycle 12, or 16 with one stall on each of its three fetches and its load.
                 first = 12 + 4 * stall
                 second = first + 5 + 2 * stall
-                self.assertEqual(effects(rtl.trace[2]), f"x2={first:08x} mem[{TIMER:08x}]->{first:08x}/4")
-                self.assertEqual(effects(rtl.trace[3]), f"x3={second:08x} mem[{TIMER:08x}]->{second:08x}/4")
-                self.assertEqual(effects(emulator.trace[2]), f"x2=00000002 mem[{TIMER:08x}]->00000002/4",
+                self.assertEqual(effects(rtl.trace[2]), f"x2={first:08x} mem[{MTIME:08x}]->{first:08x}/4")
+                self.assertEqual(effects(rtl.trace[3]), f"x3={second:08x} mem[{MTIME:08x}]->{second:08x}/4")
+                self.assertEqual(effects(emulator.trace[2]), f"x2=00000002 mem[{MTIME:08x}]->00000002/4",
                                  "the emulator counts executed instructions")
                 self.assertEqual(rtl.trace[:2] + rtl.trace[4:], emulator.trace[:2] + emulator.trace[4:],
                                  "everything but the timer values is identical")
@@ -706,18 +715,18 @@ class RtlTest(unittest.TestCase):
         # A write loads the count: the cycle of the store is V, the first read 5 cycles later (7 with a
         # stall on each of its three fetches and its load; a held store must not load early) is V + 5,
         # and the count wraps through zero on the way.
-        wrap = LI(1, TIMER) + LI(3, 0xFFFFFFFE) + [SW(3, 1, 0), LW(2, 1, 0), LW(4, 1, 0)] + FINISH()
+        wrap = LI(1, MTIME) + LI(3, 0xFFFFFFFE) + [SW(3, 1, 0), LW(2, 1, 0), LW(4, 1, 0)] + FINISH()
         for stall in (0, 1):
             with self.subTest(stall=stall):
                 emulator, rtl = self.run_both(wrap, stall=stall)
                 self.assertEqual((rtl.halt["halt"], rtl.halt["outcome"]), ("done", "pass"), rtl.stderr)
                 first = (0xFFFFFFFE + 5 + 2 * stall) & M
                 second = (first + 5 + 2 * stall) & M
-                self.assertEqual(effects(rtl.trace[4]), f"mem[{TIMER:08x}]<-fffffffe/4")
+                self.assertEqual(effects(rtl.trace[4]), f"mem[{MTIME:08x}]<-fffffffe/4")
                 self.assertEqual([effects(line) for line in rtl.trace[5:7]],
-                                 [f"x2={first:08x} mem[{TIMER:08x}]->{first:08x}/4", f"x4={second:08x} mem[{TIMER:08x}]->{second:08x}/4"])
+                                 [f"x2={first:08x} mem[{MTIME:08x}]->{first:08x}/4", f"x4={second:08x} mem[{MTIME:08x}]->{second:08x}/4"])
                 self.assertEqual([effects(line) for line in emulator.trace[5:7]],
-                                 [f"x2=ffffffff mem[{TIMER:08x}]->ffffffff/4", f"x4=00000000 mem[{TIMER:08x}]->00000000/4"])
+                                 [f"x2=ffffffff mem[{MTIME:08x}]->ffffffff/4", f"x4=00000000 mem[{MTIME:08x}]->00000000/4"])
 
     def test_clint_boot_rom_and_boot_registers(self):
         """Track 1 (docs/rv32.md, "Boot convention", "CLINT"): a0 and a1 hold the hart id and the
@@ -726,16 +735,25 @@ class RtlTest(unittest.TestCase):
         high word follow a write to it. None of these reads a count that differs, so the traces are
         compared whole."""
         words = [ADDI(20, 10, 0), ADDI(21, 11, 0), LW(22, 11, 0), LBU(23, 11, 1), LHU(24, 11, 6), LW(25, 11, 0x7FC)]
-        words += LI(1, CLINT) + LI(3, CLINT + 0x4000) + LI(2, CLINT + 0xBFF8)
-        words += [LW(4, 3, 0), LW(5, 3, 4)] + LI(6, 0x12345678) + [SW(6, 3, 4), LW(7, 3, 4), SW(6, 1, 0), LW(8, 1, 0)]
+        words += LI(1, BOOTROM + 0xFFC) + [LW(26, 1, 0)]           # the ROM's last word: past the blob, 0
+        words += LI(1, MSIP) + LI(3, MTIMECMP) + LI(2, MTIME)
+        words += [LW(4, 3, 0), LW(5, 3, 4)] + LI(6, 0x89ABCDEF) + LI(13, 0x01234567)
+        words += [SW(6, 3, 0), SW(13, 3, 4), LW(7, 3, 4), LW(14, 3, 0)]
+        words += LI(6, 0xFFFFFFFF) + [SW(6, 1, 0), LW(8, 1, 0), SW(0, 1, 0), LW(15, 1, 0)]
         words += [SW(0, 2, 0)] + LI(6, 9) + [SW(6, 2, 4), LW(9, 2, 4), RDTIMEH(12)]
         for stall in (0, 1):
             with self.subTest(stall=stall):
                 emulator, rtl = self.assert_same_pass(words + FINISH(), stall=stall)
                 self.assertIn(f"x21={BOOTROM:08x}", effects(rtl.trace[1]))
                 self.assertEqual(effects(rtl.trace[2]), f"x22=edfe0dd0 mem[{BOOTROM:08x}]->edfe0dd0/4")
+                x = registers(rtl.trace)
+                self.assertEqual((x[4], x[5], x[26]), (0xFFFFFFFF, 0xFFFFFFFF, 0))
+                self.assertEqual((x[7], x[14]), (0x01234567, 0x89ABCDEF), "each mtimecmp half keeps its own value")
+                self.assertEqual((x[8], x[15]), (1, 0), "msip holds bit 0: all ones reads 1, zero clears it")
+                self.assertEqual((x[9], x[12]), (9, 9), "mtime's high word and timeh follow the write")
         for name, body, cause, value in (
                 ("store to the boot ROM", [SW(0, 11, 0)], 7, BOOTROM),
+                ("load past the boot ROM", LI(1, BOOTROM + 0x1000) + [LW(2, 1, 0)], 5, BOOTROM + 0x1000),
                 ("fetch from the boot ROM", [JALR(0, 11, 0)], 1, BOOTROM),
                 ("byte load of mtime", LI(1, CLINT + 0xBFF8) + [LBU(2, 1, 0)], 5, CLINT + 0xBFF8),
                 ("word between CLINT registers", LI(1, CLINT + 0x4008) + [LW(2, 1, 0)], 5, CLINT + 0x4008),
@@ -743,6 +761,20 @@ class RtlTest(unittest.TestCase):
                 ("virt's virtio-mmio, reserved for O3", LI(1, 0x10001000) + [SW(2, 1, 0)], 7, 0x10001000)):
             with self.subTest(name):
                 self.assert_same_double_fault(body, cause, value)
+
+    def test_mtime_carries_into_the_high_word(self):
+        """Review on PR #18: on the RTL too, the low word carries into the high word and `timeh`, and
+        a high write after the low word has wrapped replaces the carried high word; `cycle` never
+        moves with mtime. The program reads only the high words and `cycleh`, which agree on both
+        backends, so the traces are compared whole."""
+        words = [RDCYCLEH(21)] + LI(2, MTIME) + LI(6, 0xFFFFFFFE) + [SW(0, 2, 4), SW(6, 2, 0)]
+        words += [ADDI(0, 0, 0)] * 3 + [LW(7, 2, 4), RDTIMEH(8)]
+        words += LI(6, 0xFFFFFFFF) + [SW(6, 2, 0)] + LI(13, 5) + [SW(13, 2, 4), LW(14, 2, 4), RDTIMEH(15), RDCYCLEH(22)]
+        for stall in (0, 1):
+            with self.subTest(stall=stall):
+                emulator, rtl = self.assert_same_pass(words + FINISH(), stall=stall)
+                x = registers(rtl.trace)
+                self.assertEqual((x[7], x[8], x[14], x[15], x[21], x[22]), (1, 1, 5, 5, 0, 0))
 
     def test_display_and_framebuffer(self):
         """WIDTH and HEIGHT, byte/halfword/word stores into the framebuffer and reads back, two
@@ -905,7 +937,7 @@ class RtlTest(unittest.TestCase):
         """+reset-at=N resets the machine while a store is being held: it never lands, the timer,
         frame count, input queue, and held keys restart from zero, and the program runs again to its end."""
         marker = RAM + 0x1000
-        words = LI(1, marker) + [LW(2, 1, 0)] + LI(6, TIMER) + [LW(5, 6, 0)] + LI(7, INPUT) + [LW(8, 7, 4), LW(11, 7, 8)]
+        words = LI(1, marker) + [LW(2, 1, 0)] + LI(6, MTIME) + [LW(5, 6, 0)] + LI(7, INPUT) + [LW(8, 7, 4), LW(11, 7, 8)]
         words += LI(9, DISPLAY) + [SW(0, 9, 0), LW(10, 9, 4)] + LI(3, 0xC0DE) + [SW(3, 1, 0), LW(4, 1, 0)] + FINISH()
         # With +stall=3 every request takes four cycles: the sixteen instructions before the store take
         # 10 x 7 + 6 x 11 = 136 cycles, the store's fetch ends at 140, decode 141, execute 142, and its
@@ -1057,7 +1089,7 @@ class RunnerTest(unittest.TestCase):
             # Reads the timer (so results mode applies), takes one ecall through a handler that
             # returns past it, presents once, prints one byte.
             handler_at = RAM + 0x200
-            words = LI(5, handler_at) + [CSRRW(0, MTVEC, 5)] + LI(1, TIMER) + [LW(2, 1, 0), ECALL()]
+            words = LI(5, handler_at) + [CSRRW(0, MTVEC, 5)] + LI(1, MTIME) + [LW(2, 1, 0), ECALL()]
             words += LI(3, DISPLAY) + [SW(0, 3, 0)] + LI(5, CONSOLE) + LI(6, ord("A")) + [SB(6, 5, 0)] + FINISH()
             words += [0] * ((handler_at - RAM) // 4 - len(words))
             words += [CSRRS(12, MEPC, 0), ADDI(12, 12, 4), CSRRW(0, MEPC, 12), MRET()]
