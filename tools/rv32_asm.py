@@ -72,6 +72,10 @@ GPU_TRIANGLE = 0x4
 GPU_IDLE = 0x0
 GPU_INVALID = 0x1
 GPU_INTERNAL = 0x2
+# The DMA window (issue #20): [START, END) bounds the RAM G1 and G2 may reach.
+DMA_WINDOW = 0x1100A000
+DMA_WINDOW_START = 0x0
+DMA_WINDOW_END = 0x4
 # G2 programmable 3D (docs/rv32-3d.md); tests pin these to the model, g3d.h and the RTL.
 G3D_BASE = 0x11008000
 G3D_SIZE = 0x2000

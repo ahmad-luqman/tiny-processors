@@ -16,7 +16,9 @@ module rv32_gpu #(
     output wire [31:0] memory_addr,
     output wire [7:0] memory_wdata,
     input wire memory_ready,
-    input wire [7:0] memory_rdata
+    input wire [7:0] memory_rdata,
+    // The DMA window (rv32_dma_window.v): SETUP refuses a RAM source outside [start, end).
+    input wire [31:0] window_start, window_end
 );
     localparam [63:0] RAM_BYTES=RAM_WORDS*64'd4;
     localparam [2:0] IDLE=0, SETUP=1, SCAN=2, READ=3, WRITE=4, ADVANCE=5;
@@ -87,7 +89,8 @@ module rv32_gpu #(
     // multiplicands now have only 32 live bits; retain the full 64-bit result.
     wire [63:0] extent={32'd0,p[SH]}*{32'd0,p[STRIDE]}+{32'd0,p[SW]}-{32'd0,p[STRIDE]};
     wire [63:0] end_address={32'd0,p[SRC]}+extent;
-    wire ram_source=p[SRC]>=32'h8000_0000 && end_address<=64'h8000_0000+RAM_BYTES;
+    wire ram_source=p[SRC]>=32'h8000_0000 && end_address<=64'h8000_0000+RAM_BYTES &&
+        p[SRC]>=window_start && end_address<={32'd0,window_end};
     assign source_lock=busy && p[OP]==GPU_BLIT && p[SRC]>=32'h8000_0000 && p[SH]!=0 && end_address<=64'hffff_ffff;
     assign source_begin=p[SRC];
     assign source_end=end_address[31:0];

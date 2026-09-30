@@ -17,6 +17,8 @@ typedef struct {
 static inline bool gpu_busy(const gpu_device *g){return g->status==GPU_BUSY;}
 void gpu_device_reset(gpu_device *g);
 bool gpu_access(gpu_device *g,uint32_t off,int width,bool write,uint32_t *value);
-void gpu_tick(gpu_device *g,uint8_t *ram,uint32_t ram_size,uint8_t *fb,bool hold);
+/* window_start/window_end: the DMA window (docs/rv32.md), the RAM a blit may read from; SETUP
+ * refuses a RAM source outside it. At reset it is all of RAM. */
+void gpu_tick(gpu_device *g,uint8_t *ram,uint32_t ram_size,uint8_t *fb,bool hold,uint32_t window_start,uint32_t window_end);
 bool gpu_source_locked(const gpu_device *g,uint32_t addr,int width);
 #endif

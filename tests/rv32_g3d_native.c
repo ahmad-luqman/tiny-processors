@@ -74,9 +74,9 @@ int main(int argc, char **argv)
         for (int i=0;i<4;i++) ok&=g3d_access(&dev,params[i][0],4,true,&params[i][1],false);
         v=G3D_START; ok&=g3d_access(&dev,G3D_COMMAND,4,true,&v,false);
         if (!ok) { fprintf(stderr,"job %d: access refused\n",job); return 1; }
-        g3d_tick(&dev,ram,RAM_SIZE,fb,false);
+        g3d_tick(&dev,ram,RAM_SIZE,fb,false,0x80000000u,0x80000000u+RAM_SIZE);
         uint32_t rng=seed*2654435761u+1u, ticks=0, holds=seed&1u;
-        while (g3d_busy(&dev) && ticks++<50000000u) { rng=rng*1103515245u+12345u; g3d_tick(&dev,ram,RAM_SIZE,fb,holds && (rng>>16)%4==0); }
+        while (g3d_busy(&dev) && ticks++<50000000u) { rng=rng*1103515245u+12345u; g3d_tick(&dev,ram,RAM_SIZE,fb,holds && (rng>>16)%4==0,0x80000000u,0x80000000u+RAM_SIZE); }
         uint32_t got[12]={dev.status,dev.error,dev.fault_pc,dev.instructions,dev.transfers,dev.divides,dev.pixels,dev.zfail,dev.culled,
                           dev.cycles-dev.stalls,hash(fb,sizeof fb),hash(ram+zoff,320u*240u*2u)};
         for (int k=0;k<12;k++) {

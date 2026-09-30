@@ -747,8 +747,23 @@ static mem_access g3d_mmio_load(machine *m,uint32_t off,int width,uint32_t *v)
 {return g3d_access(&m->g3d,off,width,false,v,gpu_busy(&m->gpu))?ACC_OK:ACC_FAULT;}
 static mem_access g3d_mmio_store(machine *m,uint32_t off,int width,uint32_t v)
 {return g3d_access(&m->g3d,off,width,true,&v,gpu_busy(&m->gpu))?ACC_OK:ACC_FAULT;}
+/* The DMA window: two words, readable and writable at any time; the engines read it when they
+ * validate a job, so a write never changes a job already running. */
+static mem_access dma_window_load(machine *m,uint32_t off,int width,uint32_t *v)
+{
+    if(width!=4 || (off!=DMA_WINDOW_START && off!=DMA_WINDOW_END)) return ACC_FAULT;
+    *v=off==DMA_WINDOW_START?m->dma_start:m->dma_end;
+    return ACC_OK;
+}
+static mem_access dma_window_store(machine *m,uint32_t off,int width,uint32_t v)
+{
+    if(width!=4 || (off!=DMA_WINDOW_START && off!=DMA_WINDOW_END)) return ACC_FAULT;
+    if(off==DMA_WINDOW_START) m->dma_start=v; else m->dma_end=v;
+    return ACC_OK;
+}
 static const region REGIONS[] = {
     {"gpu", GPU_BASE, 128, gpu_load, gpu_store},
+    {"dma_window", DMA_WINDOW_BASE, 8, dma_window_load, dma_window_store},
     {"g3d", G3D_BASE, G3D_SIZE, g3d_mmio_load, g3d_mmio_store},
     {"done", DONE_ADDR, 4, NULL, done_store},
     {"console", CONSOLE_BASE, 8, console_load, console_store},
@@ -877,8 +892,8 @@ static void enter_handler(machine *m, uint32_t cause, uint32_t tval)
 static void tick_accelerators(machine *m)
 {
     simd_tick(&m->simd, false);
-    gpu_tick(&m->gpu, m->ram, RAM_SIZE, m->fb, false);
-    g3d_tick(&m->g3d, m->ram, RAM_SIZE, m->fb, false);
+    gpu_tick(&m->gpu, m->ram, RAM_SIZE, m->fb, false, m->dma_start, m->dma_end);
+    g3d_tick(&m->g3d, m->ram, RAM_SIZE, m->fb, false, m->dma_start, m->dma_end);
 }
 
 /* Deliver a trap for the instruction at m->pc. The instruction does not
@@ -1727,6 +1742,8 @@ void emu_init(machine *m)
     simd_reset(&m->simd);
     gpu_device_reset(&m->gpu);
     g3d_device_reset(&m->g3d);
+    m->dma_start = RAM_BASE;
+    m->dma_end = RAM_BASE + RAM_SIZE;
     m->mtimecmp = ~0ull;
     m->priv = m->mpp = PRIV_M; /* O5: machine mode from reset, MPP reading 3 until a trap or a write */
     /* Boot convention (docs/rv32.md, "Reset"): the hart id in a0, the device tree in a1. */

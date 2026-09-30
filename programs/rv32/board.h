@@ -12,6 +12,10 @@
 
 #define RV32_GPU_BASE 0x11007000
 #define RV32_G3D_BASE 0x11008000
+/* The DMA window (issue #20): the RAM G1 and G2 may reach, [START, END); all of RAM at reset. */
+#define RV32_DMA_WINDOW_BASE 0x1100a000
+#define RV32_DMA_WINDOW_START 0x0
+#define RV32_DMA_WINDOW_END 0x4
 #define RV32_SIMD4_BASE        0x11004000
 #define RV32_SIMD4_PROGRAM     0x11005000
 #define RV32_SIMD4_DATA        0x11006000

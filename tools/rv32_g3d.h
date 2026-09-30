@@ -37,7 +37,10 @@ void g3d_device_reset(g3d_device *d);
 /* CPU access to the window. `other_busy` is the G1 engine: the two share the
  * framebuffer and RAM port, so neither starts while the other runs. */
 bool g3d_access(g3d_device *d, uint32_t off, int width, bool write, uint32_t *value, bool other_busy);
-void g3d_tick(g3d_device *d, uint8_t *ram, uint32_t ram_size, uint8_t *fb, bool hold);
+/* window_start/window_end: the DMA window (docs/rv32.md); VALIDATE refuses a depth buffer outside
+ * it. At reset it is all of RAM. */
+void g3d_tick(g3d_device *d, uint8_t *ram, uint32_t ram_size, uint8_t *fb, bool hold, uint32_t window_start,
+              uint32_t window_end);
 /* CPU writes to the depth buffer fault while the engine owns it. */
 bool g3d_z_locked(const g3d_device *d, uint32_t addr, int width);
 #endif

@@ -15,7 +15,7 @@ from tools.rv32_g3d_scene import SHADERS, constants, cube  # noqa: E402
 from tools.rv32_g3d_scene import passthrough, random_program, vertex  # noqa: E402
 
 BUILD = ROOT / 'build/g3d'
-RAM_SIZE = 0x400000
+RAM_ORIGIN, RAM_SIZE = 0x80000000, 0x400000
 ZBASE = 0x80040000
 
 
@@ -29,7 +29,7 @@ def build_device(extra=()):
     lib.native_g3d_size.restype = C.c_size_t
     lib.g3d_access.restype = C.c_bool
     lib.g3d_access.argtypes = [C.c_void_p, C.c_uint32, C.c_int, C.c_bool, C.POINTER(C.c_uint32), C.c_bool]
-    lib.g3d_tick.argtypes = [C.c_void_p, C.c_void_p, C.c_uint32, C.c_void_p, C.c_bool]
+    lib.g3d_tick.argtypes = [C.c_void_p, C.c_void_p, C.c_uint32, C.c_void_p, C.c_bool, C.c_uint32, C.c_uint32]
     lib.g3d_z_locked.restype = C.c_bool
     lib.g3d_z_locked.argtypes = [C.c_void_p, C.c_uint32, C.c_int]
     return lib
@@ -41,6 +41,7 @@ class Device:
         self.state = C.create_string_buffer(lib.native_g3d_size())
         self.ram = C.create_string_buffer(RAM_SIZE)
         self.fb = C.create_string_buffer(76800)
+        self.window = (RAM_ORIGIN, RAM_ORIGIN + RAM_SIZE)  # the DMA window: all of RAM, as at reset
 
     def write(self, off, value, other_busy=False):
         v = C.c_uint32(value & 0xffffffff)
@@ -52,7 +53,7 @@ class Device:
         return v.value if ok else None
 
     def tick(self, hold=False):
-        self.lib.g3d_tick(self.state, self.ram, RAM_SIZE, self.fb, hold)
+        self.lib.g3d_tick(self.state, self.ram, RAM_SIZE, self.fb, hold, *self.window)
 
     def load(self, program, consts, inputs, triangles, vcount=None, tcount=None, limit=4096, zbase=ZBASE):
         for i, w in enumerate(program):

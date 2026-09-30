@@ -63,6 +63,7 @@ DISPLAY_BASE = rv32_asm.DISPLAY
 SIMD4_BASE, SIMD4_PROGRAM, SIMD4_DATA = rv32_asm.SIMD_BASE, rv32_asm.SIMD_PROGRAM, rv32_asm.SIMD_DATA
 GPU_BASE = rv32_asm.GPU_BASE
 G3D_BASE, G3D_SIZE = rv32_asm.G3D_BASE, rv32_asm.G3D_SIZE
+DMA_WINDOW_BASE = rv32_asm.DMA_WINDOW
 FB_BASE, FB_SIZE = rv32_asm.FB, rv32_asm.FB_SIZE
 
 
@@ -138,7 +139,8 @@ MACHINE = node("", {
          device("simd4", SIMD4_BASE, ("tiny-processors,simd4",),
                 ((SIMD4_BASE, 32), (SIMD4_PROGRAM, 1024), (SIMD4_DATA, 1024))),
          device("gpu", GPU_BASE, ("tiny-processors,g1",), ((GPU_BASE, 128),)),
-         device("g3d", G3D_BASE, ("tiny-processors,g2",), ((G3D_BASE, G3D_SIZE),))),
+         device("g3d", G3D_BASE, ("tiny-processors,g2",), ((G3D_BASE, G3D_SIZE),)),
+         device("dma-window", DMA_WINDOW_BASE, ("tiny-processors,dma-window",), ((DMA_WINDOW_BASE, 8),))),
 )
 
 

@@ -29,7 +29,10 @@ module rv32_g3d #(
     output wire [3:0]  memory_strb,
     output wire [31:0] memory_wdata,
     input  wire        memory_ready,
-    input  wire [31:0] memory_rdata
+    input  wire [31:0] memory_rdata,
+    // The DMA window (rv32_dma_window.v): VALIDATE refuses a depth buffer outside [start, end).
+    input  wire [31:0] window_start,
+    input  wire [31:0] window_end
 );
     localparam [63:0] RAM_BYTES = RAM_WORDS * 64'd4;
     localparam [31:0] Z_BYTES = 32'd153600;
@@ -340,7 +343,8 @@ module rv32_g3d #(
 
     // ---------------------------------------------------------------- sequencing
     wire zbase_ok = zbase[1:0] == 2'b00 && zbase >= 32'h8000_0000 &&
-                    {32'd0, zbase - 32'h8000_0000} + {32'd0, Z_BYTES} <= RAM_BYTES;
+                    {32'd0, zbase - 32'h8000_0000} + {32'd0, Z_BYTES} <= RAM_BYTES &&
+                    zbase >= window_start && {32'd0, zbase} + {32'd0, Z_BYTES} <= {32'd0, window_end};
     wire params_ok = zbase_ok && vcount >= 32'd1 && vcount <= 32'd32 && tcount <= 32'd64 &&
                      limit >= 32'd1 && limit <= 32'hffff;
     wire [31:0] tri_word = tris[index[5:0]];

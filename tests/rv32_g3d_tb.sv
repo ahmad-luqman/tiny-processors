@@ -15,6 +15,8 @@ module rv32_g3d_tb;
     wire [31:0] rdata, zbase_out, memory_addr, memory_wdata;
     wire [3:0] memory_strb;
     reg memory_ready = 1;
+    // The DMA window at its reset value, all of the device's RAM; the SoC tests narrow it.
+    wire [31:0] window_start = 32'h8000_0000, window_end = 32'h8000_0000 + 1048576 * 4;
     localparam [31:0] ZBASE = 32'h8004_0000;
     // State numbers of rv32_g3d.v's memory phases, for the cancellation check.
     localparam [3:0] ZREAD = 4'd10, ZWRITE = 4'd11, PWRITE = 4'd12, CLEAR = 4'd14;

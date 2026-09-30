@@ -64,6 +64,11 @@
 #define DISPLAY_FRAMES 0x4u
 #define DISPLAY_WIDTH 0x8u
 #define DISPLAY_HEIGHT 0xCu
+/* The DMA window (issue #20): the RAM G1 and G2 may reach, [START, END), in its own page so the
+ * kernel can keep it from the programs it grants the engines. */
+#define DMA_WINDOW_BASE 0x1100a000u
+#define DMA_WINDOW_START 0x0u
+#define DMA_WINDOW_END 0x4u
 #define FB_BASE 0x12000000u
 #define FB_COLUMNS 320u
 #define FB_ROWS 240u
@@ -98,6 +103,7 @@ typedef struct {
     simd_device simd;
     gpu_device gpu;
     g3d_device g3d;
+    uint32_t dma_start, dma_end; /* the DMA window; all of RAM at reset */
     uint32_t x[32], f[32];
     uint8_t fcsr;
     uint32_t pc;

@@ -93,7 +93,7 @@ RV32WIN := build/rv32/rv32win
 SDL3_CFLAGS = $(shell pkg-config --cflags sdl3 2>/dev/null)
 SDL3_LIBS = $(shell pkg-config --libs sdl3 2>/dev/null)
 RV32_RTL := rtl/rv32/rv32_fregfile.v rtl/rv32/rv32_fdecode.v $(FP32_RTL) rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32_muldiv.v rtl/rv32/rv32.v
-RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_clint.v rtl/rv32/rv32_plic.v rtl/rv32/rv32_virtio_blk.v rtl/rv32/rv32_bootrom.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
+RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_clint.v rtl/rv32/rv32_plic.v rtl/rv32/rv32_virtio_blk.v rtl/rv32/rv32_bootrom.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_dma_window.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
 RV32_TB := tests/rv32_tb.sv
 RV32_TB_VVP := build/rv32/rv32_tb.vvp
 RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
@@ -677,6 +677,13 @@ test-rv32-gfx: $(RV32EMU) $(RV32_TB_VVP)
 	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_gfx*.py' -v
 test-rv32-gfx-verilator: $(RV32EMU) $(RV32_TB_VERILATOR)
 	HOST_CC=$(HOST_CC) G1_SIM=verilator $(PYTHON) -m unittest discover -s tests -p 'test_rv32_gfx*.py' -v
+# Issue #20: the DMA window bounds G1's blit source and G2's depth buffer (tests/test_rv32_dma_window.py).
+.PHONY: test-rv32-dma-window test-rv32-dma-window-icarus
+test-rv32-dma-window: $(RV32EMU) $(RV32_TB_VERILATOR)
+	G1_SIM=verilator $(PYTHON) -m unittest discover -s tests -p 'test_rv32_dma_window.py' -v
+test-rv32-dma-window-icarus: $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) -m unittest discover -s tests -p 'test_rv32_dma_window.py' -v
+test-rv32: test-rv32-dma-window test-rv32-dma-window-icarus
 run-rv32-gfx-emu: check-rv32-gfx-image $(RV32EMU)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_ARGS) --backend emulator --out build/gfx/emu
 run-rv32-gfx-rtl: check-rv32-gfx-image $(RV32EMU) $(RV32_TB_VVP)

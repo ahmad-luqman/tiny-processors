@@ -8,6 +8,8 @@ module rv32_gpu_tb;
     wire [31:0] rdata,source_begin,source_end,memory_addr;
     wire [7:0] memory_wdata;
     reg memory_ready=0;
+    // The DMA window at its reset value, all of the device's RAM; the SoC tests narrow it.
+    wire [31:0] window_start=32'h8000_0000, window_end=32'h8000_0000+65536*4;
     reg [7:0] ram[0:262143],fb[0:76799];
     wire [7:0] memory_rdata=memory_addr[31]?ram[memory_addr-32'h80000000]:fb[memory_addr-32'h12000000];
     rv32_gpu #(.RAM_WORDS(65536)) dut(.*);
