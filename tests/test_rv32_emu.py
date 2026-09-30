@@ -192,7 +192,8 @@ class EmulatorTest(unittest.TestCase):
     def test_branch_conditions_at_signed_boundary(self):
         # a = INT32_MIN, b = 1: every branch skips `addi xN, x0, 1` when taken.
         a, b = 1, 2
-        words = LI(a, 0x80000000) + LI(b, 1)
+        words = [ADDI(10, 0, 0), ADDI(11, 0, 0)]  # a0 and a1 start with the boot convention's values
+        words += LI(a, 0x80000000) + LI(b, 1)
         for n, branch in enumerate([BEQ, BNE, BLT, BGE, BLTU, BGEU], start=10):
             words += [branch(a, b, 8), ADDI(n, 0, 1)]
         for n, branch in enumerate([BEQ, BNE, BLT, BGE, BLTU, BGEU], start=16):
@@ -309,15 +310,22 @@ class EmulatorTest(unittest.TestCase):
             ([SB(1, 2, 0)], DONE, 7, DONE),                 # and word-only
             ([SH(1, 2, 0)], DONE, 7, DONE),
             ([SW(1, 2, 4)], DONE, 7, DONE + 4),
-            ([LBU(1, 2, 0)], TIMER, 5, TIMER),              # TICKS is a word
-            ([SH(1, 2, 0)], TIMER, 7, TIMER),
-            ([LW(1, 2, 4)], TIMER, 5, TIMER + 4),           # no other timer register
-            ([SW(1, 2, 12)], TIMER, 7, TIMER + 12),
-            ([LW(1, 2, 16)], TIMER, 5, TIMER + 16),         # past the window
-            ([LW(1, 2, 2)], TIMER, 4, TIMER + 2),           # misalignment is decided before the window
-            ([LHU(1, 2, 2)], TIMER, 5, TIMER + 2),          # an aligned halfword inside the window is refused by it
-            ([LW(1, 2, 0)], 0x20003000, 5, 0x20003000),     # the palette window reserved for M6 is unmapped in M5
-            ([SW(1, 2, 0)], 0x20003000, 7, 0x20003000),
+            ([LBU(1, 2, 0)], MTIME, 5, MTIME),              # mtime is read a word at a time
+            ([SH(1, 2, 0)], MTIME, 7, MTIME),
+            ([LW(1, 2, -4)], MTIME, 5, MTIME - 4),          # no other CLINT register
+            ([SW(1, 2, 12)], MTIME, 7, MTIME + 12),
+            ([LW(1, 2, 8)], MTIME, 5, MTIME + 8),           # past the last register, still inside the window
+            ([LW(1, 2, 0)], CLINT + 4, 5, CLINT + 4),       # between msip and mtimecmp
+            ([LW(1, 2, 0)], CLINT + 0x10000, 5, CLINT + 0x10000),  # past the window
+            ([SB(1, 2, 0)], BOOTROM, 7, BOOTROM),           # the boot ROM is read-only
+            ([SW(1, 2, 0)], BOOTROM + 0xFFC, 7, BOOTROM + 0xFFC),
+            ([LW(1, 2, 0)], BOOTROM + 0x1000, 5, BOOTROM + 0x1000),  # past the ROM
+            ([LW(1, 2, 0)], 0x0C000000, 5, 0x0C000000),     # virt's PLIC: reserved for O1, unmapped
+            ([LW(1, 2, 0)], 0x10001000, 5, 0x10001000),     # virt's first virtio-mmio slot: reserved for O3
+            ([LW(1, 2, 2)], MTIME, 4, MTIME + 2),           # misalignment is decided before the window
+            ([LHU(1, 2, 2)], MTIME, 5, MTIME + 2),          # an aligned halfword inside the window is refused by it
+            ([LW(1, 2, 0)], 0x11003000, 5, 0x11003000),     # the palette window reserved for M6 is unmapped in M5
+            ([SW(1, 2, 0)], 0x11003000, 7, 0x11003000),
             ([LW(1, 2, 0)], DISPLAY, 5, DISPLAY),           # PRESENT is write-only
             ([SW(1, 2, 4)], DISPLAY, 7, DISPLAY + 4),       # FRAMES, WIDTH, HEIGHT are read-only
             ([SW(1, 2, 12)], DISPLAY, 7, DISPLAY + 12),
@@ -393,19 +401,65 @@ class EmulatorTest(unittest.TestCase):
     def test_timer_counts_executed_instructions(self):
         """Device time (docs/rv32.md): a load inside instruction N reads N - 1, trapped instructions
         count, and a write loads the count so a read n instructions later returns value + n."""
-        result = self.run_pass(LI(1, TIMER) + [LW(2, 1, 0), LW(3, 1, 0)])
+        result = self.run_pass(LI(1, MTIME) + [LW(2, 1, 0), LW(3, 1, 0)])
         self.assertEqual((result.state.x[2], result.state.x[3]), (2, 3))
-        self.assertEqual(effects(result.trace[2]), f"x2=00000002 mem[{TIMER:08x}]->00000002/4")
+        self.assertEqual(effects(result.trace[2]), f"x2=00000002 mem[{MTIME:08x}]->00000002/4")
         # The store is instruction 5; instruction 6 reads value + 1 and instruction 7 wraps to zero.
-        result = self.run_pass(LI(1, TIMER) + LI(3, 0xFFFFFFFE) + [SW(3, 1, 0), LW(2, 1, 0), LW(4, 1, 0)])
+        result = self.run_pass(LI(1, MTIME) + LI(3, 0xFFFFFFFE) + [SW(3, 1, 0), LW(2, 1, 0), LW(4, 1, 0)])
         self.assertEqual((result.state.x[2], result.state.x[4]), (0xFFFFFFFF, 0))
         # A trapped instruction is executed: lui, addi, csrrw, then the ecall is instruction 4; the
         # handler's lui and addi are 5 and 6, so its lw is instruction 7 and reads 6.
         handler_at = RAM + 0x200
         words = LI(5, handler_at) + [CSRRW(0, MTVEC, 5), ECALL()] + FINISH(0x00013333)
-        words += [0] * ((handler_at - RAM) // 4 - len(words)) + LI(1, TIMER) + [LW(2, 1, 0)] + FINISH()
+        words += [0] * ((handler_at - RAM) // 4 - len(words)) + LI(1, MTIME) + [LW(2, 1, 0)] + FINISH()
         result = self.run_words(words)
         self.assertEqual((result.state.halt, result.state.traps, result.state.x[2]), ("done", 1, 6))
+
+    def test_clint_registers_and_time_csr(self):
+        """Track 1: mtime is 64-bit and writable half by half, `time` reads mtime (so it follows a
+        write), mtimecmp resets to all ones and keeps its two halves apart, and msip keeps bit 0 of
+        what is written (all ones reads 1, zero clears it)."""
+        words = LI(1, MSIP) + LI(2, MTIME) + LI(3, MTIMECMP)
+        words += [LW(4, 3, 0), LW(5, 3, 4)]                        # mtimecmp at reset
+        words += LI(6, 7) + [SW(6, 2, 4), SW(0, 2, 0)]             # mtime = 7 << 32, low word 0
+        words += [RDTIMEH(7), RDTIME(8), LW(9, 2, 4)]
+        words += LI(6, 0x89ABCDEF) + LI(13, 0x01234567) + [SW(6, 3, 0), SW(13, 3, 4), LW(10, 3, 0), LW(11, 3, 4)]
+        words += LI(6, 0xFFFFFFFF) + [SW(6, 1, 0), LW(12, 1, 0), SW(0, 1, 0), LW(14, 1, 0)]
+        x = self.run_pass(words).state.x
+        self.assertEqual((x[4], x[5]), (0xFFFFFFFF, 0xFFFFFFFF))
+        self.assertEqual((x[7], x[9]), (7, 7), "timeh and mtime's high word follow the write")
+        self.assertEqual(x[8], 2, "time reads the count two instructions after the low word was set to 0")
+        self.assertEqual((x[10], x[11]), (0x89ABCDEF, 0x01234567), "each mtimecmp half keeps its own value")
+        self.assertEqual((x[12], x[14]), (1, 0), "msip holds bit 0: all ones reads 1, zero clears it")
+
+    def test_mtime_carries_into_the_high_word(self):
+        """Review on PR #18: the low word carries into the high word (and `timeh`), a write to the
+        high word after the low word has wrapped keeps the wrapped low word, and `cycle` is the
+        core's own count, untouched by writes to mtime."""
+        words = [RDCYCLE(20), RDCYCLEH(21)] + LI(2, MTIME) + LI(6, 0xFFFFFFFE)
+        words += [SW(0, 2, 4), SW(6, 2, 0)]                          # store N: count N = 0x0_FFFFFFFE
+        words += [ADDI(0, 0, 0)] * 3 + [LW(7, 2, 4), RDTIMEH(8), LW(9, 2, 0)]   # N+4, N+5, N+6
+        words += LI(6, 0xFFFFFFFF) + [SW(6, 2, 0)] + LI(13, 5) + [SW(13, 2, 4)]  # low wraps before the high write
+        words += [LW(14, 2, 4), RDTIMEH(15), LW(16, 2, 0), RDCYCLE(22), RDCYCLEH(23)]
+        x = self.run_pass(words).state.x
+        self.assertEqual((x[7], x[8], x[9]), (1, 1, 4), "0xFFFFFFFE + 4 carries; + 6 reads low word 4")
+        # The low store makes its own count 0xFFFFFFFF; LI is two instructions, so the high store sees
+        # 0x1_00000002 and makes it 0x5_00000002; the low word is read three instructions later.
+        self.assertEqual((x[14], x[15], x[16]), (5, 5, 5), "the high write replaced the carried 1, kept the low word")
+        self.assertEqual((x[20], x[21], x[23]), (0, 0, 0))
+        self.assertEqual(x[22], words.index(RDCYCLE(22)), "cycle counts every instruction before it, whatever mtime was set to")
+
+    def test_boot_convention_and_rom(self):
+        """Track 1: a0 holds hart id 0 and a1 the boot ROM, whose first bytes are an FDT header
+        (magic d00dfeed, big-endian) of the size tools/rv32_dtb.py builds; every width reads it."""
+        from tools import rv32_dtb
+        blob = rv32_dtb.build(rv32_dtb.MACHINE)
+        words = [ADDI(20, 10, 0), ADDI(21, 11, 0), LW(22, 11, 0), LBU(23, 11, 0), LHU(24, 11, 6), LW(25, 11, 4)]
+        x = self.run_pass(words).state.x
+        self.assertEqual((x[20], x[21]), (0, BOOTROM))
+        self.assertEqual((x[22], x[23]), (0xEDFE0DD0, 0xD0))
+        self.assertEqual(x[24], int.from_bytes(blob[6:8], "little"))
+        self.assertEqual(int.from_bytes(x[25].to_bytes(4, "little"), "big"), len(blob), "totalsize")
 
     def test_display_and_framebuffer(self):
         """Pixels are ordinary memory at every width; a present hashes them into a checkpoint line
@@ -548,7 +602,7 @@ class EmulatorTest(unittest.TestCase):
         self.assertEqual((result.status, result.halt["outcome"]), (0, "pass"), result.stderr)
         self.assertEqual(result.checkpoints, expected)
         self.assertEqual((result.stdout, result.state.frames, result.state.traps), (f"PASS {pinned}\n", 200, 0))
-        self.assertFalse(any(f"mem[{TIMER:08x}]" in line for line in result.trace), "Pong never reads the timer")
+        self.assertFalse(any(f"mem[{MTIME:08x}]" in line for line in result.trace), "Pong never reads the timer")
         # A Q one frame later is popped one iteration later, so the guest presents once more first.
         later = PONG_INPUT.read_text().replace("frame 200 down Q", "frame 201 down Q")
         result = self.run_words(words, limit=10_000_000, checkpoints=True, input_script=later)

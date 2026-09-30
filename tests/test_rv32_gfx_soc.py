@@ -24,7 +24,7 @@ class GraphicsSoC(unittest.TestCase):
     def test_busy_ownership(self):
         source=RAM+0x10003
         p=[2,0,0,0,0,0,0,0,320,240,source,320,320,240,0,0]
-        words=self.parameters(p)+LI(2,0x30000000)+LI(3,source)+LI(7,0x20002000)
+        words=self.parameters(p)+LI(2,0x12000000)+LI(3,source)+LI(7,0x11002000)
         words+=LI(4,0x11223344)+[SW(4,3,-3)]+LI(4,0x55667788)+[SW(4,3,765)]
         words+=LI(8,FB+76800-4)+LI(4,0xaabbccdd)+[SW(4,8,0)]
         words+=LI(4,RAM+1024)+[CSRRW(0,0x305,4)]+LI(4,1)+[SW(4,1,0)]
@@ -41,7 +41,7 @@ class GraphicsSoC(unittest.TestCase):
         for suffix,timing in [('random',dict(seed=19,gpu_seed=31)),('fixed',dict(stall=1,gpu_stall=2))]:
             for backend,run in zip(('emulator','rtl'),self.run_pair(words,'ownership-'+suffix,**timing)):
                 traps=[l.split()[-2:] for l in run.trace if ' trap ' in l]
-                self.assertEqual(traps,[[str(c),f'{a:08x}'] for c,a in [(5,0x30000000),(7,0x30000000),(7,0x20002000),(7,BASE+64),(7,BASE),(7,source),(7,source+767),(7,FB+76800-4)]])
+                self.assertEqual(traps,[[str(c),f'{a:08x}'] for c,a in [(5,0x12000000),(7,0x12000000),(7,0x11002000),(7,BASE+64),(7,BASE),(7,source),(7,source+767),(7,FB+76800-4)]])
                 for address,value,width in [(BASE+GPU_STATUS,0,4),(source,0x11,1),(source+767,0x66,1),
                                             (FB+76800-4,0xaabbccdd,4),(BASE+GPU_STATUS,4,4),(BASE+GPU_ERROR,1,4),
                                             (DISPLAY+4,0,4),(DISPLAY+8,320,4),(DISPLAY+12,240,4)]+[(BASE+GPU_PARAMS+4*i,0,4) for i in range(16)]:
@@ -71,7 +71,7 @@ class GraphicsSoC(unittest.TestCase):
         words+=LI(4,1)+[SW(4,1,0),ECALL()]+FINISH()
         words += [0]*(256-len(words))+[LW(5,1,4)]+FINISH()
         for run in self.run_pair(words,'trap-tick'):
-            self.assertTrue(any('mem[20007004]->00000002/4' in l for l in run.trace))
+            self.assertTrue(any('mem[11007004]->00000002/4' in l for l in run.trace))
             self.assertEqual(sum(' trap ' in l for l in run.trace),1)
     def test_register_faults(self):
         for n,(off,access) in enumerate([(0,LW),(28,LW),(32,LW),(60,LW),(4,SW),(4,SB),(64,SH)]):
@@ -80,9 +80,9 @@ class GraphicsSoC(unittest.TestCase):
             for run in self.run_pair(words,f'fault{n}'):
                 self.assertEqual([l.split()[-2:] for l in run.trace if ' trap ' in l],[[str(5 if access==LW else 7),f'{BASE+off:08x}']])
     def test_runner_contract(self):
-        self.assertTrue(uses_accelerator(['1 80000000 00000000 mem[20007004]->00000001/4']))
-        self.assertFalse(uses_accelerator(['1 80000000 00000000 trap 5 20007004']))
-        self.assertFalse(uses_accelerator(['1 80000000 00000000 mem[20007040]<-00000001/4']))
+        self.assertTrue(uses_accelerator(['1 80000000 00000000 mem[11007004]->00000001/4']))
+        self.assertFalse(uses_accelerator(['1 80000000 00000000 trap 5 11007004']))
+        self.assertFalse(uses_accelerator(['1 80000000 00000000 mem[11007040]<-00000001/4']))
         args=simulator_command(self.sim,'a',gpu_stall=2,gpu_seed=None)
         self.assertIn('+gpu-stall=2',args)
 

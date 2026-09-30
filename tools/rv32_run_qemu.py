@@ -41,11 +41,15 @@ def run(command, timeout):
     return completed.returncode, completed.stdout, completed.stderr, False
 
 
-def classify(status, transcript, timed_out, expect_hex=None):
-    """Decide whether a run satisfied the contract: one line, matching exit status."""
+def classify(status, transcript, timed_out, expect_hex=None, last_line=False):
+    """Decide whether a run satisfied the contract: one line, matching exit status. With
+    `last_line`, a program may print a report first and only its last line is the verdict, as
+    for the diagnostic and the platform check."""
     lines = transcript.replace("\r", "").splitlines()
     if timed_out:
         return Outcome(False, f"timed out with {len(lines)} console line(s)", None, None)
+    if last_line and lines:
+        lines = lines[-1:]
     if len(lines) != 1:
         return Outcome(False, f"expected exactly one console line, got {len(lines)}", None, None)
     passed = PASS_LINE.match(lines[0])
@@ -75,6 +79,7 @@ def main():
     parser.add_argument("--transcript", type=Path, help="write the guest console output here")
     parser.add_argument("--qemu-log", type=Path, help="enable QEMU guest error logging to this file")
     parser.add_argument("--expect-hex", help="checksum the PASS line must carry")
+    parser.add_argument("--last-line", action="store_true", help="judge the last console line; earlier lines are a report")
     args = parser.parse_args()
     command = qemu_command(args.qemu, args.elf, args.cpu, args.memory, args.qemu_log)
     try:
@@ -84,7 +89,7 @@ def main():
     if args.transcript:
         args.transcript.parent.mkdir(parents=True, exist_ok=True)
         args.transcript.write_text(transcript)
-    outcome = classify(status, transcript, timed_out, args.expect_hex)
+    outcome = classify(status, transcript, timed_out, args.expect_hex, args.last_line)
     print(" ".join(command))
     print(transcript, end="" if transcript.endswith("\n") else "\n")
     if not outcome.ok:

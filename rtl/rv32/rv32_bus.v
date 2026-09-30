@@ -44,22 +44,27 @@ module rv32_bus #(
     input  wire        done_ready,
     input  wire        done_error,
     input  wire [31:0] done_rdata,
-    // Timer at 0x2000_0000.
-    output wire        timer_valid,
-    input  wire        timer_ready,
-    input  wire        timer_error,
-    input  wire [31:0] timer_rdata,
-    // Input at 0x2000_1000.
+    // CLINT at 0x0200_0000 (64 KiB, QEMU virt's address).
+    output wire        clint_valid,
+    input  wire        clint_ready,
+    input  wire        clint_error,
+    input  wire [31:0] clint_rdata,
+    // Boot ROM (the device tree) at 0x0000_1000, 4 KiB.
+    output wire        rom_valid,
+    input  wire        rom_ready,
+    input  wire        rom_error,
+    input  wire [31:0] rom_rdata,
+    // Input at 0x1100_1000.
     output wire        input_valid,
     input  wire        input_ready,
     input  wire        input_error,
     input  wire [31:0] input_rdata,
-    // Display controller at 0x2000_2000.
+    // Display controller at 0x1100_2000.
     output wire        display_valid,
     input  wire        display_ready,
     input  wire        display_error,
     input  wire [31:0] display_rdata,
-    // Framebuffer at 0x3000_0000.
+    // Framebuffer at 0x1200_0000.
     output wire        fb_valid,
     input  wire        fb_ready,
     input  wire        fb_error,
@@ -74,19 +79,20 @@ module rv32_bus #(
     input wire g3d_ready, g3d_error,
     input wire [31:0] g3d_rdata
 );
-    localparam [31:0] GPU_BASE = 32'h2000_7000;
-    localparam [31:0] G3D_BASE = 32'h2000_8000;
-    localparam [31:0] SIMD4_BASE = 32'h2000_4000;
-    localparam [31:0] SIMD4_PROGRAM = 32'h2000_5000;
-    localparam [31:0] SIMD4_DATA = 32'h2000_6000;
+    localparam [31:0] GPU_BASE = 32'h1100_7000;
+    localparam [31:0] G3D_BASE = 32'h1100_8000;
+    localparam [31:0] SIMD4_BASE = 32'h1100_4000;
+    localparam [31:0] SIMD4_PROGRAM = 32'h1100_5000;
+    localparam [31:0] SIMD4_DATA = 32'h1100_6000;
     localparam [31:0] RAM_BASE = 32'h8000_0000;
     localparam [31:0] RAM_BYTES = RAM_WORDS * 4;
     localparam [31:0] CONSOLE_BASE = 32'h1000_0000;
     localparam [31:0] DONE_ADDR = 32'h0010_0000;
-    localparam [31:0] TIMER_BASE = 32'h2000_0000;
-    localparam [31:0] INPUT_BASE = 32'h2000_1000;
-    localparam [31:0] DISPLAY_BASE = 32'h2000_2000;
-    localparam [31:0] FB_BASE = 32'h3000_0000;
+    localparam [31:0] CLINT_BASE = 32'h0200_0000;
+    localparam [31:0] BOOTROM_BASE = 32'h0000_1000;
+    localparam [31:0] INPUT_BASE = 32'h1100_1000;
+    localparam [31:0] DISPLAY_BASE = 32'h1100_2000;
+    localparam [31:0] FB_BASE = 32'h1200_0000;
     localparam [31:0] FB_BYTES = FB_WORDS * 4;
 
     wire req = mem_valid && !mem_hold;
@@ -101,7 +107,8 @@ module rv32_bus #(
     wire ram_sel = (mem_addr >= RAM_BASE) && (ram_offset < RAM_BYTES);
     wire console_sel = !mem_fetch && (mem_addr[31:3] == CONSOLE_BASE[31:3]);
     wire done_sel = !mem_fetch && (mem_addr == DONE_ADDR);
-    wire timer_sel = !mem_fetch && (mem_addr[31:4] == TIMER_BASE[31:4]);
+    wire clint_sel = !mem_fetch && (mem_addr[31:16] == CLINT_BASE[31:16]);
+    wire rom_sel = !mem_fetch && (mem_addr[31:12] == BOOTROM_BASE[31:12]);
     wire input_sel = !mem_fetch && (mem_addr[31:4] == INPUT_BASE[31:4]);
     wire display_sel = !mem_fetch && (mem_addr[31:4] == DISPLAY_BASE[31:4]);
     wire fb_sel = !mem_fetch && (mem_addr >= FB_BASE) && (fb_offset < FB_BYTES);
@@ -110,7 +117,7 @@ module rv32_bus #(
                       ((mem_addr & 32'hffff_fc00) == SIMD4_DATA));
     wire gpu_sel = !mem_fetch && mem_addr[31:7]==GPU_BASE[31:7];
     wire g3d_sel = !mem_fetch && mem_addr[31:13] == G3D_BASE[31:13];   // 8 KiB
-    wire none_sel = !(ram_sel || console_sel || done_sel || timer_sel || input_sel || display_sel || fb_sel || simd_sel || gpu_sel || g3d_sel);
+    wire none_sel = !(ram_sel || console_sel || done_sel || clint_sel || rom_sel || input_sel || display_sel || fb_sel || simd_sel || gpu_sel || g3d_sel);
 
     assign gpu_valid = req && gpu_sel;
     assign g3d_valid = req && g3d_sel;
@@ -118,21 +125,22 @@ module rv32_bus #(
     assign ram_valid = req && ram_sel;
     assign console_valid = req && console_sel;
     assign done_valid = req && done_sel;
-    assign timer_valid = req && timer_sel;
+    assign clint_valid = req && clint_sel;
+    assign rom_valid = req && rom_sel;
     assign input_valid = req && input_sel;
     assign display_valid = req && display_sel;
     assign fb_valid = req && fb_sel;
 
     assign mem_ready = req && ((ram_sel && ram_ready) || (console_sel && console_ready) ||
-                               (done_sel && done_ready) || (timer_sel && timer_ready) ||
+                               (done_sel && done_ready) || (clint_sel && clint_ready) || (rom_sel && rom_ready) ||
                                (input_sel && input_ready) || (display_sel && display_ready) ||
                                (fb_sel && fb_ready) || (simd_sel && simd_ready) || (gpu_sel && gpu_ready) || (g3d_sel && g3d_ready) || none_sel);
     assign mem_error = (ram_sel && ram_error) || (console_sel && console_error) ||
-                       (done_sel && done_error) || (timer_sel && timer_error) ||
+                       (done_sel && done_error) || (clint_sel && clint_error) || (rom_sel && rom_error) ||
                        (input_sel && input_error) || (display_sel && display_error) ||
                        (fb_sel && fb_error) || (simd_sel && simd_error) || (gpu_sel && gpu_error) || (g3d_sel && g3d_error) || none_sel;
     assign mem_rdata = ({32{ram_sel}} & ram_rdata) | ({32{console_sel}} & console_rdata) |
-                       ({32{done_sel}} & done_rdata) | ({32{timer_sel}} & timer_rdata) |
+                       ({32{done_sel}} & done_rdata) | ({32{clint_sel}} & clint_rdata) | ({32{rom_sel}} & rom_rdata) |
                        ({32{input_sel}} & input_rdata) | ({32{display_sel}} & display_rdata) |
                        ({32{fb_sel}} & fb_rdata) | ({32{simd_sel}} & simd_rdata) | ({32{gpu_sel}} & gpu_rdata) |
                        ({32{g3d_sel}} & g3d_rdata);

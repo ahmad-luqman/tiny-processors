@@ -21,9 +21,9 @@ module rv32_g3d_tb;
     reg [31:0] zb = ZBASE;             // the job's depth buffer: its ZBASE when valid
     reg [7:0] zmem [0:153599];
     reg [7:0] fb [0:76799];
-    wire [31:0] z_off = memory_addr - zb, fb_off = memory_addr - 32'h3000_0000;
+    wire [31:0] z_off = memory_addr - zb, fb_off = memory_addr - 32'h1200_0000;
     wire in_z = memory_addr >= zb && z_off < 32'd153600;
-    wire in_fb = memory_addr >= 32'h3000_0000 && fb_off < 32'd76800;
+    wire in_fb = memory_addr >= 32'h1200_0000 && fb_off < 32'd76800;
     wire [31:0] memory_rdata = in_z ? {zmem[z_off+3], zmem[z_off+2], zmem[z_off+1], zmem[z_off]} : 32'd0;
     rv32_g3d #(.RAM_WORDS(1048576)) dut (.*);
 

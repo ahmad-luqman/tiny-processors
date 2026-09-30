@@ -26,8 +26,8 @@ def oracle(fb,p):
         nonlocal writes
         if 0<=x<320 and 0<=y<240:fb[y*320+x]=v;writes+=1
     if op in (1,2):
-        source=bytes(fb) if src==0x30000000 else RAM_PATTERN if op==2 else b''
-        base=0 if src==0x30000000 else src-0x80000000
+        source=bytes(fb) if src==0x12000000 else RAM_PATTERN if op==2 else b''
+        base=0 if src==0x12000000 else src-0x80000000
         for j in range(h):
             for i in range(w):
                 if op==1:put(x0+i,y0+j,col)
@@ -88,7 +88,7 @@ class Graphics(unittest.TestCase):
             cmds += [command(3,x0=4,y0=4,x1=4+x,y1=4+y),command(3,x1=4,y1=4,x0=4+x,y0=4+y)]
         cmds += [command(4,x0=1,y0=1,x1=8,y1=1,x2=1,y2=8),command(4,x0=8,y0=8,x1=1,y1=8,x2=8,y2=1),command(4,x0=-1024,y0=-1024,x1=1023,y1=1023,x2=0,y2=0)]
         for dx,dy in [(1,0),(-1,0),(0,1),(0,-1),(1,1),(-1,-1),(0,0),(-20,-20),(-1,1),(1,-1),(-5,3),(5,-3)]:
-            cmds.append(command(2,x0=10+dx,y0=10+dy,w=30,h=20,src=0x30000000,stride=320,sw=320,sh=240,sx=10,sy=10))
+            cmds.append(command(2,x0=10+dx,y0=10+dy,w=30,h=20,src=0x12000000,stride=320,sw=320,sh=240,sx=10,sy=10))
         cmds += [command(2,x0=-4,y0=4,w=20,h=20,src=0x80000003,stride=19,sw=17,sh=15,sx=-2,sy=-1)]
         cmds += [command(x0=x,y0=y,w=2,h=2) for x,y in [(-1,-1),(319,-1),(-1,239),(319,239)]]
         cmds += [command(3,x0=-1024,y0=-1024,x1=1023,y1=1023),command(3,x0=-1024,y0=1023,x1=1023,y1=-1024),
@@ -114,7 +114,7 @@ class Graphics(unittest.TestCase):
         for n,p in enumerate(cmds):
             before=bytes(expected);writes=oracle(expected,p)
             ref=(C.c_uint8*76800).from_buffer_copy(before)
-            src=ref if p[GP_SRC]==0x30000000 else C.cast(C.byref(self.lib.native_gpu_ram().contents,max(0,p[GP_SRC]-0x80000000)),C.POINTER(C.c_uint8))
+            src=ref if p[GP_SRC]==0x12000000 else C.cast(C.byref(self.lib.native_gpu_ram().contents,max(0,p[GP_SRC]-0x80000000)),C.POINTER(C.c_uint8))
             self.lib.gpu_reference(ref,src,(U32*16)(*(v&0xffffffff for v in p)))
             self.assertEqual(bytes(ref),bytes(expected),('reference',n,p))
             rec=self.run_command(p,n%2)
@@ -131,17 +131,17 @@ class Graphics(unittest.TestCase):
             self.assertEqual(C.string_at(self.lib.native_gpu_fb(),76800),before)
             records.append(rec);rows.append((0,-1,p))
         # Invalid geometry/source and reset through setup, scan, held read/write, advance.
-        for p in [command(9),command(x0=1024,w=1,h=1),command(2,w=2,h=2,src=0xfffffff0,stride=32,sw=32,sh=2),command(color=256),command(w=2049),command(h=2049),command(2,w=1,h=1,src=0x8003ffff,stride=2,sw=2,sh=1),command(2,w=1,h=1,src=0x30000001,stride=320,sw=320,sh=240),command(2,sw=0,sh=1),command(2,sw=1,sh=0),command(2,sw=2,sh=2,stride=1),command(3,x1=1024),command(4,y2=-1025)]:
+        for p in [command(9),command(x0=1024,w=1,h=1),command(2,w=2,h=2,src=0xfffffff0,stride=32,sw=32,sh=2),command(color=256),command(w=2049),command(h=2049),command(2,w=1,h=1,src=0x8003ffff,stride=2,sw=2,sh=1),command(2,w=1,h=1,src=0x12000001,stride=320,sw=320,sh=240),command(2,sw=0,sh=1),command(2,sw=1,sh=0),command(2,sw=2,sh=2,stride=1),command(3,x1=1024),command(4,y2=-1025)]:
             invalid(p)
         for p in [command(0),command(y0=1024),command(3,y1=-1025),command(4,x2=1024)]:invalid(p)
         valid_blit=command(2,w=2,h=2,src=0x80000000,stride=16,sw=16,sh=16)
         for field,value in [(11,15),(11,65536),(12,0),(12,2049),(13,0),(13,2049),(14,1024),(15,-1025),(10,0x70000000)]:
             p=valid_blit.copy();p[field]=value
             invalid(p)
-        p=command(2,w=2,h=2,src=0x30000000,stride=320,sw=319,sh=240)
+        p=command(2,w=2,h=2,src=0x12000000,stride=320,sw=319,sh=240)
         invalid(p)
         for field,value in [(11,321),(13,239)]:
-            p=command(2,w=2,h=2,src=0x30000000,stride=320,sw=320,sh=240);p[field]=value;invalid(p)
+            p=command(2,w=2,h=2,src=0x12000000,stride=320,sw=320,sh=240);p[field]=value;invalid(p)
         for mode in (1,3):
             for tick in range(12):
                 p=command(2,x0=10,y0=10,w=10,h=10,src=0x80000000+tick*17,stride=16,sw=16,sh=16)

@@ -37,6 +37,12 @@ Small, low-risk steps that every later track leans on.
 
 ## Track 1: proper QEMU support
 
+**Done (2026-09-29), option 1:** see the [plan](track1-qemu.md) and the
+[Track 1 record](../rv32-platform.md). Our devices moved into a hole `virt`
+leaves unused, the timer became a CLINT at `virt`'s address, and every backend
+passes a device tree in `a1`; the PLIC and virtio-blk addresses are reserved for
+O1 and O3. Option 2 (a custom QEMU board) remains optional.
+
 "Proper QEMU support" can mean two different things.
 
 1. **Make the platform `virt`-compatible where QEMU already has devices
@@ -131,8 +137,8 @@ This track does not depend on the others and can run alongside any of them.
 ## Recommended order
 
 1. Groundwork: compliance suite, M, Zicntr, CoreMark, GDB stub (done, [record](../rv32-groundwork.md)).
-2. O1 interrupts with the CLINT at `virt` addresses, which starts both
-   "proper QEMU" and "proper OS".
+2. Track 1 option 1 (done, [record](../rv32-platform.md)), then O1 interrupts
+   through its CLINT and a PLIC at `virt`'s address.
 3. O2 kernel, syscalls, separate programs and a shell, run on QEMU `virt` as
    well as our backends.
 4. C library, then Lua: the first "runs more apps" result.

@@ -53,7 +53,7 @@ void gpu_tick(gpu_device *g,uint8_t *ram,uint32_t ram_size,uint8_t *fb,bool hold
         if(op==GPU_FILL || op==GPU_BLIT)valid=valid&&p[GP_W]<=2048&&p[GP_H]<=2048;
         if(op==GPU_BLIT){
             uint64_t end=source_end(p);
-            bool source=p[GP_SRC]==0x30000000u ? p[GP_SW]==320&&p[GP_SH]==240&&p[GP_STRIDE]==320 :
+            bool source=p[GP_SRC]==0x12000000u ? p[GP_SW]==320&&p[GP_SH]==240&&p[GP_STRIDE]==320 :
                 p[GP_SRC]>=0x80000000u && end<=(uint64_t)0x80000000u+ram_size;
             valid=valid&&coord(p[GP_SX])&&coord(p[GP_SY])&&p[GP_SW]>0&&p[GP_SW]<=2048&&
                 p[GP_SH]>0&&p[GP_SH]<=2048&&p[GP_STRIDE]>=p[GP_SW]&&p[GP_STRIDE]<=65535&&source;
@@ -78,7 +78,7 @@ void gpu_tick(gpu_device *g,uint8_t *ram,uint32_t ram_size,uint8_t *fb,bool hold
                 int32_t sx=(int32_t)p[GP_SX],sy=(int32_t)p[GP_SY];
                 g->lo=max(g->lo,g->ax-sx);g->top=max(g->top,g->ay-sy);
                 g->hi=min(g->hi,g->ax+(int32_t)p[GP_SW]-sx);g->bottom=min(g->bottom,g->ay+(int32_t)p[GP_SH]-sy);
-                if(p[GP_SRC]==0x30000000u && g->ay*320+g->ax>sy*320+sx)g->step=-1;
+                if(p[GP_SRC]==0x12000000u && g->ay*320+g->ax>sy*320+sx)g->step=-1;
             }
             if(op==GPU_TRIANGLE){
                 int32_t area=(g->bx-g->ax)*(g->cy-g->ay)-(g->by-g->ay)*(g->cx-g->ax);
@@ -100,7 +100,7 @@ void gpu_tick(gpu_device *g,uint8_t *ram,uint32_t ram_size,uint8_t *fb,bool hold
         if(hold){g->stalls++;return;}
         if(g->phase==READ){
             uint32_t off=(uint32_t)((int32_t)p[GP_SY]+g->y-g->ay)*p[GP_STRIDE]+(uint32_t)((int32_t)p[GP_SX]+g->x-g->ax);
-            g->pixel=p[GP_SRC]==0x30000000u?fb[off]:ram[p[GP_SRC]-0x80000000u+off];
+            g->pixel=p[GP_SRC]==0x12000000u?fb[off]:ram[p[GP_SRC]-0x80000000u+off];
             g->reads++;g->phase=WRITE;
         }else{fb[g->y*320+g->x]=g->pixel;g->writes++;g->phase=ADVANCE;}
     }else if(g->phase==ADVANCE){

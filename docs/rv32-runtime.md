@@ -145,7 +145,7 @@ held-key read, the x-coordinate store, and first erased pixel are:
 `0x80000101` is a LEFT press, and `0x2` is its held bit. `tetris_frame` changes
 the piece origin from column 3 to 2 after collision checking. `tetris_draw`
 compares composed board/piece cells with the drawing cache; the byte store at
-`0x30001932` erases a cell whose old occupied position moved. The framebuffer
+`0x12001932` erases a cell whose old occupied position moved. The framebuffer
 becomes visible only at the subsequent PRESENT store. These are instruction
 and memory effects; emulator instruction counts are not RTL clock counts.
 Addresses and step numbers describe this build and can move after edits.

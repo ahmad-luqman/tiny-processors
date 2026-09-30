@@ -3,9 +3,9 @@
 #define RV32_SIMD4_H
 #include <stdbool.h>
 #include <stdint.h>
-#define SIMD_BASE 0x20004000u
-#define SIMD_PROGRAM 0x20005000u
-#define SIMD_DATA 0x20006000u
+#define SIMD_BASE 0x11004000u
+#define SIMD_PROGRAM 0x11005000u
+#define SIMD_DATA 0x11006000u
 #define SIMD_COMMAND                 0x00
 #define SIMD_STATUS                  0x04
 #define SIMD_ENTRY                   0x08

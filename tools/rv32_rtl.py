@@ -19,14 +19,14 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tools.rv32_asm import PROGRAM_INPUTS, PROGRAMS, TIMER, SIMD_BASE, SIMD_COMMAND, SIMD_STATUS, SIMD_ENTRY, SIMD_CYCLES, SIMD_STALLS, SIMD_TRANSFERS, SIMD_INSTRUCTIONS, words_to_bytes, words_to_hex  # noqa: E402
+from tools.rv32_asm import PROGRAM_INPUTS, PROGRAMS, MTIME, SIMD_BASE, SIMD_COMMAND, SIMD_STATUS, SIMD_ENTRY, SIMD_CYCLES, SIMD_STALLS, SIMD_TRANSFERS, SIMD_INSTRUCTIONS, words_to_bytes, words_to_hex  # noqa: E402
 from tools.rv32_asm import GPU_BASE, GPU_COMMAND, GPU_STATUS, GPU_ERROR, GPU_CYCLES, GPU_STALLS, GPU_READS, GPU_WRITES
 from tools.rv32_image import write_hex  # noqa: E402
 from tools.rv32_run_emu import DEFAULT_EMULATOR, emulator_command, halt_line, last_halt_line, parse_halt_line  # noqa: E402
 
 RTL_SOURCES = [ROOT / "rtl" / "rv32" / name
                for name in ("rv32_fregfile.v", "rv32_fdecode.v", "rv32_regfile.v", "rv32_alu.v", "rv32_decode.v", "rv32_muldiv.v", "rv32.v",
-                            "rv32_bus.v", "rv32_ram.v", "rv32_console.v", "rv32_done.v", "rv32_timer.v", "rv32_input.v", "rv32_display.v", "rv32_soc.v", "rv32_gpu.v", "rv32_g3d.v", "rv32_g3d_core.v", "rv32_simd4.v")]
+                            "rv32_bus.v", "rv32_ram.v", "rv32_console.v", "rv32_done.v", "rv32_clint.v", "rv32_bootrom.v", "rv32_input.v", "rv32_display.v", "rv32_soc.v", "rv32_gpu.v", "rv32_g3d.v", "rv32_g3d_core.v", "rv32_simd4.v")]
 RTL_SOURCES.extend([ROOT / "rtl/fp32/fp32.v", ROOT / "rtl/simd4/simd4.v"])
 TESTBENCH = ROOT / "tests" / "rv32_tb.sv"
 DEFAULT_SIMULATOR = "build/rv32/rv32_tb.vvp"
@@ -265,10 +265,10 @@ DEVICE_TIME_CSRS = (asm.CYCLE, asm.TIME, asm.CYCLEH, asm.TIMEH)
 
 
 def reads_device_time(trace):
-    """Whether a trace reads device time: a load from the timer, or a CSR instruction on the
-    cycle or time counter (docs/rv32.md, "Device time")."""
+    """Whether a trace reads device time: a load from either word of the CLINT's mtime, or a CSR
+    instruction on the cycle or time counter (docs/rv32.md, "Device time")."""
     for line in trace:
-        if f"mem[{TIMER:08x}]->" in line:
+        if f"mem[{MTIME:08x}]->" in line or f"mem[{MTIME + 4:08x}]->" in line:
             return True
         parts = line.split(" ", 3)
         if len(parts) >= 3 and " trap " not in line:  # a trapped counter access read nothing
@@ -386,7 +386,9 @@ def main():
     parser.add_argument("--mode", choices=("check", "waves", "bench"), default="check")
     parser.add_argument("--program", choices=sorted(PROGRAMS), default="loop", help="assembled program to run")
     parser.add_argument("--image", type=Path, help="a flat .bin image to run instead of an assembled program")
-    parser.add_argument("--expect-console", help="the guest console output both backends must produce")
+    console = parser.add_mutually_exclusive_group()
+    console.add_argument("--expect-console", help="the guest console output both backends must produce")
+    console.add_argument("--expect-console-file", type=Path, help="the same, read from a file")
     parser.add_argument("--expect-last-line", help="the last console line both backends must produce")
     parser.add_argument("--expect-checkpoint", action="append", default=[], metavar="LINE",
                         help="the `frame N <hash>` lines both backends must write, exactly and in order (repeatable)")
@@ -484,6 +486,8 @@ def main():
         sys.exit("this program accesses accelerator registers; use --compare results")
     if args.compare == "results" and not (reads_timer or uses_simd):
         sys.exit("--compare results is for a program that reads the timer, the cycle/time counters or accelerator registers; this one never did, use --compare trace")
+    if args.expect_console_file is not None:
+        args.expect_console = args.expect_console_file.read_text().rstrip("\n")
     if args.expect_console is not None and emulator.console.rstrip("\n") != args.expect_console:
         sys.exit(f"emulator console {emulator.console!r} is not {args.expect_console!r}")
     last_line = emulator.console.rstrip("\n").rsplit("\n", 1)[-1]

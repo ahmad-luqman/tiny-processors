@@ -15,7 +15,7 @@ to measure what Q16.16 / S12.4 / 16-bit Z cost, never as a pass/fail oracle.
 import math
 
 # Device window (docs/rv32-3d.md "Registers").
-G3D_BASE = 0x20008000
+G3D_BASE = 0x11008000
 G3D_SIZE = 0x2000
 G3D_COMMAND, G3D_STATUS, G3D_ERROR, G3D_FAULT_PC = 0x00, 0x04, 0x08, 0x0c
 G3D_CYCLES, G3D_STALLS, G3D_INSTRUCTIONS, G3D_TRANSFERS = 0x10, 0x14, 0x18, 0x1c

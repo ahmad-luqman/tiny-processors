@@ -15,13 +15,13 @@ int main(void)
         c.p[GP_W]=op==1?320:32;c.p[GP_H]=op==1?240:32;
         c.p[GP_X1]=70;c.p[GP_Y1]=25;c.p[GP_X2]=30;c.p[GP_Y2]=60;
         c.p[GP_SRC]=(uint32_t)(uintptr_t)source;c.p[GP_SW]=32;c.p[GP_SH]=32;c.p[GP_STRIDE]=32;
-        uint32_t start=mmio_read32(RV32_TIMER_BASE);
+        uint32_t start=mmio_read32(RV32_CLINT_BASE + RV32_CLINT_MTIME);
 #ifdef G1_CPU
         gpu_reference((uint8_t *)RV32_FB_BASE,source,&c);
 #else
         if(!gpu_run(&c,1000000))return 1;
 #endif
-        uint32_t elapsed=mmio_read32(RV32_TIMER_BASE)-start;
+        uint32_t elapsed=mmio_read32(RV32_CLINT_BASE + RV32_CLINT_MTIME)-start;
         rv32_puts("BENCH");number(op);number(elapsed);
 #ifndef G1_CPU
         number(mmio_read32(GPU_BASE+GPU_CYCLES));number(mmio_read32(GPU_BASE+GPU_STALLS));

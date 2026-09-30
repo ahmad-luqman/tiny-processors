@@ -32,21 +32,25 @@
 #define DONE_PASS 0x5555u
 #define DONE_FAIL 0x3333u
 #define DONE_RESET 0x7777u
-#define TIMER_BASE 0x20000000u
-#define TIMER_TICKS 0x0u
-#define INPUT_BASE 0x20001000u
+#define CLINT_BASE 0x02000000u
+#define CLINT_SIZE 0x10000u
+#define CLINT_MSIP 0x0u
+#define CLINT_MTIMECMP 0x4000u
+#define CLINT_MTIME 0xbff8u
+#define BOOT_HART 0u      /* a0 at reset: the hart id */
+#define INPUT_BASE 0x11001000u
 #define INPUT_EVENT 0x0u
 #define INPUT_COUNT 0x4u
 #define INPUT_KEYS 0x8u
 #define INPUT_QUEUE 16u
 #define EVENT_VALID 0x80000000u
 #define EVENT_PRESS 0x100u
-#define DISPLAY_BASE 0x20002000u
+#define DISPLAY_BASE 0x11002000u
 #define DISPLAY_PRESENT 0x0u
 #define DISPLAY_FRAMES 0x4u
 #define DISPLAY_WIDTH 0x8u
 #define DISPLAY_HEIGHT 0xCu
-#define FB_BASE 0x30000000u
+#define FB_BASE 0x12000000u
 #define FB_COLUMNS 320u
 #define FB_ROWS 240u
 #define FB_SIZE (FB_COLUMNS * FB_ROWS)
@@ -82,7 +86,9 @@ typedef struct {
     enum halt halt;
     uint32_t done_word;
     uint32_t second_cause, second_tval; /* the trap that could not be delivered */
-    uint32_t timer_offset; /* TICKS = steps + timer_offset; a write sets the offset */
+    uint64_t mtime_offset; /* mtime = steps + mtime_offset; a write sets the offset */
+    uint64_t mtimecmp;     /* CLINT registers with no effect until the core takes interrupts (O1) */
+    uint32_t msip;
     uint8_t *fb;           /* the framebuffer window, FB_SIZE bytes */
     uint32_t frames;       /* presents since reset */
     FILE *checkpoints;     /* one `frame N <hash>` line per present, or NULL */

@@ -91,7 +91,7 @@ module rv32_gpu #(
     assign source_lock=busy && p[OP]==GPU_BLIT && p[SRC]>=32'h8000_0000 && p[SH]!=0 && end_address<=64'hffff_ffff;
     assign source_begin=p[SRC];
     assign source_end=end_address[31:0];
-    wire fb_source=p[SRC]==32'h3000_0000;
+    wire fb_source=p[SRC]==32'h1200_0000;
     wire dest_after_source=$signed(p[Y0])*320+$signed(p[X0])>$signed(p[SY])*320+$signed(p[SX]);
     reg good, empty;
     reg signed [31:0] na,nb,nc,nd,ne,nf,nlo,ntop,nhi,nbottom,nstep,area,tmp;
@@ -128,7 +128,7 @@ module rv32_gpu #(
     wire [31:0] source_offset=($signed(p[SY])+y-ay)*$signed(p[STRIDE])+$signed(p[SX])+x-ax;
     assign memory_valid=(state==READ || state==WRITE) && !cancel;
     assign memory_we=state==WRITE;
-    assign memory_addr=state==READ?p[SRC]+source_offset:32'h3000_0000+$unsigned(y)*320+$unsigned(x);
+    assign memory_addr=state==READ?p[SRC]+source_offset:32'h1200_0000+$unsigned(y)*320+$unsigned(x);
     assign memory_wdata=pixel;
     wire signed [31:0] twice_err=err*2;
     wire step_x=twice_err>=-dy, step_y=twice_err<=dx;

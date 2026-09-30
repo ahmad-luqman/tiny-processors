@@ -11,9 +11,9 @@ module rv32_simd4 (
     output wire ready, error,
     input wire memory_hold
 );
-    localparam [31:0] SIMD4_BASE = 32'h2000_4000;
-    localparam [31:0] SIMD4_PROGRAM = 32'h2000_5000;
-    localparam [31:0] SIMD4_DATA = 32'h2000_6000;
+    localparam [31:0] SIMD4_BASE = 32'h1100_4000;
+    localparam [31:0] SIMD4_PROGRAM = 32'h1100_5000;
+    localparam [31:0] SIMD4_DATA = 32'h1100_6000;
     localparam [4:0] SIMD4_COMMAND = 5'h00;
     localparam [4:0] SIMD4_STATUS = 5'h04;
     localparam [4:0] SIMD4_ENTRY = 5'h08;

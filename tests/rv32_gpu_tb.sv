@@ -9,7 +9,7 @@ module rv32_gpu_tb;
     wire [7:0] memory_wdata;
     reg memory_ready=0;
     reg [7:0] ram[0:262143],fb[0:76799];
-    wire [7:0] memory_rdata=memory_addr[31]?ram[memory_addr-32'h80000000]:fb[memory_addr-32'h30000000];
+    wire [7:0] memory_rdata=memory_addr[31]?ram[memory_addr-32'h80000000]:fb[memory_addr-32'h12000000];
     rv32_gpu #(.RAM_WORDS(65536)) dut(.*);
     integer file,ret,n,i,mode,abort_tick,ticks,case_count=0;
     reg [31:0] words[0:15],hash,stats[0:5],value;
@@ -35,8 +35,8 @@ module rv32_gpu_tb;
         if(memory_valid && memory_ready)begin
             if(memory_addr[31])begin
                 if(memory_we || memory_addr<32'h80000000 || memory_addr>=32'h80040000)$fatal(1,"bad RAM access");
-            end else if(memory_addr<32'h30000000 || memory_addr>=32'h30012c00)$fatal(1,"bad framebuffer access");
-            if(memory_we)fb[memory_addr-32'h30000000]<=memory_wdata;
+            end else if(memory_addr<32'h12000000 || memory_addr>=32'h12012c00)$fatal(1,"bad framebuffer access");
+            if(memory_we)fb[memory_addr-32'h12000000]<=memory_wdata;
         end
         if(held && !cancel && (!memory_valid || memory_addr!==held_addr || memory_we!==held_we || memory_wdata!==held_data))$fatal(1,"unstable held request");
         held<=memory_valid && !memory_ready;

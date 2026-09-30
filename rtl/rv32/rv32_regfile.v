@@ -2,8 +2,12 @@
 
 // Thirty-one 32-bit registers plus the constant x0. Two combinational read
 // ports (muxes over the registers), one write port at the clock edge. Reset
-// clears every register so both backends agree on a read before a write.
-module rv32_regfile (
+// clears every register except a1, which receives the boot convention's
+// device-tree address (a0, the hart id, is 0), so both backends agree on a
+// read before a write.
+module rv32_regfile #(
+    parameter [31:0] RESET_A1 = 32'd0
+) (
     input  wire        clk,
     input  wire        reset,
     input  wire        we,
@@ -22,7 +26,7 @@ module rv32_regfile (
     always @(posedge clk) begin
         if (reset) begin
             for (i = 1; i < 32; i = i + 1)
-                regs[i] <= 32'd0;
+                regs[i] <= (i == 11) ? RESET_A1 : 32'd0;
         end else if (we && waddr != 5'd0) begin
             regs[waddr] <= wdata;
         end

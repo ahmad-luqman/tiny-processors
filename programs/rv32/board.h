@@ -10,11 +10,11 @@
 #ifndef RV32_BOARD_H
 #define RV32_BOARD_H
 
-#define RV32_GPU_BASE 0x20007000
-#define RV32_G3D_BASE 0x20008000
-#define RV32_SIMD4_BASE        0x20004000
-#define RV32_SIMD4_PROGRAM     0x20005000
-#define RV32_SIMD4_DATA        0x20006000
+#define RV32_GPU_BASE 0x11007000
+#define RV32_G3D_BASE 0x11008000
+#define RV32_SIMD4_BASE        0x11004000
+#define RV32_SIMD4_PROGRAM     0x11005000
+#define RV32_SIMD4_DATA        0x11006000
 #define RV32_SIMD4_COMMAND           0x00
 #define RV32_SIMD4_STATUS            0x04
 #define RV32_SIMD4_ENTRY             0x08
@@ -49,16 +49,26 @@
 #define RV32_DONE_PASS         0x5555
 #define RV32_DONE_FAIL         0x3333
 
-/* Timer (M5): TICKS is a free-running 32-bit counter. One tick is one clock
- * cycle on the RTL and one executed instruction on the emulator, so only
- * monotonicity modulo 2^32 may be relied on. A word write loads it. */
-#define RV32_TIMER_BASE        0x20000000
-#define RV32_TIMER_TICKS       0x0
+/* CLINT (Track 1, at QEMU virt's address): mtime is a free-running 64-bit
+ * counter, read and written a word at a time. One tick is one clock cycle on
+ * the RTL, one executed instruction on the emulator and 100 ns on QEMU, so
+ * only monotonicity may be relied on. The `time` CSR reads the same count.
+ * msip and mtimecmp hold their values; nothing acts on them until O1. */
+#define RV32_CLINT_BASE        0x02000000
+#define RV32_CLINT_MSIP        0x0
+#define RV32_CLINT_MTIMECMP    0x4000
+#define RV32_CLINT_MTIME       0xbff8
+
+/* Boot convention (Track 1): at reset a0 holds the hart id and a1 the address
+ * of a flattened device tree. On our backends the tree is in this boot ROM;
+ * on QEMU it is in RAM. Use a1, never this address. */
+#define RV32_BOOTROM_BASE      0x00001000
+#define RV32_BOOTROM_SIZE      0x1000
 
 /* Input (M5): EVENT pops the oldest event (0 when empty), COUNT is the
  * queue length (0..16), KEYS has bit k set while key code k is held. An
  * event is RV32_EVENT_VALID | (press << RV32_EVENT_PRESS_SHIFT) | code. */
-#define RV32_INPUT_BASE        0x20001000
+#define RV32_INPUT_BASE        0x11001000
 #define RV32_INPUT_EVENT       0x0
 #define RV32_INPUT_COUNT       0x4
 #define RV32_INPUT_KEYS        0x8
@@ -87,7 +97,7 @@
 /* Display (M5): a word write to PRESENT snapshots the framebuffer (a
  * checkpoint hash in M5, the native window in M6); FRAMES counts presents
  * since reset; WIDTH and HEIGHT read the resolution. */
-#define RV32_DISPLAY_BASE      0x20002000
+#define RV32_DISPLAY_BASE      0x11002000
 #define RV32_DISPLAY_PRESENT   0x0
 #define RV32_DISPLAY_FRAMES    0x4
 #define RV32_DISPLAY_WIDTH     0x8
@@ -97,7 +107,7 @@
 
 /* Framebuffer (M5): one byte per pixel, row-major from the top-left, RGB332
  * until a palette exists; readable and writable at every width. */
-#define RV32_FB_BASE           0x30000000
+#define RV32_FB_BASE           0x12000000
 #define RV32_FB_SIZE           (RV32_DISPLAY_COLUMNS * RV32_DISPLAY_ROWS)
 
 #ifndef __ASSEMBLER__

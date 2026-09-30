@@ -7,9 +7,15 @@
 // second trap before the handler retires an instruction halts the core
 // (the emulator's double-fault rule). The contract is docs/rv32-rtl.md;
 // the datapath and controller are explained in docs/rv32-to-gates.md.
-module rv32 (
+module rv32 #(
+    // Boot convention (docs/rv32.md, "Reset"): a0 holds the hart id and a1 the
+    // address of the machine's device tree when the first instruction runs.
+    parameter [31:0] BOOT_A1 = 32'h0000_1000
+) (
     input  wire        clk,
     input  wire        reset,
+    // The platform's mtime (the CLINT's count), which the `time` CSR shadows.
+    input  wire [63:0] time_now,
     // Memory port (docs/rv32.md, "Memory transaction contract").
     output wire        mem_valid,
     output wire [31:0] mem_addr,
@@ -66,8 +72,8 @@ module rv32 (
     reg taken;
     reg in_trap; // a trap was taken and its handler has not retired an instruction yet
     // Zicntr: clock cycles since reset and instructions retired since reset.
-    // `time` reads the cycle count, because a device tick is a clock cycle on
-    // the RTL (docs/rv32.md, "Device time").
+    // `time` reads the CLINT's mtime (time_now), as on QEMU virt, so a write
+    // to mtime moves it (docs/rv32.md, "CLINT").
     reg [63:0] cycle_count, instret_count;
 
     // Decoded fields, combinational from ir.
@@ -166,8 +172,10 @@ module rv32 (
         (csr_addr == CSR_MTVEC) ? mtvec :
         (csr_addr == CSR_MEPC) ? mepc :
         (csr_addr == CSR_MCAUSE) ? mcause :
-        (csr_addr == CSR_CYCLE || csr_addr == CSR_TIME) ? cycle_count[31:0] :
-        (csr_addr == CSR_CYCLEH || csr_addr == CSR_TIMEH) ? cycle_count[63:32] :
+        (csr_addr == CSR_CYCLE) ? cycle_count[31:0] :
+        (csr_addr == CSR_CYCLEH) ? cycle_count[63:32] :
+        (csr_addr == CSR_TIME) ? time_now[31:0] :
+        (csr_addr == CSR_TIMEH) ? time_now[63:32] :
         (csr_addr == CSR_INSTRET) ? instret_count[31:0] :
         (csr_addr == CSR_INSTRETH) ? instret_count[63:32] :
         mtval; // CSR_MTVAL
@@ -188,7 +196,7 @@ module rv32 (
     wire rf_we = (state == WRITEBACK) && rd_written;
     wire [31:0] rd_value = is_load ? load_value : (is_jal || is_jalr) ? ir_pc + 32'd4 : alu_out;
 
-    rv32_regfile regfile (
+    rv32_regfile #(.RESET_A1(BOOT_A1)) regfile (
         .clk(clk), .reset(reset), .we(rf_we), .waddr(rd), .wdata(rd_value),
         .raddr1(rs1), .raddr2(rs2), .rdata1(rs1_value), .rdata2(rs2_value));
 

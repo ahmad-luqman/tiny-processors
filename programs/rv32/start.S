@@ -1,9 +1,12 @@
 /* Reset entry for the RV32 machine.
  *
  * The linker script places .text.init first, so _start sits at the reset
- * address 0x80000000. On arrival only the PC is meaningful: no stack, no
- * zeroed .bss, unspecified registers. Initialized data needs no copying
- * because the whole image is loaded at its link address (LMA == VMA).
+ * address 0x80000000. On arrival the PC, a0 (the hart id) and a1 (the
+ * device tree's address) are meaningful (docs/rv32.md, "Boot convention"):
+ * no stack, no zeroed .bss, other registers unspecified. This code must not
+ * touch a0 or a1 before `call main`, which receives them as its arguments.
+ * Initialized data needs no copying because the whole image is loaded at its
+ * link address (LMA == VMA).
  *
  * No CSR instructions, no WFI: the M1 slice stays inside base RV32I.
  */

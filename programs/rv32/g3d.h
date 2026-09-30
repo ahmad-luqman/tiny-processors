@@ -5,7 +5,7 @@
 #define RV32_G3D_H
 #include <stdint.h>
 
-#define G3D_BASE 0x20008000u
+#define G3D_BASE 0x11008000u
 #define G3D_SIZE 0x2000u
 #define G3D_COMMAND 0x00u
 #define G3D_STATUS 0x04u
