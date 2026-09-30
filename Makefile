@@ -1359,4 +1359,7 @@ run-rv32-virtio-rtl: check-rv32-virtiocheck-image $(RV32EMU) $(RV32_TB_VVP)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_VIRTIO_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --out build/rv32/virtio-icarus
 run-rv32-virtio-rtl-verilator: check-rv32-virtiocheck-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_VIRTIO_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --seed 3 --gpu-seed 5 --out build/rv32/virtio-verilator
-test-rv32: run-rv32-virtio-qemu run-rv32-virtio-emu run-rv32-virtio-rtl run-rv32-virtio-rtl-verilator
+# The same check in step-tick mode with seeded stalls: the disk transfers keep the trace comparable.
+run-rv32-virtio-rtl-steps: check-rv32-virtiocheck-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_VIRTIO_ARGS) --ticks steps --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --seed 3 --out build/rv32/virtio-steps
+test-rv32: run-rv32-virtio-qemu run-rv32-virtio-emu run-rv32-virtio-rtl run-rv32-virtio-rtl-verilator run-rv32-virtio-rtl-steps
