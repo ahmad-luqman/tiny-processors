@@ -575,9 +575,25 @@ static void wake_blocked(void)
     }
 }
 
+/* Whether G1 or G2 is busy. Only a program flagged `accelerators` starts them, so until one has run
+ * the answer is no without a look; once one has, the kernel looks until it finds them idle with no
+ * such program alive. A session without the menu never touches an engine register, and so stays
+ * trace-comparable in step-tick mode (engines advance per clock). */
+static int engines_used;
+
 static uint32_t engines_busy(void)
 {
-    return (gpu && (mmio_read32(gpu + GPU_STATUS) & GPU_BUSY)) || (g3d && (mmio_read32(g3d + G3D_STATUS) & G3D_BUSY));
+    if (!engines_used) {
+        return 0;
+    }
+    if ((gpu && (mmio_read32(gpu + GPU_STATUS) & GPU_BUSY)) || (g3d && (mmio_read32(g3d + G3D_STATUS) & G3D_BUSY))) {
+        return 1;
+    }
+    engines_used = 0;
+    for (uint32_t i = 0; i < MAX_PROCS; i++) {
+        engines_used |= alive(&procs[i]) && (procs[i].flags & PROGRAM_ACCELERATORS);
+    }
+    return 0;
 }
 
 /* The next ready process after `after` in table order, round robin, or 0. While G1 or G2 is busy
@@ -633,6 +649,9 @@ static struct frame *schedule(void)
             return &idle_frame;
         }
         current->state = RUNNING;
+    }
+    if (current->flags & PROGRAM_ACCELERATORS) {
+        engines_used = 1;
     }
     protect(current);
     return &current->f;

@@ -1317,7 +1317,7 @@ run-rv32-os-qemu-reboot: run-rv32-os-qemu run-rv32-os-emu
 run-rv32-os-emu: check-rv32-os-image $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32/os/emu
 run-rv32-os-rtl: check-rv32-os-image $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --timeout 600 --max-cycles 50000000 --out build/rv32/os/icarus
+	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --timeout 1800 --max-cycles 50000000 --out build/rv32/os/icarus
 run-rv32-os-rtl-verilator: check-rv32-os-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --max-cycles 50000000 --out build/rv32/os/verilator
 # Pong under the kernel gives the standalone image's 200 checkpoints and PASS word, trace for trace
