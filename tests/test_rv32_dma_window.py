@@ -9,9 +9,10 @@ from pathlib import Path
 import unittest
 
 from tools.rv32_asm import (ADDI, ANDI, BNE, CSRRS, CSRRW, DMA_WINDOW, DMA_WINDOW_END, DMA_WINDOW_START, FB, FINISH,
-                            G3D_BASE, G3D_CLEAR_Z, G3D_COMMAND, G3D_DONE, G3D_ERROR, G3D_FAULT, G3D_STATUS, G3D_ZBASE,
-                            GPU_BASE, GPU_COMMAND, GPU_DONE, GPU_ERROR, GPU_FAULT, GPU_INVALID, GPU_PARAMS, GPU_START,
-                            GPU_STATUS, LB, LH, LI, LW, MRET, RAM, RAM_SIZE, SB, SW)
+                            G3D_BASE, G3D_CLEAR_Z, G3D_COMMAND, G3D_DONE, G3D_ERROR, G3D_FAULT, G3D_LIMIT, G3D_START,
+                            G3D_STATUS, G3D_TCOUNT, G3D_VCOUNT, G3D_ZBASE, GPU_BASE, GPU_BLIT, GPU_COMMAND, GPU_DONE,
+                            GPU_ERROR, GPU_FAULT, GPU_INVALID, GPU_PARAMS, GPU_START, GPU_STATUS, LB, LH, LI, LW, MRET,
+                            RAM, RAM_SIZE, SB, SW)
 from tools.rv32_rtl import check_passed, compare_backends, run_emulator, run_rtl, write_image
 
 RESULTS = RAM + 0x3000          # where the programs store what they read
@@ -85,12 +86,15 @@ class DmaWindowTest(unittest.TestCase):
     def blit(self, slot, source, width=4, rows=4):
         """A 4 by 4 blit to the frame's corner from a `width` by `rows` source at `source` (stride
         `width`); records STATUS and ERROR."""
-        p = [2, 0, 0, 0, 0, 0, 0, 0, 4, 4, source, width, width, rows, 0, 0]
+        return self.start_blit(source, width, rows) + wait(1, GPU_STATUS) + \
+            record(2 * slot, 1, GPU_STATUS) + record(2 * slot + 1, 1, GPU_ERROR)
+
+    def start_blit(self, source, width=4, rows=4, size=4):
+        p = [GPU_BLIT, 0, 0, 0, 0, 0, 0, 0, size, size, source, width, width, rows, 0, 0]
         words = []
         for i, value in enumerate(p):
             words += LI(4, value & 0xffffffff) + [SW(4, 1, GPU_PARAMS + 4 * i)]
-        words += LI(4, GPU_START) + [SW(4, 1, GPU_COMMAND)] + wait(1, GPU_STATUS)
-        return words + record(2 * slot, 1, GPU_STATUS) + record(2 * slot + 1, 1, GPU_ERROR)
+        return words + LI(4, GPU_START) + [SW(4, 1, GPU_COMMAND)]
 
     def test_g1_source_must_lie_in_the_window(self):
         start, end = RAM + 0x20000, RAM + 0x20000 + 64
@@ -103,12 +107,18 @@ class DmaWindowTest(unittest.TestCase):
         words += self.blit(4, end - 12)                            # one row past END
         words += self.blit(5, start - 4)                           # starts one row before START
         words += self.blit(6, FB, width=320, rows=240)            # the framebuffer is not RAM: no window
+        # A blit validated inside the window runs to the end even if the window then shrinks to
+        # nothing, as G2's job does below.
+        words += LI(4, start + 0x1000) + [SW(4, 2, DMA_WINDOW_END)]  # room for a 64 by 64 source
+        words += self.start_blit(start, width=64, rows=64, size=64)
+        words += [ADDI(0, 0, 0)] * 4 + [SW(0, 2, DMA_WINDOW_START), SW(0, 2, DMA_WINDOW_END)]
+        words += wait(1, GPU_STATUS) + record(14, 1, GPU_STATUS) + record(15, 1, GPU_ERROR)
         words += FINISH()
         done, invalid = (GPU_DONE, 0), (GPU_FAULT, GPU_INVALID)
-        expected = [done, invalid, done, done, invalid, invalid, done]
+        expected = [done, invalid, done, done, invalid, invalid, done, done]
         for run in self.run_pair(words, "g1-window", stall=1, gpu_stall=2):
             stored = self.stored(run)
-            self.assertEqual([(stored[2 * i], stored[2 * i + 1]) for i in range(7)], expected)
+            self.assertEqual([(stored[2 * i], stored[2 * i + 1]) for i in range(8)], expected)
             self.assertEqual(self.traps(run), [])
 
     def clear(self, slot, zbase):
@@ -124,6 +134,10 @@ class DmaWindowTest(unittest.TestCase):
         words += self.clear(2, start + 4)                          # one word past END
         words += self.clear(3, start - 4)                          # one word before START
         words += self.clear(4, RAM + 0x100000)                     # elsewhere in RAM
+        # START validates ZBASE as CLEAR_Z does: outside the window it is E_PARAM before any work.
+        words += LI(4, start - 4) + [SW(4, 1, G3D_ZBASE)] + LI(4, 1) + [SW(4, 1, G3D_VCOUNT), SW(0, 1, G3D_TCOUNT)]
+        words += LI(4, 1000) + [SW(4, 1, G3D_LIMIT)] + LI(4, G3D_START) + [SW(4, 1, G3D_COMMAND)]
+        words += wait(1, G3D_STATUS) + record(12, 1, G3D_STATUS) + record(13, 1, G3D_ERROR)
         # A job validated inside the window runs to the end even if the window then shrinks to
         # nothing: the engines only test it when a job starts.
         words += LI(4, start) + [SW(4, 1, G3D_ZBASE)] + LI(4, G3D_CLEAR_Z) + [SW(4, 1, G3D_COMMAND)]
@@ -133,8 +147,8 @@ class DmaWindowTest(unittest.TestCase):
         done, param = (G3D_DONE, 0), (G3D_FAULT, G3D_E_PARAM)
         for run in self.run_pair(words, "g2-window", seed=5, gpu_seed=9):
             stored = self.stored(run)
-            self.assertEqual([(stored[2 * i], stored[2 * i + 1]) for i in range(6)],
-                             [done, done, param, param, param, done])
+            self.assertEqual([(stored[2 * i], stored[2 * i + 1]) for i in range(7)],
+                             [done, done, param, param, param, done, param])
             self.assertEqual(self.traps(run), [])
 
 

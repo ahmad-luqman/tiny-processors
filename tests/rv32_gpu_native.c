@@ -1,9 +1,8 @@
 #include "../tools/rv32_gpu.h"
 static gpu_device g;
 static uint8_t ram[262144],fb[76800];
-/* The DMA window; all of RAM unless a test narrows it. */
-static uint32_t window_start=0x80000000u,window_end=0x80000000u+sizeof ram;
-void native_gpu_window(uint32_t start,uint32_t end){window_start=start;window_end=end;}
+/* The DMA window at its reset value, all of RAM; tests/test_rv32_dma_window.py narrows it on the machine. */
+static const uint32_t window_start=0x80000000u,window_end=0x80000000u+sizeof ram;
 void native_gpu_reset(void){gpu_device_reset(&g);}
 void native_gpu_init(void){gpu_device_reset(&g);for(unsigned i=0;i<sizeof ram;i++)ram[i]=(uint8_t)(i*17+3);for(unsigned i=0;i<sizeof fb;i++)fb[i]=(uint8_t)(i*13+7);}
 int native_gpu_access(uint32_t off,int width,int write,uint32_t *v){return gpu_access(&g,off,width,write!=0,v);}

@@ -1236,7 +1236,7 @@ RV32_OS_SLOT_primes := 2
 RV32_OS_SLOT_pong := 3
 RV32_OS_SLOT_tetris := 4
 # The menu keeps its G2 depth buffer (150 KiB) in its own slots, where the DMA window lets G2
-# reach (issue #20), so it needs three; slots 5 and 6 are free for smaller programs.
+# reach (issue #20), so it needs three; of its old slots, 5 went to dmaprobe and 6 is free.
 RV32_OS_SLOT_menu := 15
 RV32_OS_SPAN_menu := 3
 RV32_OS_SLOT_dmaprobe := 5

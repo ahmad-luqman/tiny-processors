@@ -458,7 +458,8 @@ fast it passes.
 Twelve 256 KiB slots were all taken by the end of O3. Slots are now 128 KiB
 (24 of them), and a program may span several: its link script's
 `SLOT_SPAN`, recorded in the RAM disk entry, sets where its stack starts. The
-menu, the only program larger than 96 KiB, spans two. `spawn` refuses a
+menu, the only program larger than 96 KiB, spans three since issue #20 gave it
+its own depth buffer (two before). `spawn` refuses a
 program whose span overlaps a live process's.
 
 ### Two programs, one machine
@@ -726,8 +727,8 @@ macOS, QEMU 11.1.2, llvm@22):
   (6,988,036 cycles), results-identical over 111 console lines with identical
   disks.
 - **Menu session** (`dmaprobe`, `dmaprobe window`, then S1's menu):
-  `PASS 53e2ea5f` and S1's 185 checkpoints on the emulator (21,298,922 steps)
-  and on Verilator with seeded waits (122,242,097 cycles).
+  `PASS 53e2ea5f` and S1's 185 checkpoints on the emulator (21,313,555 steps)
+  and on Verilator with seeded waits (122,346,280 cycles).
 - **Pong** stays trace-identical in step-tick mode (1,035,534 lines).
 - **Cost** (Yosys 0.69 generic cells): the window is 103 cells, and its test
   adds 307 to G1 (52,097 to 52,404).

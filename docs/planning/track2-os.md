@@ -27,7 +27,8 @@ contract:
   high as item 6 of O1 says.
 - O5 grants the framebuffer to every process and the accelerators only to a
   program flagged for them, which is trusted: the engines' DMA is not held by
-  PMP.
+  PMP. (Issue #20 later closed this with a DMA window the kernel
+  sets to the program's own slots.)
 
 The track keeps the project's two rules. Every hardware change is made twice,
 in the emulator and in the RTL, and compared. Every program that can run on

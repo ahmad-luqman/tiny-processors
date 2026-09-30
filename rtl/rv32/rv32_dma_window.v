@@ -6,7 +6,8 @@
 // write never affects a job already running. It sits in its own page, outside
 // the span the kernel grants a program that drives the engines, so only the
 // kernel sets it. At reset it is all of RAM, which leaves the engines' existing
-// RAM-bounds checks the only limit. Every other access is refused.
+// RAM-bounds checks the only limit. Byte and halfword accesses are refused here;
+// the bus decodes only these 8 bytes, so it refuses every other offset.
 module rv32_dma_window #(
     parameter integer RAM_WORDS = 1048576
 ) (

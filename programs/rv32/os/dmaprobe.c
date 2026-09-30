@@ -4,8 +4,10 @@
  * kernel sets the DMA window to its own slot. The engines must refuse to reach the kernel or
  * another program's slot through their DMA:
  *
- *   dmaprobe          a G1 blit from its own memory is accepted; blits from the kernel and from
- *                     the shell's slot, and G2 depth-buffer clears at either, are refused
+ *   dmaprobe          G1 blits from its own memory are accepted, up to the last byte of its
+ *                     slot; blits that pass the slot's end, or come from the next slot, the
+ *                     kernel or the shell's slot, and G2 depth-buffer clears at the kernel or
+ *                     the shell, are refused
  *   dmaprobe window   a load of the window's START register, which PMP keeps from programs
  *                     (cause 5)
  *
@@ -21,7 +23,7 @@
 #include "gpu.h"
 #include "mmio.h"
 
-#define KERNEL 0x80040000u    /* in the kernel's MiB: the bare machine's G3D_DEMO_ZBASE, which the menu used until issue #20 */
+#define KERNEL 0x80040000u    /* in the kernel's MiB (the bare machine's G3D_DEMO_ZBASE) */
 #define SHELL  0x80100000u    /* slot 0 */
 
 void dmaprobe_window(void);
@@ -36,8 +38,16 @@ __asm__(
     "    .popsection\n");
 
 static uint8_t source[16];
+extern uint8_t _stack_top[]; /* user.ld: the end of the slot, which the DMA window's END must be */
 
-/* G1 with a zero-sized destination: only SETUP runs, and it judges the source. */
+/* The outcome of a job: 0 when it finished (DONE), else STATUS in the high half and ERROR in the
+ * low, so a job that neither finished nor reported an error is not taken for one that did. */
+static uint32_t outcome(uint32_t status, uint32_t error, uint32_t done)
+{
+    return status == done ? 0 : status << 16 | error;
+}
+
+/* G1 with a zero-sized destination: only SETUP runs, and it judges the 16-byte source. */
 static uint32_t blit(uint32_t address)
 {
     static const uint32_t shape[GP_COUNT] = {[GP_OP] = GPU_BLIT, [GP_STRIDE] = 4, [GP_SW] = 4, [GP_SH] = 4};
@@ -47,7 +57,7 @@ static uint32_t blit(uint32_t address)
     mmio_write32(GPU_BASE + GPU_COMMAND, GPU_START);
     while (mmio_read32(GPU_BASE + GPU_STATUS) == GPU_BUSY) {
     }
-    return mmio_read32(GPU_BASE + GPU_STATUS) == GPU_DONE ? 0 : mmio_read32(GPU_BASE + GPU_ERROR);
+    return outcome(mmio_read32(GPU_BASE + GPU_STATUS), mmio_read32(GPU_BASE + GPU_ERROR), GPU_DONE);
 }
 
 /* G2's CLEAR_Z validates the depth buffer before it writes a word of it. */
@@ -57,18 +67,22 @@ static uint32_t clear(uint32_t zbase)
     mmio_write32(G3D_BASE + G3D_COMMAND, G3D_CLEAR_Z);
     while (mmio_read32(G3D_BASE + G3D_STATUS) == G3D_BUSY) {
     }
-    return mmio_read32(G3D_BASE + G3D_STATUS) == G3D_DONE ? 0 : mmio_read32(G3D_BASE + G3D_ERROR);
+    return outcome(mmio_read32(G3D_BASE + G3D_STATUS), mmio_read32(G3D_BASE + G3D_ERROR), G3D_DONE);
 }
 
-static void report(const char *what, uint32_t error)
+static void report(const char *what, uint32_t result)
 {
     u_puts("dmaprobe: ");
     u_puts(what);
-    u_puts(error ? " refused, error " : " accepted\n");
-    if (error) {
-        u_putdec(error);
-        u_puts("\n");
+    if (!result) {
+        u_puts(" accepted\n");
+        return;
     }
+    u_puts(" refused, status ");
+    u_putdec(result >> 16);
+    u_puts(" error ");
+    u_putdec(result & 0xffffu);
+    u_puts("\n");
 }
 
 int main(const char *args)
@@ -78,7 +92,11 @@ int main(const char *args)
         u_puts("dmaprobe: the window was readable\n");
         return 1;
     }
+    uint32_t end = (uint32_t)_stack_top;
     report("G1 blit from its own memory", blit((uint32_t)source));
+    report("G1 blit ending at its slot's end", blit(end - 16u));
+    report("G1 blit past its slot's end", blit(end - 12u));
+    report("G1 blit from the next slot", blit(end));
     report("G1 blit from the kernel", blit(KERNEL));
     report("G1 blit from the shell", blit(SHELL));
     report("G2 depth buffer in the kernel", clear(KERNEL));

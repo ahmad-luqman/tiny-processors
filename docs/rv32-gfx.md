@@ -38,7 +38,7 @@ SW ≤ STRIDE ≤ 65535. SRC is a byte address in configured RAM, or exactly
 `0x12000000` with SW=320, SH=240, STRIDE=320 for framebuffer copies. The full
 source extent `(SH-1)*STRIDE+SW` must fit RAM without address wrap, and a RAM
 source must also lie in the [DMA window](rv32.md#dma-window-at-0x1100_a000)
-(issue #20; all of RAM at reset), or SETUP ends the blit with INVALID. Source and
+(issue #20; all of RAM at reset), or SETUP ends the blit with FAULT, ERROR=1 (INVALID). Source and
 destination are clipped together. Overlap has snapshot semantics, implemented
 by reverse traversal when destination follows source in the same framebuffer.
 

@@ -327,9 +327,16 @@ static void discover(uintptr_t address)
             }
         }
     }
-    /* The DMA window must stay outside the region PMP grants, or a program could widen it. */
-    dma_window = find(&t, "tiny-processors,dma-window", 0, 0);
-    if (dma_window && accelerators_end && dma_window + 8u > accelerators && dma_window < accelerators_end) {
+    /* The DMA window: required wherever G1 or G2 is (without it the engines reach all of RAM),
+     * and outside the region PMP grants, or a program could widen it. QEMU has neither. */
+    uint32_t window_size = 0;
+    if (fdt_find(&t, "compatible", "tiny-processors,dma-window", 0, &dma_window, &window_size) != FDT_OK) {
+        dma_window = 0;
+    }
+    if ((gpu || g3d) && !dma_window) {
+        panic("g1 or g2 without a DMA window");
+    }
+    if (dma_window && accelerators_end && dma_window + window_size > accelerators && dma_window < accelerators_end) {
         panic("the DMA window inside the accelerators' region");
     }
     uint32_t timebase;
@@ -505,8 +512,30 @@ static uint32_t close_file(struct open_file *o)
     return mode == O_WRITE && !fs_flush() ? SYS_ERROR : 0; /* a written file's size reaches the disk */
 }
 
+/* A program that drives the engines has ended. Unless another such program lives (whose job it
+ * may be), stop any job still running: its blit source or depth buffer lies in slots about to be
+ * freed, and the next program there must not have an engine writing into it. */
+static void stop_orphaned_engines(const struct proc *p)
+{
+    if (!(p->flags & PROGRAM_ACCELERATORS)) {
+        return;
+    }
+    for (uint32_t i = 0; i < MAX_PROCS; i++) {
+        if (&procs[i] != p && alive(&procs[i]) && (procs[i].flags & PROGRAM_ACCELERATORS)) {
+            return;
+        }
+    }
+    if (gpu && (mmio_read32(gpu + GPU_STATUS) & GPU_BUSY)) {
+        mmio_write32(gpu + GPU_COMMAND, GPU_RESET);
+    }
+    if (g3d && (mmio_read32(g3d + G3D_STATUS) & G3D_BUSY)) {
+        mmio_write32(g3d + G3D_COMMAND, G3D_RESET);
+    }
+}
+
 static void finish(struct proc *p, uint32_t code)
 {
+    stop_orphaned_engines(p);
     for (uint32_t i = 0; i < OPEN_FILES; i++) {
         if (close_file(&p->files[i]) == SYS_ERROR) {
             kputs("kernel: pid ");
