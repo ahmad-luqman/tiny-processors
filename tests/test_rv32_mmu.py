@@ -262,6 +262,21 @@ class MmuTest(StepTicksCase):
         self.assertEqual(self.log(rtl.trace), [])
         self.assertEqual([stored(rtl.trace, DUMP), stored(rtl.trace, DUMP + 4)], [INTERRUPT | 1, taken_at])
 
+    def test_a_delegated_interrupt_is_taken_in_user_mode_whatever_sie_says(self):
+        """Below S mode a delegated interrupt is always enabled: with SIE clear, sret into U mode
+        takes the pending SSI at the first user instruction, into S mode."""
+        handler_s = [CSRRS(20, SCAUSE, 0), CSRRS(21, SEPC, 0)] + LI(16, DUMP)
+        handler_s += [SW(20, 16, 0), SW(21, 16, 4), CSRRCI(0, SIP_CSR, 2), SRET()]
+        at = SUPER + 0x200
+        user_at = ALIAS + (USER_CODE - RAM)
+        supervisor = LI(5, at) + [CSRRW(0, STVEC, 5)] + LI(5, user_at) + [CSRRW(0, SEPC, 5)]
+        supervisor += LI(6, MSTATUS_SPP) + [CSRRC(0, SSTATUS, 6), SRET()]
+        supervisor += [0] * ((at - SUPER) // 4 - len(supervisor)) + handler_s
+        machine = LI(5, 1 << 1) + [CSRRW(0, MIDELEG, 5), CSRRW(0, MIE_CSR, 5), CSRRW(0, MIP_CSR, 5)]
+        emulator, rtl = self.assert_same(program(pmp() + machine, supervisor, [ECALL()]))
+        self.assertEqual([stored(rtl.trace, DUMP), stored(rtl.trace, DUMP + 4)], [INTERRUPT | 1, user_at])
+        self.assertEqual([entry[:3] for entry in self.log(rtl.trace)], [(8, 0, user_at)])
+
 
 if __name__ == "__main__":
     unittest.main()
