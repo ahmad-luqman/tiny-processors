@@ -379,7 +379,7 @@ build-rv32-rtl: $(RV32_TB_VVP)
 # processes; each compiles its own testbench, as the unsharded suite does.
 RV32_RTL_SHARDS ?= 8
 test-rv32-rtl: check-rv32-image
-	HOST_CC=$(HOST_CC) $(PYTHON) tools/rv32_unittest_shards.py --shards $(RV32_RTL_SHARDS) test_rv32_rtl.py
+	HOST_CC=$(HOST_CC) RV32_ICARUS_TIMEOUT=$(RV32_ICARUS_TIMEOUT) $(PYTHON) tools/rv32_unittest_shards.py --shards $(RV32_RTL_SHARDS) test_rv32_rtl.py
 
 test-rv32-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR)
 	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_rtl.py' -v
