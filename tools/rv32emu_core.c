@@ -878,9 +878,9 @@ enum walk_kind { WALK_FETCH, WALK_LOAD, WALK_STORE };
 /* Translate `va` for an access of `kind` at privilege `priv`: ACC_OK with the physical address,
  * ACC_PAGE_FAULT, or ACC_FAULT (an access fault) when a page-table read leaves RAM or PMP refuses
  * it, or the translated address is at or past 2^32. The caller checks PMP on the result. Without translation (satp.MODE 0, or machine
- * mode) the address is its own. There is no TLB: every access walks, which is what an
- * implementation with one must look like to a program that follows each page-table change
- * with sfence.vma. A and D are never set by hardware; a clear one is a page fault (Svade). */
+ * mode) the address is its own. There is no TLB: every access walks, which is what the RTL's
+ * TLB (issue #24) looks like to a program that follows each page-table change with sfence.vma
+ * or a satp write. A and D are never set by hardware; a clear one is a page fault (Svade). */
 static mem_access translate(const machine *m, uint32_t va, enum walk_kind kind, uint32_t priv, uint32_t *pa)
 {
     if (!(m->satp & SATP_MODE) || priv == PRIV_M) {

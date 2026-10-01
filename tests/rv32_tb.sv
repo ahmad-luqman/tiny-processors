@@ -119,6 +119,8 @@ module rv32_tb;
     integer md_waits = 0;       // cycles in MD_WAIT: 33 per M-extension instruction
     integer ptw_waits = 0;      // issue #20: cycles the page-table walk adds, stalls apart
     integer walks = 0;          // issue #20: page-table reads, transfers that are not the instruction's
+    integer tlb_hits = 0;       // issue #24: translations the TLB answered
+    integer tlb_misses = 0;     // issue #24: translations that started a walk
     reg fp_inflight = 0, fp_completed = 0;
     // Integration protocol: each arithmetic retirement consumes one completion.
     // Reset cancels both tokens, even if a response was accepted before writeback.
@@ -263,7 +265,8 @@ module rv32_tb;
             if (interrupts != 0) $fwrite(STDERR, " interrupts=%0d", interrupts);
             if (fp_waits != 0) $fwrite(STDERR, " fp_waits=%0d", fp_waits);
             if (md_waits != 0) $fwrite(STDERR, " md_waits=%0d", md_waits);
-            if (walks != 0 || ptw_waits != 0) $fwrite(STDERR, " walks=%0d ptw_waits=%0d", walks, ptw_waits);
+            if (walks != 0 || ptw_waits != 0 || tlb_hits != 0 || tlb_misses != 0)
+                $fwrite(STDERR, " walks=%0d ptw_waits=%0d tlb_hits=%0d tlb_misses=%0d", walks, ptw_waits, tlb_hits, tlb_misses);
             if (halt_name == "done") begin
                 $fwrite(STDERR, " done=%h", done_word);
                 if (done_word == 32'h5555)
@@ -325,6 +328,8 @@ module rv32_tb;
             if (state == dut.core.FP_ISSUE || state == dut.core.FP_WAIT) fp_waits = fp_waits + 1;
             if (state == dut.core.MD_WAIT) md_waits = md_waits + 1;
             if (dut.core.ptw_cycle) ptw_waits = ptw_waits + 1;
+            if (dut.core.tlb_hit_seen) tlb_hits = tlb_hits + 1;
+            if (dut.core.tlb_miss_seen) tlb_misses = tlb_misses + 1;
             // The M unit restarts on a start while busy (rtl/rv32/rv32_muldiv.v);
             // the core must never ask it to.
             if (dut.core.muldiv.start && dut.core.muldiv.busy)
