@@ -923,32 +923,33 @@ so their "before" runs are the sessions without them.
 
 | Session | Backend | Before | After |
 | --- | --- | --- | --- |
-| Console | emulator, steps | 1,576,460 | 1,658,469 |
-| Console | Verilator, a stall per request, cycles | 9,545,241 | 10,015,467 |
-| Jobs | emulator, steps | 6,751,793 | 6,798,527 |
-| Jobs | Verilator, a stall per request, cycles | 44,053,339 | 44,977,745 |
-| Pong | emulator, steps | 1,199,530 | 1,222,158 |
-| Menu | emulator, steps | 24,958,865 | 24,989,117 |
-| Menu | Verilator, seeded waits, cycles | 143,475,499 | 145,249,956 |
+| Console | emulator, steps | 1,576,460 | 1,703,115 |
+| Console | Verilator, a stall per request, cycles | 9,545,241 | 10,269,603 |
+| Jobs | emulator, steps | 6,751,793 | 6,799,401 |
+| Jobs | Verilator, a stall per request, cycles | 44,053,339 | 44,982,331 |
+| Pong | emulator, steps | 1,199,530 | 1,222,789 |
+| Menu | emulator, steps | 24,958,865 | 25,048,928 |
+| Menu | Verilator, seeded waits, cycles | 143,475,499 | 145,635,450 |
 
-- **Console session:** `PASS dc3c1ef5` on QEMU `virt` (transcript pinned; its
+- **Console session:** `PASS 8b4402e5` on QEMU `virt` (transcript pinned; its
   disk byte for byte the emulator's, and the reboot finds the files), the
-  emulator, Verilator and Icarus (7,544,467 cycles), results-identical over
-  111 console lines and 836 exception records with identical disks, and
+  emulator, Verilator and Icarus (7,738,513 cycles), results-identical over
+  114 console lines and every process's faults, with identical disks, and
   trace-identical in step-tick mode (`test-rv32-os`).
 - **Jobs session:** `PASS 408a6738` on QEMU, the emulator and Verilator (40
   presents, identical disks), and trace-identical in step-tick mode with
-  seeded stalls (6,798,527 lines).
+  seeded stalls (6,799,401 lines).
 - **Pong** keeps its 200 checkpoints and `PASS 814f72be` and is
-  trace-identical to Verilator in step-tick mode (1,222,158 lines); the second
+  trace-identical to Verilator in step-tick mode (1,222,789 lines); the second
   boot keeps `PASS 455b9c97`.
-- **Menu session:** `PASS 53e2ea67` and S1's 185 checkpoints on the emulator
+- **Menu session:** `PASS b1f2b253` and S1's 185 checkpoints on the emulator
   and on Verilator with seeded waits.
 - **The TLB:** the four entries hit on 99.3% (console) to 99.5% (Pong, jobs)
   of translated accesses, and on 99.0% in the menu, whose code, data, depth
   buffer, framebuffer and engine registers compete for them. The step counts
-  grow by what the kernel spends building tables at spawn (5% in the console
-  session, which spawns 27 processes); the cycle counts add the walks.
+  of the sessions that did not change grow by what the kernel spends building
+  tables at spawn (0.7% for jobs, 1.9% for Pong); the cycle counts add the
+  walks (2.1% for jobs).
 - **Tools:** `test-rv32-os` checks that `.pagetables` is a page-aligned NOBITS
   section below the kernel's stack, sized for every entry, with the bounds PMP
   uses, and that the slots, the framebuffer and the engine windows of our tree
