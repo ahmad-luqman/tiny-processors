@@ -501,7 +501,7 @@ test-rv32-slow: run-rv32-capstone-rtl
 
 # Compile the same directed C checks as a standalone sanitized executable.
 .PHONY: test-rv32-capstone-sanitize
-test-rv32-capstone-sanitize: build/rv32/digit_shape.h build/rv32/digit_weights.h $(RV32_G3D_GENERATED) | build/rv32
+test-rv32-capstone-sanitize: build/rv32/digit_shape.h build/rv32/digit_weights.h build/rv32/digit_weights.c $(RV32_G3D_GENERATED) | build/rv32
 	mkdir -p build/rv32/host
 	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fno-builtin -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -DRV32_NATIVE_MAIN -Iprograms/rv32 -Ibuild/rv32 tests/rv32_capstone_native.c programs/rv32/gpu_demo.c programs/rv32/gpu_ref.c programs/rv32/runtime.c programs/rv32/tetris_game.c programs/rv32/pong_game.c programs/rv32/gfx.c programs/rv32/gfx_text.c programs/rv32/digit_ui.c programs/rv32/digit_model.c build/rv32/digit_weights.c programs/rv32/g3d_demo.c programs/rv32/g3d_ref.c -o build/rv32/host/capstone-sanitize
 	build/rv32/host/capstone-sanitize
