@@ -40,7 +40,7 @@ static int32_t edge(int32_t ax,int32_t ay,int32_t bx,int32_t by,int32_t x,int32_
 {return (bx-ax)*(2*y+1-2*ay)-(by-ay)*(2*x+1-2*ax);}
 static bool inside(int32_t ax,int32_t ay,int32_t bx,int32_t by,int32_t x,int32_t y)
 {int32_t e=edge(ax,ay,bx,by,x,y);return e>0 || (!e && (by<ay || (by==ay && bx>ax)));}
-void gpu_tick(gpu_device *g,uint8_t *ram,uint32_t ram_size,uint8_t *fb,bool hold)
+void gpu_tick(gpu_device *g,uint8_t *ram,uint32_t ram_size,uint8_t *fb,bool hold,uint32_t window_start,uint32_t window_end)
 {
     if(g->command_tick){g->command_tick=false;return;}
     if(!gpu_busy(g))return;
@@ -54,7 +54,7 @@ void gpu_tick(gpu_device *g,uint8_t *ram,uint32_t ram_size,uint8_t *fb,bool hold
         if(op==GPU_BLIT){
             uint64_t end=source_end(p);
             bool source=p[GP_SRC]==0x12000000u ? p[GP_SW]==320&&p[GP_SH]==240&&p[GP_STRIDE]==320 :
-                p[GP_SRC]>=0x80000000u && end<=(uint64_t)0x80000000u+ram_size;
+                p[GP_SRC]>=0x80000000u && end<=(uint64_t)0x80000000u+ram_size && p[GP_SRC]>=window_start && end<=window_end;
             valid=valid&&coord(p[GP_SX])&&coord(p[GP_SY])&&p[GP_SW]>0&&p[GP_SW]<=2048&&
                 p[GP_SH]>0&&p[GP_SH]<=2048&&p[GP_STRIDE]>=p[GP_SW]&&p[GP_STRIDE]<=65535&&source;
         }

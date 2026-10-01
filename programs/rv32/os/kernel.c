@@ -25,12 +25,13 @@
  * held by PMP, so system calls still read and write the caller's memory.
  *
  * PMP holds the CPU, not the accelerators: G1 and G2 read and write memory by
- * DMA wherever their registers point (G2's depth buffer, G1's blit source), so
- * a program flagged `accelerators` could reach the kernel or another slot
- * through them. Such a program is trusted, as a driver would be; only the menu
- * is flagged. While an engine is busy it owns the framebuffer (a present or a
- * CPU store to it faults), so only a flagged program runs until the engines
- * are idle again, and nobody else can fault on its behalf.
+ * DMA wherever their registers point (G2's depth buffer, G1's blit source). So
+ * the kernel also sets the DMA window (issue #20) to the running process's
+ * slots, and the engines refuse a job that would reach the kernel or another
+ * slot. The window's page lies outside the accelerators' PMP region, so a
+ * program cannot move it. While an engine is busy it owns the framebuffer (a
+ * present or a CPU store to it faults), so only a flagged program runs until
+ * the engines are idle again, and nobody else can fault on its behalf.
  *
  * Blocking is by retry: a call that cannot finish yet (read with no byte
  * waiting, wait for a child still running) leaves the process's pc on its
@@ -112,6 +113,7 @@ static uint32_t next_pid = 1, exits, exit_sum;
 static uint32_t console, done_register, clint, plic;
 static uint32_t input, input_source, display, framebuffer, framebuffer_size, gpu, g3d, disk;
 static uint32_t accelerators, accelerators_end; /* O5: the window PMP grants a PROGRAM_ACCELERATORS program */
+static uint32_t dma_window;                     /* issue #20: the engines' DMA bound, 0 where there is none (QEMU) */
 static uint32_t protected_pid;                  /* O5: the process PMP is set up for */
 static char model[48];
 static uint32_t tick = KERNEL_TICK; /* O4: 100 µs where the tree gives a timebase (QEMU), else KERNEL_TICK */
@@ -325,6 +327,18 @@ static void discover(uintptr_t address)
             }
         }
     }
+    /* The DMA window: required wherever G1 or G2 is (without it the engines reach all of RAM),
+     * and outside the region PMP grants, or a program could widen it. QEMU has neither. */
+    uint32_t window_size = 0;
+    if (fdt_find(&t, "compatible", "tiny-processors,dma-window", 0, &dma_window, &window_size) != FDT_OK) {
+        dma_window = 0;
+    }
+    if ((gpu || g3d) && !dma_window) {
+        panic("g1 or g2 without a DMA window");
+    }
+    if (dma_window && accelerators_end && dma_window + window_size > accelerators && dma_window < accelerators_end) {
+        panic("the DMA window inside the accelerators' region");
+    }
     uint32_t timebase;
     if (fdt_cell(&t, "@name", "cpus", "timebase-frequency", 0, &timebase) == FDT_OK && timebase >= 10000u) {
         tick = timebase / 10000u;
@@ -498,8 +512,30 @@ static uint32_t close_file(struct open_file *o)
     return mode == O_WRITE && !fs_flush() ? SYS_ERROR : 0; /* a written file's size reaches the disk */
 }
 
+/* A program that drives the engines has ended. Unless another such program lives (whose job it
+ * may be), stop any job still running: its blit source or depth buffer lies in slots about to be
+ * freed, and the next program there must not have an engine writing into it. */
+static void stop_orphaned_engines(const struct proc *p)
+{
+    if (!(p->flags & PROGRAM_ACCELERATORS)) {
+        return;
+    }
+    for (uint32_t i = 0; i < MAX_PROCS; i++) {
+        if (&procs[i] != p && alive(&procs[i]) && (procs[i].flags & PROGRAM_ACCELERATORS)) {
+            return;
+        }
+    }
+    if (gpu && (mmio_read32(gpu + GPU_STATUS) & GPU_BUSY)) {
+        mmio_write32(gpu + GPU_COMMAND, GPU_RESET);
+    }
+    if (g3d && (mmio_read32(g3d + G3D_STATUS) & G3D_BUSY)) {
+        mmio_write32(g3d + G3D_COMMAND, G3D_RESET);
+    }
+}
+
 static void finish(struct proc *p, uint32_t code)
 {
+    stop_orphaned_engines(p);
     for (uint32_t i = 0; i < OPEN_FILES; i++) {
         if (close_file(&p->files[i]) == SYS_ERROR) {
             kputs("kernel: pid ");
@@ -651,6 +687,12 @@ static void protect(const struct proc *p)
     csr_write(CSR_PMPADDR5, accelerators_end >> 2);
     csr_write(CSR_PMPCFG0, tor_rwx << 8 | (framebuffer ? tor_rw << 24 : 0u));
     csr_write(CSR_PMPCFG1, (p->flags & PROGRAM_ACCELERATORS) && accelerators_end ? tor_rw << 8 : 0u);
+    /* The engines may reach only this process's slots. A job validated earlier keeps running
+     * (a flagged program's, while the switch goes to another flagged one or the idle loop). */
+    if (dma_window) {
+        mmio_write32(dma_window + RV32_DMA_WINDOW_START, p->base);
+        mmio_write32(dma_window + RV32_DMA_WINDOW_END, p->base + p->span);
+    }
 }
 
 static struct frame *schedule(void)
@@ -969,6 +1011,7 @@ _Noreturn void kernel_main(uint32_t hart, uintptr_t tree)
     kputs(display ? " display" : "");
     kputs(gpu ? " g1" : "");
     kputs(g3d ? " g2" : "");
+    kputs(dma_window ? " dma" : "");
     kputs(disk ? " disk" : "");
     uint32_t count;
     check_programs();

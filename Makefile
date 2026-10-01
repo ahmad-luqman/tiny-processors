@@ -93,7 +93,7 @@ RV32WIN := build/rv32/rv32win
 SDL3_CFLAGS = $(shell pkg-config --cflags sdl3 2>/dev/null)
 SDL3_LIBS = $(shell pkg-config --libs sdl3 2>/dev/null)
 RV32_RTL := rtl/rv32/rv32_fregfile.v rtl/rv32/rv32_fdecode.v $(FP32_RTL) rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32_muldiv.v rtl/rv32/rv32.v
-RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_clint.v rtl/rv32/rv32_plic.v rtl/rv32/rv32_virtio_blk.v rtl/rv32/rv32_bootrom.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
+RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_clint.v rtl/rv32/rv32_plic.v rtl/rv32/rv32_virtio_blk.v rtl/rv32/rv32_bootrom.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_dma_window.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
 RV32_TB := tests/rv32_tb.sv
 RV32_TB_VVP := build/rv32/rv32_tb.vvp
 RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
@@ -677,6 +677,13 @@ test-rv32-gfx: $(RV32EMU) $(RV32_TB_VVP)
 	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_gfx*.py' -v
 test-rv32-gfx-verilator: $(RV32EMU) $(RV32_TB_VERILATOR)
 	HOST_CC=$(HOST_CC) G1_SIM=verilator $(PYTHON) -m unittest discover -s tests -p 'test_rv32_gfx*.py' -v
+# Issue #20: the DMA window bounds G1's blit source and G2's depth buffer (tests/test_rv32_dma_window.py).
+.PHONY: test-rv32-dma-window test-rv32-dma-window-icarus
+test-rv32-dma-window: $(RV32EMU) $(RV32_TB_VERILATOR)
+	G1_SIM=verilator $(PYTHON) -m unittest discover -s tests -p 'test_rv32_dma_window.py' -v
+test-rv32-dma-window-icarus: $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) -m unittest discover -s tests -p 'test_rv32_dma_window.py' -v
+test-rv32: test-rv32-dma-window test-rv32-dma-window-icarus
 run-rv32-gfx-emu: check-rv32-gfx-image $(RV32EMU)
 	$(PYTHON) tools/rv32_rtl.py $(RV32_GFX_ARGS) --backend emulator --out build/gfx/emu
 run-rv32-gfx-rtl: check-rv32-gfx-image $(RV32EMU) $(RV32_TB_VVP)
@@ -1218,7 +1225,7 @@ test-rv32: run-rv32-irq-qemu run-rv32-irq-emu run-rv32-irq-rtl run-rv32-irq-rtl-
 RV32_OS := programs/rv32/os
 RV32_OS_CFLAGS := $(RV32_CFLAGS) -I$(RV32_OS) -Ibuild/rv32
 RV32_OS_HEADERS := $(RV32_OS)/sys.h $(RV32_OS)/ulib.h $(RV32_OS)/udecimal.h $(RV32_OS)/fs.h $(RV32_OS)/virtio.h $(RV32_OS)/score.h $(RV32_OS)/report.h programs/rv32/csr.h programs/rv32/fdt.h programs/rv32/clint.h programs/rv32/virtio_mmio.h $(RV32_HEADERS)
-RV32_OS_PROGRAMS := sh hello primes pong tetris menu syscheck fault cat write files bars life fill
+RV32_OS_PROGRAMS := sh hello primes pong tetris menu syscheck fault cat write files bars life fill dmaprobe
 # Slots of 128 KiB from 0x8010_0000 (programs/rv32/os/sys.h and tools/rv32_ramdisk.py, which
 # test-rv32-os holds to these values); a program's span is 1 slot unless given.
 RV32_OS_SLOT_BASE := 0x80100000
@@ -1228,8 +1235,11 @@ RV32_OS_SLOT_hello := 1
 RV32_OS_SLOT_primes := 2
 RV32_OS_SLOT_pong := 3
 RV32_OS_SLOT_tetris := 4
-RV32_OS_SLOT_menu := 5
-RV32_OS_SPAN_menu := 2
+# The menu keeps its G2 depth buffer (150 KiB) in its own slots, where the DMA window lets G2
+# reach (issue #20), so it needs three; of its old slots, 5 went to dmaprobe and 6 is free.
+RV32_OS_SLOT_menu := 15
+RV32_OS_SPAN_menu := 3
+RV32_OS_SLOT_dmaprobe := 5
 RV32_OS_SLOT_syscheck := 7
 RV32_OS_SLOT_fault := 8
 RV32_OS_SLOT_cat := 9
@@ -1258,6 +1268,7 @@ RV32_OS_OBJS_files := build/rv32/os/files.o
 RV32_OS_OBJS_bars := build/rv32/os/bars.o build/rv32/os/report.o
 RV32_OS_OBJS_life := build/rv32/os/life.o build/rv32/os/report.o
 RV32_OS_OBJS_fill := build/rv32/os/fill.o
+RV32_OS_OBJS_dmaprobe := build/rv32/os/dmaprobe.o
 RV32_OS_OBJS_pong := build/rv32/os/pong.o build/rv32/os/score.o build/rv32/pong_game.o build/rv32/gfx.o
 RV32_OS_OBJS_tetris := build/rv32/os/tetris.o build/rv32/os/score.o build/rv32/tetris_game.o build/rv32/gfx.o build/rv32/gfx_text.o
 RV32_OS_OBJS_menu := build/rv32/os/menu.o $(filter-out build/rv32/capstone.o $(RV32_COMMON_OBJS),$(RV32_CAPSTONE_OBJS))
@@ -1288,7 +1299,7 @@ $(RV32_OS_ELFS:.elf=.lst) build/rv32/os/kernel.lst: build/rv32/os/%.lst: build/r
 build/rv32/os/kernel.bin: build/rv32/os/%.bin: build/rv32/os/%.elf
 	$(RV32_OBJCOPY) -O binary $< $@
 build/rv32/os/ramdisk.img: $(RV32_OS_ELFS) tools/rv32_ramdisk.py
-	$(PYTHON) tools/rv32_ramdisk.py --out $@ --accelerators menu $(RV32_OS_ELFS)
+	$(PYTHON) tools/rv32_ramdisk.py --out $@ --accelerators menu --accelerators dmaprobe $(RV32_OS_ELFS)
 build/rv32/os/kentry.o: $(RV32_OS)/kentry.S build/rv32/os/ramdisk.img programs/rv32/board.h | build/rv32/os
 	$(RV32_CC) $(RV32_OS_CFLAGS) -DRAMDISK_IMAGE='"build/rv32/os/ramdisk.img"' -c -o $@ $<
 build/rv32/os/kernel.elf: $(RV32_OS_KERNEL_OBJS) $(RV32_OS)/kernel.ld

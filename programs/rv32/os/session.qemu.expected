@@ -1,6 +1,6 @@
 kernel: riscv-virtio,qemu, hart 0
 kernel: devices console clint plic disk
-kernel: 14 programs
+kernel: 15 programs
 kernel: disk 256 sectors, tfs
 sh: ls, NAME [ARGS] [&], wait, halt [CODE]
 $ ls
@@ -18,6 +18,7 @@ files
 bars
 life
 fill
+dmaprobe
 $ hello
 hello from pid 2
 $ hello a b c

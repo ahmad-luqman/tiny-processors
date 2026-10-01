@@ -289,7 +289,8 @@ static void test(g3d_device *d)
     d->phase=G3D_PH_ZREAD;
 }
 
-void g3d_tick(g3d_device *d, uint8_t *ram, uint32_t ram_size, uint8_t *fb, bool hold)
+void g3d_tick(g3d_device *d, uint8_t *ram, uint32_t ram_size, uint8_t *fb, bool hold, uint32_t window_start,
+              uint32_t window_end)
 {
     if (d->command_tick) { d->command_tick=false; return; }
     if (!g3d_busy(d)) return;
@@ -297,7 +298,8 @@ void g3d_tick(g3d_device *d, uint8_t *ram, uint32_t ram_size, uint8_t *fb, bool 
     uint32_t zoff=d->zbase-RAM_ORIGIN+2u*((uint32_t)d->y*320u+(uint32_t)d->x);
     switch (d->phase) {
     case G3D_PH_VALIDATE: {
-        bool z=d->zbase%4==0 && d->zbase>=RAM_ORIGIN && d->zbase-RAM_ORIGIN<=ram_size-Z_BYTES;
+        bool z=d->zbase%4==0 && d->zbase>=RAM_ORIGIN && d->zbase-RAM_ORIGIN<=ram_size-Z_BYTES &&
+            d->zbase>=window_start && (uint64_t)d->zbase+Z_BYTES<=window_end;
         if (d->clearing) { if (!z) fault(d,G3D_E_PARAM); else { d->index=0; d->phase=G3D_PH_CLEAR; } break; }
         if (!z || d->vcount<1 || d->vcount>G3D_VMAX || d->tcount>G3D_TMAX || d->limit<1 || d->limit>0xffffu) {
             fault(d,G3D_E_PARAM);

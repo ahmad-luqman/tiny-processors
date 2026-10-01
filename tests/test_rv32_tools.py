@@ -488,7 +488,7 @@ class DeviceHelperTests(unittest.TestCase):
                       testbench.replace("8000_0000", "80000000"))
         bases = {"RAM": RAM, "CONSOLE": CONSOLE, "DONE": DONE, "CLINT": CLINT, "PLIC": PLIC, "VIRTIO": VIRTIO, "BOOTROM": BOOTROM, "INPUT": INPUT, "DISPLAY": DISPLAY, "FB": FB,
                  "SIMD4": 0x11004000, "SIMD4_PROGRAM": 0x11005000, "SIMD4_DATA": 0x11006000, "GPU": 0x11007000,
-                 "G3D": 0x11008000}
+                 "G3D": 0x11008000, "DMA_WINDOW": 0x1100A000}
         header_bases = {name: int(value, 16) for name, value in re.findall(r"#define RV32_(\w+)_BASE\s+0x([0-9a-fA-F]+)", header)}
         self.assertEqual(header_bases, {name: bases[name] for name in header_bases}, "board.h")
         self.assertLessEqual({"CLINT", "PLIC", "BOOTROM", "INPUT", "DISPLAY", "FB"}, set(header_bases))
@@ -508,7 +508,7 @@ class DeviceHelperTests(unittest.TestCase):
                 "CLINT": rv32_dtb.CLINT_BASE, "PLIC": rv32_dtb.PLIC_BASE, "VIRTIO": rv32_dtb.VIRTIO_BASE, "BOOTROM": rv32_dtb.ROM_BASE, "INPUT": rv32_dtb.INPUT_BASE,
                 "DISPLAY": rv32_dtb.DISPLAY_BASE, "FB": rv32_dtb.FB_BASE, "SIMD4": rv32_dtb.SIMD4_BASE,
                 "SIMD4_PROGRAM": rv32_dtb.SIMD4_PROGRAM, "SIMD4_DATA": rv32_dtb.SIMD4_DATA,
-                "GPU": rv32_dtb.GPU_BASE, "G3D": rv32_dtb.G3D_BASE}
+                "GPU": rv32_dtb.GPU_BASE, "G3D": rv32_dtb.G3D_BASE, "DMA_WINDOW": rv32_dtb.DMA_WINDOW_BASE}
         self.assertEqual(tree, bases, "rv32_dtb.py describes the same windows")
         machine = (ROOT / "rtl/rv32/rv32_soc.v").read_text()
         instances = re.findall(r"rv32_ram #\(\.WORDS\((\w+)\), \.BASE\((\w+)\)\)", machine)
@@ -535,7 +535,7 @@ class DeviceHelperTests(unittest.TestCase):
         words = {name: int(value) for name, value in re.findall(r"parameter integer (\w+) = (\d+)", bus)}
         decoded = {}
         selects = re.findall(r"wire (\w+)_sel = (.*?);", bus, re.S)
-        self.assertEqual(len(selects), 14, "one select per window, plus none_sel")
+        self.assertEqual(len(selects), 15, "one select per window, plus none_sel")
         for select, expr in selects:
             if select == "none":
                 continue

@@ -81,11 +81,13 @@ a warning:
         input@11001000  ...  display@11002000 { reg = <0x11002000 0x10 0x12000000 0x12c00>; }
         simd4@11004000 { reg = <0x11004000 0x20 0x11005000 0x400 0x11006000 0x400>; }
         gpu@11007000 ...  g3d@11008000 ...
+        dma-window@1100a000 { compatible = "tiny-processors,dma-window";   reg = <0x1100a000 0x8>; };
     };
 };
 ```
 
-The blob is 1,340 bytes. A compatible list names our device first and adds a
+The blob was 1,340 bytes at Track 1; with the nodes added since (the PLIC,
+virtio-blk, and issue #20's DMA window) it is 2,012. A compatible list names our device first and adds a
 generic name only where the device implements everything a driver for that
 name may touch. The console implements only a 16550's transmit and
 line-status registers, and a 16550 driver's first act is to program the

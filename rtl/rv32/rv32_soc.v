@@ -79,6 +79,8 @@ module rv32_soc #(
     wire [31:0] gpu_rdata;
     wire g3d_valid, g3d_ready, g3d_error;
     wire [31:0] g3d_rdata;
+    wire dw_valid, dw_ready, dw_error;
+    wire [31:0] dw_rdata, dma_window_start, dma_window_end;
     wire simd_valid, simd_ready, simd_error;
     wire [31:0] simd_rdata;
     wire ram_valid, ram_ready, ram_error;
@@ -138,7 +140,14 @@ module rv32_soc #(
         .fb_valid(fb_valid), .fb_ready(fb_ready), .fb_error(fb_error), .fb_rdata(fb_rdata),
         .gpu_valid(gpu_valid), .gpu_ready(gpu_ready), .gpu_error(gpu_error), .gpu_rdata(gpu_rdata),
         .simd_valid(simd_valid), .simd_ready(simd_ready), .simd_error(simd_error), .simd_rdata(simd_rdata),
-        .g3d_valid(g3d_valid), .g3d_ready(g3d_ready), .g3d_error(g3d_error), .g3d_rdata(g3d_rdata)
+        .g3d_valid(g3d_valid), .g3d_ready(g3d_ready), .g3d_error(g3d_error), .g3d_rdata(g3d_rdata),
+        .dma_window_valid(dw_valid), .dma_window_ready(dw_ready), .dma_window_error(dw_error), .dma_window_rdata(dw_rdata)
+    );
+
+    rv32_dma_window #(.RAM_WORDS(RAM_WORDS)) dma_window (
+        .clk(clk), .reset(reset), .valid(dw_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
+        .wdata(mem_wdata), .rdata(dw_rdata), .ready(dw_ready), .error(dw_error),
+        .window_start(dma_window_start), .window_end(dma_window_end)
     );
 
     rv32_simd4 accelerator (
@@ -166,7 +175,8 @@ module rv32_soc #(
         .busy(gpu_busy), .cancel(gpu_cancel), .source_lock(gpu_source_lock),
         .source_begin(gpu_source_begin), .source_end(gpu_source_end),
         .memory_valid(gm_valid), .memory_we(gm_we), .memory_addr(gm_addr), .memory_wdata(gm_wdata),
-        .memory_ready(gm_ready), .memory_rdata(gm_rdata)
+        .memory_ready(gm_ready), .memory_rdata(gm_rdata),
+        .window_start(dma_window_start), .window_end(dma_window_end)
     );
     wire em_ready;
     wire [31:0] em_read_word;
@@ -175,7 +185,8 @@ module rv32_soc #(
         .other_busy(gpu_busy), .ready(g3d_ready), .error(g3d_error), .rdata(g3d_rdata), .busy(g3d_busy),
         .cancel(g3d_cancel), .zbase_out(g3d_zbase), .memory_valid(g3m_valid), .memory_we(g3m_we),
         .memory_addr(g3m_addr), .memory_strb(g3m_strb), .memory_wdata(g3m_wdata),
-        .memory_ready(g3d_busy && em_ready), .memory_rdata(em_read_word)
+        .memory_ready(g3d_busy && em_ready), .memory_rdata(em_read_word),
+        .window_start(dma_window_start), .window_end(dma_window_end)
     );
     wire engine_busy = gpu_busy || g3d_busy;
     wire em_cancel = gpu_cancel || g3d_cancel;

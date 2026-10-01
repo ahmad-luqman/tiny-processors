@@ -87,10 +87,14 @@ module rv32_bus #(
     input wire [31:0] simd_rdata,
     output wire g3d_valid,
     input wire g3d_ready, g3d_error,
-    input wire [31:0] g3d_rdata
+    input wire [31:0] g3d_rdata,
+    output wire dma_window_valid,
+    input wire dma_window_ready, dma_window_error,
+    input wire [31:0] dma_window_rdata
 );
     localparam [31:0] GPU_BASE = 32'h1100_7000;
     localparam [31:0] G3D_BASE = 32'h1100_8000;
+    localparam [31:0] DMA_WINDOW_BASE = 32'h1100_a000;
     localparam [31:0] SIMD4_BASE = 32'h1100_4000;
     localparam [31:0] SIMD4_PROGRAM = 32'h1100_5000;
     localparam [31:0] SIMD4_DATA = 32'h1100_6000;
@@ -132,10 +136,12 @@ module rv32_bus #(
                       ((mem_addr & 32'hffff_fc00) == SIMD4_DATA));
     wire gpu_sel = !mem_fetch && mem_addr[31:7]==GPU_BASE[31:7];
     wire g3d_sel = !mem_fetch && mem_addr[31:13] == G3D_BASE[31:13];   // 8 KiB
-    wire none_sel = !(ram_sel || console_sel || done_sel || clint_sel || plic_sel || virtio_sel || rom_sel || input_sel || display_sel || fb_sel || simd_sel || gpu_sel || g3d_sel);
+    wire dma_window_sel = !mem_fetch && (mem_addr[31:3] == DMA_WINDOW_BASE[31:3]);
+    wire none_sel = !(ram_sel || console_sel || done_sel || clint_sel || plic_sel || virtio_sel || rom_sel || input_sel || display_sel || fb_sel || simd_sel || gpu_sel || g3d_sel || dma_window_sel);
 
     assign gpu_valid = req && gpu_sel;
     assign g3d_valid = req && g3d_sel;
+    assign dma_window_valid = req && dma_window_sel;
     assign simd_valid = req && simd_sel;
     assign ram_valid = req && ram_sel;
     assign console_valid = req && console_sel;
@@ -151,16 +157,18 @@ module rv32_bus #(
     assign mem_ready = req && ((ram_sel && ram_ready) || (console_sel && console_ready) ||
                                (done_sel && done_ready) || (clint_sel && clint_ready) || (plic_sel && plic_ready) || (virtio_sel && virtio_ready) || (rom_sel && rom_ready) ||
                                (input_sel && input_ready) || (display_sel && display_ready) ||
-                               (fb_sel && fb_ready) || (simd_sel && simd_ready) || (gpu_sel && gpu_ready) || (g3d_sel && g3d_ready) || none_sel);
+                               (fb_sel && fb_ready) || (simd_sel && simd_ready) || (gpu_sel && gpu_ready) || (g3d_sel && g3d_ready) ||
+                               (dma_window_sel && dma_window_ready) || none_sel);
     assign mem_error = (ram_sel && ram_error) || (console_sel && console_error) ||
                        (done_sel && done_error) || (clint_sel && clint_error) || (plic_sel && plic_error) || (virtio_sel && virtio_error) || (rom_sel && rom_error) ||
                        (input_sel && input_error) || (display_sel && display_error) ||
-                       (fb_sel && fb_error) || (simd_sel && simd_error) || (gpu_sel && gpu_error) || (g3d_sel && g3d_error) || none_sel;
+                       (fb_sel && fb_error) || (simd_sel && simd_error) || (gpu_sel && gpu_error) || (g3d_sel && g3d_error) ||
+                       (dma_window_sel && dma_window_error) || none_sel;
     assign mem_rdata = ({32{ram_sel}} & ram_rdata) | ({32{console_sel}} & console_rdata) |
                        ({32{done_sel}} & done_rdata) | ({32{clint_sel}} & clint_rdata) | ({32{plic_sel}} & plic_rdata) | ({32{virtio_sel}} & virtio_rdata) | ({32{rom_sel}} & rom_rdata) |
                        ({32{input_sel}} & input_rdata) | ({32{display_sel}} & display_rdata) |
                        ({32{fb_sel}} & fb_rdata) | ({32{simd_sel}} & simd_rdata) | ({32{gpu_sel}} & gpu_rdata) |
-                       ({32{g3d_sel}} & g3d_rdata);
+                       ({32{g3d_sel}} & g3d_rdata) | ({32{dma_window_sel}} & dma_window_rdata);
 
     // `mem_we` is routed to the slaves by the machine, not decoded here: a write to a
     // read-only register is the slave's refusal, so the decoder stays direction-blind.

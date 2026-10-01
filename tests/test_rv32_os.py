@@ -22,7 +22,8 @@ from tools.rv32_rtl import ROOT, Run, compare_backends, diff_traces, run_emulato
 
 OS = ROOT / "build/rv32/os"
 PROGRAMS = ("sh", "hello", "primes", "pong", "tetris", "menu", "syscheck", "fault", "cat", "write", "files", "bars", "life",
-            "fill")
+            "fill", "dmaprobe")
+ENGINES = frozenset({"menu", "dmaprobe"})  # the programs flagged `accelerators`
 
 
 def elfs(*names):
@@ -35,16 +36,16 @@ def elfs(*names):
 
 class RamdiskTest(unittest.TestCase):
     def test_round_trip(self):
-        blob = rv32_ramdisk.build(elfs(*PROGRAMS), frozenset({"menu"}))
+        blob = rv32_ramdisk.build(elfs(*PROGRAMS), ENGINES)
         entries = rv32_ramdisk.parse(blob)
         self.assertEqual([e["name"] for e in entries], list(PROGRAMS))
         for index, entry in enumerate(entries):
             with self.subTest(entry["name"]):
                 self.assertEqual(entry["load"] % rv32_ramdisk.SLOT_SIZE, rv32_ramdisk.SLOT_BASE % rv32_ramdisk.SLOT_SIZE)
                 self.assertEqual(entry["entry"], entry["load"])
-                self.assertEqual(entry["flags"], rv32_ramdisk.ACCELERATORS if entry["name"] == "menu" else 0)
+                self.assertEqual(entry["flags"], rv32_ramdisk.ACCELERATORS if entry["name"] in ENGINES else 0)
                 self.assertLessEqual(entry["size"], entry["memory"])
-                self.assertEqual(entry["span"], rv32_ramdisk.SLOT_SIZE * (2 if entry["name"] == "menu" else 1))
+                self.assertEqual(entry["span"], rv32_ramdisk.SLOT_SIZE * (3 if entry["name"] == "menu" else 1))
                 self.assertLessEqual(entry["memory"], entry["span"] - rv32_ramdisk.STACK_SIZE)
                 elf = parse_elf((OS / f"{entry['name']}.elf").read_bytes())
                 self.assertEqual(entry["data"], flatten(elf, entry["load"]))
