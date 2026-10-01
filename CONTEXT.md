@@ -74,7 +74,7 @@ The hart's less privileged mode (Track 2, O5), entered with mret when mstatus.MP
 _Avoid_: supervisor mode, a process (a process runs in user mode; the mode is the hart's).
 
 **PMP**:
-Physical memory protection (Track 2, O5): eight entries (pmpcfg0-1, pmpaddr0-7) of OFF, TOR, NA4 or NAPOT regions with R, W, X and a lock, checked before an access reaches the bus. User mode needs an entry that allows the access; machine mode only obeys locked entries. The kernel grants the running process its slots, the framebuffer and, if it drives them, the accelerators. See [the contract](docs/rv32.md#o5-protection).
+Physical memory protection (Track 2, O5): eight entries (pmpcfg0-1, pmpaddr0-7) of OFF, TOR, NA4 or NAPOT regions with R, W, X and a lock, checked before an access reaches the bus. User mode needs an entry that allows the access; machine mode only obeys locked entries. The kernel grants the running process its slots, the framebuffer and, if it drives them, the accelerators; since issue #25, when every process has its own page table, PMP is the backstop behind it, and entries 6 and 7 let the hart's page-table walks read the tables. See [the contract](docs/rv32.md#o5-protection).
 _Avoid_: an MMU, virtual memory, page tables, the bus decoder's access faults (those are for addresses nothing is mapped at).
 
 **Page table**:

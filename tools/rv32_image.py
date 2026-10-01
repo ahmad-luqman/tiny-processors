@@ -30,9 +30,11 @@ EF_RISCV_FLOAT_ABI = 0x6
 EF_RISCV_RVE = 0x8
 EF_RISCV_TSO = 0x10
 REQUIRED_SECTIONS = (".text", ".rodata", ".data", ".bss")
-# Zero-filled sections an image may add, as long as they carry no bytes: the kernel's page tables
-# (issue #25), which startup does not clear.
-NOBITS_SECTIONS = (".pagetables",)
+# The kernel's page tables (issue #25): a section without file bytes (NOBITS) that startup does not
+# clear, admitted only with page_tables=True, page-aligned, between the bounds symbols PMP uses and
+# below the stack.
+PAGE_TABLES_SECTION = ".pagetables"
+PAGE_SIZE = 4096
 REQUIRED_SYMBOLS = ("_start", "__bss_start", "__bss_end", "_end", "_stack_bottom", "_stack_top")
 # Base RV32I only: no M, no CSRs, no compressed, no traps in the M1 slice.
 FORBIDDEN_MNEMONIC = re.compile(r"\A(mul\w*|div\w*|rem\w*|csr\w*|fence\.i|c\.\w+|ecall|ebreak|wfi|[msu]ret|sfence\.vma)\Z")
@@ -212,7 +214,7 @@ def check_m_build(elf, listing):
 
 
 def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, entry=None, allow_privileged=False, allow_f=False,
-                allow_m=False, allow_counters=False, allow_system=False, allow_user=False):
+                allow_m=False, allow_counters=False, allow_system=False, allow_user=False, page_tables=False):
     """Return a list of contract violations; an empty list means the image is acceptable."""
     entry = ram_base if entry is None else entry
     ram_end = ram_base + ram_size
@@ -264,9 +266,9 @@ def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, e
         elif by_name[name].size == 0 and name == ".text":  # a program may have no data (Track 2's small ones)
             problems.append(f"section {name} is empty")
     for section in elf.sections:
-        if section.name in NOBITS_SECTIONS and section.type != SHT_NOBITS:
-            problems.append(f"section {section.name} must be NOBITS")
-        elif section.flags & SHF_ALLOC and section.size and section.name not in REQUIRED_SECTIONS + NOBITS_SECTIONS:
+        if page_tables and section.name == PAGE_TABLES_SECTION:
+            problems.extend(check_page_tables(section, symbols))
+        elif section.flags & SHF_ALLOC and section.size and section.name not in REQUIRED_SECTIONS:
             problems.append(f"unexpected allocated section {section.name} ({section.size} bytes)")
     bss = by_name.get(".bss")
     if bss and all(name in symbols for name in ("__bss_start", "__bss_end")):
@@ -284,6 +286,22 @@ def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, e
         problems.append("undefined symbols: " + ", ".join(sorted(elf.undefined)))
     if listing is not None:
         problems.extend(check_listing(listing, allow_privileged, allow_f, allow_m, allow_counters, allow_system, allow_user))
+    return problems
+
+
+def check_page_tables(section, symbols):
+    """The kernel's page-table section (issue #25): no file bytes, whole pages, bounded by the
+    symbols PMP entries 6 and 7 use, and clear of the stack."""
+    problems = []
+    if section.type != SHT_NOBITS:
+        problems.append(f"section {section.name} must be NOBITS")
+    if section.addr % PAGE_SIZE or section.size % PAGE_SIZE:
+        problems.append(f"section {section.name} is not whole pages at a page boundary")
+    bounds = (symbols.get("__pagetables_start"), symbols.get("__pagetables_end"))
+    if bounds != (section.addr, section.addr + section.size):
+        problems.append(f"__pagetables_start/__pagetables_end do not match the {section.name} section")
+    if "_stack_bottom" in symbols and section.addr + section.size > symbols["_stack_bottom"]:
+        problems.append(f"section {section.name} overlaps the stack")
     return problems
 
 
@@ -343,6 +361,8 @@ def main():
                              "medeleg, mideleg, the supervisor CSRs, satp, sret and sfence.vma")
     parser.add_argument("--allow-user", action="store_true",
                         help="implies --allow-counters: also ecall and unimp, what a user-mode program runs (Track 2, O5)")
+    parser.add_argument("--page-tables", action="store_true",
+                        help="admit the kernel's .pagetables section, NOBITS and page-aligned (issue #25)")
     parser.add_argument("--require-m", action="store_true",
                         help="implies --allow-m: the listing must use M instructions and the image must not contain the "
                              "software multiply/divide routines (an RV32IM build that really retired rt/muldiv.c)")
@@ -356,7 +376,7 @@ def main():
         listing = args.listing.read_text() if args.listing else None
         problems = check_image(elf, listing, args.ram_base, args.ram_size, allow_privileged=args.allow_privileged, allow_f=args.allow_f,
                                allow_m=args.allow_m, allow_counters=args.allow_counters, allow_system=args.allow_system,
-                               allow_user=args.allow_user)
+                               allow_user=args.allow_user, page_tables=args.page_tables)
         if args.require_m:
             problems.extend(check_m_build(elf, listing))
         image = flatten(elf, args.ram_base)

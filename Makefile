@@ -1398,7 +1398,7 @@ check-rv32-os-image: firmware-rv32-os $(RV32_OS_DISK)
 		$(PYTHON) tools/rv32_image.py build/rv32/os/$(p).elf --listing build/rv32/os/$(p).lst --ram-base $(call rv32_os_base,$(p)) \
 			--ram-size $(call rv32_os_size,$(p)) $(call rv32_os_gate,$(p)) > /dev/null; \
 		echo "build/rv32/os/$(p).elf: slot at $(call rv32_os_base,$(p))";)
-	$(PYTHON) tools/rv32_image.py build/rv32/os/kernel.elf --listing build/rv32/os/kernel.lst --bin build/rv32/os/kernel.bin --hex build/rv32/os/kernel.hex --ram-size 0x100000 --allow-system
+	$(PYTHON) tools/rv32_image.py build/rv32/os/kernel.elf --listing build/rv32/os/kernel.lst --bin build/rv32/os/kernel.bin --hex build/rv32/os/kernel.hex --ram-size 0x100000 --allow-system --page-tables
 	$(PYTHON) tools/rv32_ramdisk.py --list build/rv32/os/ramdisk.img
 print-rv32-os-slot-%:
 	@echo $(RV32_OS_SLOT_$*) $(call rv32_os_span,$*)

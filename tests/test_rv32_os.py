@@ -17,7 +17,7 @@ import test_rv32_rtl as integer_tests
 from tools import rv32_mkfs as mkfs
 from tools import rv32_ramdisk
 from tools.rv32_asm import *  # noqa: F401,F403
-from tools.rv32_image import flatten, parse_elf
+from tools.rv32_image import SHT_NOBITS, flatten, parse_elf
 from tools.rv32_rtl import ROOT, Run, compare_backends, diff_traces, run_emulator, run_rtl, write_image
 
 OS = ROOT / "build/rv32/os"
@@ -191,25 +191,41 @@ class LayoutTest(unittest.TestCase):
                          (rv32_ramdisk.SLOT_BASE, rv32_ramdisk.SLOT_SIZE, rv32_ramdisk.SLOTS, rv32_ramdisk.STACK_SIZE))
         self.assertEqual(header["OS_SLOT_BASE"], 0x80000000 + header["OS_KERNEL_SIZE"])
 
-    def test_the_page_tables_fit_the_kernel_and_the_slots_one_table(self):
-        """Issue #25: the kernel's page tables are a page-aligned NOBITS section inside its MiB, below
-        its stack, and PMP lets the walks read exactly that section. Every slot lies in one 4 MiB
-        region, so a process's slots take one level-0 table of the four its entry has (the others
-        are for the framebuffer and the accelerators)."""
+    def test_the_page_tables_fit_the_kernel(self):
+        """Issue #25: the kernel's page tables are a page-aligned NOBITS section inside its MiB,
+        below its stack, sized for every process table entry, and PMP lets the walks read exactly
+        that section."""
         (kernel,) = elfs("kernel")
         elf = parse_elf(kernel.read_bytes())
-        section = next(s for s in elf.sections if s.name == ".pagetables")
-        text = (ROOT / "programs/rv32/os/kernel.c").read_text()
-        procs = int(re.search(r"#define MAX_PROCS (\d+)", text).group(1))
-        tables = int(re.search(r"#define PAGE_TABLES (\d+)u", text).group(1))
-        self.assertEqual(section.type, 8, "NOBITS: startup does not clear it, the kernel does")
+        section = next((s for s in elf.sections if s.name == ".pagetables"), None)
+        self.assertIsNotNone(section, "kernel.elf has a .pagetables section")
+        procs, tables = kernel_constant("MAX_PROCS"), kernel_constant("PAGE_TABLES")
+        self.assertEqual(section.type, SHT_NOBITS, "startup does not clear it; the kernel does")
         self.assertEqual(section.addr % 4096, 0)
         self.assertEqual(section.size, procs * tables * 4096)
         self.assertEqual((elf.symbols["__pagetables_start"], elf.symbols["__pagetables_end"]),
                          (section.addr, section.addr + section.size))
         self.assertLessEqual(section.addr + section.size, elf.symbols["_stack_bottom"])
-        first, last = rv32_ramdisk.SLOT_BASE, rv32_ramdisk.SLOT_BASE + rv32_ramdisk.SLOTS * rv32_ramdisk.SLOT_SIZE - 1
-        self.assertEqual(first >> 22, last >> 22, "the slots share one level-0 table")
+
+    def test_every_process_fits_its_entrys_tables(self):
+        """Issue #25: an entry has a root and PAGE_TABLES - 1 level-0 tables, one per 4 MiB region
+        its process touches. On our machine's tree the most any process touches, every slot, the
+        framebuffer and every engine window, fits; the kernel checks the same at boot
+        (check_page_table_budget), and QEMU virt's tree has only the slots."""
+        from tools import rv32_dtb
+        ranges = [(rv32_ramdisk.SLOT_BASE, rv32_ramdisk.SLOTS * rv32_ramdisk.SLOT_SIZE)]
+        regs = rv32_dtb.regions(rv32_dtb.MACHINE)
+        ranges.append([(base, size) for path, base, size in regs if path.startswith("/soc/display@")][1])  # the framebuffer
+        ranges += [(base, size) for path, base, size in regs if path.split("@")[0] in ("/soc/simd4", "/soc/gpu", "/soc/g3d")]
+        self.assertEqual(len(ranges), 1 + 1 + 5, "the slots, the framebuffer and the five engine windows")
+        touched = {region for base, size in ranges for region in range(base >> 22, ((base + size - 1) >> 22) + 1)}
+        self.assertLessEqual(1 + len(touched), kernel_constant("PAGE_TABLES"))
+
+
+def kernel_constant(name):
+    """A #define of kernel.c, a decimal number with or without the u suffix."""
+    text = (ROOT / "programs/rv32/os/kernel.c").read_text()
+    return int(re.search(rf"#define {name} (\d+)u?\b", text).group(1))
 
 
 class KernelTest(unittest.TestCase):
@@ -240,7 +256,7 @@ class KernelTest(unittest.TestCase):
         self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
         self.assertEqual(rtl.console, (ROOT / "programs/rv32/os/session.expected").read_text())
         self.assertGreater(rtl.halt["interrupts"], 10, "the timer ticked and the kernel took it")
-        self.assertIn("kernel: pid 9 fault killed: cause 13", rtl.console, "a page fault since issue #25")
+        self.assertIn("kernel: pid 10 fault killed: cause 13", rtl.console, "a page fault since issue #25")
 
 
     def test_two_jobs_share_the_machine_fairly(self):

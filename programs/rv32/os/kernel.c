@@ -80,10 +80,10 @@
 #define PTE_W 0x04u
 #define PTE_X 0x08u
 #define PTE_U 0x10u
-#define PTE_A 0x40u /* every leaf has A and D set: our hart never sets them (Svade), and QEMU then need not */
+#define PTE_A 0x40u /* every leaf has A and D: our hart never sets them (Svade), QEMU need not */
 #define PTE_D 0x80u
 #define SATP_SV32 0x80000000u
-#define PAGE_TABLES 4u /* per process: the root and a level-0 table for each 4 MiB it touches */
+#define PAGE_TABLES 4u /* per process table entry: the root and a level-0 table per 4 MiB touched */
 
 /* A context: kentry.S knows these offsets. */
 struct frame {
@@ -132,7 +132,13 @@ static uint32_t next_pid = 1, exits, exit_sum;
 static uint32_t console, done_register, clint, plic;
 static uint32_t input, input_source, display, framebuffer, framebuffer_size, gpu, g3d, disk;
 static uint32_t accelerators, accelerators_end; /* O5: the window PMP grants a PROGRAM_ACCELERATORS program */
-static struct { uint32_t base, size; } engine_windows[5]; /* issue #25: the windows themselves, which its page table maps */
+/* The engines' register and memory windows. O5's PMP region spans them all; since issue #25 the
+ * page table of a PROGRAM_ACCELERATORS program maps each one, and nothing between them. */
+static const struct { const char *compatible; uint32_t index; } engines[] = {
+    {"tiny-processors,simd4", 0}, {"tiny-processors,simd4", 1}, {"tiny-processors,simd4", 2},
+    {"tiny-processors,g1", 0},    {"tiny-processors,g2", 0},
+};
+static struct { uint32_t base, size; } engine_windows[sizeof engines / sizeof engines[0]];
 static uint32_t engine_window_count;
 static uint32_t dma_window;                     /* issue #20: the engines' DMA bound, 0 where there is none (QEMU) */
 static uint32_t protected_pid;                  /* O5: the process PMP is set up for */
@@ -144,10 +150,12 @@ static int faulted; /* kernel_fault ran: halt must not touch the disk again */
 static uint32_t keys[KEY_BUFFER];
 static uint32_t key_head, key_count, keys_dropped;
 
-/* Issue #25: each process table entry's page tables, a root and its level-0 tables. kernel.ld places
- * them in a page-aligned section of their own, not zeroed at boot (map() clears a table it takes),
- * whose bounds PMP entries 6 and 7 let the hart's walks read. */
-static uint32_t page_tables[MAX_PROCS][PAGE_TABLES][PAGE_SIZE / 4] __attribute__((section(".pagetables"), aligned(PAGE_SIZE)));
+/* Issue #25: each process table entry's page tables, a root and its level-0 tables. kernel.ld
+ * places them in a page-aligned section of their own, not zeroed at boot (map_process() clears an
+ * entry's root and map() each level-0 table, when first taken), whose bounds PMP entries 6 and 7
+ * let the hart's walks read. */
+static uint32_t page_tables[MAX_PROCS][PAGE_TABLES][PAGE_SIZE / 4]
+    __attribute__((section(".pagetables"), aligned(PAGE_SIZE)));
 _Static_assert(sizeof page_tables[0][0] == PAGE_SIZE, "one table per page");
 extern uint8_t __pagetables_start[], __pagetables_end[];
 
@@ -279,11 +287,14 @@ static _Noreturn void panic(const char *why)
 
 /* ---- The device tree, read once at boot ---- */
 
-static uint32_t find(const fdt *t, const char *compatible, uint32_t index, int required)
+/* Reg entry `index` of the node `compatible` names: 1 with its base and size, 0 when the tree has
+ * no such node or entry. Any other answer is a malformed tree, and the kernel stops: a device it
+ * took for absent would be left out of PMP and the page tables, and fail later as something
+ * else. */
+static int find_reg(const fdt *t, const char *compatible, uint32_t index, uint32_t *base, uint32_t *size)
 {
-    uint32_t base = 0, size;
-    fdt_status status = fdt_find(t, "compatible", compatible, index, &base, &size);
-    if (status == FDT_NOT_FOUND && !required) {
+    fdt_status status = fdt_find(t, "compatible", compatible, index, base, size);
+    if (status == FDT_NOT_FOUND) {
         return 0;
     }
     if (status != FDT_OK) {
@@ -293,6 +304,21 @@ static uint32_t find(const fdt *t, const char *compatible, uint32_t index, int r
         kputdec((uint32_t)status);
         kputc('\n');
         panic("device tree");
+    }
+    return 1;
+}
+
+static uint32_t find(const fdt *t, const char *compatible, uint32_t index, int required)
+{
+    uint32_t base = 0, size;
+    if (!find_reg(t, compatible, index, &base, &size)) {
+        if (required) {
+            kputs("kernel: device tree: no ");
+            kputs(compatible);
+            kputc('\n');
+            panic("device tree");
+        }
+        return 0;
     }
     return base;
 }
@@ -340,14 +366,9 @@ static void discover(uintptr_t address)
     gpu = find(&t, "tiny-processors,g1", 0, 0);
     g3d = find(&t, "tiny-processors,g2", 0, 0);
     /* O5: one PMP region from the lowest accelerator window to the end of the highest. */
-    static const struct { const char *compatible; uint32_t index; } engines[] = {
-        {"tiny-processors,simd4", 0}, {"tiny-processors,simd4", 1}, {"tiny-processors,simd4", 2},
-        {"tiny-processors,g1", 0}, {"tiny-processors,g2", 0},
-    };
-    _Static_assert(sizeof engine_windows / sizeof engine_windows[0] == sizeof engines / sizeof engines[0], "one per engine window");
     for (uint32_t w = 0; w < sizeof engines / sizeof engines[0]; w++) {
         uint32_t base, size;
-        if (fdt_find(&t, "compatible", engines[w].compatible, engines[w].index, &base, &size) == FDT_OK) {
+        if (find_reg(&t, engines[w].compatible, engines[w].index, &base, &size)) {
             engine_windows[engine_window_count].base = base;
             engine_windows[engine_window_count++].size = size;
             if (!accelerators_end || base < accelerators) {
@@ -361,7 +382,7 @@ static void discover(uintptr_t address)
     /* The DMA window: required wherever G1 or G2 is (without it the engines reach all of RAM),
      * and outside the region PMP grants, or a program could widen it. QEMU has neither. */
     uint32_t window_size = 0;
-    if (fdt_find(&t, "compatible", "tiny-processors,dma-window", 0, &dma_window, &window_size) != FDT_OK) {
+    if (!find_reg(&t, "tiny-processors,dma-window", 0, &dma_window, &window_size)) {
         dma_window = 0;
     }
     if ((gpu || g3d) && !dma_window) {
@@ -466,54 +487,64 @@ static int alive(const struct proc *p)
 
 /* Issue #25: what each process table entry's page tables map. The next process there starts from
  * the same tables with the last one's leaves cleared, rather than from 16 KiB cleared again; a
- * table is cleared once, when it is first taken. */
+ * table is cleared once, when it is first taken. The layout is kept here, not read from the
+ * proc: spawn() has overwritten the proc's base, span and flags by the time the old leaves are
+ * cleared. */
 static struct address_space {
-    uint32_t tables; /* how many of the entry's tables are in use, the root first; 0 before its first process */
-    uint32_t base, span, accelerators;
+    uint32_t tables; /* the entry's tables in use, the root first; 0 before its first process */
+    uint32_t base, span;
+    uint32_t drives_engines; /* a PROGRAM_ACCELERATORS program's: the engines' windows mapped */
 } spaces[MAX_PROCS];
 
 static void clear_table(uint32_t *table)
 {
     for (uint32_t i = 0; i < PAGE_SIZE / 4; i++) {
-        ((volatile uint32_t *)table)[i] = 0; /* volatile: a loop the compiler would make a byte-wise memset */
+        ((volatile uint32_t *)table)[i] = 0; /* else the compiler makes it a byte-wise memset */
     }
 }
 
-/* Map [start, end) at the same physical addresses with leaf flags `flags`, or with 0 clear the
- * leaves there. A level-0 table is taken the first time a 4 MiB region is mapped. */
-static void map(uint32_t entry, uint32_t start, uint32_t end, uint32_t flags)
+/* Map [start, end) at the same physical addresses with leaf rights `rights`, or with 0 clear the
+ * leaves there. A level-0 table is taken the first time a 4 MiB region is mapped; the root must
+ * have been taken already (map_process()), or it would be handed out as a level-0 table. */
+static void map(uint32_t entry, uint32_t start, uint32_t end, uint32_t rights)
 {
     uint32_t (*pt)[PAGE_SIZE / 4] = page_tables[entry];
+    if (!spaces[entry].tables) {
+        panic("map before the root");
+    }
     for (uint32_t page = start & ~(PAGE_SIZE - 1u); page < end; page += PAGE_SIZE) {
         uint32_t *pointer = &pt[0][page >> 22];
         if (!(*pointer & PTE_V)) {
-            if (!flags) {
+            if (!rights) {
                 continue;
             }
             if (spaces[entry].tables == PAGE_TABLES) {
-                panic("page tables full");
+                panic("page tables full"); /* check_page_table_budget() rules this out at boot */
             }
             uint32_t *table = pt[spaces[entry].tables++];
             clear_table(table);
             *pointer = (uint32_t)(uintptr_t)table >> 12 << 10 | PTE_V;
         }
         uint32_t *leaf = (uint32_t *)(uintptr_t)(*pointer >> 10 << 12);
-        leaf[page >> 12 & 1023u] = flags ? page >> 12 << 10 | flags | PTE_V | PTE_U | PTE_A | PTE_D : 0;
+        leaf[page >> 12 & 1023u] = rights ? page >> 12 << 10 | rights | PTE_V | PTE_U | PTE_A | PTE_D : 0;
     }
 }
 
-/* The address space `spaces[entry]` describes, mapped (on) or cleared: its slots readable, writable
- * and executable; the framebuffer and, for a program that drives them, the accelerators' windows
- * readable and writable. Nothing else is mapped. */
-static void lay_out(uint32_t entry, int on)
+/* The address space `spaces[entry]` describes, with `rights` on the slots (R, W and X to map it, 0
+ * to clear it) and the same less X on the framebuffer and, for a program that drives them, the
+ * accelerators' windows. Nothing else is mapped. */
+static void lay_out(uint32_t entry, uint32_t rights)
 {
     const struct address_space *space = &spaces[entry];
-    map(entry, space->base, space->base + space->span, on ? PTE_R | PTE_W | PTE_X : 0);
+    uint32_t data = rights & ~PTE_X;
+    map(entry, space->base, space->base + space->span, rights);
     if (framebuffer) {
-        map(entry, framebuffer, framebuffer + framebuffer_size, on ? PTE_R | PTE_W : 0);
+        map(entry, framebuffer, framebuffer + framebuffer_size, data);
     }
-    for (uint32_t w = 0; space->accelerators && w < engine_window_count; w++) {
-        map(entry, engine_windows[w].base, engine_windows[w].base + engine_windows[w].size, on ? PTE_R | PTE_W : 0);
+    if (space->drives_engines) {
+        for (uint32_t w = 0; w < engine_window_count; w++) {
+            map(entry, engine_windows[w].base, engine_windows[w].base + engine_windows[w].size, data);
+        }
     }
 }
 
@@ -530,8 +561,42 @@ static void map_process(const struct proc *p)
     }
     space->base = p->base;
     space->span = p->span;
-    space->accelerators = p->flags & PROGRAM_ACCELERATORS;
-    lay_out(entry, 1);
+    space->drives_engines = !!(p->flags & PROGRAM_ACCELERATORS);
+    lay_out(entry, PTE_R | PTE_W | PTE_X);
+}
+
+/* Add the 4 MiB regions [start, end) touches to `regions`: `*count` so far, at most `max`. */
+static void add_regions(uint32_t *regions, uint32_t *count, uint32_t max, uint32_t start, uint32_t end)
+{
+    for (uint32_t region = start >> 22; region <= (end - 1u) >> 22; region++) {
+        uint32_t k = 0;
+        while (k < *count && regions[k] != region) {
+            k++;
+        }
+        if (k == *count) {
+            if (*count == max) {
+                panic("page tables: more 4 MiB regions than an entry has tables");
+            }
+            regions[(*count)++] = region;
+        }
+    }
+}
+
+/* Issue #25: an entry has a root and PAGE_TABLES - 1 level-0 tables, one per 4 MiB region its
+ * process touches. Checked once at boot against the most any process could touch (every slot, the
+ * framebuffer and every engine window), so a tree that needs more stops the kernel here and not
+ * at the first spawn of the program that would. */
+static void check_page_table_budget(void)
+{
+    uint32_t regions[PAGE_TABLES - 1], count = 0;
+    add_regions(regions, &count, PAGE_TABLES - 1, OS_SLOT_BASE, OS_SLOT_BASE + OS_SLOTS * OS_SLOT_SIZE);
+    if (framebuffer) {
+        add_regions(regions, &count, PAGE_TABLES - 1, framebuffer, framebuffer + framebuffer_size);
+    }
+    for (uint32_t w = 0; w < engine_window_count; w++) {
+        add_regions(regions, &count, PAGE_TABLES - 1, engine_windows[w].base,
+                    engine_windows[w].base + engine_windows[w].size);
+    }
 }
 
 /* Load a program into its slots and make it ready; returns the process or 0. */
@@ -775,7 +840,9 @@ static struct proc *next_ready(const struct proc *after)
  * framebuffer (RW), 4-5 the accelerators (RW) for a program that drives them. A user access
  * nothing matches faults; the idle loop runs in machine mode and ignores it. Since issue #25 its
  * page table is the first check and PMP the backstop; entries 6-7 let the hart's page-table walks,
- * which are supervisor reads, read the tables (and only read them). */
+ * which are supervisor reads, read the tables (and only read them). Unlocked PMP cannot tell
+ * supervisor from user mode, so that entry lets user mode read the tables too: only the page
+ * tables, which never map them, keep a program out. */
 static void protect(const struct proc *p)
 {
     if (p->pid == protected_pid) {
@@ -783,6 +850,7 @@ static void protect(const struct proc *p)
     }
     protected_pid = p->pid;
     uint32_t tor_rwx = PMP_TOR | PMP_R | PMP_W | PMP_X, tor_rw = PMP_TOR | PMP_R | PMP_W;
+    uint32_t tor_r = PMP_TOR | PMP_R;
     csr_write(CSR_PMPADDR0, p->base >> 2);
     csr_write(CSR_PMPADDR1, (p->base + p->span) >> 2);
     csr_write(CSR_PMPADDR2, framebuffer >> 2);
@@ -792,10 +860,13 @@ static void protect(const struct proc *p)
     csr_write(CSR_PMPADDR6, (uint32_t)(uintptr_t)__pagetables_start >> 2);
     csr_write(CSR_PMPADDR7, (uint32_t)(uintptr_t)__pagetables_end >> 2);
     csr_write(CSR_PMPCFG0, tor_rwx << 8 | (framebuffer ? tor_rw << 24 : 0u));
-    csr_write(CSR_PMPCFG1, ((p->flags & PROGRAM_ACCELERATORS) && accelerators_end ? tor_rw << 8 : 0u) |
-                               (PMP_TOR | PMP_R) << 24);
-    /* Its address space, after PMP: the satp write and the fence drop every cached translation,
-     * which the privileged spec asks for when PMP changes over the page tables too. */
+    uint32_t engines_rw = (p->flags & PROGRAM_ACCELERATORS) && accelerators_end ? tor_rw : 0u;
+    csr_write(CSR_PMPCFG1, engines_rw << 8 | tor_r << 24);
+    /* Its address space, after PMP, and a fence for two reasons. The ASID is 0 bits wide, so every
+     * process's translations look alike to a TLB, and map_process() rewrites an entry's leaves for
+     * a new process: a hart whose satp write flushed nothing could keep the old process's. And the
+     * privileged spec asks for one after PMP changes over the page tables, as entries 0-5 just did.
+     * Our RTL empties its TLB on a satp write anyway, and the emulator has none. */
     csr_write(CSR_SATP, SATP_SV32 | (uint32_t)(uintptr_t)page_tables[p - procs][0] >> 12);
     __asm__ volatile("sfence.vma" ::: "memory");
     /* The engines may reach only this process's slots. A job validated earlier keeps running
@@ -1126,6 +1197,7 @@ _Noreturn void kernel_main(uint32_t hart, uintptr_t tree)
     kputs(disk ? " disk" : "");
     uint32_t count;
     check_programs();
+    check_page_table_budget();
     (void)programs(&count);
     kputs("\nkernel: ");
     kputdec(count);

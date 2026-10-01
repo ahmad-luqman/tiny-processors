@@ -15,9 +15,15 @@ dmaprobe: G2 depth buffer in the shell refused, status 4 error 1
 $ dmaprobe window
 kernel: pid 3 dmaprobe killed: cause 13 at dmaprobe+0x18 tval 1100a000
 sh: dmaprobe exited 141
+$ fault engine
+kernel: pid 4 fault killed: cause 13 at fault+0x6c tval 11007000
+sh: fault exited 141
+$ fault tail
+kernel: pid 5 fault killed: cause 5 at fault+0x74 tval 12012c00
+sh: fault exited 133
 $ menu
 digit 1 margin 5117
 PASS c76cd363
 $ halt
-kernel: halt, 3 exits
-PASS 53e2ea67
+kernel: halt, 5 exits
+PASS b1f2b253

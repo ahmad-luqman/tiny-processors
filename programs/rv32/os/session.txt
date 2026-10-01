@@ -5,6 +5,7 @@ primes
 primes 100
 primes 2
 nosuch
+fault prev
 syscheck
 fault load
 fault illegal

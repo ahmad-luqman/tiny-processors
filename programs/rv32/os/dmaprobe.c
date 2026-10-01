@@ -1,9 +1,10 @@
 /* dmaprobe: the DMA window from a program that drives the engines (issue #20).
  *
- * The program is flagged `accelerators`, so its page table maps G1's and G2's registers and PMP
- * lets it at them, and the kernel sets the DMA window to its own slot. The slot is mapped at its
- * own physical address (issue #25), so the addresses it gives the engines are the ones they use. The engines must refuse to reach the kernel or
- * another program's slot through their DMA:
+ * The program is flagged `accelerators`, so its page table maps G1's and G2's registers and
+ * PMP lets it at them, and the kernel sets the DMA window to its own slot. The slot is mapped
+ * at its own physical address (issue #25), so the addresses it gives the engines are the ones
+ * they use. The engines must refuse to reach the kernel or another program's slot through
+ * their DMA:
  *
  *   dmaprobe          G1 blits from its own memory are accepted, up to the last byte of its
  *                     slot; blits that pass the slot's end, or come from the next slot, the

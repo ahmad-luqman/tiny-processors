@@ -244,7 +244,8 @@ track's review, a pc inside the program's own slots is printed relative to
 its load address, `at fault+0x18`, and fault.c's faulting instructions are
 assembly at fixed offsets, so the transcripts do not depend on the compiler),
 the exit code is 128 plus the cause, and the shell carries on. Nothing stops a program
-from writing kernel memory yet; that is O5.
+from writing kernel memory yet; that is O5. (Since issue #25 the load is a page
+fault, cause 13; see [Paging](#paging-issue-25).)
 
 ### Programs
 
@@ -257,7 +258,7 @@ from writing kernel memory yet; that is O5.
 | 4 | [tetris](../programs/rv32/os/tetris.c) | The M7 Tetris, Q quits |
 | 5 | [dmaprobe](../programs/rv32/os/dmaprobe.c) | The DMA window: engine jobs that reach outside its slot are refused (issue #20) |
 | 7 | [syscheck](../programs/rv32/os/syscheck.c) | System-call edge cases |
-| 8 | [fault](../programs/rv32/os/fault.c) | A load from an unmapped address, or an illegal instruction; since O5 also kernel and other-slot accesses and a machine CSR |
+| 8 | [fault](../programs/rv32/os/fault.c) | A load from an unmapped address, or an illegal instruction; since O5 also kernel and other-slot accesses and a machine CSR; since issue #25 the slot the last program left, an engine's registers and the byte past the framebuffer |
 | 9, 10, 11 | [cat](../programs/rv32/os/cat.c), [write](../programs/rv32/os/write.c), [files](../programs/rv32/os/files.c) | Print a file, write one, list them (O3) |
 | 12, 13 | [bars](../programs/rv32/os/bars.c), [life](../programs/rv32/os/life.c) | Two programs that share the screen (O4) |
 | 14 | [fill](../programs/rv32/os/fill.c) | Numbered lines into a file, to a given size (after O5's review) |
@@ -622,7 +623,9 @@ instruction with the instruction in `mtval`; `fault read` is a load from the
 kernel and `fault exec` a jump to the kernel's `_start`, a fetch fault with
 the pc and `mtval` both `0x8000_0000`. QEMU `virt`, whose
 hart has PMP too, prints the same lines. `fault load` still faults at
-`0x0020_0000`, but PMP now refuses it before the bus decoder could.
+`0x0020_0000`, but PMP now refuses it before the bus decoder could. Since
+issue #25 the page table refuses all six first, as page faults (causes 13, 15
+and 12); see [Paging](#paging-issue-25).
 
 Programs are built for user mode too: their images are checked with
 `--allow-user`, which admits `ecall`, `unimp` and counter reads and none of
@@ -748,8 +751,8 @@ table, and PMP stays as the backstop.
 The issue left two things open.
 
 **The kernel stays in machine mode.** An S-mode kernel needs a machine-mode
-shim: the timer interrupt cannot be delegated, and our PLIC has only a machine
-context, so the shim would forward both through `mip.STIP` and `mip.SEIP`. The
+shim: the CLINT's machine timer interrupt cannot be delegated (`mideleg` holds
+only the supervisor interrupts), and our PLIC has only a machine context, so the shim would forward both through `mip.STIP` and `mip.SEIP`. The
 kernel would also have to map itself and every device into each page table,
 and PMP would have to grant supervisor mode the kernel's memory. In machine
 mode nothing is translated (MPRV stays clear), so the kernel's code, its
@@ -783,38 +786,54 @@ questions (exercise 1).
 | --- | --- | --- |
 | The process's slots, `base` to `base + span` | 32 per slot | R, W, X |
 | The framebuffer, from the tree | 19 (75 KiB, rounded up) | R, W |
-| Each accelerator window, from the tree, for a program flagged `accelerators` | 5 | R, W |
+| The accelerators' windows, from the tree, for a program flagged `accelerators` | 6 in all: G2's two, one each for SIMD4's three and G1's | R, W |
 
 Every leaf also has V, U, A and D set. Our hart never sets A or D (Svade), and
 a leaf that has them already behaves the same on QEMU, whatever it does about
 them. A process table entry owns four tables, its root and a level-0 table for
 each 4 MiB region it touches: the slots (all 24 lie in `0x8000_0000`'s
-megapage), the framebuffer and the accelerators. Eight entries make 128 KiB,
-in a page-aligned NOBITS section of [kernel.ld](../programs/rv32/os/kernel.ld),
-`.pagetables`, which startup does not clear.
-[rv32_image.py](../tools/rv32_image.py) admits that section by name, and only
-when it holds no bytes. `spawn()` builds the new process's tables in its entry,
-and a table is cleared once, the first time it is taken. After that the next
-process clears only the last one's leaves before it maps its own. The
-byte-wise `memset` the kernel shares with the programs would otherwise cost
-16 KiB of stores per spawn, which nearly doubled the console session's steps.
+megapage), the framebuffer and the accelerators. The kernel checks at boot that
+the most any process could touch (every slot, the framebuffer and every engine
+window in the tree) fits, and panics if not, rather than at the first spawn of
+the program that would need a fifth table; `test-rv32-os` checks the same on
+our tree. Eight entries make 128 KiB, in a page-aligned NOBITS section of
+[kernel.ld](../programs/rv32/os/kernel.ld), `.pagetables`, which startup does
+not clear. [rv32_image.py](../tools/rv32_image.py) admits that section only
+when asked (`--page-tables`, which only the kernel's check passes), and then
+only as whole pages without file bytes, between `__pagetables_start` and
+`__pagetables_end` and below the stack.
+
+`spawn()` builds the new process's tables in its entry. A table is cleared
+once, the first time it is taken; after that the next process clears only the
+last one's leaves before it maps its own, from a copy of the last layout the
+entry keeps (by then `spawn()` has overwritten the process table entry's own).
+The first version cleared all four tables on every spawn with the byte-wise
+`memset` the kernel shares with the programs: the console session took
+2,982,180 steps instead of 1,576,460. Clearing only the leaves brings it to
+within 5% of that.
 
 ### Switching
 
 `protect()` already ran whenever a different process was about to run. It now
 writes PMP, then `satp` (MODE Sv32, the root's page number) and `sfence.vma`.
-Both empty the RTL's TLB, so no translation survives a switch. The fence after
-PMP is what the privileged spec asks for when PMP changes over the page
-tables. A process table entry is rebuilt only while another process's table
-is live, and its new process gets a new pid, so its first resume always
-passes through `protect()`. The idle loop runs in machine mode, where `satp`
-does not matter.
+The fence has two reasons. The ASID is 0 bits wide, so to a TLB every
+process's translations look alike, and `map_process()` rewrites an entry's
+leaves for each new process: on a hart whose `satp` write flushed nothing, the
+old process's translations would survive the switch. And the privileged spec
+asks for a fence after PMP changes over the page tables, as entries 0 to 5 do
+on every switch. Our RTL empties its TLB on the `satp` write as well, and the
+emulator has no TLB, so of the three backends only QEMU could notice a missing
+fence. A process table entry is rebuilt only while it is not the live one (at
+the first spawn `satp` is still 0), and its new process gets a new pid, so its
+first resume always passes through `protect()`. The idle loop runs in machine
+mode, where `satp` does not matter.
 
 ### PMP as the backstop
 
-Entries 0 to 5 are unchanged. Every user address PMP grants is also mapped, so
-PMP now refuses only what a wrong page table would let through: the end of the
-framebuffer's last page, say. A page-table walk is a supervisor read that PMP
+Entries 0 to 5 are unchanged. Every user address PMP grants is also mapped. The
+only mapped bytes PMP refuses are the 1 KiB past the framebuffer's end, in the
+last page its mapping covers; otherwise PMP matters only if a page table is
+wrong. `fault tail` keeps the backstop tested (below). A page-table walk is a supervisor read that PMP
 must grant, on our hart and on QEMU alike. Entries 6 and 7 therefore grant
 read (and only read) on `.pagetables`. PMP cannot tell supervisor from user
 mode, so this also grants user mode those reads, but no page table maps
@@ -822,8 +841,9 @@ mode, so this also grants user mode those reads, but no page table maps
 
 ### Faults
 
-Translation comes before PMP, so the faults O5 added are page faults now, at
-the same pc and `mtval`:
+Translation comes before PMP, so the address faults in
+[fault.c](../programs/rv32/os/fault.c) are page faults now, at the same pc and
+`mtval` (the pids are the console session's before `fault prev` joined it):
 
 ```
 $ fault load
@@ -845,21 +865,61 @@ kernel: pid 15 fault killed: cause 12 at 80000000 tval 80000000
 sh: fault exited 140
 ```
 
-`dmaprobe window` is a load page fault too (cause 13 at `0x1100_a000`).
-`kill()` reports the new causes as it reported the access faults. A fault's
-exit code, 128 plus the cause, goes into the PASS word, so the two sessions
-with faults get new words: the console session `PASS dc3c1ef5` (was
-`dc3c1f20`) and the menu session `PASS 53e2ea67` (was `53e2ea5f`). Neither
-session's sequence of events changed, only the causes. The jobs session and
-Pong have no faults and keep `PASS 408a6738` and `PASS 814f72be`. QEMU `virt`
-prints the same transcripts.
+`dmaprobe window` is a load page fault too (cause 13, tval `1100a000`).
+`kill()` reports the new causes as it reported the access faults.
+
+Three new `fault` modes test what paging adds, each placed in a session so it
+reuses the process table entry the program before it left:
+
+```
+$ primes 2
+...
+$ fault prev
+kernel: pid 7 fault killed: cause 15 at fault+0x60 tval 80140000
+sh: fault exited 143
+```
+
+`fault prev` stores to slot 2, where `primes` just ran, from the entry `primes`
+left. Without the clearing of the old leaves the store would find `primes`'s
+mapping and PMP would refuse it (cause 7). The menu session runs two more
+right after `dmaprobe`, which drives the engines:
+
+```
+$ fault engine
+kernel: pid 4 fault killed: cause 13 at fault+0x6c tval 11007000
+sh: fault exited 141
+$ fault tail
+kernel: pid 5 fault killed: cause 5 at fault+0x74 tval 12012c00
+sh: fault exited 133
+```
+
+`fault engine` loads from G1's registers in a program not flagged
+`accelerators`: its page table must not map them, though `dmaprobe`'s, in the
+same entry, did (with stale leaves it is PMP's cause 5). `fault tail` loads the
+byte after the framebuffer: the page table lets it through and PMP refuses it,
+the backstop at work. It runs only in the menu session, because QEMU has no
+display and would print something else.
+
+A fault's exit code, 128 plus the cause, goes into the PASS word. With the new
+causes and probes the console session gives `PASS 8b4402e5` (`dc3c1f20` before
+issue #25) and the menu session `PASS b1f2b253` (`53e2ea5f`). Paging alone,
+without the probes, moved them by the exit codes only, to `dc3c1ef5` and
+`53e2ea67`: the sessions' sequences of events did not change. The jobs session
+and Pong have no faults and keep `PASS 408a6738` and `PASS 814f72be`. QEMU
+`virt` prints the same console transcript as our machine but its first two
+lines.
 
 ### Evidence (issue #25)
 
-Measured on Ubuntu 24.04 (clang 18, QEMU 8.2.2, Verilator 5.020, Icarus 13.0)
-from a clean `build/rv32/os`. The "before" column is the commit this change
-started from, measured on the same toolchain; the earlier records' counts come
-from macOS and llvm@22 and do not compare with these.
+Measured on Ubuntu 24.04 with clang 18, QEMU 8.2.2 and Verilator 5.020 from
+the distribution and Icarus 13.0 built from source (the distribution has 12.0,
+which cannot compile the testbench), from a clean `build/rv32/os`. The "before"
+column is commit `ec9ee66`, the one this change started from, measured on the
+same toolchain. The earlier records' counts (the 1,875,698 steps "After issue
+#20" gives the jobs session, say) come from macOS and llvm@22 and do not
+compare with these. The jobs and Pong sessions are the same before and after;
+the console and menu sessions gained the probes above (one process and two),
+so their "before" runs are the sessions without them.
 
 | Session | Backend | Before | After |
 | --- | --- | --- | --- |
@@ -890,9 +950,14 @@ from macOS and llvm@22 and do not compare with these.
   grow by what the kernel spends building tables at spawn (5% in the console
   session, which spawns 27 processes); the cycle counts add the walks.
 - **Tools:** `test-rv32-os` checks that `.pagetables` is a page-aligned NOBITS
-  section below the kernel's stack, that its bounds are the symbols PMP uses,
-  and that every slot lies in one 4 MiB region; `test-rv32-tools` checks that
-  the image checker admits the section only without bytes.
+  section below the kernel's stack, sized for every entry, with the bounds PMP
+  uses, and that the slots, the framebuffer and the engine windows of our tree
+  fit an entry's tables; `test-rv32-tools` checks that the image checker admits
+  the section only with `--page-tables`, and then only well formed.
+- **The probes probe:** with the clearing of the old leaves taken out of
+  `map_process()`, `fault prev` becomes cause 7 and `fault engine` cause 5, so
+  both transcripts fail; with `PAGE_TABLES` at 3 the kernel stops at boot with
+  `panic: page tables: more 4 MiB regions than an entry has tables`.
 
 ## Exercises (issue #25)
 
