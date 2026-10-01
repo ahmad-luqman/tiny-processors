@@ -366,7 +366,10 @@ module rv32_tb;
                         pending_write = mem_we;
                         pending_error = mem_error;
                         // The trace shows the virtual address, as the emulator's does (issue #20);
-                        // untranslated, it is the bus address.
+                        // untranslated, it must be the bus address.
+                        if (!dut.core.xlate_ok && mem_addr != dut.core.alu_out)
+                            $fatal(1, "An untranslated data access at %h whose address is %h inside the core",
+                                   mem_addr, dut.core.alu_out);
                         pending_addr = dut.core.alu_out;
                         // Both directions show the strobed lanes: a store's written
                         // bytes, a load's raw bytes before the core extends them.
