@@ -137,6 +137,23 @@ class ImageCheckerTests(unittest.TestCase):
         self.assertTrue(any("__bss_start/__bss_end" in p for p in self.problems(symbols=symbols)))
         self.assertTrue(any("undefined symbols: memcpy" in p for p in self.problems(undefined=["memcpy"])))
 
+    def test_page_tables_only_where_asked_and_well_formed(self):
+        """Issue #25: the kernel's .pagetables is admitted with page_tables=True, and then only as
+        whole NOBITS pages between __pagetables_start and __pagetables_end, below the stack."""
+        def tables(sh_type=SHT_NOBITS, addr=RAM + 0x1000, payload=0x2000):
+            return GOOD_SECTIONS + [(".pagetables", sh_type, SHF_ALLOC | SHF_WRITE, addr, payload)]
+        bounds = dict(GOOD_SYMBOLS, __pagetables_start=RAM + 0x1000, __pagetables_end=RAM + 0x3000)
+        check = lambda **overrides: check_image(parse_elf(build_elf(**overrides)), page_tables=True)  # noqa: E731
+        self.assertEqual(check(sections=tables(), symbols=bounds), [])
+        self.assertTrue(any("unexpected allocated section .pagetables" in p
+                            for p in self.problems(sections=tables(), symbols=bounds)), "a program may not carry one")
+        self.assertTrue(any("must be NOBITS" in p for p in check(sections=tables(SHT_PROGBITS, payload=b"P" * 0x2000),
+                                                                 symbols=bounds)))
+        self.assertTrue(any("whole pages" in p for p in check(sections=tables(payload=0x1800), symbols=bounds)))
+        self.assertTrue(any("__pagetables_start/__pagetables_end" in p for p in check(sections=tables(), symbols=GOOD_SYMBOLS)))
+        low_stack = dict(bounds, _stack_bottom=RAM + 0x2000, _end=RAM + 0x170)
+        self.assertTrue(any("overlaps the stack" in p for p in check(sections=tables(), symbols=low_stack)))
+
     def test_flatten_fills_gaps_and_hex_words_are_little_endian(self):
         sections = GOOD_SECTIONS + [(".data2", SHT_PROGBITS, SHF_ALLOC, RAM + 0x200, b"\x17\x01\x04\x00")]
         segments = [(RAM, RAM, 0x130, 0x130, 7), (RAM + 0x200, RAM + 0x200, 4, 4, 6)]

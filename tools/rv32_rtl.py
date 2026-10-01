@@ -283,7 +283,13 @@ def trap_records(trace):
 def trap_records_by_region(trace, faults_only=False):
     """The trap records grouped by the 128 KiB region of RAM (a program slot since O4) their PC lies
     in, each group in trace order. With preemption the order of two processes' exceptions depends
-    on device time; the order of one process's own does not (docs/rv32-os.md, O4)."""
+    on device time; the order of one process's own does not (docs/rv32-os.md, O4).
+
+    Since issue #25 a process's PC is virtual. The kernel maps every process's slots at their own
+    physical addresses, so the virtual PC is the physical one and its region still names the
+    process; satp would not, since a process table entry, and so a page table, outlives the
+    process, and which entry a background job's successor gets depends on device time. A kernel
+    that put two processes at one virtual address would need the physical PC in the trap record."""
     groups = {}
     for record in trap_records(trace):
         if faults_only and record.split()[3] in ("8", "11"):
