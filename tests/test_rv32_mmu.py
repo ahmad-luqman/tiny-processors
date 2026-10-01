@@ -416,6 +416,65 @@ class MmuTest(StepTicksCase):
         # Misses: the image's megapage, the user page, the X-only megapage and root[0]; the faults are hits.
         self.assertEqual((rtl.halt["tlb_misses"], rtl.halt["walks"]), (4, 5))
 
+    def test_user_mode_data_hits_a_supervisor_entry(self):
+        """S mode fills TEST_VA's entry (U clear); the same load from U mode hits it and faults."""
+        user = LI(12, TEST_VA) + [LW(13, 12, 0), ECALL()]
+        supervisor = LI(10, TEST_VA) + [LW(11, 10, 0)]
+        supervisor += LI(5, ALIAS + (USER_CODE - RAM)) + [CSRRW(0, SEPC, 5)] + LI(6, MSTATUS_SPP)
+        supervisor += [CSRRC(0, SSTATUS, 6), SRET()]
+        emulator, rtl = self.assert_same(program(pmp(), supervisor, user))
+        self.assertEqual([entry[:2] for entry in self.log(rtl.trace)], [(13, TEST_VA), (8, 0)])
+        # Misses: the image's megapage, TEST_VA's page and the user alias; the U-mode load is a hit.
+        self.assertEqual((rtl.halt["tlb_misses"], rtl.halt["walks"]), (3, 4))
+
+    def test_a_store_that_hits_a_read_only_dirty_entry_faults(self):
+        """W, not D, refuses this store hit: the leaf has R, A and D but no W."""
+        va3 = TEST_VA + 0x3000
+        supervisor = self.retarget(3, PAGE_U, PTE_V | PTE_R | PTE_A | PTE_D)  # before any fill: nothing stale
+        supervisor += LI(10, va3) + [LW(11, 10, 0), SW(11, 10, 0)] + FINISH()
+        emulator, rtl = self.assert_same(program(pmp(), supervisor))
+        self.assertEqual([entry[:2] for entry in self.log(rtl.trace)], [(15, va3)])
+        self.assertEqual(rtl.halt["tlb_misses"], 3)  # the image's megapage, va3, root[0]: the store hits
+
+    def mprv(self, machine, after):
+        """Machine code with satp on and MPRV set with MPP = U, then `machine`, then MPRV clear and `after`."""
+        words = LI(5, SATP_SV32 | ROOT >> 12) + [CSRRW(0, SATP, 5)]
+        words += LI(6, MSTATUS_MPP) + [CSRRC(0, MSTATUS, 6)] + LI(6, MSTATUS_MPRV) + [CSRRS(0, MSTATUS, 6)]
+        return pmp() + words + list(machine) + LI(6, MSTATUS_MPRV) + [CSRRC(0, MSTATUS, 6)] + list(after)
+
+    def test_an_mprv_load_hits_at_the_privilege_mpp_names(self):
+        """Machine mode with MPRV and MPP = U loads a U page twice: a walk, then a hit, both checked at
+        U's privilege (a hit checked at machine mode's would ignore U; one at S's would fault)."""
+        machine = LI(10, TEST_VA + 0x1000) + [LW(11, 10, 0), LW(12, 10, 4)]
+        dump = LI(16, DUMP) + [SW(11, 16, 0), SW(12, 16, 4)]
+        emulator, rtl = self.assert_same(program(self.mprv(machine, dump), FINISH()))
+        self.assertEqual(self.log(rtl.trace), [])
+        self.assertEqual([stored(rtl.trace, DUMP), stored(rtl.trace, DUMP + 4)], [0x7000, 0x7001])
+
+    def test_sfence_vma_in_machine_mode_flushes(self):
+        """Machine mode, translating through MPRV with MPP = S, fills va3, retargets it and runs
+        sfence.vma itself: the next load sees the new page on both backends."""
+        va3 = TEST_VA + 0x3000
+        machine = LI(6, 0x800) + [CSRRS(0, MSTATUS, 6)]  # MPP = S
+        machine += LI(10, va3) + [LW(13, 10, 0)] + self.retarget(3, PAGE_S) + [SFENCE_VMA(), LW(14, 10, 0)]
+        dump = LI(16, DUMP) + [SW(13, 16, 0), SW(14, 16, 4)]
+        emulator, rtl = self.assert_same(program(self.mprv(machine, dump), FINISH()))
+        self.assertEqual([stored(rtl.trace, DUMP), stored(rtl.trace, DUMP + 4)], [0x7000, 0x5000])
+
+    def test_the_lowest_numbered_entry_wins_when_two_match(self):
+        """A 4 KiB entry for va3, then TEST_VA's root entry rewritten as a megapage without
+        sfence.vma, then a fill through it: two entries match va3 and the older, lower-numbered 4 KiB
+        one translates it. The emulator, with no TLB, follows the megapage, so the traces differ."""
+        va3 = TEST_VA + 0x3000
+        supervisor = LI(10, va3) + [LW(11, 10, 0)]
+        supervisor += LI(20, ROOT + 4 * (TEST_VA >> 22)) + LI(21, pte(RAM, RWXAD)) + [SW(21, 20, 0)]
+        supervisor += LI(22, TEST_VA + 0x5000) + [LW(23, 22, 0), LW(12, 10, 0)]
+        supervisor += LI(16, DUMP) + [SW(12, 16, 0)] + FINISH()
+        emulator, rtl = self.run_both(program(pmp(), supervisor))
+        self.assertEqual((emulator.halt["outcome"], rtl.halt["outcome"]), ("pass", "pass"))
+        self.assertEqual(stored(rtl.trace, DUMP), 0x7000)
+        self.assertNotEqual(stored(emulator.trace, DUMP), 0x7000)
+
 
 if __name__ == "__main__":
     unittest.main()
