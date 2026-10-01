@@ -7,6 +7,10 @@ import subprocess
 import unittest
 ROOT=Path(__file__).resolve().parents[1]
 BUILD=ROOT/'build/gfx'
+# Icarus and Verilator run this file side by side under make -j: what both write goes in a
+# directory of the simulator's own.
+SIM=os.environ.get('G1_SIM','icarus')
+RUN=BUILD/f'unit-{SIM}'
 from tools.rv32_asm import GPU_PARAMS, GPU_COMMAND, GPU_STATUS, GPU_ERROR, GPU_CYCLES, GPU_STALLS, GPU_READS, GPU_WRITES, GPU_START, GPU_RESET, GPU_BUSY, GPU_DONE, GPU_FAULT
 from tools.rv32_devices import fnv_fold as fnv
 from tools.rv32_gfx_fixture import fixture_text, GP_SRC
@@ -57,9 +61,9 @@ def oracle(fb,p):
 class Graphics(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        BUILD.mkdir(parents=True,exist_ok=True)
-        subprocess.run([os.environ.get('HOST_CC','cc'),'-shared','-fPIC','-O2','-std=c11','-Wall','-Wextra','-Werror','-o',str(BUILD/'native.dylib'),'tests/rv32_gpu_native.c','tools/rv32_gpu.c','programs/rv32/gpu_ref.c','programs/rv32/gfx.c'],cwd=ROOT,check=True)
-        cls.lib=C.CDLL(str(BUILD/'native.dylib'))
+        RUN.mkdir(parents=True,exist_ok=True)
+        subprocess.run([os.environ.get('HOST_CC','cc'),'-shared','-fPIC','-O2','-std=c11','-Wall','-Wextra','-Werror','-o',str(RUN/'native.dylib'),'tests/rv32_gpu_native.c','tools/rv32_gpu.c','programs/rv32/gpu_ref.c','programs/rv32/gfx.c'],cwd=ROOT,check=True)
+        cls.lib=C.CDLL(str(RUN/'native.dylib'))
         cls.lib.native_gpu_fb.restype=C.POINTER(C.c_uint8)
         cls.lib.native_gpu_ram.restype=C.POINTER(C.c_uint8)
         cls.lib.native_gpu_access.argtypes=[U32,C.c_int,C.c_int,C.POINTER(U32)]
@@ -151,8 +155,8 @@ class Graphics(unittest.TestCase):
         rec=self.run_command(p);self.assertEqual(rec[1:],[GPU_DONE,0,19,0,0,6])
         self.assertEqual(C.string_at(self.lib.native_gpu_fb(),76800),bytes(before))
         records.append(rec);rows.append((0,-1,p))
-        fixture=BUILD/'commands.txt';fixture.write_text(fixture_text(rows))
-        sim=os.environ.get('G1_SIM','icarus')
+        fixture=RUN/'commands.txt';fixture.write_text(fixture_text(rows))
+        sim=SIM
         if sim=='icarus':
             subprocess.run(['iverilog','-g2012','-s','rv32_gpu_tb','-o',str(BUILD/'gpu.vvp'),'tests/rv32_gpu_tb.sv','rtl/rv32/rv32_gpu.v'],cwd=ROOT,check=True)
             run=['vvp',str(BUILD/'gpu.vvp')]
@@ -170,7 +174,7 @@ class Graphics(unittest.TestCase):
         for n,(line,want) in enumerate(zip(lines,records,strict=True)):
             self.assertEqual([int(v,16) for v in line[2:]],want,(n,rows[n]))
         for bad in ('', '0 -1 '+ '00000000 '*15, '0 -1 '+ '100000001 '+'00000000 '*15, '0 -1 '+ 'xxxxxxxx '+'00000000 '*15, fixture_text([(0,-1,command())])+'1'):
-            invalid=BUILD/'invalid.txt';invalid.write_text(bad)
+            invalid=RUN/'invalid.txt';invalid.write_text(bad)
             rejected=subprocess.run(run+[f'+input={invalid}'],text=True,capture_output=True)
             self.assertNotEqual(rejected.returncode,0)
             self.assertNotIn('PASS ',rejected.stdout)

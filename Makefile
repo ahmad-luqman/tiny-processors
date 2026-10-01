@@ -30,6 +30,17 @@ QEMU_RV32 ?= qemu-system-riscv32
 # the Icarus recipes give the simulator alone (--rtl-timeout) this wall-clock limit to catch a hang;
 # the emulator reference keeps the target's --timeout. Override it for a slow host.
 RV32_ICARUS_TIMEOUT ?= 3600
+# Issue #26 (docs/rv32-testing.md): RV32_TIMING=1 runs every recipe line through
+# tools/rv32_recipe_shell.py. It prints each line's output in one block, so `make -j` logs stay
+# readable on GNU Make 3.81, which has no --output-sync. It also appends the line's timing to
+# RV32_TIMING_LOG. A $(shell ...) evaluated while a recipe expands would go through it too, with that
+# recipe's name, and capture its banners; the SDL3 flags below are evaluated early for that reason.
+ifdef RV32_TIMING
+RV32_TIMING_LOG ?= build/rv32-timing.jsonl
+export RV32_TIMING_LOG
+SHELL = $(PYTHON) tools/rv32_recipe_shell.py $@
+MAKEFLAGS += -s
+endif
 HOST_CC ?= cc
 RV32_ARCH := --target=riscv32-unknown-elf -march=rv32i -mabi=ilp32 -mcmodel=medlow -mno-relax
 RV32_CFLAGS := $(RV32_ARCH) -std=c11 -ffreestanding -fno-builtin -nostdlib -O2 -g -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Wextra -Werror -Iprograms/rv32
@@ -92,6 +103,10 @@ RV32WIN := build/rv32/rv32win
 # Recursive `=`: pkg-config runs only where the window is built, so a machine without SDL3 still runs every test.
 SDL3_CFLAGS = $(shell pkg-config --cflags sdl3 2>/dev/null)
 SDL3_LIBS = $(shell pkg-config --libs sdl3 2>/dev/null)
+ifdef RV32_TIMING
+SDL3_CFLAGS := $(SDL3_CFLAGS)
+SDL3_LIBS := $(SDL3_LIBS)
+endif
 RV32_RTL := rtl/rv32/rv32_fregfile.v rtl/rv32/rv32_fdecode.v $(FP32_RTL) rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32_muldiv.v rtl/rv32/rv32.v
 RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_clint.v rtl/rv32/rv32_plic.v rtl/rv32/rv32_virtio_blk.v rtl/rv32/rv32_bootrom.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_dma_window.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
 RV32_TB := tests/rv32_tb.sv
@@ -344,6 +359,12 @@ test-rv32-gdb: check-rv32-image $(RV32EMU)
 debug-rv32-gdb: check-rv32-image $(RV32EMU)
 	$(RV32EMU) --image $(or $(IMAGE),build/rv32/selfcheck.bin) --gdb $(or $(PORT),3333)
 
+# Issue #26 (docs/rv32-testing.md): the RV32 checks come in two tiers. test-rv32 is the gate before
+# every RV32 PR: every check on Verilator, plus the Icarus runs that take seconds. test-rv32-slow
+# holds the long Icarus twins of Verilator checks in test-rv32; run it before merging.
+# test-rv32-full is both. All three are safe under make -j.
+.PHONY: test-rv32-slow test-rv32-full
+test-rv32-full: test-rv32 test-rv32-slow
 test-rv32: test-rv32-gdb
 
 $(RV32_TB_VVP): $(RV32_SOC_RTL) $(FP32_HEADERS) $(RV32_TB) | build/rv32
@@ -354,8 +375,11 @@ $(RV32_TB_VERILATOR): $(RV32_SOC_RTL) $(FP32_HEADERS) $(RV32_TB) | build
 
 build-rv32-rtl: $(RV32_TB_VVP)
 
+# On Icarus the sweep takes about 300 s in one process, so it is dealt out to RV32_RTL_SHARDS
+# processes; each compiles its own testbench, as the unsharded suite does.
+RV32_RTL_SHARDS ?= 8
 test-rv32-rtl: check-rv32-image
-	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_rtl.py' -v
+	HOST_CC=$(HOST_CC) $(PYTHON) tools/rv32_unittest_shards.py --shards $(RV32_RTL_SHARDS) test_rv32_rtl.py
 
 test-rv32-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR)
 	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_rtl.py' -v
@@ -428,7 +452,8 @@ run-rv32-pong-rtl: check-rv32-image $(RV32_TB_VVP) $(RV32EMU)
 run-rv32-pong-rtl-verilator: check-rv32-image $(RV32_TB_VERILATOR) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_PONG_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/rtl-verilator
 
-test-rv32: test-rv32-tools test-rv32-rt test-rv32-pong run-rv32-qemu test-rv32-emu test-rv32-win run-rv32-emu diff-rv32-qemu run-rv32-diag-emu run-rv32-pong-emu test-rv32-rtl test-rv32-rtl-verilator run-rv32-rtl run-rv32-rtl-verilator run-rv32-diag-rtl run-rv32-diag-rtl-verilator run-rv32-pong-rtl run-rv32-pong-rtl-verilator lint-rv32 lint-rv32-soc synth-rv32 synth-rv32-soc
+test-rv32: test-rv32-tools test-rv32-rt test-rv32-pong run-rv32-qemu test-rv32-emu test-rv32-win run-rv32-emu diff-rv32-qemu run-rv32-diag-emu run-rv32-pong-emu test-rv32-rtl-verilator run-rv32-rtl run-rv32-rtl-verilator run-rv32-diag-rtl-verilator run-rv32-pong-rtl-verilator lint-rv32 lint-rv32-soc synth-rv32 synth-rv32-soc
+test-rv32-slow: test-rv32-rtl run-rv32-diag-rtl run-rv32-pong-rtl
 
 disasm-rv32: firmware-rv32
 	cat build/rv32/selfcheck.lst
@@ -471,7 +496,8 @@ frames-rv32-capstone: check-rv32-image $(RV32EMU)
 disasm-rv32-capstone: firmware-rv32
 	cat build/rv32/capstone.lst
 
-test-rv32: test-rv32-capstone run-rv32-capstone-emu run-rv32-capstone-rtl run-rv32-capstone-rtl-verilator
+test-rv32: test-rv32-capstone run-rv32-capstone-emu run-rv32-capstone-rtl-verilator
+test-rv32-slow: run-rv32-capstone-rtl
 
 # Compile the same directed C checks as a standalone sanitized executable.
 .PHONY: test-rv32-capstone-sanitize
@@ -608,7 +634,8 @@ run-rv32-f-rtl-verilator: check-rv32-f-image $(RV32EMU) $(RV32_TB_VERILATOR)
 test-rv32-f-tools: check-rv32-f-image $(RV32EMU) $(RV32_FP_OBJ)
 	$(PYTHON) -m unittest discover -s tests -p 'test_rv32_f_tools.py' -v
 
-test-rv32: test-rv32-f test-rv32-f-verilator test-rv32-f-tools run-rv32-f-emu run-rv32-f-rtl run-rv32-f-rtl-verilator
+test-rv32: test-rv32-f-verilator test-rv32-f-tools run-rv32-f-emu run-rv32-f-rtl run-rv32-f-rtl-verilator
+test-rv32-slow: test-rv32-f
 
 .PHONY: waves-rv32-f bench-rv32-f run-rv32-f-soft-qemu
 waves-rv32-f: $(RV32EMU) $(RV32_TB_VVP)
@@ -661,7 +688,8 @@ test-rv32-simd4: check-rv32-simd4-image $(RV32EMU) $(RV32_TB_VVP) build/rv32/sim
 test-rv32-simd4-verilator: check-rv32-simd4-image $(RV32EMU) $(RV32_TB_VERILATOR) build/verilator-rv32-simd4/protocol
 	A2_SIM=verilator $(PYTHON) -m unittest discover -s tests -p 'test_rv32_simd4.py' -v
 
-test-rv32: test-rv32-simd4 test-rv32-simd4-verilator run-rv32-simd4-emu run-rv32-simd4-rtl run-rv32-simd4-rtl-verilator
+test-rv32: test-rv32-simd4-verilator run-rv32-simd4-emu run-rv32-simd4-rtl run-rv32-simd4-rtl-verilator
+test-rv32-slow: test-rv32-simd4
 
 # G1: integer rasterizer, RAM/framebuffer blits, and menu integration.
 .PHONY: test-rv32-gfx test-rv32-gfx-verilator check-rv32-gfx-image run-rv32-gfx-emu run-rv32-gfx-rtl run-rv32-gfx-rtl-verilator run-rv32-gfx-menu-emu run-rv32-gfx-menu-rtl run-rv32-gfx-menu-rtl-verilator lint-rv32-gfx synth-rv32-gfx
@@ -700,7 +728,8 @@ lint-rv32-gfx:
 	verilator --lint-only --Wall --language 1364-2005 --top-module rv32_gpu rtl/rv32/rv32_gpu.v
 synth-rv32-gfx: | build
 	yosys -Q -T -l build/gpu-synth.log -p 'read_verilog rtl/rv32/rv32_gpu.v; synth -top rv32_gpu; check -assert; select -assert-none t:*LATCH*; stat; write_json build/gpu.json'
-test-rv32: test-rv32-gfx test-rv32-gfx-verilator run-rv32-gfx-emu run-rv32-gfx-rtl run-rv32-gfx-rtl-verilator run-rv32-gfx-menu-emu run-rv32-gfx-menu-rtl-verilator lint-rv32-gfx synth-rv32-gfx
+test-rv32: test-rv32-gfx test-rv32-gfx-verilator run-rv32-gfx-emu run-rv32-gfx-rtl-verilator run-rv32-gfx-menu-emu run-rv32-gfx-menu-rtl-verilator lint-rv32-gfx synth-rv32-gfx
+test-rv32-slow: run-rv32-gfx-rtl
 
 .PHONY: bench-rv32-gfx waves-rv32-gfx
 build/rv32/gfxbench_cpu.o: programs/rv32/gfxbench.c $(RV32_HEADERS) | build/rv32
@@ -717,7 +746,7 @@ waves-rv32-gfx: test-rv32-gfx
 test-rv32-gfx-sanitize: test-rv32-gfx | build
 	mkdir -p build/gfx
 	$(HOST_CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -DG1_NATIVE_MAIN tests/rv32_gpu_native.c tools/rv32_gpu.c programs/rv32/gpu_ref.c programs/rv32/gfx.c -o build/gfx/sanitize
-	build/gfx/sanitize build/gfx/commands.txt
+	build/gfx/sanitize build/gfx/unit-icarus/commands.txt
 test-rv32: test-rv32-gfx-sanitize
 # The capstone sanitizer covers the runtime, the digit UI and the digit model
 # under ASan and UBSan. It was defined but never reached by the aggregate.
@@ -856,6 +885,15 @@ check-rv32-3d-image: build/rv32/g3dcheck.bin build/rv32/g3dcheck.lst
 RV32_G3D_MAX_CYCLES := 200000000
 test-rv32-3d: $(RV32EMU) $(RV32_TB_VVP) | build
 	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_3d*.py' -v
+# test-rv32-3d in two halves for the tiers (issue #26): the files that run no simulator (the
+# oracle, the C reference, the emulator's device) in test-rv32, and the Icarus corpus and SoC
+# contracts in test-rv32-slow. Together they run what test-rv32-3d runs, without two processes
+# rebuilding the same libraries in build/g3d at once.
+.PHONY: test-rv32-3d-model test-rv32-3d-icarus
+test-rv32-3d-model: $(RV32EMU) | build
+	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest tests.test_rv32_3d tests.test_rv32_3d_device -v
+test-rv32-3d-icarus: $(RV32EMU) $(RV32_TB_VVP) | build
+	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest tests.test_rv32_3d_rtl tests.test_rv32_3d_soc -v
 # Runs the standalone corpus in full and the SoC contracts on Verilator; it fails
 # when Verilator is missing because both tests build with it.
 test-rv32-3d-verilator: $(RV32EMU) $(RV32_TB_VERILATOR) | build
@@ -871,7 +909,8 @@ lint-rv32-3d:
 	verilator --lint-only --Wall --language 1364-2005 --top-module rv32_g3d rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v
 synth-rv32-3d: | build
 	yosys -Q -T -l build/g3d-synth.log -p 'read_verilog rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v; synth -top rv32_g3d; check -assert; select -assert-none t:*LATCH*; stat; write_json build/g3d.json'
-test-rv32: test-rv32-3d test-rv32-3d-verilator run-rv32-3d-emu run-rv32-3d-rtl-verilator lint-rv32-3d synth-rv32-3d
+test-rv32: test-rv32-3d-model test-rv32-3d-verilator run-rv32-3d-emu run-rv32-3d-rtl-verilator lint-rv32-3d synth-rv32-3d
+test-rv32-slow: test-rv32-3d-icarus
 # The 3D menu replay: the device draws every 3D frame on the emulator and the RTL,
 # the C reference draws them natively, and all three must match the pinned
 # checkpoints. Re-pin with tools/rv32_capstone_native.py --input programs/rv32/g3d.input --write.
@@ -1019,7 +1058,8 @@ test-rv32-m: $(RV32EMU)
 	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_m.py' -v
 test-rv32-m-verilator: $(RV32EMU) $(RV32_TB_VERILATOR)
 	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_m.py' -v
-test-rv32: test-rv32-m test-rv32-m-verilator run-rv32m-emu run-rv32m-rtl run-rv32m-rtl-verilator
+test-rv32: test-rv32-m test-rv32-m-verilator run-rv32m-emu run-rv32m-rtl-verilator
+test-rv32-slow: run-rv32m-rtl
 
 # Track 0: CoreMark and Dhrystone, each built for RV32I (software multiply and divide) and
 # RV32IM, timed with the Zicntr counters. The benchmark sources are vendored unmodified
@@ -1166,7 +1206,8 @@ run-rv32-platform-rtl-verilator: check-rv32-platcheck-image $(RV32EMU) $(RV32_TB
 test-rv32-platform: check-rv32-platcheck-image
 	HOST_CC=$(HOST_CC) QEMU_RV32=$(QEMU_RV32) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_platform.py' -v
 
-test-rv32: check-rv32-dtb check-rv32-virt-map test-rv32-platform run-rv32-platform-qemu run-rv32-platform-emu run-rv32-platform-rtl run-rv32-platform-rtl-verilator
+test-rv32: check-rv32-dtb check-rv32-virt-map test-rv32-platform run-rv32-platform-qemu run-rv32-platform-emu run-rv32-platform-rtl-verilator
+test-rv32-slow: run-rv32-platform-rtl
 
 # Track 2 (docs/rv32-os.md, plan docs/planning/track2-os.md). O1: interrupts. irqcheck takes
 # CLINT and PLIC interrupts and runs unmodified on QEMU virt, the emulator and the RTL; the RTL is
