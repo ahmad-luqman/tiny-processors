@@ -29,6 +29,10 @@ from tools.rv32_run_emu import build_emulator, emulator_command
 STALLS = (0, 1, 3)
 SEED = 7
 OPCODES = (0x37, 0x17, 0x6F, 0x67, 0x63, 0x03, 0x23, 0x13, 0x33, 0x0F, 0x73)
+# The simulator's wall-clock limit in run_both. Every run is bounded by cycles; this only catches a
+# hang. The Pong image takes about 106 s on Icarus alone, so under make -j test-rv32-rtl passes the
+# Makefile's RV32_ICARUS_TIMEOUT (issue #26).
+RTL_TIMEOUT = float(os.environ.get("RV32_ICARUS_TIMEOUT", "120"))
 
 
 def require(tool, hint):
@@ -90,7 +94,8 @@ class RtlTest(unittest.TestCase):
                                     checkpoints=emu_checkpoints, input_script=script, allow_lost_events=allow_lost_events)
             rtl = run_rtl(simulator or self.simulator, hex_path, Path(directory) / "rtl.trace",
                           stall=stall, seed=seed, max_cycles=max_cycles, checkpoints=rtl_checkpoints,
-                          input_script=script, reset_at=reset_at, allow_lost_events=allow_lost_events)
+                          input_script=script, reset_at=reset_at, allow_lost_events=allow_lost_events,
+                          timeout=RTL_TIMEOUT)
         report = f"\n--- simulator output ---\n{rtl.noise}--- guest console ---\n{rtl.console}--- stderr ---\n{rtl.stderr}"
         self.assertEqual(rtl.status, 0, report)
         self.assertEqual(rtl.noise, "", "the simulator printed something of its own" + report)
@@ -524,7 +529,7 @@ class RtlTest(unittest.TestCase):
             self.assertTrue(25000 < steps < 45000 and steps // 8 < accesses < steps // 2, (steps, accesses))
             for stall, seed in ((0, None), (1, None), (None, SEED)):
                 with self.subTest(stall=stall, seed=seed):
-                    rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", stall=stall, seed=seed)
+                    rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", stall=stall, seed=seed, timeout=RTL_TIMEOUT)
                     self.assertEqual((rtl.status, rtl.noise), (0, ""), rtl.stderr)
                     self.assertIsNotNone(rtl.halt, rtl.stderr)
                     self.assertEqual((rtl.halt["halt"], rtl.halt["outcome"], rtl.console),
@@ -896,7 +901,7 @@ class RtlTest(unittest.TestCase):
             script = Path(directory) / "input.txt"
             script.write_text("".join(f"frame 1 down {c}\n" for c in range(17)))
             emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace", input_script=script)
-            rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", stall=0, input_script=script)
+            rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", stall=0, input_script=script, timeout=RTL_TIMEOUT)
         self.assertNotEqual(emulator.status, 0)
         self.assertNotEqual(rtl.status, 0)
         self.assertEqual((emulator.halt["outcome"], rtl.halt["outcome"]), ("pass", "pass"), "the halt lines were printed first")

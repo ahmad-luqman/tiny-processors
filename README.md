@@ -213,7 +213,7 @@ The [vector kernel](programs/simd4/vector_add.py), the [matrix kernel](programs/
 The [RV32 machine contract](docs/rv32.md) fixes reset, the address map, the console and done-register protocol, and the ILP32 firmware ABI for our RISC-V computer. A freestanding C self-check with our own startup code, linker script, and multiply/divide runtime compiles with Homebrew Clang 22, links with lld, passes a standard-library ELF checker, and runs on QEMU's `virt` board, whose UART and test device sit at the contract's three addresses.
 
 ```sh
-make test-rv32          # Tool tests, host runtime tests, image checks, the QEMU run, the emulator checks, the RTL tests, the self-check and the device diagnostic on both simulators, lint and synthesis of the core and the machine
+make test-rv32          # Tool tests, host runtime tests, image checks, the QEMU run, the emulator checks, the RTL tests on Verilator, the self-check on both simulators, the device diagnostic on Verilator, lint and synthesis of the core and the machine
 make check-rv32-image   # Build ELF/listing/bin/hex and verify them against the contract
 make run-rv32-qemu      # Run on qemu-system-riscv32; console line and exit status must agree
 make disasm-rv32        # Print the annotated listing
@@ -221,6 +221,8 @@ make test-rv32-emu      # 30 hand-computed edge tests against our C emulator
 make run-rv32-emu       # Run the same image on our emulator with a retirement trace
 make diff-rv32-qemu     # Emulator and QEMU must execute the same PC sequence
 ```
+
+Run the aggregate in parallel with `make -j8 test-rv32`. The long Icarus twins of its Verilator checks are in `make test-rv32-slow`, and `make test-rv32-full` runs both; read [running the RV32 tests](docs/rv32-testing.md) for the tiers, readable `-j` logs and timings.
 
 QEMU boots the image with the bare `rv32i` CPU model; all 28 checks pass, the guest prints `PASS 807d9fad`, and QEMU exits with status 0. The 17 tool tests and 6 host runtime tests use only the standard library. Read the [C to instructions to memory walkthrough](docs/c-to-instructions.md). QEMU is a reference runner, not our machine.
 
@@ -233,7 +235,7 @@ QEMU boots the image with the bare `rv32i` CPU model; all 28 checks pass, the gu
 [rtl/rv32/](rtl/rv32/) is the hardware for the machine: a register file, an ALU with a barrel shifter and one subtractor's comparison flags, an immediate decoder, the four trap CSRs, and a five-state controller driving the contract's ready/valid memory port with byte strobes in both directions. It runs all of RV32I plus `csrr*` and `mret`; illegal encodings and faults trap through `mtvec` exactly as the emulator's do, and a double fault halts both backends the same way. The testbench holds the bus to model stalls and prints the emulator's retirement trace, so a Python test diffs the two backends line for line, and the M1 C self-check runs on the core to `PASS 807d9fad` with the emulator's 32,610-line trace.
 
 ```sh
-make test-rv32-rtl            # 36 tests: emulator vs Icarus, differential, traps, devices, harness, fixed and random stalls
+make test-rv32-rtl            # 42 tests: emulator vs Icarus, differential, traps, devices, harness, fixed and random stalls; 8 processes, in test-rv32-slow
 make test-rv32-rtl-verilator  # the same tests on a Verilator build of the testbench
 make run-rv32-rtl             # the C self-check on the RTL: PASS 807d9fad, identical trace, cycle count
 make run-rv32-rtl-verilator   # the same on Verilator with one stall cycle per request
