@@ -1283,7 +1283,11 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(rtl_halt_line("rv32_tb: halt=limit cycles=200 steps=50 stalls=0 transfers=51 error=limit")["outcome"],
                          "error=limit")
         self.assertIsNone(rtl_halt_line("no halt line here"))
-        for bad in ("rv32_tb: halt=done cycles=336 steps=78 stalls=0 transfers=102 done=xxxxxxxx pass",
+        # Issue #20: page-table reads and the walk's cycles come as a pair.
+        walked = "rv32_tb: halt=done cycles=400 steps=78 stalls=0 transfers=110 walks=8 ptw_waits=12 done=00005555 pass"
+        self.assertEqual((rtl_halt_line(walked)["walks"], rtl_halt_line(walked)["ptw_waits"]), (8, 12))
+        for bad in ("rv32_tb: halt=done cycles=400 steps=78 stalls=0 transfers=110 walks=8 done=00005555 pass",
+                    "rv32_tb: halt=done cycles=400 steps=78 stalls=0 transfers=110 ptw_waits=12 done=00005555 pass","rv32_tb: halt=done cycles=336 steps=78 stalls=0 transfers=102 done=xxxxxxxx pass",
                     "rv32_tb: halt=done cycles=",
                     "rv32_tb: halt=done cycles=336 steps=78 stalls=0 transfers=102 pass",
                     "rv32_tb: halt=limit cycles=335 steps=77 stalls=0 transfers=102 done=00005555 pass",

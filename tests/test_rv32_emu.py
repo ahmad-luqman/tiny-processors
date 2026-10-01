@@ -267,7 +267,8 @@ class EmulatorTest(unittest.TestCase):
                 ([r_type(0x33, 1, 1, 2, 3, 0x20)], 2, r_type(0x33, 1, 1, 2, 3, 0x20)),  # sll with sub bit
                 ([b_type(2, 0, 0, 8)], 2, b_type(2, 0, 0, 8)),                     # unused branch funct3
                 ([i_type(0x03, 1, 3, 0, 0)], 2, i_type(0x03, 1, 3, 0, 0)),         # ld does not exist
-                ([0x10200073], 2, 0x10200073)]:                                    # sret
+                ([0x10500073 | 1 << 7], 2, 0x10500073 | 1 << 7),                   # wfi with rd set
+                ([0x12000073 | 1 << 7], 2, 0x12000073 | 1 << 7)]:                  # sfence.vma with rd set
             with self.subTest(body=body):
                 result = self.run_trapping(body)
                 self.assertEqual((result.state.x[10], result.state.x[11]), (cause, tval))
@@ -384,6 +385,28 @@ class EmulatorTest(unittest.TestCase):
         result = self.run_words(words)
         self.assertEqual((result.state.traps, result.state.mcause, result.state.mepc), (2, 3, handler_at + 8))
         self.assertEqual(result.state.halt, "double-fault", "the second trap vectors to 0 and cannot be delivered")
+
+    def test_supervisor_state_in_the_dump_and_a_delegated_double_fault(self):
+        """Issue #20: --dump-state shows MPP = S and the S CSRs; a double fault whose first trap was
+        delegated reports scause, sepc and stval, where that trap went."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "image.bin").write_bytes(b"".join(word.to_bytes(4, "little")
+                                                      for word in LI(5, 0x800) + [CSRRW(0, MSTATUS, 5)] + FINISH()))
+            subprocess.run([str(self.emulator), "--image", str(path / "image.bin"), "--dump-state", str(path / "state")],
+                           capture_output=True, check=True)
+            state = dict(line.split() for line in (path / "state").read_text().splitlines())
+        self.assertEqual(int(state["mstatus"], 16) & MSTATUS_MPP, 0x800, "MPP = S")
+        self.assertTrue({"medeleg", "mideleg", "satp", "stvec", "sepc", "scause", "stval"} <= state.keys())
+        target = RAM + 0x100  # an illegal word, run in S mode with illegal instructions delegated
+        words = LI(5, 0xFFFFFFFF) + [CSRRW(0, PMPADDR0, 5)] + LI(5, 0x1F) + [CSRRW(0, PMPCFG0, 5)]  # S may run anywhere
+        words += LI(5, 1 << 2) + [CSRRW(0, MEDELEG, 5)] + LI(5, target) + [CSRRW(0, MEPC, 5)]
+        words += LI(5, 0x800) + [CSRRW(0, MSTATUS, 5), MRET()]
+        words += [0] * ((target - RAM) // 4 - len(words)) + [0]
+        result = self.run_words(words)
+        self.assertEqual(result.state.halt, "double-fault")
+        self.assertIn("unhandled-trap scause=2 sepc=80000100 stval=00000000 then cause=1 tval=00000000 at pc=00000000",
+                      result.stderr)
 
     def test_console_receive(self):
         """O2: --console-input's bytes wait from reset; LSR.DR says one is waiting, RBR takes it, and

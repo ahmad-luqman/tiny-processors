@@ -1,10 +1,11 @@
 `timescale 1ns/1ps
 
 // Multicycle RV32IMF core: the integer path plus FP_ISSUE/FP_WAIT and the
-// M extension's MD_WAIT. One ready/valid memory port, four trap CSRs,
-// floating CSRs, the Zicntr counters, and atomic register/flag retirement in
-// WRITEBACK. See docs/rv32-f.md and docs/rv32-groundwork.md. A trap vectors to mtvec; a
-// second trap before the handler retires an instruction halts the core
+// M extension's MD_WAIT. One ready/valid memory port, the machine and (issue
+// #20) supervisor trap CSRs with an Sv32 page-table walker, floating CSRs, the
+// Zicntr counters, and atomic register/flag retirement in WRITEBACK. See
+// docs/rv32-f.md and docs/rv32-groundwork.md. A trap vectors to mtvec, or to
+// stvec when delegated; a second trap before the handler retires an instruction halts the core
 // (the emulator's double-fault rule). The contract is docs/rv32-rtl.md;
 // the datapath and controller are explained in docs/rv32-to-gates.md.
 module rv32 #(
@@ -32,6 +33,7 @@ module rv32 #(
     input  wire [31:0] mem_rdata,
     input  wire        mem_error,
     output wire        mem_fetch,
+    output wire        mem_ptw,   // issue #20: a page-table read, which only RAM may answer
     // Retirement port for the testbench.
     output reg         retire,
     output reg  [31:0] retire_pc,
@@ -58,18 +60,24 @@ module rv32 #(
 );
     localparam [3:0] FETCH = 4'd0, DECODE = 4'd1, EXECUTE = 4'd2,
                      MEM = 4'd3, WRITEBACK = 4'd4, HALT = 4'd5, FP_ISSUE = 4'd6, FP_WAIT = 4'd7,
-                     MD_WAIT = 4'd8, WFI_WAIT = 4'd9;
+                     MD_WAIT = 4'd8, WFI_WAIT = 4'd9,
+                     WALK = 4'd10, XLATE = 4'd11; // issue #20: a page-table read; PMP on a translated data address
     localparam [3:0] CAUSE_TARGET_MISALIGNED = 4'd0, CAUSE_FETCH_FAULT = 4'd1,
                      CAUSE_ILLEGAL = 4'd2, CAUSE_BREAKPOINT = 4'd3,
                      CAUSE_LOAD_MISALIGNED = 4'd4, CAUSE_LOAD_FAULT = 4'd5,
                      CAUSE_STORE_MISALIGNED = 4'd6, CAUSE_STORE_FAULT = 4'd7,
-                     CAUSE_ECALL_U = 4'd8, CAUSE_ECALL = 4'd11;
+                     CAUSE_ECALL_U = 4'd8, CAUSE_ECALL_S = 4'd9, CAUSE_ECALL = 4'd11,
+                     CAUSE_FETCH_PAGE = 4'd12, CAUSE_LOAD_PAGE = 4'd13, CAUSE_STORE_PAGE = 4'd15;
+    localparam [1:0] PRIV_U = 2'd0, PRIV_S = 2'd1, PRIV_M = 2'd3;
     localparam [11:0] CSR_MTVEC = 12'h305, CSR_MEPC = 12'h341, CSR_MCAUSE = 12'h342,
                       CSR_MTVAL = 12'h343, CSR_MSTATUS = 12'h300, CSR_MIE = 12'h304, CSR_MSCRATCH = 12'h340,
                       CSR_MIP = 12'h344, CSR_MCOUNTEREN = 12'h306, CSR_PMPCFG0 = 12'h3a0, CSR_PMPCFG1 = 12'h3a1,
                       CSR_FFLAGS = 12'h001, CSR_FRM = 12'h002, CSR_FCSR = 12'h003,
                       CSR_CYCLE = 12'hc00, CSR_TIME = 12'hc01, CSR_INSTRET = 12'hc02,
-                      CSR_CYCLEH = 12'hc80, CSR_TIMEH = 12'hc81, CSR_INSTRETH = 12'hc82;
+                      CSR_CYCLEH = 12'hc80, CSR_TIMEH = 12'hc81, CSR_INSTRETH = 12'hc82,
+                      CSR_MEDELEG = 12'h302, CSR_MIDELEG = 12'h303, CSR_SSTATUS = 12'h100, CSR_SIE = 12'h104,
+                      CSR_STVEC = 12'h105, CSR_SCOUNTEREN = 12'h106, CSR_SSCRATCH = 12'h140, CSR_SEPC = 12'h141,
+                      CSR_SCAUSE = 12'h142, CSR_STVAL = 12'h143, CSR_SIP = 12'h144, CSR_SATP = 12'h180;
     localparam [2:0] DIRECT_NONE=3'd0, DIRECT_SIGN=3'd1, DIRECT_CLASS=3'd3;
     localparam [31:0] RESET_PC = 32'h8000_0000;
 
@@ -89,10 +97,28 @@ module rv32 #(
     reg [2:0] mie_bits; // {MEIE, MTIE, MSIE}
     reg [31:0] mscratch;
     reg fetch_waiting;  // this FETCH has presented its request, so it can no longer be replaced
-    // Protection (O5): the privilege mode (1 machine, 0 user), mstatus.MPP (1 machine, 0 user),
-    // the counters user mode may read, and eight PMP entries.
-    reg priv_m, mpp_m;
+    // Protection (O5): the privilege mode and mstatus.MPP (3 machine, 1 supervisor since issue #20,
+    // 0 user), the counters user mode may read, and eight PMP entries.
+    reg [1:0] priv, mpp;
+    wire priv_m = priv == PRIV_M;
     reg [2:0] mcounteren;
+    // S-mode (issue #20): mstatus's supervisor fields, delegation, the supervisor's interrupt
+    // enables and the software-raised supervisor interrupts ({SEI, STI, SSI} in each), the
+    // supervisor's trap CSRs and satp (MODE and a 22-bit PPN; the ASID is 0 bits wide).
+    reg mstatus_sie, mstatus_spie, mstatus_spp, mstatus_mprv, mstatus_sum, mstatus_mxr;
+    reg mstatus_tvm, mstatus_tw, mstatus_tsr;
+    reg [15:0] medeleg;
+    reg [2:0] mideleg, mie_s, mip_soft, scounteren;
+    reg [31:0] stvec, sscratch, sepc, scause, stval;
+    reg satp_mode;
+    reg [21:0] satp_ppn;
+    // Sv32 (issue #20): the page-table walk. `phys` holds the translation of the current fetch or
+    // data access once `xlate_ok` is set; `pte_addr` is the entry the walk reads next.
+    localparam [1:0] WALK_FETCH = 2'd0, WALK_LOAD = 2'd1, WALK_STORE = 2'd2;
+    reg xlate_ok, walk_level;
+    reg [1:0] walk_kind;
+    reg [31:0] phys;
+    reg [33:0] pte_addr;
     reg [7:0] pmpcfg [0:7];
     reg [31:0] pmpaddr [0:7];
 
@@ -101,23 +127,40 @@ module rv32 #(
     wire [2:0] funct3;
     wire [31:0] imm;
     wire is_lui, is_auipc, is_alu_imm, is_alu_reg, is_muldiv, alu_alt, is_load, is_store;
-    wire is_branch, is_jal, is_jalr, is_csr, is_mret, is_ecall, is_ebreak, is_wfi, writes_rd, illegal;
+    wire is_branch, is_jal, is_jalr, is_csr, is_mret, is_ecall, is_ebreak, is_wfi, is_sret, is_sfence, writes_rd, illegal;
 
     rv32_decode decode (
         .insn(ir), .rd(rd), .rs1(rs1), .rs2(rs2), .funct3(funct3), .imm(imm),
         .is_lui(is_lui), .is_auipc(is_auipc), .is_alu_imm(is_alu_imm), .is_alu_reg(is_alu_reg), .is_muldiv(is_muldiv),
         .alu_alt(alu_alt), .is_load(is_load), .is_store(is_store), .is_branch(is_branch),
         .is_jal(is_jal), .is_jalr(is_jalr), .is_csr(is_csr), .is_mret(is_mret),
-        .is_ecall(is_ecall), .is_ebreak(is_ebreak), .is_wfi(is_wfi), .writes_rd(writes_rd), .illegal(illegal));
+        .is_ecall(is_ecall), .is_ebreak(is_ebreak), .is_wfi(is_wfi), .is_sret(is_sret), .is_sfence(is_sfence),
+        .writes_rd(writes_rd), .illegal(illegal));
 
-    // mip is the live levels; an interrupt is enabled when mie has it and mstatus.MIE is set.
-    // It is taken in place of a fetch that has not been presented yet, so a request on the bus
-    // is never withdrawn: MEI first, then MSI, then MTI.
-    wire [31:0] mip = {20'd0, irq_external, 3'd0, irq_timer, 3'd0, irq_software, 3'd0};
-    wire [2:0] irq_ready = {irq_external, irq_timer, irq_software} & mie_bits;
-    // In user mode interrupts are always enabled (O5).
-    wire irq_take = (state == FETCH) && !fetch_waiting && (mstatus_mie || !priv_m) && (irq_ready != 3'd0);
-    wire [3:0] irq_code = irq_ready[2] ? 4'd11 : irq_ready[0] ? 4'd3 : 4'd7;
+    // mip is the live levels, and since issue #20 the supervisor interrupts machine mode raises.
+    // An interrupt is taken in place of a fetch that has not been presented yet, so a request on
+    // the bus is never withdrawn, and never before a handler's first instruction retires, so it
+    // cannot make a double fault of a trap into S mode. Those bound for machine mode come before
+    // those mideleg sends to S mode, and within one mode the order is MEI, MSI, MTI, SEI, SSI, STI.
+    // One bound for machine mode is enabled below it whatever MIE says (O5); a delegated one is
+    // enabled below S mode, or in it with SIE, and never in machine mode.
+    wire [31:0] mip = {20'd0, irq_external, 1'b0, mip_soft[2], 1'b0, irq_timer, 1'b0, mip_soft[1], 1'b0,
+                       irq_software, 1'b0, mip_soft[0], 1'b0};
+    wire [31:0] mie_value = {20'd0, mie_bits[2], 1'b0, mie_s[2], 1'b0, mie_bits[1], 1'b0, mie_s[1], 1'b0,
+                             mie_bits[0], 1'b0, mie_s[0], 1'b0};
+    wire [31:0] mideleg_value = {22'd0, mideleg[2], 3'd0, mideleg[1], 3'd0, mideleg[0], 1'b0};
+    wire [2:0] irq_ready = {irq_external, irq_timer, irq_software} & mie_bits; // {MEI, MTI, MSI}
+    wire [2:0] irq_ready_s = mip_soft & mie_s;                                  // {SEI, STI, SSI}
+    wire irq_wake = (irq_ready != 3'd0) || (irq_ready_s != 3'd0);              // what ends a wfi
+    wire m_enabled = !priv_m || mstatus_mie;
+    wire s_enabled = priv == PRIV_U || (priv == PRIV_S && mstatus_sie);
+    wire [2:0] take_m = m_enabled ? irq_ready : 3'd0;
+    wire [2:0] take_sm = m_enabled ? irq_ready_s & ~mideleg : 3'd0;  // S interrupts bound for M
+    wire [2:0] take_ss = s_enabled ? irq_ready_s & mideleg : 3'd0;   // and those delegated to S
+    wire [2:0] take_s = (take_m != 3'd0 || take_sm != 3'd0) ? take_sm : take_ss;
+    wire irq_take = (state == FETCH) && !fetch_waiting && !in_trap && (take_m != 3'd0 || take_s != 3'd0);
+    wire [3:0] irq_code = take_m[2] ? 4'd11 : take_m[0] ? 4'd3 : take_m[1] ? 4'd7 :
+                          take_s[2] ? 4'd9 : take_s[0] ? 4'd1 : 4'd5;
 
     wire fp_valid, fp_to_integer, fp_from_integer;
     wire [4:0] fp_op;
@@ -187,6 +230,12 @@ module rv32 #(
         (width == 2'd0) ? {{24{load_byte[7] & ~funct3[2]}}, load_byte} :
         (width == 2'd1) ? {{16{load_half[15] & ~funct3[2]}}, load_half} : mdr;
 
+    // mstatus: SD and FS constant (floating state is always on), MPP, and the fields S-mode added.
+    wire [31:0] mstatus_value = {1'b1, 8'd0, mstatus_tsr, mstatus_tw, mstatus_tvm, mstatus_mxr, mstatus_sum, mstatus_mprv,
+                                 2'b00, 2'b11, mpp, 2'b00, mstatus_spp, mstatus_mpie, 1'b0, mstatus_spie, 1'b0,
+                                 mstatus_mie, 1'b0, mstatus_sie, 1'b0};
+    wire [31:0] sstatus_value = mstatus_value & 32'h800c_6122; // SD, MXR, SUM, FS, SPP, SPIE, SIE
+
     // CSRs: the old value is the result, captured into alu_out in EXECUTE;
     // the new value is written in WRITEBACK. The operand is rs1 or its
     // five-bit field (funct3[2]); csrrs/csrrc with a zero field write nothing.
@@ -201,12 +250,24 @@ module rv32 #(
         (csr_addr == CSR_MTVEC) ? mtvec :
         (csr_addr == CSR_MEPC) ? mepc :
         (csr_addr == CSR_MCAUSE) ? mcause :
-        (csr_addr == CSR_MSTATUS) ? {1'b1, 16'd0, 2'b11, {2{mpp_m}}, 3'd0, mstatus_mpie, 3'd0, mstatus_mie, 3'd0} :
+        (csr_addr == CSR_MSTATUS) ? mstatus_value :
+        (csr_addr == CSR_SSTATUS) ? sstatus_value :
+        (csr_addr == CSR_MEDELEG) ? {16'd0, medeleg} :
+        (csr_addr == CSR_MIDELEG) ? mideleg_value :
+        (csr_addr == CSR_SIE) ? (mie_value & mideleg_value) :
+        (csr_addr == CSR_SIP) ? (mip & mideleg_value) :
+        (csr_addr == CSR_STVEC) ? stvec :
+        (csr_addr == CSR_SCOUNTEREN) ? {29'd0, scounteren} :
+        (csr_addr == CSR_SSCRATCH) ? sscratch :
+        (csr_addr == CSR_SEPC) ? sepc :
+        (csr_addr == CSR_SCAUSE) ? scause :
+        (csr_addr == CSR_STVAL) ? stval :
+        (csr_addr == CSR_SATP) ? {satp_mode, 9'd0, satp_ppn} :
         (csr_addr == CSR_MCOUNTEREN) ? {29'd0, mcounteren} :
         (csr_addr == CSR_PMPCFG0) ? {pmpcfg[3], pmpcfg[2], pmpcfg[1], pmpcfg[0]} :
         (csr_addr == CSR_PMPCFG1) ? {pmpcfg[7], pmpcfg[6], pmpcfg[5], pmpcfg[4]} :
         (csr_addr[11:3] == 9'h076) ? pmpaddr[csr_addr[2:0]] :
-        (csr_addr == CSR_MIE) ? {20'd0, mie_bits[2], 3'd0, mie_bits[1], 3'd0, mie_bits[0], 3'd0} :
+        (csr_addr == CSR_MIE) ? mie_value :
         (csr_addr == CSR_MIP) ? mip :
         (csr_addr == CSR_MSCRATCH) ? mscratch :
         (csr_addr == CSR_CYCLE) ? cycle_count[31:0] :
@@ -219,6 +280,7 @@ module rv32 #(
     wire [31:0] csr_operand = funct3[2] ? {27'd0, rs1} : a;
     wire [31:0] csr_new = (funct3[1:0] == 2'd1) ? csr_operand :
                           (funct3[1:0] == 2'd2) ? (csr_old | csr_operand) : (csr_old & ~csr_operand);
+    wire [2:0] csr_new_s = {csr_new[9], csr_new[5], csr_new[1]}; // SEI, STI, SSI as mideleg orders them
     wire csr_we = is_csr && ((funct3[1:0] == 2'd1) || (rs1 != 5'd0));
 
     wire fp_csr_write = csr_we && csr_addr >= CSR_FFLAGS && csr_addr <= CSR_FCSR;
@@ -267,20 +329,34 @@ module rv32 #(
                               (width == 2'd1 && alu_result[0]));
     wire target_misaligned = (is_jal || is_jalr || branch_taken) && execute_out[1];
 
-    // Memory port: a fetch in FETCH, a data access in MEM, nothing otherwise
+    // Memory port: a fetch in FETCH (at `phys` once translated), a page-table read in WALK, a
+    // data access in MEM, nothing otherwise
     // and nothing while reset is asserted (the state register already says
     // FETCH then, so the gate is explicit).
-    // PMP (O5): one checker, on the fetch address in FETCH and on the data address in EXECUTE. The
-    // lowest-numbered matching entry decides; user mode needs a match that grants the access,
-    // machine mode only a locked entry's permission. Regions are whole words (granularity 4).
+    // Sv32 (issue #20): translation applies to fetches below machine mode, and to loads and stores
+    // below it at their effective privilege, which MPRV makes MPP's in machine mode.
+    wire [1:0] data_priv = (priv_m && mstatus_mprv) ? mpp : priv;
+    wire translate_fetch = satp_mode && !priv_m;
+    wire translate_data = satp_mode && data_priv != PRIV_M;
+    wire fetch_walk = (state == FETCH) && translate_fetch && !xlate_ok; // a fetch that needs its walk first
+    wire [31:0] fetch_addr = xlate_ok ? phys : pc;
+    wire [31:0] walk_va = walk_kind == WALK_FETCH ? pc : alu_out;
+
+    // PMP (O5): one checker, on the fetch address in FETCH and on the data address in EXECUTE; since
+    // issue #20 also on a page-table read in WALK (as a supervisor read) and on a translated data
+    // address in XLATE. The lowest-numbered matching entry decides; below machine mode an access
+    // needs a match that grants it, machine mode only a locked entry's permission. Regions are
+    // whole words (granularity 4).
     wire pmp_fetch = state == FETCH;
-    wire [31:0] pmp_word = {2'b00, pmp_fetch ? pc[31:2] : alu_result[31:2]};
-    wire [2:0] pmp_need = pmp_fetch ? 3'b100 : is_store ? 3'b010 : 3'b001; // X, W, R
+    wire [31:0] pmp_addr = pmp_fetch ? fetch_addr : state == WALK ? pte_addr[31:0] : state == XLATE ? phys : alu_result;
+    wire [31:0] pmp_word = {2'b00, pmp_addr[31:2]};
+    wire [1:0] pmp_priv = pmp_fetch ? priv : state == WALK ? PRIV_S : data_priv;
+    wire [2:0] pmp_need = pmp_fetch ? 3'b100 : (state != WALK && is_store) ? 3'b010 : 3'b001; // X, W, R
     reg pmp_ok, pmp_found, pmp_match;
     reg [31:0] pmp_low, pmp_ones;
     integer entry;
     always @* begin
-        pmp_ok = priv_m;
+        pmp_ok = pmp_priv == PRIV_M;
         pmp_found = 1'b0;
         for (entry = 0; entry < 8; entry = entry + 1) begin
             pmp_low = entry == 0 ? 32'd0 : pmpaddr[entry == 0 ? 0 : entry - 1];
@@ -293,30 +369,74 @@ module rv32 #(
             endcase
             if (pmp_match && !pmp_found) begin
                 pmp_found = 1'b1;
-                pmp_ok = (priv_m && !pmpcfg[entry][7]) || ((pmpcfg[entry][2:0] & pmp_need) == pmp_need);
+                pmp_ok = (pmp_priv == PRIV_M && !pmpcfg[entry][7]) || ((pmpcfg[entry][2:0] & pmp_need) == pmp_need);
             end
         end
     end
-    wire fetch_deny = pmp_fetch && !pmp_ok;
-    // User mode may use the floating CSRs and, as mcounteren allows, the counters (the only CSRs
-    // numbered 0xCxx); a machine CSR, mret or wfi there is an illegal instruction.
-    // Counters 0xc03 and 0xc83 do not exist (the decoder makes them illegal anyway); the fourth bit
-    // is 0 so the index stays inside the vector.
+    wire fetch_deny = pmp_fetch && !fetch_walk && !pmp_ok;
+    // A CSR needs the privilege its number's bits 9:8 name: user mode the floating CSRs and, as
+    // mcounteren and scounteren allow, the counters (the only CSRs numbered 0xCxx); supervisor mode
+    // also the S CSRs, the counters as mcounteren allows, and satp unless mstatus.TVM. mret below
+    // machine mode, and sret, wfi and sfence.vma in user mode (or in S mode with TSR, TW, TVM), are
+    // illegal instructions. Counters 0xc03 and 0xc83 do not exist (the decoder makes them illegal
+    // anyway); the fourth bit is 0 so the index stays inside the vector.
     wire [3:0] counter_enable = {1'b0, mcounteren};
-    wire csr_user_ok = csr_addr[9:8] == 2'b00 && (csr_addr[11:10] != 2'b11 || counter_enable[csr_addr[1:0]]);
-    wire priv_illegal = !priv_m && ((is_csr && !csr_user_ok) || is_mret || is_wfi);
+    wire [3:0] scounter_enable = {1'b0, scounteren};
+    wire counter_ok = csr_addr[11:10] != 2'b11 ||
+                      (counter_enable[csr_addr[1:0]] && (priv == PRIV_S || scounter_enable[csr_addr[1:0]]));
+    wire csr_priv_ok = csr_addr[9:8] <= priv && counter_ok && !(csr_addr == CSR_SATP && mstatus_tvm);
+    wire priv_illegal = !priv_m && ((is_csr && !csr_priv_ok) || is_mret ||
+                                    (is_sret && (priv == PRIV_U || mstatus_tsr)) ||
+                                    (is_wfi && (priv == PRIV_U || mstatus_tw)) ||
+                                    (is_sfence && (priv == PRIV_U || mstatus_tvm)));
 
-    assign mem_valid = !reset && ((state == FETCH && !irq_take && !fetch_deny) || (state == MEM));
+    // The page-table walk (issue #20). A read of the entry at pte_addr is a supervisor read: PMP
+    // must grant it, it must lie in the 32-bit space, and only RAM answers it (mem_ptw keeps the
+    // devices off it), else the access faults. The entry then decides, in the emulator's order:
+    // invalid (V clear, or W without R), a pointer with D, A or U set or at level 0, a misaligned
+    // megapage, U against the privilege (and SUM), the permission (and MXR), a clear A or, for a
+    // store, D (Svade: hardware never sets them) are page faults; a leaf whose physical address
+    // is at or past 2^32 is an access fault.
+    wire walk_deny = (state == WALK) && (pte_addr[33:32] != 2'b00 || !pmp_ok);
+    wire [21:0] pte_ppn = mem_rdata[31:10];
+    wire pte_v = mem_rdata[0], pte_r = mem_rdata[1], pte_w = mem_rdata[2], pte_x = mem_rdata[3];
+    wire pte_u = mem_rdata[4], pte_a = mem_rdata[6], pte_d = mem_rdata[7];
+    wire pte_leaf = pte_r || pte_x;
+    wire [1:0] walk_priv = walk_kind == WALK_FETCH ? priv : data_priv;
+    wire pte_user_bad = walk_priv == PRIV_U ? !pte_u : pte_u && (walk_kind == WALK_FETCH || !mstatus_sum);
+    wire pte_perm_bad = walk_kind == WALK_FETCH ? !pte_x : walk_kind == WALK_STORE ? !pte_w : !(pte_r || (mstatus_mxr && pte_x));
+    wire pte_page_fault = !pte_v || (!pte_r && pte_w) ||
+                          (!pte_leaf && (!walk_level || pte_a || pte_d || pte_u)) ||
+                          (pte_leaf && ((walk_level && pte_ppn[9:0] != 10'd0) || pte_user_bad || pte_perm_bad ||
+                                        !pte_a || (walk_kind == WALK_STORE && !pte_d)));
+    wire [33:0] leaf_addr = walk_level ? {pte_ppn[21:10], walk_va[21:0]} : {pte_ppn, walk_va[11:0]};
+    wire [3:0] walk_page_cause = walk_kind == WALK_FETCH ? CAUSE_FETCH_PAGE :
+                                 walk_kind == WALK_STORE ? CAUSE_STORE_PAGE : CAUSE_LOAD_PAGE;
+    wire [3:0] walk_access_cause = walk_kind == WALK_FETCH ? CAUSE_FETCH_FAULT :
+                                   walk_kind == WALK_STORE ? CAUSE_STORE_FAULT : CAUSE_LOAD_FAULT;
+    wire [31:0] walk_epc = walk_kind == WALK_FETCH ? pc : ir_pc;
+    wire [33:0] walk_root = {satp_ppn, 12'd0};
+    // Cycles the walk adds, for the testbench's cycle formula: the FETCH cycle that starts one, each
+    // WALK cycle whose request is not stalled (a stalled one counts as a stall, as any other), XLATE.
+    wire ptw_cycle = (fetch_walk && !irq_take) || (state == WALK && !(mem_valid && !mem_ready)) || state == XLATE;
+    // The testbench reads ptw_cycle; PMP compares whole words.
+    wire unused_ok = &{1'b0, ptw_cycle, pmp_addr[1:0]};
+
+    assign mem_valid = !reset && ((state == FETCH && !irq_take && !fetch_deny && !fetch_walk) || (state == MEM) ||
+                                  (state == WALK && !walk_deny));
     assign mem_fetch = mem_valid && (state == FETCH);
-    assign mem_addr = mem_fetch ? pc : alu_out;
+    assign mem_ptw = mem_valid && (state == WALK);
+    assign mem_addr = mem_fetch ? fetch_addr : mem_ptw ? pte_addr[31:0] : xlate_ok ? phys : alu_out;
     assign mem_we = mem_valid && (state == MEM) && is_store;
-    assign mem_strb = !mem_valid ? 4'b0000 : mem_fetch ? 4'b1111 : strb;
+    assign mem_strb = !mem_valid ? 4'b0000 : (mem_fetch || mem_ptw) ? 4'b1111 : strb;
     // Sub-word store data is replicated across the lanes so the strobe alone selects it.
     assign mem_wdata = (width == 2'd0) ? {4{b[7:0]}} : (width == 2'd1) ? {2{b[15:0]}} : b;
 
     // Trap entry: report it on the retirement port; vector through mtvec
     // unless the previous trap's handler has not retired yet, which halts
-    // the core with the CSRs of the first trap intact.
+    // the core with the CSRs of the first trap intact. Since issue #20 a trap
+    // from S or U mode whose cause medeleg (an exception) or mideleg (an
+    // interrupt) delegates enters S mode through stvec and the supervisor's CSRs.
     task take_trap;
         input interrupt;
         input [3:0] cause;
@@ -327,17 +447,29 @@ module rv32 #(
             trap_interrupt <= interrupt;
             trap_cause <= cause;
             trap_value <= value;
+            xlate_ok <= 1'b0;
             if (in_trap) begin
                 state <= HALT;
                 halted <= 1'b1;
+            end else if (!priv_m && (interrupt ? mideleg_value[{1'b0, cause}] : medeleg[cause])) begin
+                in_trap <= 1'b1;
+                sepc <= epc;
+                scause <= {interrupt, 27'd0, cause};
+                stval <= value;
+                mstatus_spie <= mstatus_sie;
+                mstatus_sie <= 1'b0;
+                mstatus_spp <= priv == PRIV_S;
+                priv <= PRIV_S;
+                pc <= stvec;
+                state <= FETCH;
             end else begin
                 in_trap <= 1'b1;
                 mepc <= epc;
                 mcause <= {interrupt, 27'd0, cause};
                 mstatus_mpie <= mstatus_mie;
                 mstatus_mie <= 1'b0;
-                mpp_m <= priv_m;
-                priv_m <= 1'b1;
+                mpp <= priv;
+                priv <= PRIV_M;
                 mtval <= value;
                 pc <= mtvec;
                 state <= FETCH;
@@ -363,9 +495,15 @@ module rv32 #(
             mstatus_mie <= 1'b0;
             mstatus_mpie <= 1'b0;
             mie_bits <= 3'd0;
-            priv_m <= 1'b1;
-            mpp_m <= 1'b1;
+            priv <= PRIV_M;
+            mpp <= PRIV_M;
             mcounteren <= 3'd0;
+            mstatus_sie <= 1'b0; mstatus_spie <= 1'b0; mstatus_spp <= 1'b0; mstatus_mprv <= 1'b0;
+            mstatus_sum <= 1'b0; mstatus_mxr <= 1'b0; mstatus_tvm <= 1'b0; mstatus_tw <= 1'b0; mstatus_tsr <= 1'b0;
+            medeleg <= 16'd0; mideleg <= 3'd0; mie_s <= 3'd0; mip_soft <= 3'd0; scounteren <= 3'd0;
+            stvec <= 32'd0; sscratch <= 32'd0; sepc <= 32'd0; scause <= 32'd0; stval <= 32'd0;
+            satp_mode <= 1'b0; satp_ppn <= 22'd0;
+            xlate_ok <= 1'b0; walk_level <= 1'b0; walk_kind <= WALK_FETCH; phys <= 32'd0; pte_addr <= 34'd0;
             for (entry = 0; entry < 8; entry = entry + 1) begin
                 pmpcfg[entry] <= 8'd0;
                 pmpaddr[entry] <= 32'd0;
@@ -400,11 +538,17 @@ module rv32 #(
                     retire_pc <= pc;
                     retire_insn <= 32'd0;
                     take_trap(1'b1, irq_code, 32'd0, pc);
+                end else if (fetch_walk) begin // Sv32: translate the pc first (issue #20)
+                    walk_kind <= WALK_FETCH;
+                    walk_level <= 1'b1;
+                    pte_addr <= walk_root + {22'd0, pc[31:22], 2'b00};
+                    state <= WALK;
                 end else if (fetch_deny) begin // PMP refuses the fetch before the bus sees it (O5)
                     retire_pc <= pc;
                     retire_insn <= 32'd0;
                     take_trap(1'b0, CAUSE_FETCH_FAULT, pc, pc);
                 end else if (mem_ready) begin
+                    xlate_ok <= 1'b0;
                     ir <= mem_rdata;
                     ir_pc <= pc;
                     retire_pc <= pc;
@@ -422,7 +566,7 @@ module rv32 #(
                     if ((illegal && !fp_valid) || priv_illegal)
                         take_trap(1'b0, CAUSE_ILLEGAL, ir, ir_pc);
                     else if (is_ecall)
-                        take_trap(1'b0, priv_m ? CAUSE_ECALL : CAUSE_ECALL_U, 32'd0, ir_pc);
+                        take_trap(1'b0, priv_m ? CAUSE_ECALL : priv == PRIV_S ? CAUSE_ECALL_S : CAUSE_ECALL_U, 32'd0, ir_pc);
                     else if (is_ebreak)
                         take_trap(1'b0, CAUSE_BREAKPOINT, ir_pc, ir_pc);
                     else
@@ -433,6 +577,12 @@ module rv32 #(
                     taken <= branch_taken;
                     if (access_misaligned)
                         take_trap(1'b0, is_load ? CAUSE_LOAD_MISALIGNED : CAUSE_STORE_MISALIGNED, alu_result, ir_pc);
+                    else if ((is_load || is_store) && translate_data) begin // Sv32: translate first (issue #20)
+                        walk_kind <= is_store ? WALK_STORE : WALK_LOAD;
+                        walk_level <= 1'b1;
+                        pte_addr <= walk_root + {22'd0, alu_result[31:22], 2'b00};
+                        state <= WALK;
+                    end
                     else if ((is_load || is_store) && !pmp_ok) // PMP, before the bus (O5)
                         take_trap(1'b0, is_load ? CAUSE_LOAD_FAULT : CAUSE_STORE_FAULT, alu_result, ir_pc);
                     else if (target_misaligned)
@@ -445,7 +595,7 @@ module rv32 #(
                     end
                     else if (md_start)
                         state <= MD_WAIT;
-                    else if (is_wfi && !step_ticks && (irq_ready == 3'd0))
+                    else if (is_wfi && !step_ticks && !irq_wake)
                         state <= WFI_WAIT;
                     else if (is_load || is_store)
                         state <= MEM;
@@ -463,7 +613,38 @@ module rv32 #(
                     end
                 end
                 // wfi waits for any enabled interrupt level, whatever mstatus.MIE says.
-                WFI_WAIT: if (irq_ready != 3'd0) state <= WRITEBACK;
+                WFI_WAIT: if (irq_wake) state <= WRITEBACK;
+                // Sv32 (issue #20): one page-table entry per visit, then FETCH with the translated
+                // pc, XLATE for a data address, or a trap. The trap reports the virtual address.
+                WALK: if (walk_deny) begin
+                    if (walk_kind == WALK_FETCH) begin retire_pc <= pc; retire_insn <= 32'd0; end
+                    take_trap(1'b0, walk_access_cause, walk_va, walk_epc);
+                end else if (mem_ready) begin
+                    if (walk_kind == WALK_FETCH && (mem_error || pte_page_fault)) begin
+                        retire_pc <= pc;
+                        retire_insn <= 32'd0;
+                    end
+                    if (mem_error)
+                        take_trap(1'b0, walk_access_cause, walk_va, walk_epc);
+                    else if (pte_page_fault)
+                        take_trap(1'b0, walk_page_cause, walk_va, walk_epc);
+                    else if (!pte_leaf) begin
+                        walk_level <= 1'b0;
+                        pte_addr <= {pte_ppn, 12'd0} + {22'd0, walk_va[21:12], 2'b00};
+                    end else if (leaf_addr[33:32] != 2'b00) begin
+                        if (walk_kind == WALK_FETCH) begin retire_pc <= pc; retire_insn <= 32'd0; end
+                        take_trap(1'b0, walk_access_cause, walk_va, walk_epc);
+                    end else begin
+                        phys <= leaf_addr[31:0];
+                        xlate_ok <= 1'b1;
+                        state <= walk_kind == WALK_FETCH ? FETCH : XLATE;
+                    end
+                end
+                // PMP on the translated data address, at the effective privilege.
+                XLATE: if (!pmp_ok)
+                    take_trap(1'b0, is_load ? CAUSE_LOAD_FAULT : CAUSE_STORE_FAULT, alu_out, ir_pc);
+                else
+                    state <= MEM;
                 MD_WAIT: if (md_valid) begin
                     alu_out <= md_result;
                     state <= WRITEBACK;
@@ -478,7 +659,8 @@ module rv32 #(
                 WRITEBACK: begin
                     // The register file samples rf_we/rd_value on this same edge;
                     // a CSR write lands here too, so the instruction's effects commit together.
-                    pc <= is_mret ? mepc : (is_jal || is_jalr || taken) ? alu_out : ir_pc + 32'd4;
+                    pc <= is_mret ? mepc : is_sret ? sepc : (is_jal || is_jalr || taken) ? alu_out : ir_pc + 32'd4;
+                    xlate_ok <= 1'b0;
                     retire_fd_we <= fp_write;
                     retire_fd <= rd;
                     retire_fd_value <= fp_value;
@@ -492,9 +674,39 @@ module rv32 #(
                             CSR_MCAUSE: mcause <= csr_new;
                             CSR_MTVAL: mtval <= csr_new;
                             CSR_MSTATUS: begin
+                                mstatus_sie <= csr_new[1];
                                 mstatus_mie <= csr_new[3];
+                                mstatus_spie <= csr_new[5];
                                 mstatus_mpie <= csr_new[7];
-                                mpp_m <= csr_new[12:11] == 2'b11; // WARL: machine or user
+                                mstatus_spp <= csr_new[8];
+                                mpp <= csr_new[12:11] == 2'b10 ? PRIV_U : csr_new[12:11]; // WARL: 3, 1 or 0
+                                mstatus_mprv <= csr_new[17];
+                                mstatus_sum <= csr_new[18];
+                                mstatus_mxr <= csr_new[19];
+                                mstatus_tvm <= csr_new[20];
+                                mstatus_tw <= csr_new[21];
+                                mstatus_tsr <= csr_new[22];
+                            end
+                            CSR_SSTATUS: begin
+                                mstatus_sie <= csr_new[1];
+                                mstatus_spie <= csr_new[5];
+                                mstatus_spp <= csr_new[8];
+                                mstatus_sum <= csr_new[18];
+                                mstatus_mxr <= csr_new[19];
+                            end
+                            CSR_MEDELEG: medeleg <= csr_new[15:0] & 16'hb3ff; // not 10, 11 or 14
+                            CSR_MIDELEG: mideleg <= csr_new_s;
+                            CSR_SIE: mie_s <= (mie_s & ~mideleg) | (csr_new_s & mideleg);
+                            CSR_SIP: if (mideleg[0]) mip_soft[0] <= csr_new[1]; // only SSIP, when delegated
+                            CSR_STVEC: stvec <= {csr_new[31:2], 2'b00};
+                            CSR_SCOUNTEREN: scounteren <= csr_new[2:0];
+                            CSR_SSCRATCH: sscratch <= csr_new;
+                            CSR_SEPC: sepc <= {csr_new[31:2], 2'b00};
+                            CSR_SCAUSE: scause <= csr_new;
+                            CSR_STVAL: stval <= csr_new;
+                            CSR_SATP: begin
+                                satp_mode <= csr_new[31];
+                                satp_ppn <= csr_new[21:0];
                             end
                             CSR_MCOUNTEREN: mcounteren <= csr_new[2:0];
                             CSR_PMPCFG0, CSR_PMPCFG1:
@@ -503,9 +715,13 @@ module rv32 #(
                                         // Bits 6:5 read 0; W without R is reserved and stored as neither.
                                         pmpcfg[{csr_addr[0], entry[1:0]}] <=
                                             (csr_new[8 * entry +: 8] & 8'h9f) & ~{6'd0, csr_new[8 * entry + 1] && !csr_new[8 * entry], 1'b0};
-                            CSR_MIE: mie_bits <= {csr_new[11], csr_new[7], csr_new[3]};
+                            CSR_MIE: begin
+                                mie_bits <= {csr_new[11], csr_new[7], csr_new[3]};
+                                mie_s <= csr_new_s;
+                            end
                             CSR_MSCRATCH: mscratch <= csr_new;
-                            // mip's bits are read-only: the write is legal and does nothing.
+                            // mip: MSIP, MTIP and MEIP are the devices'; SSIP, STIP and SEIP are software's.
+                            CSR_MIP: mip_soft <= csr_new_s;
                             default: // pmpaddr0-7, unless the entry or the TOR entry above it is locked
                                 if (csr_addr[11:3] == 9'h076 && !pmpcfg[csr_addr[2:0]][7] &&
                                     !(csr_addr[2:0] != 3'd7 && pmpcfg[csr_addr[2:0] + 3'd1][7] &&
@@ -516,8 +732,16 @@ module rv32 #(
                     if (is_mret) begin
                         mstatus_mie <= mstatus_mpie;
                         mstatus_mpie <= 1'b1;
-                        priv_m <= mpp_m;  // O5: the mode MPP names,
-                        mpp_m <= 1'b0;    // and MPP becomes the least privileged mode
+                        priv <= mpp;      // O5: the mode MPP names,
+                        mpp <= PRIV_U;    // and MPP becomes the least privileged mode;
+                        if (mpp != PRIV_M) mstatus_mprv <= 1'b0; // MPRV lasts only while machine mode does
+                    end
+                    if (is_sret) begin    // issue #20: the same from S mode's copies
+                        mstatus_sie <= mstatus_spie;
+                        mstatus_spie <= 1'b1;
+                        priv <= mstatus_spp ? PRIV_S : PRIV_U;
+                        mstatus_spp <= 1'b0;
+                        mstatus_mprv <= 1'b0;
                     end
                     in_trap <= 1'b0;
                     instret_count <= instret_count + 64'd1;
@@ -528,7 +752,7 @@ module rv32 #(
                     state <= FETCH;
                 end
                 HALT: begin end // hold until reset
-                // Encodings 10-15 are never entered; should the state register
+                // Encodings 12-15 are never entered; should the state register
                 // ever hold one, stop the way a double fault does rather than
                 // hang with `halted` low.
                 default: begin

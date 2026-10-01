@@ -100,7 +100,6 @@ _Static_assert(sizeof(struct program) == 52, "tools/rv32_ramdisk.py's <24s7I ent
 
 extern void trap_vector(void);
 extern void kernel_idle(void);
-extern void write_scounteren(uint32_t value);
 extern _Noreturn void kernel_resume(struct frame *f);
 extern const uint8_t ramdisk[], ramdisk_end[];
 
@@ -1041,7 +1040,7 @@ _Noreturn void kernel_main(uint32_t hart, uintptr_t tree)
     set_timer(mtime() + tick);
     csr_write(CSR_MIE, MIP_MEIP | MIP_MTIP);
     csr_write(CSR_MCOUNTEREN, 7u); /* O5: user mode may read cycle, time and instret */
-    write_scounteren(7u);          /* and on a hart with S-mode (QEMU's) that takes scounteren too */
+    csr_write(CSR_SCOUNTEREN, 7u); /* and, since the hart has S-mode (issue #20), scounteren too */
 
     idle_frame.x[2] = (uint32_t)(uintptr_t)&idle_stack[64];
     idle_frame.pc = (uint32_t)(uintptr_t)kernel_idle;

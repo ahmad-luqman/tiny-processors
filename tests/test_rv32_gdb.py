@@ -664,7 +664,8 @@ class GdbStubTest(unittest.TestCase):
         self.assertEqual(client.reg(REG_CSR0 + 3), 0x1F)
         self.assertEqual(client.ask(f"P{REG_CSR0 + 0x7C0:x}={reg_hex(0)}"), "E01", "no CSR 0x7c0")
         self.assertEqual(client.ask(f"P{REG_CSR0 + 0x300:x}={reg_hex(0xFFFFFFFF)}"), "OK")
-        self.assertEqual(client.reg(REG_CSR0 + 0x300), 0x80007888, "only MIE and MPIE are writable")
+        self.assertEqual(client.reg(REG_CSR0 + 0x300), 0x807E79AA,
+                         "only the S and M enables, SPP, MPRV, SUM, MXR, TVM, TW and TSR are writable")
         self.assertEqual(client.ask(f"P{REG_CSR0 + 0x300:x}={reg_hex(0)}"), "OK")
         self.assertEqual(client.ask(f"P5={reg_hex(1)[:6]}"), "E01", "short value")
         # G writes the whole block: keep everything but x7.

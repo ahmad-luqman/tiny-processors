@@ -38,10 +38,11 @@ FORBIDDEN_MNEMONIC = re.compile(r"\A(mul\w*|div\w*|rem\w*|csr\w*|fence\.i|c\.\w+
 PRIVILEGED_MNEMONIC = re.compile(r"\A(csr\w*|mret)\Z")
 TRAP_CSR = re.compile(r"\b(mtvec|mepc|mcause|mtval)\b")
 # What a system image may use in addition (Track 2): the interrupt CSRs, wfi and ecall (O1, O2), and
-# the protection CSRs, mcounteren and PMP (O5), and scounteren, which the kernel writes on a hart
-# with S-mode (QEMU's) and skips over, as the illegal instruction it is, on ours.
-SYSTEM_CSR = re.compile(r"\b(mstatus|mie|mip|mscratch|mcounteren|scounteren|pmpcfg[01]|pmpaddr[0-7])\b")
-SYSTEM_MNEMONIC = re.compile(r"\A(wfi|ecall)\Z")
+# the protection CSRs, mcounteren and PMP (O5); since issue #20 also S-mode and Sv32: delegation,
+# the supervisor's CSRs, satp, sret and sfence.vma.
+SYSTEM_CSR = re.compile(r"\b(mstatus|mie|mip|mscratch|mcounteren|scounteren|pmpcfg[01]|pmpaddr[0-7]|"
+                        r"medeleg|mideleg|sstatus|sie|stvec|sscratch|sepc|scause|stval|sip|satp)\b")
+SYSTEM_MNEMONIC = re.compile(r"\A(wfi|ecall|sret|sfence\.vma)\Z")
 UNIMP = 0xC0001073  # `unimp`: csrrw x0, cycle, x0, illegal everywhere since cycle is read-only
 # What an RV32IM image may use in addition (Track 0): exactly the eight M-extension instructions.
 M_MNEMONIC = re.compile(r"\A(mul|mulh|mulhsu|mulhu|div|divu|rem|remu)\Z")
@@ -333,7 +334,8 @@ def main():
     parser.add_argument("--allow-counters", action="store_true", help="admit reads of the Zicntr counters (cycle, time, instret)")
     parser.add_argument("--allow-system", action="store_true",
                         help="implies --allow-privileged: also the interrupt CSRs (mstatus, mie, mip, mscratch), "
-                             "mcounteren, scounteren, pmpcfg0-1, pmpaddr0-7, wfi and ecall (Track 2)")
+                             "mcounteren, scounteren, pmpcfg0-1, pmpaddr0-7, wfi and ecall (Track 2); since issue #20 also "
+                             "medeleg, mideleg, the supervisor CSRs, satp, sret and sfence.vma")
     parser.add_argument("--allow-user", action="store_true",
                         help="implies --allow-counters: also ecall and unimp, what a user-mode program runs (Track 2, O5)")
     parser.add_argument("--require-m", action="store_true",

@@ -126,22 +126,6 @@ kernel_trapped:
     call kernel_fault            /* reports the trap and halts; never returns */
 1:  j 1b
 
-/* write_scounteren(a0): scounteren = a0 where the hart has S-mode (QEMU's does, and there a
- * user-mode counter read needs its bit in scounteren as well as mcounteren); on ours the CSR does
- * not exist and the write is an illegal instruction, so mtvec points at the next instruction
- * meanwhile and the trap just skips it. Boot time only: interrupts are off. */
-    .balign 4
-    .globl write_scounteren
-    .type write_scounteren, @function
-write_scounteren:
-    la t0, 1f
-    csrrw t0, mtvec, t0
-    csrw scounteren, a0
-    .balign 4
-1:  csrw mtvec, t0
-    ret
-    .size write_scounteren, . - write_scounteren
-
 /* The idle context: waits for an interrupt with interrupts on. */
     .balign 4
     .globl kernel_idle

@@ -110,11 +110,13 @@ module rv32_soc #(
     wire rom_valid, rom_ready, rom_error;
     wire [31:0] rom_rdata;
 
+    // A page-table read (issue #20) is answered by RAM alone, as a fetch is: the bus sees it as one.
+    wire mem_ptw;
     rv32 #(.BOOT_A1(BOOTROM_BASE)) core (
         .clk(clk), .reset(reset),
         .mem_valid(mem_valid), .mem_addr(mem_addr), .mem_we(mem_we), .mem_strb(mem_strb),
         .mem_wdata(mem_wdata), .mem_ready(mem_ready), .mem_rdata(mem_rdata), .mem_error(mem_error),
-        .mem_fetch(mem_fetch),
+        .mem_fetch(mem_fetch), .mem_ptw(mem_ptw),
         .retire(retire), .retire_pc(retire_pc), .retire_insn(retire_insn), .retire_rd_we(retire_rd_we),
         .retire_rd(retire_rd), .retire_rd_value(retire_rd_value), .trap(trap), .trap_cause(trap_cause),
         .retire_fd_we(retire_fd_we), .retire_fd(retire_fd), .retire_fd_value(retire_fd_value),
@@ -126,7 +128,7 @@ module rv32_soc #(
     );
 
     rv32_bus #(.RAM_WORDS(RAM_WORDS), .FB_WORDS(FB_WORDS)) bus (
-        .mem_valid(mem_valid), .mem_we(mem_we), .mem_fetch(mem_fetch), .mem_hold(mem_hold),
+        .mem_valid(mem_valid), .mem_we(mem_we), .mem_fetch(mem_fetch || mem_ptw), .mem_hold(mem_hold),
         .mem_addr(mem_addr), .mem_ready(mem_ready), .mem_error(mem_error), .mem_rdata(mem_rdata),
         .ram_valid(ram_valid), .ram_ready(ram_ready), .ram_error(ram_error), .ram_rdata(ram_rdata),
         .console_valid(con_valid), .console_ready(con_ready), .console_error(con_error), .console_rdata(con_rdata),

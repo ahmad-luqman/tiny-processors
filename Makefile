@@ -1201,6 +1201,44 @@ run-rv32-irq-rtl-verilator: check-rv32-irqcheck-image $(RV32EMU) $(RV32_TB_VERIL
 run-rv32-irq-rtl-steps: check-rv32-irqcheck-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_IRQ_ARGS) --ticks steps --allow-traps --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --seed 5 --out build/rv32/irq-steps
 
+# Issue #20: S-mode and Sv32. mmucheck runs on QEMU (with Svade, so a clear A or D bit faults as
+# ours does), the emulator and the RTL; tests/test_rv32_mmu.py is the directed half.
+.PHONY: check-rv32-mmucheck-image run-rv32-mmu-qemu run-rv32-mmu-emu run-rv32-mmu-rtl run-rv32-mmu-rtl-verilator run-rv32-mmu-rtl-steps test-rv32-mmu test-rv32-mmu-icarus
+RV32_MMUCHECK_OBJS := build/rv32/mmucheck.o $(RV32_COMMON_OBJS)
+RV32_MMUCHECK_HEX := 7530cb0f
+RV32_MMU_QEMU_CPU ?= rv32,svade=on,svadu=off
+RV32_MMU_ARGS := --image build/rv32/mmucheck.bin --expect-last-line "PASS $(RV32_MMUCHECK_HEX)" --expect-console-file programs/rv32/mmucheck.expected
+
+build/rv32/mmucheck.o: programs/rv32/csr.h
+
+build/rv32/mmucheck.elf: $(RV32_MMUCHECK_OBJS) programs/rv32/link.ld
+	$(RV32_CC) $(RV32_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(RV32_MMUCHECK_OBJS)
+
+check-rv32-mmucheck-image: build/rv32/mmucheck.elf build/rv32/mmucheck.lst build/rv32/mmucheck.bin
+	$(PYTHON) tools/rv32_image.py build/rv32/mmucheck.elf --listing build/rv32/mmucheck.lst --bin build/rv32/mmucheck.bin --hex build/rv32/mmucheck.hex --allow-system
+
+run-rv32-mmu-qemu: check-rv32-mmucheck-image
+	$(PYTHON) tools/rv32_run_qemu.py build/rv32/mmucheck.elf --qemu $(QEMU_RV32) --cpu $(RV32_MMU_QEMU_CPU) --last-line --timeout 20 --expect-hex $(RV32_MMUCHECK_HEX) --transcript build/rv32/mmucheck.qemu.transcript --qemu-log build/rv32/mmucheck.qemu.log
+	diff -u programs/rv32/mmucheck.expected build/rv32/mmucheck.qemu.transcript
+
+run-rv32-mmu-emu: check-rv32-mmucheck-image $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_MMU_ARGS) --compare results --backend emulator --emulator $(RV32EMU) --out build/rv32/mmu-emu
+
+run-rv32-mmu-rtl: check-rv32-mmucheck-image $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_MMU_ARGS) --compare results --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/rv32/mmu-icarus
+
+run-rv32-mmu-rtl-verilator: check-rv32-mmucheck-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_MMU_ARGS) --compare results --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/mmu-verilator
+
+run-rv32-mmu-rtl-steps: check-rv32-mmucheck-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_MMU_ARGS) --ticks steps --allow-traps --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --seed 5 --out build/rv32/mmu-steps
+
+test-rv32-mmu: $(RV32EMU) $(RV32_TB_VERILATOR)
+	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_mmu.py' -v
+test-rv32-mmu-icarus: $(RV32EMU) $(RV32_TB_VVP)
+	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VVP) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_mmu.py' -v
+test-rv32: run-rv32-mmu-qemu run-rv32-mmu-emu run-rv32-mmu-rtl run-rv32-mmu-rtl-verilator run-rv32-mmu-rtl-steps test-rv32-mmu test-rv32-mmu-icarus
+
 test-rv32-irq: $(RV32EMU) $(RV32_TB_VERILATOR)
 	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_irq.py' -v
 

@@ -572,9 +572,10 @@ kernel rewrites the entries only when a different process is about to run.
 It runs in machine mode with no locked entry, so PMP never stops it: system
 calls still copy to and from the caller's memory after `user_range()` has
 checked the pointer. `mcounteren` is 7, so programs may read the counters; on
-a hart with S-mode (QEMU's) a user counter read also needs `scounteren`, so
-the kernel writes that too, with `mtvec` pointed past the write for the
-moment, since on our machine the CSR does not exist and the write traps.
+a hart with S-mode a user counter read also needs `scounteren`, so the kernel
+writes that too. Until issue #20 gave our hart S-mode only QEMU's had it, and
+the kernel pointed `mtvec` past the write for the moment, since on ours the
+CSR did not exist and the write trapped.
 
 Entries 4 and 5 opened a hole PMP cannot close. G1 and G2 read and write RAM
 by DMA wherever their registers point (G2's depth buffer, G1's blit source),
@@ -714,22 +715,25 @@ Measured after the track's review, from a clean `build/rv32/os`:
 most of their run time; shift-and-subtract division (#21) shortened every
 session that prints numbers. QEMU's OS sessions run on instruction-counted
 time (#21), and the DMA window keeps the engines inside the running process's
-slots (the menu at 15–17, `dmaprobe` at 5). With all three (Apple Silicon
-macOS, QEMU 11.1.2, llvm@22):
+slots (the menu at 15–17, `dmaprobe` at 5). The hart has S-mode since the
+Sv32 change, so the kernel writes `scounteren` directly instead of trapping
+on it. That changes the kernel's code and where device time lands, so every
+count below moves slightly (some up, some down). With all of these (Apple
+Silicon macOS, QEMU 11.1.2, llvm@22):
 
 - **Jobs session:** `PASS 408a6738` on QEMU ten runs in a row, "preempted yes"
-  for both jobs each time; the emulator (1,875,690 steps, 151 interrupts),
-  Verilator with a stall per request (12,832,708 cycles, 40 presents,
+  for both jobs each time; the emulator (1,875,698 steps, 151 interrupts),
+  Verilator with a stall per request (12,832,750 cycles, 40 presents,
   identical disks) and step-tick mode with seeded stalls (traces identical,
-  1,875,690 lines).
-- **Console session:** `PASS dc3c1f20` on QEMU, the emulator (1,532,083
-  steps), Verilator with a stall per request (9,305,012 cycles) and Icarus
-  (6,988,036 cycles), results-identical over 111 console lines with identical
+  1,875,698 lines).
+- **Console session:** `PASS dc3c1f20` on QEMU, the emulator (1,532,547
+  steps), Verilator with a stall per request (9,305,790 cycles) and Icarus
+  (6,988,645 cycles), results-identical over 111 console lines with identical
   disks.
 - **Menu session** (`dmaprobe`, `dmaprobe window`, then S1's menu):
-  `PASS 53e2ea5f` and S1's 185 checkpoints on the emulator (21,313,555 steps)
-  and on Verilator with seeded waits (122,346,280 cycles).
-- **Pong** stays trace-identical in step-tick mode (1,035,534 lines).
+  `PASS 53e2ea5f` and S1's 185 checkpoints on the emulator (21,313,547 steps)
+  and on Verilator with seeded waits (122,348,610 cycles).
+- **Pong** stays trace-identical in step-tick mode (1,035,530 lines).
 - **Cost** (Yosys 0.69 generic cells): the window is 103 cells, and its test
   adds 307 to G1 (52,097 to 52,404).
 

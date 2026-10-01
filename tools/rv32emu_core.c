@@ -33,7 +33,11 @@ enum cause {
     CAUSE_STORE_MISALIGNED = 6,
     CAUSE_STORE_FAULT = 7,
     CAUSE_ECALL_U = 8,
+    CAUSE_ECALL_S = 9,
     CAUSE_ECALL_M = 11,
+    CAUSE_FETCH_PAGE_FAULT = 12, /* Sv32 (issue #20): a page fault of each kind */
+    CAUSE_LOAD_PAGE_FAULT = 13,
+    CAUSE_STORE_PAGE_FAULT = 15,
 };
 
 /* The only CSRs that exist; every other number is an illegal instruction. The six Zicntr
@@ -42,15 +46,47 @@ enum cause {
 enum csr { CSR_FFLAGS = 0x001, CSR_FRM = 0x002, CSR_FCSR = 0x003, CSR_MSTATUS = 0x300, CSR_MIE = 0x304, CSR_MTVEC = 0x305,
            CSR_MCOUNTEREN = 0x306, CSR_PMPCFG0 = 0x3a0, CSR_PMPCFG1 = 0x3a1, CSR_PMPADDR0 = 0x3b0, CSR_PMPADDR7 = 0x3b7,
            CSR_MSCRATCH = 0x340, CSR_MEPC = 0x341, CSR_MCAUSE = 0x342, CSR_MTVAL = 0x343, CSR_MIP = 0x344,
-           CSR_CYCLE = 0xc00, CSR_TIME = 0xc01, CSR_INSTRET = 0xc02, CSR_CYCLEH = 0xc80, CSR_TIMEH = 0xc81, CSR_INSTRETH = 0xc82 };
+           CSR_CYCLE = 0xc00, CSR_TIME = 0xc01, CSR_INSTRET = 0xc02, CSR_CYCLEH = 0xc80, CSR_TIMEH = 0xc81, CSR_INSTRETH = 0xc82,
+           /* S-mode (issue #20) */
+           CSR_MEDELEG = 0x302, CSR_MIDELEG = 0x303,
+           CSR_SSTATUS = 0x100, CSR_SIE = 0x104, CSR_STVEC = 0x105, CSR_SCOUNTEREN = 0x106, CSR_SSCRATCH = 0x140,
+           CSR_SEPC = 0x141, CSR_SCAUSE = 0x142, CSR_STVAL = 0x143, CSR_SIP = 0x144, CSR_SATP = 0x180 };
 /* mstatus and the interrupt bits (O1, docs/rv32.md "Behavior fixed in Track 2"). MPP is 3 (machine) or
- * 0 (user) since O5, kept in machine.mpp; FS reads 3 and SD 1 because floating state is always on. */
+ * 0 (user) since O5, and 1 (supervisor) too since issue #20, kept in machine.mpp; FS reads 3 and SD 1 because floating state is always on. */
+#define MSTATUS_SIE 0x2u
 #define MSTATUS_MIE 0x8u
+#define MSTATUS_SPIE 0x20u
 #define MSTATUS_MPIE 0x80u
+#define MSTATUS_SPP 0x100u
+#define MSTATUS_MPRV 0x20000u
+#define MSTATUS_SUM 0x40000u
+#define MSTATUS_MXR 0x80000u
+#define MSTATUS_TVM 0x100000u
+#define MSTATUS_TW 0x200000u
+#define MSTATUS_TSR 0x400000u
+/* The bits machine.mstatus holds; MPP is machine.mpp, FS and SD are constant. */
+#define MSTATUS_WRITABLE (MSTATUS_SIE | MSTATUS_MIE | MSTATUS_SPIE | MSTATUS_MPIE | MSTATUS_SPP | MSTATUS_MPRV | \
+                          MSTATUS_SUM | MSTATUS_MXR | MSTATUS_TVM | MSTATUS_TW | MSTATUS_TSR)
 #define MSTATUS_CONSTANT 0x80006000u /* SD, FS = 3 */
 #define MSTATUS_MPP 0x1800u
+/* sstatus: the supervisor's view of mstatus. */
+#define SSTATUS_MASK (MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_SUM | MSTATUS_MXR | MSTATUS_CONSTANT)
 #define PRIV_U 0u
+#define PRIV_S 1u
 #define PRIV_M 3u
+/* medeleg: the exceptions that may be delegated to S-mode (not 10, 11 or 14, which do not exist
+ * or cannot happen below M). */
+#define MEDELEG_MASK 0xb3ffu
+/* Sv32 (issue #20): satp and the page-table entry bits. */
+#define SATP_MODE 0x80000000u
+#define SATP_PPN 0x003fffffu
+#define PTE_V 0x01u
+#define PTE_R 0x02u
+#define PTE_W 0x04u
+#define PTE_X 0x08u
+#define PTE_U 0x10u
+#define PTE_A 0x40u
+#define PTE_D 0x80u
 /* PMP (O5): a configuration byte per entry. */
 #define PMP_R 0x01u
 #define PMP_W 0x02u
@@ -61,12 +97,17 @@ enum csr { CSR_FFLAGS = 0x001, CSR_FRM = 0x002, CSR_FCSR = 0x003, CSR_MSTATUS = 
 #define PMP_NAPOT 0x18u
 #define PMP_L 0x80u
 #define PMP_ENTRIES 8u
+#define IRQ_SSI 1u
 #define IRQ_MSI 3u
+#define IRQ_STI 5u
 #define IRQ_MTI 7u
+#define IRQ_SEI 9u
 #define IRQ_MEI 11u
-#define MIE_MASK ((1u << IRQ_MSI) | (1u << IRQ_MTI) | (1u << IRQ_MEI))
+/* The supervisor interrupts have no device behind them: machine mode raises them in mip. */
+#define S_INTERRUPTS ((1u << IRQ_SSI) | (1u << IRQ_STI) | (1u << IRQ_SEI))
+#define MIE_MASK ((1u << IRQ_MSI) | (1u << IRQ_MTI) | (1u << IRQ_MEI) | S_INTERRUPTS)
 #define INTERRUPT 0x80000000u
-typedef enum { ACC_OK, ACC_FAULT, ACC_MISALIGNED } mem_access; /* not `access`: unistd.h owns that name */
+typedef enum { ACC_OK, ACC_FAULT, ACC_MISALIGNED, ACC_PAGE_FAULT } mem_access; /* not `access`: unistd.h owns that name */
 
 /* Every window of the memory map is a region with a load and a store
  * handler, or NULL when that direction is undefined. A handler receives the
@@ -552,7 +593,7 @@ static mem_access virtio_store(machine *m, uint32_t offset, int width, uint32_t 
 static uint32_t mip_now(const machine *m)
 {
     return (m->msip ? 1u << IRQ_MSI : 0u) | (mtime_now(m) >= m->mtimecmp ? 1u << IRQ_MTI : 0u) |
-           (plic_best(m) ? 1u << IRQ_MEI : 0u);
+           (plic_best(m) ? 1u << IRQ_MEI : 0u) | m->mip_soft;
 }
 
 /* Input (docs/rv32.md): the host queues an event when its frame is reached,
@@ -804,9 +845,9 @@ static uint32_t ram_read(const machine *m, uint32_t addr, int width)
 
 /* PMP (O5; docs/rv32.md "Behavior fixed in Track 2"): the lowest-numbered entry that matches the
  * address decides. Regions are whole words (granularity 4), so an aligned access matches whole or not
- * at all. User mode needs a match with the permission; machine mode is held only to locked
- * entries and may go where nothing matches. */
-static bool pmp_allows(const machine *m, uint32_t addr, uint32_t need)
+ * at all. Below machine mode (`priv`, which MPRV may lower) an access needs a match with the
+ * permission; machine mode is held only to locked entries and may go where nothing matches. */
+static bool pmp_allows(uint32_t priv, const machine *m, uint32_t addr, uint32_t need)
 {
     uint32_t word = addr >> 2;
     for (uint32_t i = 0; i < PMP_ENTRIES; i++) {
@@ -819,19 +860,88 @@ static bool pmp_allows(const machine *m, uint32_t addr, uint32_t need)
         default: continue; /* OFF */
         }
         if (match) {
-            return (m->priv == PRIV_M && !(cfg & PMP_L)) || (cfg & need) == need;
+            return (priv == PRIV_M && !(cfg & PMP_L)) || (cfg & need) == need;
         }
     }
-    return m->priv == PRIV_M;
+    return priv == PRIV_M;
 }
 
-/* Data load. Misalignment is checked before the address is decoded, and PMP before the bus. */
-static mem_access load(machine *m, uint32_t addr, int width, uint32_t *value)
+/* Sv32 (issue #20, docs/rv32.md "Sv32"). The privilege a data access runs at: MPRV in machine
+ * mode makes loads and stores run at MPP's, for address translation and PMP alike. */
+static uint32_t data_priv(const machine *m)
 {
-    if (addr % (uint32_t)width) {
+    return m->priv == PRIV_M && (m->mstatus & MSTATUS_MPRV) ? m->mpp : m->priv;
+}
+
+enum walk_kind { WALK_FETCH, WALK_LOAD, WALK_STORE };
+
+/* Translate `va` for an access of `kind` at privilege `priv`: ACC_OK with the physical address,
+ * ACC_PAGE_FAULT, or ACC_FAULT (an access fault) when a page-table read leaves RAM or PMP refuses
+ * it, or the translated address is at or past 2^32. The caller checks PMP on the result. Without translation (satp.MODE 0, or machine
+ * mode) the address is its own. There is no TLB: every access walks, which is what an
+ * implementation with one must look like to a program that follows each page-table change
+ * with sfence.vma. A and D are never set by hardware; a clear one is a page fault (Svade). */
+static mem_access translate(const machine *m, uint32_t va, enum walk_kind kind, uint32_t priv, uint32_t *pa)
+{
+    if (!(m->satp & SATP_MODE) || priv == PRIV_M) {
+        *pa = va;
+        return ACC_OK;
+    }
+    uint64_t table = (uint64_t)(m->satp & SATP_PPN) << 12;
+    for (int level = 1; level >= 0; level--) {
+        uint64_t at = table + 4u * ((va >> (level ? 22 : 12)) & 0x3ffu);
+        /* The walker reads only RAM, and PMP checks it as a supervisor read. */
+        if (at >> 32 || !in_ram((uint32_t)at, 4) || !pmp_allows(PRIV_S, m, (uint32_t)at, PMP_R)) {
+            return ACC_FAULT;
+        }
+        uint32_t pte = ram_read(m, (uint32_t)at, 4);
+        if (!(pte & PTE_V) || (!(pte & PTE_R) && (pte & PTE_W))) {
+            return ACC_PAGE_FAULT;
+        }
+        if (!(pte & (PTE_R | PTE_X))) { /* a pointer to the next level: D, A and U are reserved there */
+            if (level == 0 || (pte & (PTE_D | PTE_A | PTE_U))) {
+                return ACC_PAGE_FAULT;
+            }
+            table = (uint64_t)(pte >> 10) << 12;
+            continue;
+        }
+        uint32_t ppn = pte >> 10;
+        if (level == 1 && (ppn & 0x3ffu)) {
+            return ACC_PAGE_FAULT; /* a misaligned megapage */
+        }
+        bool user = pte & PTE_U;
+        if (priv == PRIV_U ? !user : user && (kind == WALK_FETCH || !(m->mstatus & MSTATUS_SUM))) {
+            return ACC_PAGE_FAULT;
+        }
+        bool allowed = kind == WALK_FETCH ? pte & PTE_X
+                     : kind == WALK_STORE ? pte & PTE_W
+                     : (pte & PTE_R) || ((m->mstatus & MSTATUS_MXR) && (pte & PTE_X));
+        if (!allowed || !(pte & PTE_A) || (kind == WALK_STORE && !(pte & PTE_D))) {
+            return ACC_PAGE_FAULT;
+        }
+        uint64_t address = level ? (uint64_t)(ppn >> 10) << 22 | (va & 0x3fffffu) : (uint64_t)ppn << 12 | (va & 0xfffu);
+        if (address >> 32) {
+            return ACC_FAULT; /* past the 32-bit physical space the machine has */
+        }
+        *pa = (uint32_t)address;
+        return ACC_OK;
+    }
+    return ACC_PAGE_FAULT; /* not reached */
+}
+
+/* Data load. Misalignment is checked on the virtual address, then it is translated, and PMP
+ * checks the physical address before the bus. */
+static mem_access load(machine *m, uint32_t va, int width, uint32_t *value)
+{
+    uint32_t priv = data_priv(m), addr;
+    if (va % (uint32_t)width) {
         return ACC_MISALIGNED;
     }
-    if (!pmp_allows(m, addr, PMP_R)) {
+    mem_access translated = translate(m, va, WALK_LOAD, priv, &addr);
+    if (translated != ACC_OK) {
+        return translated;
+    }
+    if (!pmp_allows(priv, m, addr, PMP_R)) {
         return ACC_FAULT;
     }
     const region *r = find_region(addr, width);
@@ -841,12 +951,17 @@ static mem_access load(machine *m, uint32_t addr, int width, uint32_t *value)
     return r->load(m, addr - r->base, width, value);
 }
 
-static mem_access store(machine *m, uint32_t addr, int width, uint32_t value)
+static mem_access store(machine *m, uint32_t va, int width, uint32_t value)
 {
-    if (addr % (uint32_t)width) {
+    uint32_t priv = data_priv(m), addr;
+    if (va % (uint32_t)width) {
         return ACC_MISALIGNED;
     }
-    if (!pmp_allows(m, addr, PMP_W)) {
+    mem_access translated = translate(m, va, WALK_STORE, priv, &addr);
+    if (translated != ACC_OK) {
+        return translated;
+    }
+    if (!pmp_allows(priv, m, addr, PMP_W)) {
         return ACC_FAULT;
     }
     const region *r = find_region(addr, width);
@@ -875,13 +990,27 @@ static void trace_effects(const machine *m)
 }
 
 /* Trap entry, shared by exceptions and interrupts: mepc is the instruction not executed, MPIE takes
- * MIE and MIE clears, MPP takes the privilege mode and the machine enters machine mode (O5). */
+ * MIE and MIE clears, MPP takes the privilege mode and the machine enters machine mode (O5). Since
+ * issue #20 a trap from S or U mode whose cause medeleg (an exception) or mideleg (an interrupt)
+ * delegates goes to S mode instead, through the supervisor's copies: sepc, scause, stval, SPIE and
+ * SIE, SPP, stvec. */
 static void enter_handler(machine *m, uint32_t cause, uint32_t tval)
 {
+    uint32_t delegated = (cause & INTERRUPT) ? m->mideleg : m->medeleg;
+    if (m->priv != PRIV_M && ((delegated >> (cause & 31u)) & 1u)) {
+        m->sepc = m->pc;
+        m->scause = cause;
+        m->stval = tval;
+        m->mstatus = (m->mstatus & ~(MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP)) |
+                     ((m->mstatus & MSTATUS_SIE) ? MSTATUS_SPIE : 0u) | (m->priv == PRIV_S ? MSTATUS_SPP : 0u);
+        m->priv = PRIV_S;
+        m->pc = m->stvec;
+        return;
+    }
     m->mepc = m->pc;
     m->mcause = cause;
     m->mtval = tval;
-    m->mstatus = (m->mstatus & MSTATUS_MIE) ? MSTATUS_MPIE : 0u;
+    m->mstatus = (m->mstatus & ~(MSTATUS_MIE | MSTATUS_MPIE)) | ((m->mstatus & MSTATUS_MIE) ? MSTATUS_MPIE : 0u);
     m->mpp = m->priv;
     m->priv = PRIV_M;
     m->pc = m->mtvec;
@@ -928,7 +1057,7 @@ static void take_interrupt(machine *m, uint32_t code)
     if (m->trace) {
         fprintf(m->trace, "%" PRIu64 " %08" PRIx32 " 00000000 interrupt %" PRIu32 "\n", m->steps, m->pc, code);
     }
-    if (m->in_trap) { /* unreachable while trap entry clears MIE; kept as the double-fault rule */
+    if (m->in_trap) { /* unreachable: an interrupt waits for the handler's first instruction */
         m->halt = HALT_DOUBLE_FAULT;
         m->second_cause = INTERRUPT | code;
         m->second_tval = 0;
@@ -945,7 +1074,19 @@ static bool csr_read(const machine *m, uint32_t number, uint32_t *value)
     case CSR_FFLAGS: *value = m->fcsr & 31u; return true;
     case CSR_FRM: *value = m->fcsr >> 5; return true;
     case CSR_FCSR: *value = m->fcsr; return true;
-    case CSR_MSTATUS: *value = m->mstatus | MSTATUS_CONSTANT | (m->mpp == PRIV_M ? MSTATUS_MPP : 0u); return true;
+    case CSR_MSTATUS: *value = m->mstatus | MSTATUS_CONSTANT | (uint32_t)m->mpp << 11; return true;
+    case CSR_SSTATUS: *value = (m->mstatus | MSTATUS_CONSTANT) & SSTATUS_MASK; return true;
+    case CSR_MEDELEG: *value = m->medeleg; return true;
+    case CSR_MIDELEG: *value = m->mideleg; return true;
+    case CSR_SIE: *value = m->mie & m->mideleg; return true;
+    case CSR_SIP: *value = mip_now(m) & m->mideleg; return true;
+    case CSR_STVEC: *value = m->stvec; return true;
+    case CSR_SCOUNTEREN: *value = m->scounteren; return true;
+    case CSR_SSCRATCH: *value = m->sscratch; return true;
+    case CSR_SEPC: *value = m->sepc; return true;
+    case CSR_SCAUSE: *value = m->scause; return true;
+    case CSR_STVAL: *value = m->stval; return true;
+    case CSR_SATP: *value = m->satp; return true;
     case CSR_MCOUNTEREN: *value = m->mcounteren; return true;
     case CSR_PMPCFG0: case CSR_PMPCFG1: {
         const uint8_t *c = m->pmpcfg + 4 * (number - CSR_PMPCFG0);
@@ -990,10 +1131,30 @@ static void csr_write(machine *m, uint32_t number, uint32_t value)
     case CSR_FFLAGS: m->fcsr = (m->fcsr & 0xe0u) | (value & 31u); m->wr_fcsr = true; break;
     case CSR_FRM: m->fcsr = (m->fcsr & 31u) | ((value & 7u) << 5); m->wr_fcsr = true; break;
     case CSR_FCSR: m->fcsr = value & 255u; m->wr_fcsr = true; break;
-    case CSR_MSTATUS:
-        m->mstatus = value & (MSTATUS_MIE | MSTATUS_MPIE);
-        m->mpp = (value & MSTATUS_MPP) == MSTATUS_MPP ? PRIV_M : PRIV_U; /* WARL: 3 or 0 */
+    case CSR_MSTATUS: {
+        m->mstatus = value & MSTATUS_WRITABLE;
+        uint32_t mpp = (value & MSTATUS_MPP) >> 11;
+        m->mpp = mpp == 2u ? PRIV_U : (uint8_t)mpp; /* WARL: 3, 1 or 0; 2 (reserved) stores 0 */
         break;
+    }
+    case CSR_SSTATUS:
+        m->mstatus = (m->mstatus & ~SSTATUS_MASK) | (value & SSTATUS_MASK & MSTATUS_WRITABLE);
+        break;
+    case CSR_MEDELEG: m->medeleg = value & MEDELEG_MASK; break;
+    case CSR_MIDELEG: m->mideleg = value & S_INTERRUPTS; break;
+    case CSR_SIE: m->mie = (m->mie & ~m->mideleg) | (value & m->mideleg); break;
+    case CSR_SIP: { /* only SSIP is the supervisor's to write, and only when it is delegated */
+        uint32_t ssip = m->mideleg & (1u << IRQ_SSI);
+        m->mip_soft = (m->mip_soft & ~ssip) | (value & ssip);
+        break;
+    }
+    case CSR_STVEC: m->stvec = value & ~3u; break;
+    case CSR_SCOUNTEREN: m->scounteren = value & 7u; break;
+    case CSR_SSCRATCH: m->sscratch = value; break;
+    case CSR_SEPC: m->sepc = value & ~3u; break;
+    case CSR_SCAUSE: m->scause = value; break;
+    case CSR_STVAL: m->stval = value; break;
+    case CSR_SATP: m->satp = value & (SATP_MODE | SATP_PPN); break; /* ASID is 0 bits wide */
     case CSR_MCOUNTEREN: m->mcounteren = value & 7u; break;
     case CSR_PMPCFG0: case CSR_PMPCFG1:
         for (uint32_t k = 0; k < 4; k++) {
@@ -1008,7 +1169,7 @@ static void csr_write(machine *m, uint32_t number, uint32_t value)
         }
         break;
     case CSR_MIE: m->mie = value & MIE_MASK; break;
-    case CSR_MIP: break; /* MSIP, MTIP and MEIP are read-only: the write is legal and does nothing */
+    case CSR_MIP: m->mip_soft = value & S_INTERRUPTS; break; /* MSIP, MTIP and MEIP are the devices' */
     case CSR_MSCRATCH: m->mscratch = value; break;
     case CSR_MTVEC: m->mtvec = value & ~3u; break; /* direct mode only (WARL) */
     case CSR_MEPC: m->mepc = value & ~3u; break;   /* IALIGN is 32 */
@@ -1027,18 +1188,30 @@ static void csr_write(machine *m, uint32_t number, uint32_t value)
     }
 }
 
-/* User mode (O5) may use the floating CSRs and, as mcounteren allows, the counters; every
- * machine CSR is an illegal instruction there. */
+/* A CSR needs the privilege its number's bits 9:8 name (O5, issue #20): user mode the floating CSRs,
+ * supervisor mode also the S CSRs. The counters need their bit in mcounteren below machine mode
+ * and in scounteren too in user mode; satp is the machine's alone while mstatus.TVM is set. */
+/* sret, wfi and sfence.vma (issue #20): legal in machine mode, and in supervisor mode unless
+ * mstatus's `trap_bit` (TSR, TW or TVM) says to trap them; never in user mode. */
+static bool supervisor_allows(const machine *m, uint32_t trap_bit)
+{
+    return m->priv == PRIV_M || (m->priv == PRIV_S && !(m->mstatus & trap_bit));
+}
+
 static bool csr_allowed(const machine *m, uint32_t number)
 {
     if (m->priv == PRIV_M) {
         return true;
     }
-    if ((number >> 8) & 3u) {
+    if (((number >> 8) & 3u) > m->priv) {
         return false;
     }
     if (number >= CSR_CYCLE && number <= CSR_INSTRETH) {
-        return (m->mcounteren >> (number & 3u)) & 1u;
+        uint32_t bit = 1u << (number & 3u);
+        return (m->mcounteren & bit) && (m->priv == PRIV_S || (m->scounteren & bit));
+    }
+    if (number == CSR_SATP && (m->mstatus & MSTATUS_TVM)) {
+        return false;
     }
     return true;
 }
@@ -1102,23 +1275,44 @@ static void step(machine *m)
     m->wr_reg = m->wr_freg = -1;
     m->wr_fcsr = false;
     m->mem_read = m->mem_write = false;
-    /* An enabled, pending interrupt is taken before the instruction (O1): MEI, then MSI, then MTI. */
-    /* In user mode interrupts are always enabled (O5). */
+    /* An enabled, pending interrupt is taken before the instruction (O1). Those bound for machine
+     * mode come before those mideleg sends to supervisor mode (issue #20), and within one mode the
+     * order is MEI, MSI, MTI, SEI, SSI, STI. One bound for machine mode is enabled below it
+     * whatever MIE says (O5); a delegated one is enabled below supervisor mode, or in it with SIE,
+     * and never in machine mode. None is taken before a handler's first instruction retires, so
+     * an interrupt cannot make a double fault of a trap into S mode. */
     plic_sample(m);
-    uint32_t pending = ((m->mstatus & MSTATUS_MIE) || m->priv == PRIV_U) && m->mie ? mip_now(m) & m->mie : 0u;
-    if (pending) {
-        take_interrupt(m, (pending >> IRQ_MEI) & 1u ? IRQ_MEI : (pending >> IRQ_MSI) & 1u ? IRQ_MSI : IRQ_MTI);
-        return;
+    uint32_t pending = m->in_trap ? 0u : mip_now(m) & m->mie;
+    bool m_enabled = m->priv < PRIV_M || (m->mstatus & MSTATUS_MIE);
+    bool s_enabled = m->priv == PRIV_U || (m->priv == PRIV_S && (m->mstatus & MSTATUS_SIE));
+    uint32_t machine_level = m_enabled ? pending & ~m->mideleg : 0u;
+    uint32_t supervisor_level = s_enabled ? pending & m->mideleg : 0u;
+    uint32_t enabled = machine_level ? machine_level : supervisor_level;
+    if (enabled) {
+        static const uint8_t order[] = {IRQ_MEI, IRQ_MSI, IRQ_MTI, IRQ_SEI, IRQ_SSI, IRQ_STI};
+        for (size_t i = 0; i < sizeof order; i++) {
+            if ((enabled >> order[i]) & 1u) {
+                take_interrupt(m, order[i]);
+                return;
+            }
+        }
+        abort(); /* mie holds no other bits */
     }
     if (pc & 3u) { /* unreachable through the checked paths, kept as a guard */
         trap(m, 0, CAUSE_FETCH_MISALIGNED, pc);
         return;
     }
-    if (!in_ram(pc, 4) || !pmp_allows(m, pc, PMP_X)) {
+    uint32_t fetch_at;
+    mem_access fetched = translate(m, pc, WALK_FETCH, m->priv, &fetch_at);
+    if (fetched == ACC_PAGE_FAULT) {
+        trap(m, 0, CAUSE_FETCH_PAGE_FAULT, pc);
+        return;
+    }
+    if (fetched != ACC_OK || !in_ram(fetch_at, 4) || !pmp_allows(m->priv, m, fetch_at, PMP_X)) {
         trap(m, 0, CAUSE_FETCH_FAULT, pc);
         return;
     }
-    word = ram_read(m, pc, 4);
+    word = ram_read(m, fetch_at, 4);
     uint32_t opcode = word & 0x7fu, rd = (word >> 7) & 31u, funct3 = (word >> 12) & 7u;
     uint32_t rs1 = (word >> 15) & 31u, rs2 = (word >> 20) & 31u, funct7 = word >> 25;
     uint32_t a = m->x[rs1], b = m->x[rs2];
@@ -1183,7 +1377,8 @@ static void step(machine *m)
         uint32_t addr = a + (uint32_t)imm_i, value;
         status = load(m, addr, width, &value);
         if (status != ACC_OK) {
-            trap(m, word, status == ACC_MISALIGNED ? CAUSE_LOAD_MISALIGNED : CAUSE_LOAD_FAULT, addr);
+            trap(m, word, status == ACC_MISALIGNED ? CAUSE_LOAD_MISALIGNED :
+                          status == ACC_PAGE_FAULT ? CAUSE_LOAD_PAGE_FAULT : CAUSE_LOAD_FAULT, addr);
             return;
         }
         m->mem_read = true;
@@ -1211,7 +1406,8 @@ static void step(machine *m)
         uint32_t value = width == 4 ? b : b & ((1u << (8 * width)) - 1u);
         status = store(m, addr, width, value);
         if (status != ACC_OK) {
-            trap(m, word, status == ACC_MISALIGNED ? CAUSE_STORE_MISALIGNED : CAUSE_STORE_FAULT, addr);
+            trap(m, word, status == ACC_MISALIGNED ? CAUSE_STORE_MISALIGNED :
+                          status == ACC_PAGE_FAULT ? CAUSE_STORE_PAGE_FAULT : CAUSE_STORE_FAULT, addr);
             return;
         }
         m->mem_write = true;
@@ -1342,7 +1538,7 @@ static void step(machine *m)
     case 0x73: { /* SYSTEM */
         if (funct3 == 0) {
             if (word == 0x00000073u) {
-                trap(m, word, m->priv == PRIV_U ? CAUSE_ECALL_U : CAUSE_ECALL_M, 0);
+                trap(m, word, m->priv == PRIV_U ? CAUSE_ECALL_U : m->priv == PRIV_S ? CAUSE_ECALL_S : CAUSE_ECALL_M, 0);
                 return;
             }
             if (word == 0x00100073u) {
@@ -1351,13 +1547,30 @@ static void step(machine *m)
             }
             if (word == 0x30200073u && m->priv == PRIV_M) {
                 /* MRET: MIE from MPIE, MPIE set, the mode from MPP, MPP to user (O5) */
-                m->mstatus = MSTATUS_MPIE | ((m->mstatus & MSTATUS_MPIE) ? MSTATUS_MIE : 0u);
+                m->mstatus = (m->mstatus & ~MSTATUS_MIE) | MSTATUS_MPIE | ((m->mstatus & MSTATUS_MPIE) ? MSTATUS_MIE : 0u);
                 m->priv = m->mpp;
                 m->mpp = PRIV_U;
+                if (m->priv != PRIV_M) {
+                    m->mstatus &= ~MSTATUS_MPRV; /* MPRV only lasts while machine mode does */
+                }
                 next = m->mepc;
                 break;
             }
-            if (word == 0x10500073u && m->priv == PRIV_M) { /* WFI: retires at once (O1); illegal in user mode */
+            if (word == 0x10200073u && supervisor_allows(m, MSTATUS_TSR)) {
+                /* SRET (issue #20): SIE from SPIE, SPIE set, the mode from SPP, SPP to user */
+                m->priv = (m->mstatus & MSTATUS_SPP) ? PRIV_S : PRIV_U;
+                m->mstatus = (m->mstatus & ~(MSTATUS_SIE | MSTATUS_SPP | MSTATUS_MPRV)) | MSTATUS_SPIE |
+                             ((m->mstatus & MSTATUS_SPIE) ? MSTATUS_SIE : 0u);
+                next = m->sepc;
+                break;
+            }
+            /* WFI: retires at once (O1); illegal in user mode, and in supervisor mode with TW */
+            if (word == 0x10500073u && supervisor_allows(m, MSTATUS_TW)) {
+                break;
+            }
+            /* SFENCE.VMA (issue #20): the emulator keeps no translations, so nothing to flush;
+             * illegal in user mode, and in supervisor mode with TVM */
+            if ((word & 0xfe007fffu) == 0x12000073u && supervisor_allows(m, MSTATUS_TVM)) {
                 break;
             }
             goto illegal;
@@ -1425,10 +1638,13 @@ void emu_dump_state(const machine *m, FILE *out)
     for (int i = 0; i < 32; ++i) fprintf(out, "f%d %08" PRIx32 "\n", i, m->f[i]);
     fprintf(out, "fcsr %02x\n", m->fcsr);
     fprintf(out, "mstatus %08" PRIx32 "\nmie %08" PRIx32 "\nmip %08" PRIx32 "\nmscratch %08" PRIx32 "\n",
-            m->mstatus | MSTATUS_CONSTANT | (m->mpp == PRIV_M ? MSTATUS_MPP : 0u), m->mie, mip_now(m), m->mscratch);
+            m->mstatus | MSTATUS_CONSTANT | (uint32_t)m->mpp << 11, m->mie, mip_now(m), m->mscratch);
     fprintf(out, "priv %u\n", m->priv);
     fprintf(out, "mtvec %08" PRIx32 "\nmepc %08" PRIx32 "\nmcause %08" PRIx32 "\nmtval %08" PRIx32 "\n",
             m->mtvec, m->mepc, m->mcause, m->mtval);
+    fprintf(out, "medeleg %08" PRIx32 "\nmideleg %08" PRIx32 "\nsatp %08" PRIx32 "\n", m->medeleg, m->mideleg, m->satp);
+    fprintf(out, "stvec %08" PRIx32 "\nsepc %08" PRIx32 "\nscause %08" PRIx32 "\nstval %08" PRIx32 "\n",
+            m->stvec, m->sepc, m->scause, m->stval);
     fprintf(out, "steps %" PRIu64 "\nretired %" PRIu64 "\ntraps %" PRIu64 "\nframes %" PRIu32 "\nevents %u\nhalt %s\n",
             m->steps, m->retired, m->traps, m->frames, m->count, emu_halt_name(m->halt));
     if (m->halt == HALT_DONE) {
@@ -1896,9 +2112,16 @@ int emu_report_halt(const machine *m, size_t loaded)
         }
         break;
     case HALT_DOUBLE_FAULT:
-        fprintf(stderr, " error=unhandled-trap mcause=%" PRIu32 " mepc=%08" PRIx32 " mtval=%08" PRIx32
-                " then mcause=%" PRIu32 " mtval=%08" PRIx32 " at pc=%08" PRIx32 "\n",
-                m->mcause, m->mepc, m->mtval, m->second_cause, m->second_tval, m->pc);
+        /* The handler's mode says where the first trap went: S mode's CSRs hold it if delegated. */
+        if (m->priv == PRIV_S) {
+            fprintf(stderr, " error=unhandled-trap scause=%" PRIu32 " sepc=%08" PRIx32 " stval=%08" PRIx32
+                    " then cause=%" PRIu32 " tval=%08" PRIx32 " at pc=%08" PRIx32 "\n",
+                    m->scause, m->sepc, m->stval, m->second_cause, m->second_tval, m->pc);
+        } else {
+            fprintf(stderr, " error=unhandled-trap mcause=%" PRIu32 " mepc=%08" PRIx32 " mtval=%08" PRIx32
+                    " then mcause=%" PRIu32 " mtval=%08" PRIx32 " at pc=%08" PRIx32 "\n",
+                    m->mcause, m->mepc, m->mtval, m->second_cause, m->second_tval, m->pc);
+        }
         break;
     case HALT_LIMIT:
         fprintf(stderr, " error=instruction-limit pc=%08" PRIx32 "\n", m->pc);
