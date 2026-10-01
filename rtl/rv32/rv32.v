@@ -2,8 +2,8 @@
 
 // Multicycle RV32IMF core: the integer path plus FP_ISSUE/FP_WAIT and the
 // M extension's MD_WAIT. One ready/valid memory port, the machine and (issue
-// #20) supervisor trap CSRs with an Sv32 page-table walker and (issue #24) a 4-entry TLB, floating CSRs, the
-// Zicntr counters, and atomic register/flag retirement in WRITEBACK. See
+// #20) supervisor trap CSRs with an Sv32 page-table walker and (issue #24) a
+// 4-entry TLB, floating CSRs, the Zicntr counters, and atomic register/flag retirement in WRITEBACK. See
 // docs/rv32-f.md and docs/rv32-groundwork.md. A trap vectors to mtvec, or to
 // stvec when delegated; a second trap before the handler retires an instruction halts the core
 // (the emulator's double-fault rule). The contract is docs/rv32-rtl.md;
@@ -340,7 +340,8 @@ module rv32 #(
                               (width == 2'd1 && alu_result[0]));
     wire target_misaligned = (is_jal || is_jalr || branch_taken) && execute_out[1];
 
-    // Memory port: a fetch in FETCH (at `phys` once translated), a page-table read in WALK, a
+    // Memory port: a fetch in FETCH (at the TLB's translation on a hit, at `phys` after a walk), a
+    // page-table read in WALK, a
     // data access in MEM, nothing otherwise
     // and nothing while reset is asserted (the state register already says
     // FETCH then, so the gate is explicit).
@@ -373,7 +374,7 @@ module rv32 #(
                 tlb_bits = tlb_perm[way];
             end
     end
-    wire [31:0] tlb_phys = tlb_hit_mega ? {tlb_page[19:10], tlb_va[21:0]} : {tlb_page, tlb_va[11:0]};
+    wire [31:0] tlb_phys = {tlb_page[19:10], tlb_hit_mega ? tlb_va[21:12] : tlb_page[9:0], tlb_va[11:0]};
 
     // A leaf's permission against one access, shared by the walk (issue #20) and a TLB hit (issue
     // #24). U is checked against the privilege (and SUM). A fetch needs X, a store W, and a load R,
@@ -395,21 +396,25 @@ module rv32 #(
     wire fetch_translating = (state == FETCH) && translate_fetch && !xlate_ok;
     wire fetch_walk = fetch_translating && !tlb_hit; // a fetch that needs its walk first
     wire fetch_page_fault = fetch_translating && tlb_hit && leaf_denies(tlb_bits, WALK_FETCH, priv, mstatus_sum, mstatus_mxr);
-    wire [31:0] fetch_addr = xlate_ok ? phys : translate_fetch ? tlb_phys : pc;
     // A translated load or store looks its address up in EXECUTE: a hit goes on to PMP and MEM in
     // the same cycle (or page-faults there), and a miss walks, then checks PMP in XLATE.
     wire data_translating = (state == EXECUTE) && (is_load || is_store) && translate_data && !access_misaligned;
     wire data_page_fault = data_translating && tlb_hit &&
                            leaf_denies(tlb_bits, is_store ? WALK_STORE : WALK_LOAD, data_priv, mstatus_sum, mstatus_mxr);
+    // The address a fetch presents and PMP checks: `phys` after a walk (XLATE included), the TLB's
+    // translation on a hit, else the address itself (the pc in FETCH, the effective address in
+    // EXECUTE). xlate_ok is never set in EXECUTE.
+    wire tlb_translating = state == FETCH ? translate_fetch : translate_data;
+    wire [31:0] access_addr = xlate_ok ? phys : tlb_translating ? tlb_phys : tlb_va;
 
     // PMP (O5): one checker, on the fetch address in FETCH and on the data address in EXECUTE; since
     // issue #20 also on a page-table read in WALK (as a supervisor read) and on a translated data
-    // address in XLATE, and since issue #24 on a TLB hit's physical address in FETCH or EXECUTE. The lowest-numbered matching entry decides; below machine mode an access
+    // address in XLATE, and since issue #24 on a TLB hit's physical address in FETCH or
+    // EXECUTE. The lowest-numbered matching entry decides; below machine mode an access
     // needs a match that grants it, machine mode only a locked entry's permission. Regions are
     // whole words (granularity 4).
     wire pmp_fetch = state == FETCH;
-    wire [31:0] pmp_addr = pmp_fetch ? fetch_addr : state == WALK ? pte_addr[31:0] : state == XLATE ? phys :
-                           translate_data ? tlb_phys : alu_result;
+    wire [31:0] pmp_addr = state == WALK ? pte_addr[31:0] : access_addr;
     wire [31:0] pmp_word = {2'b00, pmp_addr[31:2]};
     wire [1:0] pmp_priv = pmp_fetch ? priv : state == WALK ? PRIV_S : data_priv;
     wire [2:0] pmp_need = pmp_fetch ? 3'b100 : (state != WALK && is_store) ? 3'b010 : 3'b001; // X, W, R
@@ -434,7 +439,7 @@ module rv32 #(
             end
         end
     end
-    wire fetch_deny = pmp_fetch && !fetch_walk && !fetch_page_fault && !pmp_ok;
+    wire fetch_deny = pmp_fetch && !fetch_walk && !pmp_ok; // FETCH takes fetch_page_fault first
     // A CSR needs the privilege its number's bits 9:8 name: user mode the floating CSRs and, as
     // mcounteren and scounteren allow, the counters (the only CSRs numbered 0xCxx); supervisor mode
     // also the S CSRs, the counters as mcounteren allows, and satp unless mstatus.TVM. mret below
@@ -493,7 +498,7 @@ module rv32 #(
                                   (state == WALK && !walk_deny));
     assign mem_fetch = mem_valid && (state == FETCH);
     assign mem_ptw = mem_valid && (state == WALK);
-    assign mem_addr = mem_fetch ? fetch_addr : mem_ptw ? pte_addr[31:0] : xlate_ok ? phys : alu_out;
+    assign mem_addr = mem_fetch ? access_addr : mem_ptw ? pte_addr[31:0] : xlate_ok ? phys : alu_out;
     assign mem_we = mem_valid && (state == MEM) && is_store;
     assign mem_strb = !mem_valid ? 4'b0000 : (mem_fetch || mem_ptw) ? 4'b1111 : strb;
     // Sub-word store data is replicated across the lanes so the strobe alone selects it.
@@ -611,14 +616,12 @@ module rv32 #(
                     walk_level <= 1'b1;
                     pte_addr <= walk_root + {22'd0, pc[31:22], 2'b00};
                     state <= WALK;
-                end else if (fetch_page_fault) begin // a TLB hit the access may not use (issue #24)
+                end else if (fetch_page_fault || fetch_deny) begin
+                    // A TLB hit the fetch may not use (issue #24) goes before PMP, which refuses the
+                    // fetch before the bus sees it (O5).
                     retire_pc <= pc;
                     retire_insn <= 32'd0;
-                    take_trap(1'b0, CAUSE_FETCH_PAGE, pc, pc);
-                end else if (fetch_deny) begin // PMP refuses the fetch before the bus sees it (O5)
-                    retire_pc <= pc;
-                    retire_insn <= 32'd0;
-                    take_trap(1'b0, CAUSE_FETCH_FAULT, pc, pc);
+                    take_trap(1'b0, fetch_page_fault ? CAUSE_FETCH_PAGE : CAUSE_FETCH_FAULT, pc, pc);
                 end else if (mem_ready) begin
                     xlate_ok <= 1'b0;
                     ir <= mem_rdata;

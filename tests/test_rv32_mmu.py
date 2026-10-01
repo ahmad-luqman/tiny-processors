@@ -129,13 +129,18 @@ def tlb_model(trace, translated):
     """What the RTL's TLB (issue #24) makes of a trap-free run: (hits, misses, page-table reads).
     Each trace line that `translated` accepts looks up its fetch's pc, then its data address if it
     has one. A miss reads one entry for a megapage and two for a 4 KiB page under TEST_VA's root
-    entry, and fills the next of four entries in turn. Nothing may flush the TLB in between."""
+    entry (the only root entry these tests point at a level-0 table), and fills the next of four entries in turn. Nothing may flush the TLB in between."""
     entries, fill, hits, misses, reads = [None] * 4, 0, 0, 0, 0
-    for line in filter(translated, trace):
+    lines = list(filter(translated, trace))
+    assert lines, "no translated lines to model"
+    for line in lines:
+        word = int(line.split()[2], 16)
+        flushes = (word & 0xFE007FFF) == 0x12000073 or (word & 0x7F == 0x73 and word >> 20 == SATP and word >> 12 & 3)
+        assert " trap " not in line and " interrupt " not in line and not flushes, f"the model cannot follow {line!r}"
         data = re.search(r"mem\[([0-9a-f]{8})\]", line)
         for address in [int(line.split()[1], 16)] + ([int(data.group(1), 16)] if data else []):
             small = address >> 22 == TEST_VA >> 22
-            key = (address >> 22, address >> 12 & 0x3FF if small else None)
+            key = (address >> 22, (address >> 12) & 0x3FF if small else None)
             if key in entries:
                 hits += 1
             else:
@@ -311,7 +316,6 @@ class MmuTest(StepTicksCase):
         self.assertEqual([stored(rtl.trace, DUMP), stored(rtl.trace, DUMP + 4)], [INTERRUPT | 1, user_at])
         self.assertEqual([entry[:3] for entry in self.log(rtl.trace)], [(8, 0, user_at)])
 
-
     # Issue #24: the RTL's TLB. TEST_VA's level-0 entries 3 to 9 are supervisor pages for these.
     SUPERVISOR_PAGE = PTE_V | PTE_R | PTE_W | PTE_A | PTE_D
 
@@ -325,7 +329,8 @@ class MmuTest(StepTicksCase):
         read does not flush. PMP still checks the stale physical address: GUARDED, which PMP
         refuses, stays refused after its entry is pointed at a page PMP grants. sfence.vma ends it."""
         va3, va4 = TEST_VA + 0x3000, TEST_VA + 0x4000
-        supervisor = LI(10, va3) + [LW(11, 10, 0)] + self.retarget(3, PAGE_S)  # reads PAGE_U, then PAGE_S
+        supervisor = LI(10, va3) + [LW(11, 10, 0)] + self.retarget(3, PAGE_S)  # reads PAGE_U, then retargets
+        stale_at = SUPER + 4 * (len(supervisor) + 1)
         supervisor += [CSRRS(5, SATP, 0), LW(12, 10, 0)]
         supervisor += LI(22, va4) + [LW(13, 22, 0)] + self.retarget(4, PAGE_U, PTE_V | PTE_R | PTE_A)
         supervisor += [LW(13, 22, 0), SFENCE_VMA(), LW(14, 10, 0), LW(15, 22, 0)]
@@ -337,6 +342,11 @@ class MmuTest(StepTicksCase):
                                   "emulator": [0x7000, 0x5000, 0x7000, 0x5000, 0x7000]})
         self.assertEqual([entry[:2] for entry in self.log(rtl.trace)], [(5, va4), (5, va4)])
         self.assertEqual([entry[:2] for entry in self.log(emulator.trace)], [(5, va4)])
+        # The traces agree up to the stale load; on the RTL the second va4 load and its retry are hits.
+        first = next(i for i, pair in enumerate(zip(rtl.trace, emulator.trace)) if pair[0] != pair[1])
+        self.assertEqual(int(rtl.trace[first].split()[1], 16), stale_at)
+        # Misses: the image's megapage, va3 and va4, each before and after sfence.vma, and root[0] for done.
+        self.assertEqual((rtl.halt["tlb_misses"], rtl.halt["walks"]), (7, 11))
 
     def test_a_satp_write_flushes_the_tlb(self):
         """Writing satp, even with the value it holds, empties the TLB: the load after it sees the
@@ -373,8 +383,39 @@ class MmuTest(StepTicksCase):
         supervisor = LI(10, va9) + [LW(11, 10, 0), SW(11, 10, 0)] + FINISH()
         emulator, rtl = self.assert_same(program(pmp(), supervisor))
         self.assertEqual([entry[:2] for entry in self.log(rtl.trace)], [(15, va9)])
-        # The image's megapage, va9's page and root[0] miss; the load's and the store's fetches hit.
-        self.assertEqual((rtl.halt["walks"], rtl.halt["tlb_misses"]), (4, 3))
+        # The image's megapage, va9's page and root[0] miss; every other lookup hits: each S-mode fetch,
+        # the store's data address (the trap line has no mem[] field) and nothing else.
+        lines = [line for line in rtl.trace if supervisor_line(line)]
+        lookups = len(lines) + sum("mem[" in line for line in lines) + 1
+        self.assertEqual([rtl.halt[key] for key in ("walks", "tlb_misses", "tlb_hits", "ptw_waits")], [4, 3, lookups - 3, 3 + 4])
+
+    def test_a_fetch_that_hits_an_entry_it_may_not_use_faults(self):
+        """Fetches that hit entries filled earlier: a page a load filled without X is a fetch page
+        fault; the image's megapage, filled by S-mode fetches, is a fetch access fault where PMP
+        refuses the physical page and a fetch page fault from U mode (U clear). None of them walks."""
+        va3 = TEST_VA + 0x3000
+        user_at = ALIAS + (USER_CODE - RAM)
+        supervisor = LI(10, va3) + [LW(11, 10, 0), JALR(1, 10, 0)]
+        supervisor += LI(10, PAGE_S) + [JALR(1, 10, 0)]
+        supervisor += LI(5, SUPER) + [CSRRW(0, SEPC, 5)] + LI(1, user_at) + LI(6, MSTATUS_SPP) + [CSRRC(0, SSTATUS, 6), SRET()]
+        emulator, rtl = self.assert_same(program(pmp(refused=PAGE_S), supervisor, [ECALL()]))
+        self.assertEqual([entry[:2] for entry in self.log(rtl.trace)], [(12, va3), (1, PAGE_S), (12, SUPER), (8, 0)])
+        # Misses: the image's megapage, va3 (two reads) and the user alias; the three faults are hits.
+        self.assertEqual((rtl.halt["tlb_misses"], rtl.halt["walks"]), (3, 4))
+
+    def test_sum_mxr_and_the_permissions_are_checked_on_a_hit(self):
+        """Entries filled while SUM or MXR allowed the access fault once it is cleared, and a store
+        hitting an X-only entry faults: the hit checks the cached leaf against the access as it is."""
+        user_va, execute_only = TEST_VA + 0x1000, EXECUTE_ONLY_VA + (PAGE_S - RAM)
+        supervisor = LI(6, MSTATUS_SUM) + [CSRRS(0, SSTATUS, 6)] + LI(10, user_va) + [SW(0, 10, 0)]
+        supervisor += [CSRRC(0, SSTATUS, 6), LW(11, 10, 0)]                                  # 13
+        supervisor += LI(6, MSTATUS_MXR) + [CSRRS(0, SSTATUS, 6)] + LI(12, execute_only) + [LW(13, 12, 0)]
+        supervisor += [CSRRC(0, SSTATUS, 6), LW(13, 12, 0), SW(0, 12, 0)] + FINISH()          # 13, 15
+        emulator, rtl = self.assert_same(program(pmp(), supervisor))
+        self.assertEqual([entry[:2] for entry in self.log(rtl.trace)], [(13, user_va), (13, execute_only), (15, execute_only)])
+        # Misses: the image's megapage, the user page, the X-only megapage and root[0]; the faults are hits.
+        self.assertEqual((rtl.halt["tlb_misses"], rtl.halt["walks"]), (4, 5))
+
 
 if __name__ == "__main__":
     unittest.main()
