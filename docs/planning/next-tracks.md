@@ -85,7 +85,7 @@ the screen, trace-identical in step-tick mode. O5 is done: user mode and eight
 PMP entries on the emulator and the RTL; every program runs in user mode, and
 one that touches kernel memory, another process's memory or a machine CSR is
 killed while the shell keeps running, with the same cause and address on QEMU.
-An Sv32 MMU remained a later milestone; issue #20 added S-mode and Sv32 to the hardware (docs/rv32.md), with the kernel's use of paging and a TLB still to come.
+An Sv32 MMU remained a later milestone; issue #20 added S-mode and Sv32 to the hardware (docs/rv32.md), with the kernel's use of paging (#25) and a TLB (#24) still to come.
 
 - **O1 interrupts.** `mstatus` (MIE/MPIE), `mie`, `mip`, a CLINT timer
   interrupt and `wfi`, on the RTL and the emulator.
@@ -123,7 +123,7 @@ An Sv32 MMU remained a later milestone; issue #20 added S-mode and Sv32 to the h
 - **Linux without an MMU (stretch).** cnlohr's `mini-rv32ima` shows that Linux
   boots on RV32IMA + Zicsr with a CLINT timer and a UART, without an MMU.
   Track 0, O1 and the A extension put this in reach on the emulator first, then
-  slowly on Verilator. A Sv32 MMU later would open xv6 or Linux with an MMU.
+  slowly on Verilator. A Sv32 MMU later would open xv6 or Linux with an MMU; issue #20 added it to the hardware, without a TLB yet.
 
 ## Track 4: Nand2Tetris and beyond
 

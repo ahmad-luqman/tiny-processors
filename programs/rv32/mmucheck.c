@@ -4,9 +4,12 @@
  *
  * Machine mode builds the page tables and runs small probes in S or U mode
  * through mret or sret. A probe does one thing (a load, a store, a jump, a
- * CSR read, sfence.vma, sret) and then ecalls; whatever ends it, the ecall or
- * a fault, reaches the machine-mode vector below, which records mcause, mtval
- * and a0 and resumes the C code in machine mode. Each check compares the
+ * CSR read, sfence.vma, sret, or a spin while an interrupt is pending) and
+ * then ecalls, or the jump or sret lands on code that does. Whatever ends it,
+ * the ecall or a fault, reaches the machine-mode vector below (a delegated
+ * trap reaches the S vector first, which records the S CSRs and ecalls). The
+ * vector records mcause, mtval, mepc, a0 and mstatus and resumes the C code
+ * in machine mode. Each check compares the
  * cause (and, where it matters, tval or the value read) with what the
  * privileged spec requires, and folds them into the PASS word, so QEMU, the
  * emulator and the RTL print the same word. Nothing depends on time.
@@ -17,6 +20,8 @@
  * - 0x4000_0000: the same 4 MiB with U set: U-mode probes run here.
  * - 0x1000_0000: a level-0 table of 4 KiB test pages, one per case.
  * - 0x1040_0000: a megapage whose PPN is not 4 MiB aligned (a page fault).
+ * - 0x1080_0000: a megapage at physical 2^32 (an access fault).
+ * - 0x10c0_0000: a pointer with A set (reserved: a page fault).
  */
 #include <stdint.h>
 
@@ -276,8 +281,8 @@ int main(void)
     check("S load pointer at level 0", load(MODE_S, va(P_POINTER)), LOAD_PAGE);
     check("S load misaligned megapage", load(MODE_S, TEST_VA + 0x400000u), LOAD_PAGE);
     check("S load unmapped", load(MODE_S, 0x20000000u), LOAD_PAGE);
-    /* Not here: a misaligned load in an invalid page. Ours checks alignment first, as the privileged
-     * spec's priority order has it (docs/rv32.md "Sv32"); QEMU translates first and page-faults. */
+    /* Not here: a misaligned load in an invalid page. Ours checks alignment first; the privileged
+     * spec allows either order (docs/rv32.md "Sv32"), and QEMU translates first and page-faults. */
     check("S load past 32-bit physical", load(MODE_S, TEST_VA + 0x800000u), LOAD_FAULT);
     check("S load past 32-bit physical tval", seen[1], TEST_VA + 0x800000u);
     check("S load through a pointer with A", load(MODE_S, TEST_VA + 0xc00000u), LOAD_PAGE);

@@ -717,7 +717,8 @@ session that prints numbers. QEMU's OS sessions run on instruction-counted
 time (#21), and the DMA window keeps the engines inside the running process's
 slots (the menu at 15–17, `dmaprobe` at 5). The hart has S-mode since the
 Sv32 change, so the kernel writes `scounteren` directly instead of trapping
-on it, which moves every count below slightly. With all of these (Apple
+on it. That changes the kernel's code and where device time lands, so every
+count below moves slightly (some up, some down). With all of these (Apple
 Silicon macOS, QEMU 11.1.2, llvm@22):
 
 - **Jobs session:** `PASS 408a6738` on QEMU ten runs in a row, "preempted yes"
