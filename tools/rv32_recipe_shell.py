@@ -62,6 +62,7 @@ def run(target, flag, command):
     if log:
         record = json.dumps({"target": target, "cwd": os.getcwd(), "command": command, "start": start, "end": end,
                              "status": status})
+        Path(log).parent.mkdir(parents=True, exist_ok=True)  # the default is under build/, which may not exist yet
         with open(log, "a") as stream:  # one short append per line: atomic for concurrent writers
             stream.write(record + "\n")
     return status

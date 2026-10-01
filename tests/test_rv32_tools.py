@@ -624,7 +624,7 @@ class TestHarnessTests(unittest.TestCase):
 
     def test_a_recipe_line_is_framed_logged_and_keeps_its_status(self):
         with tempfile.TemporaryDirectory() as directory:
-            log = Path(directory) / "timing.jsonl"
+            log = Path(directory) / "build" / "timing.jsonl"  # its directory does not exist yet
             env = {"PATH": "/usr/bin:/bin", "RV32_TIMING": "1", "MAKEFLAGS": "s -- RV32_TIMING=1 X=2",
                    "RV32_TIMING_LOG": str(log)}
             command = 'echo "[$RV32_TIMING] [$MAKEFLAGS]"; exit 3'
