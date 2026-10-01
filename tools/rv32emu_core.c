@@ -52,7 +52,7 @@ enum csr { CSR_FFLAGS = 0x001, CSR_FRM = 0x002, CSR_FCSR = 0x003, CSR_MSTATUS = 
            CSR_SSTATUS = 0x100, CSR_SIE = 0x104, CSR_STVEC = 0x105, CSR_SCOUNTEREN = 0x106, CSR_SSCRATCH = 0x140,
            CSR_SEPC = 0x141, CSR_SCAUSE = 0x142, CSR_STVAL = 0x143, CSR_SIP = 0x144, CSR_SATP = 0x180 };
 /* mstatus and the interrupt bits (O1, docs/rv32.md "Behavior fixed in Track 2"). MPP is 3 (machine) or
- * 0 (user) since O5, kept in machine.mpp; FS reads 3 and SD 1 because floating state is always on. */
+ * 0 (user) since O5, and 1 (supervisor) too since issue #20, kept in machine.mpp; FS reads 3 and SD 1 because floating state is always on. */
 #define MSTATUS_SIE 0x2u
 #define MSTATUS_MIE 0x8u
 #define MSTATUS_SPIE 0x20u
@@ -845,8 +845,8 @@ static uint32_t ram_read(const machine *m, uint32_t addr, int width)
 
 /* PMP (O5; docs/rv32.md "Behavior fixed in Track 2"): the lowest-numbered entry that matches the
  * address decides. Regions are whole words (granularity 4), so an aligned access matches whole or not
- * at all. User mode needs a match with the permission; machine mode is held only to locked
- * entries and may go where nothing matches. */
+ * at all. Below machine mode (`priv`, which MPRV may lower) an access needs a match with the
+ * permission; machine mode is held only to locked entries and may go where nothing matches. */
 static bool pmp_allows(uint32_t priv, const machine *m, uint32_t addr, uint32_t need)
 {
     uint32_t word = addr >> 2;
@@ -876,8 +876,8 @@ static uint32_t data_priv(const machine *m)
 enum walk_kind { WALK_FETCH, WALK_LOAD, WALK_STORE };
 
 /* Translate `va` for an access of `kind` at privilege `priv`: ACC_OK with the physical address,
- * ACC_PAGE_FAULT, or ACC_FAULT (an access fault) when a page-table read or the translated address
- * leaves RAM or PMP refuses the page-table read. Without translation (satp.MODE 0, or machine
+ * ACC_PAGE_FAULT, or ACC_FAULT (an access fault) when a page-table read leaves RAM or PMP refuses
+ * it, or the translated address is at or past 2^32. The caller checks PMP on the result. Without translation (satp.MODE 0, or machine
  * mode) the address is its own. There is no TLB: every access walks, which is what an
  * implementation with one must look like to a program that follows each page-table change
  * with sfence.vma. A and D are never set by hardware; a clear one is a page fault (Svade). */
@@ -1143,9 +1143,11 @@ static void csr_write(machine *m, uint32_t number, uint32_t value)
     case CSR_MEDELEG: m->medeleg = value & MEDELEG_MASK; break;
     case CSR_MIDELEG: m->mideleg = value & S_INTERRUPTS; break;
     case CSR_SIE: m->mie = (m->mie & ~m->mideleg) | (value & m->mideleg); break;
-    case CSR_SIP: /* only SSIP is the supervisor's to write, and only when it is delegated */
-        m->mip_soft = (m->mip_soft & ~(m->mideleg & (1u << IRQ_SSI))) | (value & m->mideleg & (1u << IRQ_SSI));
+    case CSR_SIP: { /* only SSIP is the supervisor's to write, and only when it is delegated */
+        uint32_t ssip = m->mideleg & (1u << IRQ_SSI);
+        m->mip_soft = (m->mip_soft & ~ssip) | (value & ssip);
         break;
+    }
     case CSR_STVEC: m->stvec = value & ~3u; break;
     case CSR_SCOUNTEREN: m->scounteren = value & 7u; break;
     case CSR_SSCRATCH: m->sscratch = value; break;
@@ -1189,6 +1191,13 @@ static void csr_write(machine *m, uint32_t number, uint32_t value)
 /* A CSR needs the privilege its number's bits 9:8 name (O5, issue #20): user mode the floating CSRs,
  * supervisor mode also the S CSRs. The counters need their bit in mcounteren below machine mode
  * and in scounteren too in user mode; satp is the machine's alone while mstatus.TVM is set. */
+/* sret, wfi and sfence.vma (issue #20): legal in machine mode, and in supervisor mode unless
+ * mstatus's `trap_bit` (TSR, TW or TVM) says to trap them; never in user mode. */
+static bool supervisor_allows(const machine *m, uint32_t trap_bit)
+{
+    return m->priv == PRIV_M || (m->priv == PRIV_S && !(m->mstatus & trap_bit));
+}
+
 static bool csr_allowed(const machine *m, uint32_t number)
 {
     if (m->priv == PRIV_M) {
@@ -1266,29 +1275,28 @@ static void step(machine *m)
     m->wr_reg = m->wr_freg = -1;
     m->wr_fcsr = false;
     m->mem_read = m->mem_write = false;
-    /* An enabled, pending interrupt is taken before the instruction (O1): MEI, MSI, MTI, then the
-     * supervisor's SEI, SSI, STI (issue #20). A machine interrupt is enabled below machine mode
-     * whatever MIE says (O5); one mideleg delegates is enabled below supervisor mode, or in it with
-     * SIE, and never in machine mode. None is taken before a handler's first instruction retires,
-     * so an interrupt cannot make a double fault of a trap into S mode. */
+    /* An enabled, pending interrupt is taken before the instruction (O1). Those bound for machine
+     * mode come before those mideleg sends to supervisor mode (issue #20), and within one mode the
+     * order is MEI, MSI, MTI, SEI, SSI, STI. One bound for machine mode is enabled below it
+     * whatever MIE says (O5); a delegated one is enabled below supervisor mode, or in it with SIE,
+     * and never in machine mode. None is taken before a handler's first instruction retires, so
+     * an interrupt cannot make a double fault of a trap into S mode. */
     plic_sample(m);
     uint32_t pending = m->in_trap ? 0u : mip_now(m) & m->mie;
-    uint32_t machine_level = pending & ~m->mideleg, supervisor_level = pending & m->mideleg;
-    if (!(m->priv < PRIV_M || (m->mstatus & MSTATUS_MIE))) {
-        machine_level = 0;
-    }
-    if (!(m->priv < PRIV_S || (m->priv == PRIV_S && (m->mstatus & MSTATUS_SIE)))) {
-        supervisor_level = 0;
-    }
-    if (machine_level || supervisor_level) {
+    bool m_enabled = m->priv < PRIV_M || (m->mstatus & MSTATUS_MIE);
+    bool s_enabled = m->priv == PRIV_U || (m->priv == PRIV_S && (m->mstatus & MSTATUS_SIE));
+    uint32_t machine_level = m_enabled ? pending & ~m->mideleg : 0u;
+    uint32_t supervisor_level = s_enabled ? pending & m->mideleg : 0u;
+    uint32_t enabled = machine_level ? machine_level : supervisor_level;
+    if (enabled) {
         static const uint8_t order[] = {IRQ_MEI, IRQ_MSI, IRQ_MTI, IRQ_SEI, IRQ_SSI, IRQ_STI};
-        uint32_t enabled = machine_level | supervisor_level;
-        for (uint32_t i = 0;; i++) {
+        for (size_t i = 0; i < sizeof order; i++) {
             if ((enabled >> order[i]) & 1u) {
                 take_interrupt(m, order[i]);
                 return;
             }
         }
+        abort(); /* mie holds no other bits */
     }
     if (pc & 3u) { /* unreachable through the checked paths, kept as a guard */
         trap(m, 0, CAUSE_FETCH_MISALIGNED, pc);
@@ -1539,8 +1547,7 @@ static void step(machine *m)
             }
             if (word == 0x30200073u && m->priv == PRIV_M) {
                 /* MRET: MIE from MPIE, MPIE set, the mode from MPP, MPP to user (O5) */
-                m->mstatus = (m->mstatus & ~(MSTATUS_MIE | MSTATUS_MPIE)) | MSTATUS_MPIE |
-                             ((m->mstatus & MSTATUS_MPIE) ? MSTATUS_MIE : 0u);
+                m->mstatus = (m->mstatus & ~MSTATUS_MIE) | MSTATUS_MPIE | ((m->mstatus & MSTATUS_MPIE) ? MSTATUS_MIE : 0u);
                 m->priv = m->mpp;
                 m->mpp = PRIV_U;
                 if (m->priv != PRIV_M) {
@@ -1549,7 +1556,7 @@ static void step(machine *m)
                 next = m->mepc;
                 break;
             }
-            if (word == 0x10200073u && (m->priv == PRIV_M || (m->priv == PRIV_S && !(m->mstatus & MSTATUS_TSR)))) {
+            if (word == 0x10200073u && supervisor_allows(m, MSTATUS_TSR)) {
                 /* SRET (issue #20): SIE from SPIE, SPIE set, the mode from SPP, SPP to user */
                 m->priv = (m->mstatus & MSTATUS_SPP) ? PRIV_S : PRIV_U;
                 m->mstatus = (m->mstatus & ~(MSTATUS_SIE | MSTATUS_SPP | MSTATUS_MPRV)) | MSTATUS_SPIE |
@@ -1558,13 +1565,12 @@ static void step(machine *m)
                 break;
             }
             /* WFI: retires at once (O1); illegal in user mode, and in supervisor mode with TW */
-            if (word == 0x10500073u && (m->priv == PRIV_M || (m->priv == PRIV_S && !(m->mstatus & MSTATUS_TW)))) {
+            if (word == 0x10500073u && supervisor_allows(m, MSTATUS_TW)) {
                 break;
             }
             /* SFENCE.VMA (issue #20): the emulator keeps no translations, so nothing to flush;
              * illegal in user mode, and in supervisor mode with TVM */
-            if ((word & 0xfe007fffu) == 0x12000073u &&
-                (m->priv == PRIV_M || (m->priv == PRIV_S && !(m->mstatus & MSTATUS_TVM)))) {
+            if ((word & 0xfe007fffu) == 0x12000073u && supervisor_allows(m, MSTATUS_TVM)) {
                 break;
             }
             goto illegal;
@@ -1632,10 +1638,13 @@ void emu_dump_state(const machine *m, FILE *out)
     for (int i = 0; i < 32; ++i) fprintf(out, "f%d %08" PRIx32 "\n", i, m->f[i]);
     fprintf(out, "fcsr %02x\n", m->fcsr);
     fprintf(out, "mstatus %08" PRIx32 "\nmie %08" PRIx32 "\nmip %08" PRIx32 "\nmscratch %08" PRIx32 "\n",
-            m->mstatus | MSTATUS_CONSTANT | (m->mpp == PRIV_M ? MSTATUS_MPP : 0u), m->mie, mip_now(m), m->mscratch);
+            m->mstatus | MSTATUS_CONSTANT | (uint32_t)m->mpp << 11, m->mie, mip_now(m), m->mscratch);
     fprintf(out, "priv %u\n", m->priv);
     fprintf(out, "mtvec %08" PRIx32 "\nmepc %08" PRIx32 "\nmcause %08" PRIx32 "\nmtval %08" PRIx32 "\n",
             m->mtvec, m->mepc, m->mcause, m->mtval);
+    fprintf(out, "medeleg %08" PRIx32 "\nmideleg %08" PRIx32 "\nsatp %08" PRIx32 "\n", m->medeleg, m->mideleg, m->satp);
+    fprintf(out, "stvec %08" PRIx32 "\nsepc %08" PRIx32 "\nscause %08" PRIx32 "\nstval %08" PRIx32 "\n",
+            m->stvec, m->sepc, m->scause, m->stval);
     fprintf(out, "steps %" PRIu64 "\nretired %" PRIu64 "\ntraps %" PRIu64 "\nframes %" PRIu32 "\nevents %u\nhalt %s\n",
             m->steps, m->retired, m->traps, m->frames, m->count, emu_halt_name(m->halt));
     if (m->halt == HALT_DONE) {
@@ -2103,9 +2112,16 @@ int emu_report_halt(const machine *m, size_t loaded)
         }
         break;
     case HALT_DOUBLE_FAULT:
-        fprintf(stderr, " error=unhandled-trap mcause=%" PRIu32 " mepc=%08" PRIx32 " mtval=%08" PRIx32
-                " then mcause=%" PRIu32 " mtval=%08" PRIx32 " at pc=%08" PRIx32 "\n",
-                m->mcause, m->mepc, m->mtval, m->second_cause, m->second_tval, m->pc);
+        /* The handler's mode says where the first trap went: S mode's CSRs hold it if delegated. */
+        if (m->priv == PRIV_S) {
+            fprintf(stderr, " error=unhandled-trap scause=%" PRIu32 " sepc=%08" PRIx32 " stval=%08" PRIx32
+                    " then cause=%" PRIu32 " tval=%08" PRIx32 " at pc=%08" PRIx32 "\n",
+                    m->scause, m->sepc, m->stval, m->second_cause, m->second_tval, m->pc);
+        } else {
+            fprintf(stderr, " error=unhandled-trap mcause=%" PRIu32 " mepc=%08" PRIx32 " mtval=%08" PRIx32
+                    " then mcause=%" PRIu32 " mtval=%08" PRIx32 " at pc=%08" PRIx32 "\n",
+                    m->mcause, m->mepc, m->mtval, m->second_cause, m->second_tval, m->pc);
+        }
         break;
     case HALT_LIMIT:
         fprintf(stderr, " error=instruction-limit pc=%08" PRIx32 "\n", m->pc);

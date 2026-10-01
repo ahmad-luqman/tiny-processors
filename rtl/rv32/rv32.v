@@ -1,10 +1,11 @@
 `timescale 1ns/1ps
 
 // Multicycle RV32IMF core: the integer path plus FP_ISSUE/FP_WAIT and the
-// M extension's MD_WAIT. One ready/valid memory port, four trap CSRs,
-// floating CSRs, the Zicntr counters, and atomic register/flag retirement in
-// WRITEBACK. See docs/rv32-f.md and docs/rv32-groundwork.md. A trap vectors to mtvec; a
-// second trap before the handler retires an instruction halts the core
+// M extension's MD_WAIT. One ready/valid memory port, the machine and (issue
+// #20) supervisor trap CSRs with an Sv32 page-table walker, floating CSRs, the
+// Zicntr counters, and atomic register/flag retirement in WRITEBACK. See
+// docs/rv32-f.md and docs/rv32-groundwork.md. A trap vectors to mtvec, or to
+// stvec when delegated; a second trap before the handler retires an instruction halts the core
 // (the emulator's double-fault rule). The contract is docs/rv32-rtl.md;
 // the datapath and controller are explained in docs/rv32-to-gates.md.
 module rv32 #(
@@ -139,9 +140,10 @@ module rv32 #(
     // mip is the live levels, and since issue #20 the supervisor interrupts machine mode raises.
     // An interrupt is taken in place of a fetch that has not been presented yet, so a request on
     // the bus is never withdrawn, and never before a handler's first instruction retires, so it
-    // cannot make a double fault of a trap into S mode: MEI, MSI, MTI, then SEI, SSI, STI. One
-    // handled in machine mode is enabled below it whatever MIE says (O5); one mideleg delegates
-    // is enabled below S mode, or in it with SIE, and never in machine mode.
+    // cannot make a double fault of a trap into S mode. Those bound for machine mode come before
+    // those mideleg sends to S mode, and within one mode the order is MEI, MSI, MTI, SEI, SSI, STI.
+    // One bound for machine mode is enabled below it whatever MIE says (O5); a delegated one is
+    // enabled below S mode, or in it with SIE, and never in machine mode.
     wire [31:0] mip = {20'd0, irq_external, 1'b0, mip_soft[2], 1'b0, irq_timer, 1'b0, mip_soft[1], 1'b0,
                        irq_software, 1'b0, mip_soft[0], 1'b0};
     wire [31:0] mie_value = {20'd0, mie_bits[2], 1'b0, mie_s[2], 1'b0, mie_bits[1], 1'b0, mie_s[1], 1'b0,
@@ -153,7 +155,9 @@ module rv32 #(
     wire m_enabled = !priv_m || mstatus_mie;
     wire s_enabled = priv == PRIV_U || (priv == PRIV_S && mstatus_sie);
     wire [2:0] take_m = m_enabled ? irq_ready : 3'd0;
-    wire [2:0] take_s = (m_enabled ? irq_ready_s & ~mideleg : 3'd0) | (s_enabled ? irq_ready_s & mideleg : 3'd0);
+    wire [2:0] take_sm = m_enabled ? irq_ready_s & ~mideleg : 3'd0;  // S interrupts bound for M
+    wire [2:0] take_ss = s_enabled ? irq_ready_s & mideleg : 3'd0;   // and those delegated to S
+    wire [2:0] take_s = (take_m != 3'd0 || take_sm != 3'd0) ? take_sm : take_ss;
     wire irq_take = (state == FETCH) && !fetch_waiting && !in_trap && (take_m != 3'd0 || take_s != 3'd0);
     wire [3:0] irq_code = take_m[2] ? 4'd11 : take_m[0] ? 4'd3 : take_m[1] ? 4'd7 :
                           take_s[2] ? 4'd9 : take_s[0] ? 4'd1 : 4'd5;
@@ -276,6 +280,7 @@ module rv32 #(
     wire [31:0] csr_operand = funct3[2] ? {27'd0, rs1} : a;
     wire [31:0] csr_new = (funct3[1:0] == 2'd1) ? csr_operand :
                           (funct3[1:0] == 2'd2) ? (csr_old | csr_operand) : (csr_old & ~csr_operand);
+    wire [2:0] csr_new_s = {csr_new[9], csr_new[5], csr_new[1]}; // SEI, STI, SSI as mideleg orders them
     wire csr_we = is_csr && ((funct3[1:0] == 2'd1) || (rs1 != 5'd0));
 
     wire fp_csr_write = csr_we && csr_addr >= CSR_FFLAGS && csr_addr <= CSR_FCSR;
@@ -324,7 +329,8 @@ module rv32 #(
                               (width == 2'd1 && alu_result[0]));
     wire target_misaligned = (is_jal || is_jalr || branch_taken) && execute_out[1];
 
-    // Memory port: a fetch in FETCH, a data access in MEM, nothing otherwise
+    // Memory port: a fetch in FETCH (at `phys` once translated), a page-table read in WALK, a
+    // data access in MEM, nothing otherwise
     // and nothing while reset is asserted (the state register already says
     // FETCH then, so the gate is explicit).
     // Sv32 (issue #20): translation applies to fetches below machine mode, and to loads and stores
@@ -390,7 +396,7 @@ module rv32 #(
     // invalid (V clear, or W without R), a pointer with D, A or U set or at level 0, a misaligned
     // megapage, U against the privilege (and SUM), the permission (and MXR), a clear A or, for a
     // store, D (Svade: hardware never sets them) are page faults; a leaf whose physical address
-    // passes 2^32 is an access fault.
+    // is at or past 2^32 is an access fault.
     wire walk_deny = (state == WALK) && (pte_addr[33:32] != 2'b00 || !pmp_ok);
     wire [21:0] pte_ppn = mem_rdata[31:10];
     wire pte_v = mem_rdata[0], pte_r = mem_rdata[1], pte_w = mem_rdata[2], pte_x = mem_rdata[3];
@@ -431,7 +437,6 @@ module rv32 #(
     // the core with the CSRs of the first trap intact. Since issue #20 a trap
     // from S or U mode whose cause medeleg (an exception) or mideleg (an
     // interrupt) delegates enters S mode through stvec and the supervisor's CSRs.
-    wire [2:0] deleg_irq = {mideleg[2], mideleg[1], mideleg[0]}; // SEI (9), STI (5), SSI (1)
     task take_trap;
         input interrupt;
         input [3:0] cause;
@@ -446,9 +451,7 @@ module rv32 #(
             if (in_trap) begin
                 state <= HALT;
                 halted <= 1'b1;
-            end else if (!priv_m && (interrupt ? (cause == 4'd1 && deleg_irq[0]) || (cause == 4'd5 && deleg_irq[1]) ||
-                                                 (cause == 4'd9 && deleg_irq[2])
-                                               : medeleg[cause])) begin
+            end else if (!priv_m && (interrupt ? mideleg_value[{1'b0, cause}] : medeleg[cause])) begin
                 in_trap <= 1'b1;
                 sepc <= epc;
                 scause <= {interrupt, 27'd0, cause};
@@ -692,8 +695,8 @@ module rv32 #(
                                 mstatus_mxr <= csr_new[19];
                             end
                             CSR_MEDELEG: medeleg <= csr_new[15:0] & 16'hb3ff; // not 10, 11 or 14
-                            CSR_MIDELEG: mideleg <= {csr_new[9], csr_new[5], csr_new[1]};
-                            CSR_SIE: mie_s <= (mie_s & ~mideleg) | ({csr_new[9], csr_new[5], csr_new[1]} & mideleg);
+                            CSR_MIDELEG: mideleg <= csr_new_s;
+                            CSR_SIE: mie_s <= (mie_s & ~mideleg) | (csr_new_s & mideleg);
                             CSR_SIP: if (mideleg[0]) mip_soft[0] <= csr_new[1]; // only SSIP, when delegated
                             CSR_STVEC: stvec <= {csr_new[31:2], 2'b00};
                             CSR_SCOUNTEREN: scounteren <= csr_new[2:0];
@@ -714,11 +717,11 @@ module rv32 #(
                                             (csr_new[8 * entry +: 8] & 8'h9f) & ~{6'd0, csr_new[8 * entry + 1] && !csr_new[8 * entry], 1'b0};
                             CSR_MIE: begin
                                 mie_bits <= {csr_new[11], csr_new[7], csr_new[3]};
-                                mie_s <= {csr_new[9], csr_new[5], csr_new[1]};
+                                mie_s <= csr_new_s;
                             end
                             CSR_MSCRATCH: mscratch <= csr_new;
                             // mip: MSIP, MTIP and MEIP are the devices'; SSIP, STIP and SEIP are software's.
-                            CSR_MIP: mip_soft <= {csr_new[9], csr_new[5], csr_new[1]};
+                            CSR_MIP: mip_soft <= csr_new_s;
                             default: // pmpaddr0-7, unless the entry or the TOR entry above it is locked
                                 if (csr_addr[11:3] == 9'h076 && !pmpcfg[csr_addr[2:0]][7] &&
                                     !(csr_addr[2:0] != 3'd7 && pmpcfg[csr_addr[2:0] + 3'd1][7] &&
@@ -749,7 +752,7 @@ module rv32 #(
                     state <= FETCH;
                 end
                 HALT: begin end // hold until reset
-                // Encodings 10-15 are never entered; should the state register
+                // Encodings 12-15 are never entered; should the state register
                 // ever hold one, stop the way a double fault does rather than
                 // hang with `halted` low.
                 default: begin
