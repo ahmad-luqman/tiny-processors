@@ -1,4 +1,6 @@
 """Issue #20: S-mode and Sv32 on both backends, the half mmucheck cannot cover (docs/rv32.md "Sv32").
+Issue #24 adds the RTL's TLB: its hit and miss counts against a model, a flush on a satp write, a
+replacement once more than four pages are live, a store hit on a clean page, and a stale entry.
 
 mmucheck runs on QEMU as the reference. These directed programs cover what QEMU cannot referee
 or does differently: a page-table read that PMP refuses, that lands in a device window or
@@ -6,7 +8,9 @@ outside RAM, PMP on the translated address, the order of a misaligned address ag
 fault, and the cycle formula with page-table walks. They also cover what mmucheck leaves out:
 machine state from S mode, the sstatus mask, MPRV without translation, TW, and which interrupt
 goes first. Each runs on the emulator and the RTL in step-tick mode and the traces
-must be identical; the expected causes and addresses are written here by hand.
+must be identical; the expected causes and addresses are written here by hand. The one exception
+is the stale-entry test: a program that changes a page-table entry without sfence.vma may see
+either translation, and the emulator, which has no TLB, sees the new one.
 
 The page tables are data in the image. Machine mode sets satp and PMP and enters S mode with
 mret; the S code runs at its physical address through an identity megapage, and U code through
@@ -15,6 +19,7 @@ the nth trap at LOG + 16 (n + 1), after the count at LOG. It returns past the in
 x1 after a fetch fault, and to the interrupted instruction after an interrupt, with mip's
 software bits cleared. It finishes the run on an ecall from U mode.
 """
+import re
 import unittest
 
 from rv32_step_case import StepTicksCase, stored
@@ -67,6 +72,11 @@ def tables():
     level0[0] = pte(PAGE_S, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D)
     level0[1] = pte(PAGE_U, PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D)
     level0[2] = pte(PAGE_S, PTE_R | PTE_W | PTE_A | PTE_D)  # V clear
+    level0[3] = pte(PAGE_U, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D)  # issue #24: supervisor pages to retarget
+    level0[4] = pte(GUARDED, PTE_V | PTE_R | PTE_A)
+    for n in range(5, 9):
+        level0[n] = pte(PAGE_S, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D)
+    level0[9] = pte(PAGE_S, PTE_V | PTE_R | PTE_W | PTE_A)  # D clear
     page_s = [0x5000 + i for i in range(1024)]
     page_u = [0x7000 + i for i in range(1024)]
     guarded = [pte(PAGE_S, PTE_V | PTE_R | PTE_A)] * 1024
@@ -115,6 +125,31 @@ def pmp(refused=None):
     return words + LI(6, (NAPOT | R | W | X) << 8 | (0 if refused is None else NAPOT)) + [CSRRW(0, PMPCFG0, 6)]
 
 
+def tlb_model(trace, translated):
+    """What the RTL's TLB (issue #24) makes of a trap-free run: (hits, misses, page-table reads).
+    Each trace line that `translated` accepts looks up its fetch's pc, then its data address if it
+    has one. A miss reads one entry for a megapage and two for a 4 KiB page under TEST_VA's root
+    entry, and fills the next of four entries in turn. Nothing may flush the TLB in between."""
+    entries, fill, hits, misses, reads = [None] * 4, 0, 0, 0, 0
+    for line in filter(translated, trace):
+        data = re.search(r"mem\[([0-9a-f]{8})\]", line)
+        for address in [int(line.split()[1], 16)] + ([int(data.group(1), 16)] if data else []):
+            small = address >> 22 == TEST_VA >> 22
+            key = (address >> 22, address >> 12 & 0x3FF if small else None)
+            if key in entries:
+                hits += 1
+            else:
+                misses += 1
+                reads += 2 if small else 1
+                entries[fill] = key
+                fill = (fill + 1) % 4
+    return hits, misses, reads
+
+
+def supervisor_line(line):
+    return int(line.split()[1], 16) >= SUPER
+
+
 class MmuTest(StepTicksCase):
 
     def log(self, trace):
@@ -133,21 +168,20 @@ class MmuTest(StepTicksCase):
         emulator, rtl = self.assert_same(words)
         self.assertEqual([stored(rtl.trace, DUMP + 4 * i) for i in range(3)], [0x5002, 0x5002, 0x50])
         self.assertIn(f"mem[{TEST_VA + 12:08x}]<-00005002/4", "\n".join(rtl.trace), "the trace shows the virtual address")
-        # Counted from the trace, not the core: every S-mode fetch and data access walks once, one
-        # read through a megapage and two through the level-0 table at TEST_VA. A walk adds one
-        # cycle per read, plus the FETCH cycle that starts a fetch's walk or the XLATE after a
-        # data access's.
-        supervisor_lines = [line for line in emulator.trace if int(line.split()[1], 16) >= SUPER]
-        accesses = [line for line in supervisor_lines if "mem[" in line]
-        reads = len(supervisor_lines) + len(accesses) + sum(f"mem[{TEST_VA >> 12:05x}" in line for line in accesses)
+        # Counted from the trace, not the core: every S-mode fetch and data access looks up the TLB,
+        # and a miss walks, one read through a megapage and two through the level-0 table at
+        # TEST_VA. A miss adds one cycle per read, plus the FETCH cycle that starts a fetch's walk or
+        # the XLATE after a data access's; a hit adds none.
+        hits, misses, reads = tlb_model(emulator.trace, supervisor_line)
+        self.assertEqual((misses, reads), (3, 4))  # the image's megapage, TEST_VA's page, root[0] for done
         for timing in ({"ticks": None, "stall": 1}, {"ticks": None, "seed": 11}, {"ticks": "steps", "stall": 0}):
             with self.subTest(**timing):
                 emulator, rtl = self.run_both(words, **timing)
                 self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
                 relation, holds = cycle_relation(rtl)
                 self.assertTrue(holds, relation)
-                self.assertEqual((rtl.halt["walks"], rtl.halt["ptw_waits"]),
-                                 (reads, reads + len(supervisor_lines) + len(accesses)), relation)
+                self.assertEqual([rtl.halt[key] for key in ("walks", "ptw_waits", "tlb_hits", "tlb_misses")],
+                                 [reads, reads + misses, hits, misses], relation)
 
     def test_user_fetches_through_the_alias_and_sret_enters_user_mode(self):
         user = LI(10, TEST_VA + 0x1000) + [LW(11, 10, 0)] + LI(12, TEST_VA) + [LW(13, 12, 0), ECALL()]
@@ -277,6 +311,70 @@ class MmuTest(StepTicksCase):
         self.assertEqual([stored(rtl.trace, DUMP), stored(rtl.trace, DUMP + 4)], [INTERRUPT | 1, user_at])
         self.assertEqual([entry[:3] for entry in self.log(rtl.trace)], [(8, 0, user_at)])
 
+
+    # Issue #24: the RTL's TLB. TEST_VA's level-0 entries 3 to 9 are supervisor pages for these.
+    SUPERVISOR_PAGE = PTE_V | PTE_R | PTE_W | PTE_A | PTE_D
+
+    def retarget(self, n, physical, flags=SUPERVISOR_PAGE):
+        """S code that rewrites level0[n] through the image's megapage, with no sfence.vma. Uses x20, x21."""
+        return LI(20, LEVEL0 + 4 * n) + LI(21, pte(physical, flags)) + [SW(21, 20, 0)]
+
+    def test_a_stale_entry_is_used_until_sfence_vma_and_pmp_still_checks_it(self):
+        """Without sfence.vma the RTL may keep using a page-table entry the program has changed; the
+        privileged spec allows that, and the emulator, which has no TLB, sees the change. A satp
+        read does not flush. PMP still checks the stale physical address: GUARDED, which PMP
+        refuses, stays refused after its entry is pointed at a page PMP grants. sfence.vma ends it."""
+        va3, va4 = TEST_VA + 0x3000, TEST_VA + 0x4000
+        supervisor = LI(10, va3) + [LW(11, 10, 0)] + self.retarget(3, PAGE_S)  # reads PAGE_U, then PAGE_S
+        supervisor += [CSRRS(5, SATP, 0), LW(12, 10, 0)]
+        supervisor += LI(22, va4) + [LW(13, 22, 0)] + self.retarget(4, PAGE_U, PTE_V | PTE_R | PTE_A)
+        supervisor += [LW(13, 22, 0), SFENCE_VMA(), LW(14, 10, 0), LW(15, 22, 0)]
+        supervisor += LI(16, DUMP) + [SW(register, 16, 4 * (register - 11)) for register in range(11, 16)] + FINISH()
+        emulator, rtl = self.run_both(program(pmp(refused=GUARDED), supervisor))
+        self.assertEqual((emulator.halt["outcome"], rtl.halt["outcome"]), ("pass", "pass"))
+        dumped = {name: [stored(run.trace, DUMP + 4 * i) for i in range(5)] for name, run in (("emulator", emulator), ("rtl", rtl))}
+        self.assertEqual(dumped, {"rtl": [0x7000, 0x7000, 0, 0x5000, 0x7000],  # stale, refused, then fresh
+                                  "emulator": [0x7000, 0x5000, 0x7000, 0x5000, 0x7000]})
+        self.assertEqual([entry[:2] for entry in self.log(rtl.trace)], [(5, va4), (5, va4)])
+        self.assertEqual([entry[:2] for entry in self.log(emulator.trace)], [(5, va4)])
+
+    def test_a_satp_write_flushes_the_tlb(self):
+        """Writing satp, even with the value it holds, empties the TLB: the load after it sees the
+        retargeted entry on both backends."""
+        supervisor = LI(10, TEST_VA + 0x3000) + [LW(11, 10, 0)] + self.retarget(3, PAGE_S)
+        supervisor += [CSRRS(5, SATP, 0), CSRRW(0, SATP, 5), LW(12, 10, 0)]
+        supervisor += LI(16, DUMP) + [SW(11, 16, 0), SW(12, 16, 4)] + FINISH()
+        emulator, rtl = self.assert_same(program(pmp(), supervisor))
+        self.assertEqual([stored(rtl.trace, DUMP), stored(rtl.trace, DUMP + 4)], [0x7000, 0x5000])
+
+    def test_the_oldest_entry_goes_once_more_than_four_pages_are_live(self):
+        """Six pages live at once (the image's megapage, five 4 KiB pages) and root[0] at the end:
+        entries are replaced oldest first, which the model predicts, and the page retargeted
+        without sfence.vma has been replaced by the time it is read again, so both backends see the
+        new translation. The cycle formula holds with stalls."""
+        supervisor = LI(10, TEST_VA + 0x3000) + [LW(11, 10, 0)] + self.retarget(3, PAGE_S)
+        for n in range(5, 9):
+            supervisor += LI(22, TEST_VA + 0x1000 * n) + [LW(23, 22, 0)]
+        supervisor += [LW(12, 10, 0)] + LI(16, DUMP) + [SW(11, 16, 0), SW(12, 16, 4)] + FINISH()
+        words = program(pmp(), supervisor)
+        emulator, rtl = self.assert_same(words)
+        self.assertEqual([stored(rtl.trace, DUMP), stored(rtl.trace, DUMP + 4)], [0x7000, 0x5000])
+        hits, misses, reads = tlb_model(emulator.trace, supervisor_line)
+        self.assertGreater(misses, 7, "the image's megapage is replaced and comes back")
+        emulator, rtl = self.run_both(words, ticks=None, stall=1)
+        relation, holds = cycle_relation(rtl)
+        self.assertTrue(holds, relation)
+        self.assertEqual([rtl.halt[key] for key in ("walks", "tlb_hits", "tlb_misses")], [reads, hits, misses], relation)
+
+    def test_a_store_that_hits_a_clean_page_faults(self):
+        """A load fills the TLB from a leaf with D clear; the store after it hits that entry and is a
+        store page fault (Svade), as a walk would make it."""
+        va9 = TEST_VA + 0x9000
+        supervisor = LI(10, va9) + [LW(11, 10, 0), SW(11, 10, 0)] + FINISH()
+        emulator, rtl = self.assert_same(program(pmp(), supervisor))
+        self.assertEqual([entry[:2] for entry in self.log(rtl.trace)], [(15, va9)])
+        # The image's megapage, va9's page and root[0] miss; the load's and the store's fetches hit.
+        self.assertEqual((rtl.halt["walks"], rtl.halt["tlb_misses"]), (4, 3))
 
 if __name__ == "__main__":
     unittest.main()

@@ -33,7 +33,10 @@ DEFAULT_SIMULATOR = "build/rv32/rv32_tb.vvp"
 DEFAULT_OUT = "build/rv32/rtl"
 BENCH_SEED = 7
 COUNTERS = ("cycles", "steps", "stalls", "transfers")
-DECIMAL = COUNTERS + ("cause", "fp_waits", "md_waits", "interrupts", "walks", "ptw_waits")
+DECIMAL = COUNTERS + ("cause", "fp_waits", "md_waits", "interrupts", "walks", "ptw_waits",
+                       "tlb_hits", "tlb_misses")
+# Issue #20's walk counters and issue #24's TLB counters: a run that translates prints all four.
+TRANSLATION = ("walks", "ptw_waits", "tlb_hits", "tlb_misses")
 HEX = ("done", "tval", "pc", "word")
 # The keys each halt reason carries besides the counters and the outcome (docs/rv32-rtl.md).
 REQUIRED = {"done": ("done",), "double-fault": ("cause", "tval"), "limit": ()}
@@ -117,12 +120,13 @@ def rtl_halt_line(stderr):
         raise ValueError(f"unknown halt reason {reason!r} in {line!r}")
     expected = {"halt", "outcome", *COUNTERS, *REQUIRED[reason]}
     for waits, unit in (("fp_waits", "FPU"), ("md_waits", "multiply/divide"), ("interrupts", "interrupt"),
-                        ("walks", "page-table read"), ("ptw_waits", "page-table walk")):
+                        ("walks", "page-table read"), ("ptw_waits", "page-table walk"), ("tlb_hits", "TLB hit"),
+                        ("tlb_misses", "TLB miss")):
         if waits in fields:
             expected.add(waits)
             if fields[waits] < 0: raise ValueError(f"negative {unit} wait count")
-    if ("walks" in fields) != ("ptw_waits" in fields):
-        raise ValueError(f"walks and ptw_waits come together in {line!r}")
+    if len({key in fields for key in TRANSLATION}) > 1:
+        raise ValueError(f"{', '.join(TRANSLATION)} come together in {line!r}")
     if set(fields) != expected:
         raise ValueError(f"halt line keys {sorted(fields)} do not match {sorted(expected)} in {line!r}")
     return fields
@@ -416,8 +420,10 @@ def first_checkpoint_difference(observed, expected):
 
 def cycle_relation(rtl):
     """Relate the testbench's cycle count to the trace: 4 cycles per instruction without a data
-    access, 5 with one, plus the stalls. Returns (text, holds); `holds` is None when a trap line
-    makes the formula inapplicable (a trap costs the cycles up to the state that raised it)."""
+    access, 5 with one, plus the stalls. With Sv32 on, the walk's cycles are one per TLB miss and
+    one per page-table read (issue #24: a hit costs none). Returns (text, holds); `holds` is None
+    when a trap line makes the formula inapplicable (a trap costs the cycles up to the state that
+    raised it)."""
     steps = len(rtl.trace)
     memory = sum("mem[" in line for line in rtl.trace)
     traps = sum(" trap " in line or " interrupt " in line for line in rtl.trace)
@@ -432,10 +438,12 @@ def cycle_relation(rtl):
     if halt.get("md_waits", 0):
         text += f"; plus {halt['md_waits']} multiply/divide wait cycles"
     if walks:
-        text += f"; plus {halt['ptw_waits']} page-table walk cycles and {walks} page-table reads"
+        text += (f"; plus {halt['ptw_waits']} page-table walk cycles = {halt['tlb_misses']} TLB misses + "
+                 f"{walks} page-table reads ({halt['tlb_hits']} TLB hits)")
     if traps:
         return f"{text} (not exact: {traps} trap lines)", None
-    return text, halt["cycles"] == expected and halt["transfers"] == steps + memory + walks
+    return text, (halt["cycles"] == expected and halt["transfers"] == steps + memory + walks and
+                  halt.get("ptw_waits", 0) == halt.get("tlb_misses", 0) + walks)
 
 
 def check_fp_waits(rtl, expected):

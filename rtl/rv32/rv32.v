@@ -2,7 +2,7 @@
 
 // Multicycle RV32IMF core: the integer path plus FP_ISSUE/FP_WAIT and the
 // M extension's MD_WAIT. One ready/valid memory port, the machine and (issue
-// #20) supervisor trap CSRs with an Sv32 page-table walker, floating CSRs, the
+// #20) supervisor trap CSRs with an Sv32 page-table walker and (issue #24) a 4-entry TLB, floating CSRs, the
 // Zicntr counters, and atomic register/flag retirement in WRITEBACK. See
 // docs/rv32-f.md and docs/rv32-groundwork.md. A trap vectors to mtvec, or to
 // stvec when delegated; a second trap before the handler retires an instruction halts the core
@@ -119,6 +119,17 @@ module rv32 #(
     reg [1:0] walk_kind;
     reg [31:0] phys;
     reg [33:0] pte_addr;
+    // The TLB (issue #24): four fully associative entries, each a leaf that a walk accepted. An
+    // entry holds its virtual page (VPN[1] alone counts for a megapage), the physical page (bits
+    // 31:12: a leaf at or past 2^32 is never filled) and the leaf's {D, U, X, W, R}. A is not kept,
+    // because a walk never accepts a leaf with A clear. The ASID is 0 bits wide, so the tag is the
+    // VPN alone. Entries fill in turn, so the oldest goes first. sfence.vma and any write to satp
+    // empty the TLB, and the fill pointer starts over at entry 0.
+    reg [3:0] tlb_valid, tlb_mega;
+    reg [19:0] tlb_vpn [0:3];
+    reg [19:0] tlb_ppn [0:3];
+    reg [4:0] tlb_perm [0:3];
+    reg [1:0] tlb_next;
     reg [7:0] pmpcfg [0:7];
     reg [31:0] pmpaddr [0:7];
 
@@ -338,17 +349,67 @@ module rv32 #(
     wire [1:0] data_priv = (priv_m && mstatus_mprv) ? mpp : priv;
     wire translate_fetch = satp_mode && !priv_m;
     wire translate_data = satp_mode && data_priv != PRIV_M;
-    wire fetch_walk = (state == FETCH) && translate_fetch && !xlate_ok; // a fetch that needs its walk first
-    wire [31:0] fetch_addr = xlate_ok ? phys : pc;
     wire [31:0] walk_va = walk_kind == WALK_FETCH ? pc : alu_out;
+
+    // The TLB lookup (issue #24): one port, on the pc in FETCH and on the effective address in
+    // EXECUTE. When two entries match (only possible after a page-table change without sfence.vma),
+    // the lowest-numbered one wins.
+    wire [31:0] tlb_va = state == FETCH ? pc : alu_result;
+    reg tlb_hit, tlb_hit_mega;
+    reg [19:0] tlb_page;
+    reg [4:0] tlb_bits;
+    integer way;
+    always @* begin
+        tlb_hit = 1'b0;
+        tlb_hit_mega = 1'b0;
+        tlb_page = 20'd0;
+        tlb_bits = 5'd0;
+        for (way = 3; way >= 0; way = way - 1)
+            if (tlb_valid[way] && tlb_vpn[way][19:10] == tlb_va[31:22] &&
+                (tlb_mega[way] || tlb_vpn[way][9:0] == tlb_va[21:12])) begin
+                tlb_hit = 1'b1;
+                tlb_hit_mega = tlb_mega[way];
+                tlb_page = tlb_ppn[way];
+                tlb_bits = tlb_perm[way];
+            end
+    end
+    wire [31:0] tlb_phys = tlb_hit_mega ? {tlb_page[19:10], tlb_va[21:0]} : {tlb_page, tlb_va[11:0]};
+
+    // A leaf's permission against one access, shared by the walk (issue #20) and a TLB hit (issue
+    // #24). U is checked against the privilege (and SUM). A fetch needs X, a store W, and a load R,
+    // or X with MXR. A store also needs D (Svade: hardware never sets it). The walk checks A itself.
+    function leaf_denies;
+        input [4:0] bits; // {D, U, X, W, R}
+        input [1:0] kind;
+        input [1:0] eff_priv;
+        input sum, mxr;
+        begin
+            leaf_denies = (eff_priv == PRIV_U ? !bits[3] : bits[3] && (kind == WALK_FETCH || !sum)) ||
+                          (kind == WALK_FETCH ? !bits[2] : kind == WALK_STORE ? !bits[1] : !(bits[0] || (mxr && bits[2]))) ||
+                          (kind == WALK_STORE && !bits[4]);
+        end
+    endfunction
+
+    // A translated fetch looks the pc up first: a hit fetches from its physical address in the same
+    // cycle (or page-faults there), and a miss walks, then fetches from `phys`.
+    wire fetch_translating = (state == FETCH) && translate_fetch && !xlate_ok;
+    wire fetch_walk = fetch_translating && !tlb_hit; // a fetch that needs its walk first
+    wire fetch_page_fault = fetch_translating && tlb_hit && leaf_denies(tlb_bits, WALK_FETCH, priv, mstatus_sum, mstatus_mxr);
+    wire [31:0] fetch_addr = xlate_ok ? phys : translate_fetch ? tlb_phys : pc;
+    // A translated load or store looks its address up in EXECUTE: a hit goes on to PMP and MEM in
+    // the same cycle (or page-faults there), and a miss walks, then checks PMP in XLATE.
+    wire data_translating = (state == EXECUTE) && (is_load || is_store) && translate_data && !access_misaligned;
+    wire data_page_fault = data_translating && tlb_hit &&
+                           leaf_denies(tlb_bits, is_store ? WALK_STORE : WALK_LOAD, data_priv, mstatus_sum, mstatus_mxr);
 
     // PMP (O5): one checker, on the fetch address in FETCH and on the data address in EXECUTE; since
     // issue #20 also on a page-table read in WALK (as a supervisor read) and on a translated data
-    // address in XLATE. The lowest-numbered matching entry decides; below machine mode an access
+    // address in XLATE, and since issue #24 on a TLB hit's physical address in FETCH or EXECUTE. The lowest-numbered matching entry decides; below machine mode an access
     // needs a match that grants it, machine mode only a locked entry's permission. Regions are
     // whole words (granularity 4).
     wire pmp_fetch = state == FETCH;
-    wire [31:0] pmp_addr = pmp_fetch ? fetch_addr : state == WALK ? pte_addr[31:0] : state == XLATE ? phys : alu_result;
+    wire [31:0] pmp_addr = pmp_fetch ? fetch_addr : state == WALK ? pte_addr[31:0] : state == XLATE ? phys :
+                           translate_data ? tlb_phys : alu_result;
     wire [31:0] pmp_word = {2'b00, pmp_addr[31:2]};
     wire [1:0] pmp_priv = pmp_fetch ? priv : state == WALK ? PRIV_S : data_priv;
     wire [2:0] pmp_need = pmp_fetch ? 3'b100 : (state != WALK && is_store) ? 3'b010 : 3'b001; // X, W, R
@@ -373,7 +434,7 @@ module rv32 #(
             end
         end
     end
-    wire fetch_deny = pmp_fetch && !fetch_walk && !pmp_ok;
+    wire fetch_deny = pmp_fetch && !fetch_walk && !fetch_page_fault && !pmp_ok;
     // A CSR needs the privilege its number's bits 9:8 name: user mode the floating CSRs and, as
     // mcounteren and scounteren allow, the counters (the only CSRs numbered 0xCxx); supervisor mode
     // also the S CSRs, the counters as mcounteren allows, and satp unless mstatus.TVM. mret below
@@ -403,12 +464,11 @@ module rv32 #(
     wire pte_u = mem_rdata[4], pte_a = mem_rdata[6], pte_d = mem_rdata[7];
     wire pte_leaf = pte_r || pte_x;
     wire [1:0] walk_priv = walk_kind == WALK_FETCH ? priv : data_priv;
-    wire pte_user_bad = walk_priv == PRIV_U ? !pte_u : pte_u && (walk_kind == WALK_FETCH || !mstatus_sum);
-    wire pte_perm_bad = walk_kind == WALK_FETCH ? !pte_x : walk_kind == WALK_STORE ? !pte_w : !(pte_r || (mstatus_mxr && pte_x));
+    wire [4:0] pte_bits = {pte_d, pte_u, pte_x, pte_w, pte_r};
     wire pte_page_fault = !pte_v || (!pte_r && pte_w) ||
                           (!pte_leaf && (!walk_level || pte_a || pte_d || pte_u)) ||
-                          (pte_leaf && ((walk_level && pte_ppn[9:0] != 10'd0) || pte_user_bad || pte_perm_bad ||
-                                        !pte_a || (walk_kind == WALK_STORE && !pte_d)));
+                          (pte_leaf && ((walk_level && pte_ppn[9:0] != 10'd0) || !pte_a ||
+                                        leaf_denies(pte_bits, walk_kind, walk_priv, mstatus_sum, mstatus_mxr)));
     wire [33:0] leaf_addr = walk_level ? {pte_ppn[21:10], walk_va[21:0]} : {pte_ppn, walk_va[11:0]};
     wire [3:0] walk_page_cause = walk_kind == WALK_FETCH ? CAUSE_FETCH_PAGE :
                                  walk_kind == WALK_STORE ? CAUSE_STORE_PAGE : CAUSE_LOAD_PAGE;
@@ -418,11 +478,18 @@ module rv32 #(
     wire [33:0] walk_root = {satp_ppn, 12'd0};
     // Cycles the walk adds, for the testbench's cycle formula: the FETCH cycle that starts one, each
     // WALK cycle whose request is not stalled (a stalled one counts as a stall, as any other), XLATE.
+    // A TLB hit adds none.
     wire ptw_cycle = (fetch_walk && !irq_take) || (state == WALK && !(mem_valid && !mem_ready)) || state == XLATE;
-    // The testbench reads ptw_cycle; PMP compares whole words.
-    wire unused_ok = &{1'b0, ptw_cycle, pmp_addr[1:0]};
+    // TLB lookups for the testbench (issue #24), one pulse each: a miss on the cycle that starts its
+    // walk, a fetch's hit on the edge that leaves FETCH, a load's or store's hit in EXECUTE.
+    wire tlb_miss_seen = (fetch_walk && !irq_take) || (data_translating && !tlb_hit);
+    wire tlb_hit_seen = (fetch_translating && tlb_hit && !irq_take && (fetch_page_fault || fetch_deny || mem_ready)) ||
+                        (data_translating && tlb_hit);
+    // The testbench reads ptw_cycle and the TLB pulses; PMP compares whole words.
+    wire unused_ok = &{1'b0, ptw_cycle, tlb_miss_seen, tlb_hit_seen, pmp_addr[1:0]};
 
-    assign mem_valid = !reset && ((state == FETCH && !irq_take && !fetch_deny && !fetch_walk) || (state == MEM) ||
+    assign mem_valid = !reset && ((state == FETCH && !irq_take && !fetch_deny && !fetch_walk && !fetch_page_fault) ||
+                                  (state == MEM) ||
                                   (state == WALK && !walk_deny));
     assign mem_fetch = mem_valid && (state == FETCH);
     assign mem_ptw = mem_valid && (state == WALK);
@@ -504,6 +571,7 @@ module rv32 #(
             stvec <= 32'd0; sscratch <= 32'd0; sepc <= 32'd0; scause <= 32'd0; stval <= 32'd0;
             satp_mode <= 1'b0; satp_ppn <= 22'd0;
             xlate_ok <= 1'b0; walk_level <= 1'b0; walk_kind <= WALK_FETCH; phys <= 32'd0; pte_addr <= 34'd0;
+            tlb_valid <= 4'd0; tlb_next <= 2'd0; // the entries themselves need no reset
             for (entry = 0; entry < 8; entry = entry + 1) begin
                 pmpcfg[entry] <= 8'd0;
                 pmpaddr[entry] <= 32'd0;
@@ -543,6 +611,10 @@ module rv32 #(
                     walk_level <= 1'b1;
                     pte_addr <= walk_root + {22'd0, pc[31:22], 2'b00};
                     state <= WALK;
+                end else if (fetch_page_fault) begin // a TLB hit the access may not use (issue #24)
+                    retire_pc <= pc;
+                    retire_insn <= 32'd0;
+                    take_trap(1'b0, CAUSE_FETCH_PAGE, pc, pc);
                 end else if (fetch_deny) begin // PMP refuses the fetch before the bus sees it (O5)
                     retire_pc <= pc;
                     retire_insn <= 32'd0;
@@ -577,13 +649,15 @@ module rv32 #(
                     taken <= branch_taken;
                     if (access_misaligned)
                         take_trap(1'b0, is_load ? CAUSE_LOAD_MISALIGNED : CAUSE_STORE_MISALIGNED, alu_result, ir_pc);
-                    else if ((is_load || is_store) && translate_data) begin // Sv32: translate first (issue #20)
+                    else if (data_translating && !tlb_hit) begin // Sv32: a TLB miss walks first (issue #20, #24)
                         walk_kind <= is_store ? WALK_STORE : WALK_LOAD;
                         walk_level <= 1'b1;
                         pte_addr <= walk_root + {22'd0, alu_result[31:22], 2'b00};
                         state <= WALK;
                     end
-                    else if ((is_load || is_store) && !pmp_ok) // PMP, before the bus (O5)
+                    else if (data_page_fault)
+                        take_trap(1'b0, is_load ? CAUSE_LOAD_PAGE : CAUSE_STORE_PAGE, alu_result, ir_pc);
+                    else if ((is_load || is_store) && !pmp_ok) // PMP, before the bus (O5); a hit's physical address
                         take_trap(1'b0, is_load ? CAUSE_LOAD_FAULT : CAUSE_STORE_FAULT, alu_result, ir_pc);
                     else if (target_misaligned)
                         take_trap(1'b0, CAUSE_TARGET_MISALIGNED, execute_out, ir_pc);
@@ -597,9 +671,11 @@ module rv32 #(
                         state <= MD_WAIT;
                     else if (is_wfi && !step_ticks && !irq_wake)
                         state <= WFI_WAIT;
-                    else if (is_load || is_store)
+                    else if (is_load || is_store) begin
+                        phys <= tlb_phys;          // used only when translated: a TLB hit
+                        xlate_ok <= translate_data;
                         state <= MEM;
-                    else
+                    end else
                         state <= WRITEBACK;
                 end
                 FP_ISSUE: if (fp_ready) state <= FP_WAIT;
@@ -638,6 +714,13 @@ module rv32 #(
                         phys <= leaf_addr[31:0];
                         xlate_ok <= 1'b1;
                         state <= walk_kind == WALK_FETCH ? FETCH : XLATE;
+                        // Fill the TLB (issue #24) before PMP: XLATE or the fetch still checks the address.
+                        tlb_valid[tlb_next] <= 1'b1;
+                        tlb_mega[tlb_next] <= walk_level;
+                        tlb_vpn[tlb_next] <= walk_va[31:12];
+                        tlb_ppn[tlb_next] <= pte_ppn[19:0];
+                        tlb_perm[tlb_next] <= pte_bits;
+                        tlb_next <= tlb_next + 2'd1;
                     end
                 end
                 // PMP on the translated data address, at the effective privilege.
@@ -742,6 +825,10 @@ module rv32 #(
                         priv <= mstatus_spp ? PRIV_S : PRIV_U;
                         mstatus_spp <= 1'b0;
                         mstatus_mprv <= 1'b0;
+                    end
+                    if (is_sfence || (csr_we && csr_addr == CSR_SATP)) begin // issue #24: flush every entry
+                        tlb_valid <= 4'd0;
+                        tlb_next <= 2'd0;
                     end
                     in_trap <= 1'b0;
                     instret_count <= instret_count + 64'd1;
