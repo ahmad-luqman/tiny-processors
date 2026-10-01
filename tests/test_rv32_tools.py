@@ -1,5 +1,6 @@
 """Unit tests for the RV32 image checker and QEMU driver; no cross toolchain needed."""
 
+import json
 from pathlib import Path
 import re
 import struct
@@ -608,6 +609,71 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertEqual(rv32_dtb.INPUT_IRQ, rv32_asm.PLIC_SOURCE_INPUT)
         soc = (ROOT / "rtl/rv32/rv32_soc.v").read_text()
         self.assertIn(f".lines({{{31 - rv32_asm.PLIC_SOURCE_INPUT}'d0, input_nonempty, {rv32_asm.PLIC_SOURCE_INPUT - 2}'d0, virtio_irq, 1'b0}})", soc)
+
+
+
+class TestHarnessTests(unittest.TestCase):
+    """The timing SHELL and the shard runner of issue #26 (docs/rv32-testing.md)."""
+    SHELL = [sys.executable, str(ROOT / "tools/rv32_recipe_shell.py")]
+    SHARDS = [sys.executable, str(ROOT / "tools/rv32_unittest_shards.py")]
+
+    def test_a_shell_call_without_a_target_runs_untouched(self):
+        # $(shell ...) outside a recipe: make passes `-c COMMAND` alone, and the value must be exact.
+        result = subprocess.run([*self.SHELL, "-c", "echo hi; exit 3"], capture_output=True, text=True)
+        self.assertEqual((result.stdout, result.returncode), ("hi\n", 3))
+
+    def test_a_recipe_line_is_framed_logged_and_keeps_its_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "timing.jsonl"
+            env = {"PATH": "/usr/bin:/bin", "RV32_TIMING": "1", "MAKEFLAGS": "s -- RV32_TIMING=1 X=2",
+                   "RV32_TIMING_LOG": str(log)}
+            command = 'echo "[$RV32_TIMING] [$MAKEFLAGS]"; exit 3'
+            result = subprocess.run([*self.SHELL, "demo", "-c", command], capture_output=True, text=True, env=env)
+            self.assertEqual(result.returncode, 3)
+            # The line runs without RV32_TIMING, so a make it starts itself is not wrapped again.
+            self.assertRegex(result.stdout, r"\A>> demo: .*\n\[\] \[s -- X=2\]\n<< demo: [\d.]+ s FAILED \(exit 3\)\n\Z")
+            record = json.loads(log.read_text())
+            self.assertEqual((record["target"], record["command"], record["status"]), ("demo", command, 3))
+            self.assertLessEqual(record["start"], record["end"])
+
+    def test_the_report_keys_targets_by_directory(self):
+        # Verilator's generated makefiles reuse names like verilated.o in every build directory.
+        with tempfile.TemporaryDirectory() as directory:
+            here = Path(directory).resolve()
+            log = here / "timing.jsonl"
+            records = [("verilated.o", here, 0.0, 2.0, 0), ("verilated.o", here / "other", 10.0, 11.0, 0),
+                       ("check", here, 2.0, 5.0, 1)]
+            log.write_text("".join(json.dumps({"target": t, "cwd": str(c), "command": "x", "start": s, "end": e,
+                                               "status": st}) + "\n" for t, c, s, e, st in records))
+            result = subprocess.run([*self.SHELL, "--report", str(log)], capture_output=True, text=True, cwd=here,
+                                    check=True)
+        rows = [line for line in result.stdout.splitlines() if line.startswith("| `")]
+        self.assertEqual(rows, ["| `check` (failed) | 3.0 | 1 |", "| `verilated.o` | 2.0 | 1 |",
+                                "| `other/verilated.o` | 1.0 | 1 |"])
+        # The nested line runs inside one of ours, so only the top-level lines count as recipe time.
+        self.assertIn("3 targets; 5 s of recipe time in 11 s of wall time", result.stdout)
+
+    def test_the_shard_verdict(self):
+        from tools.rv32_unittest_shards import verdict
+        self.assertIsNone(verdict(5, [(1, 0, 3), (2, 0, 2)]))
+        self.assertEqual(verdict(5, [(1, 1, 3), (2, 0, 2), (3, 2, 0)]), "shard(s) 1, 3 failed")
+        self.assertEqual(verdict(5, [(1, 0, 3), (2, 0, 1)]), "the shards ran 4 tests but discovery found 5")
+
+    def test_shards_run_every_test_and_report_a_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = Path(directory) / "test_sharded.py"
+            body = "import unittest\nclass T(unittest.TestCase):\n" + "".join(
+                f"    def test_{n}(self): pass\n" for n in range(5))
+            module.write_text(body)
+            passed = subprocess.run([*self.SHARDS, "--shards", "2", "-s", directory, "test_sharded.py"],
+                                    capture_output=True, text=True)
+            self.assertEqual(passed.returncode, 0, passed.stdout + passed.stderr)
+            self.assertIn("all 5 tests passed in 2 shard(s)", passed.stdout)
+            module.write_text(body + "    def test_bad(self): self.fail('no')\n")
+            failed = subprocess.run([*self.SHARDS, "--shards", "2", "-s", directory, "test_sharded.py"],
+                                    capture_output=True, text=True)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertRegex(failed.stderr, r"shard\(s\) \d failed")
 
 
 if __name__ == "__main__":
