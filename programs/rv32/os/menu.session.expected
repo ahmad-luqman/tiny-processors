@@ -13,11 +13,11 @@ dmaprobe: G1 blit from the shell refused, status 4 error 1
 dmaprobe: G2 depth buffer in the kernel refused, status 4 error 1
 dmaprobe: G2 depth buffer in the shell refused, status 4 error 1
 $ dmaprobe window
-kernel: pid 3 dmaprobe killed: cause 5 at dmaprobe+0x18 tval 1100a000
-sh: dmaprobe exited 133
+kernel: pid 3 dmaprobe killed: cause 13 at dmaprobe+0x18 tval 1100a000
+sh: dmaprobe exited 141
 $ menu
 digit 1 margin 5117
 PASS c76cd363
 $ halt
 kernel: halt, 3 exits
-PASS 53e2ea5f
+PASS 53e2ea67

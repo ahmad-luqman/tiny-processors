@@ -191,6 +191,26 @@ class LayoutTest(unittest.TestCase):
                          (rv32_ramdisk.SLOT_BASE, rv32_ramdisk.SLOT_SIZE, rv32_ramdisk.SLOTS, rv32_ramdisk.STACK_SIZE))
         self.assertEqual(header["OS_SLOT_BASE"], 0x80000000 + header["OS_KERNEL_SIZE"])
 
+    def test_the_page_tables_fit_the_kernel_and_the_slots_one_table(self):
+        """Issue #25: the kernel's page tables are a page-aligned NOBITS section inside its MiB, below
+        its stack, and PMP lets the walks read exactly that section. Every slot lies in one 4 MiB
+        region, so a process's slots take one level-0 table of the four its entry has (the others
+        are for the framebuffer and the accelerators)."""
+        (kernel,) = elfs("kernel")
+        elf = parse_elf(kernel.read_bytes())
+        section = next(s for s in elf.sections if s.name == ".pagetables")
+        text = (ROOT / "programs/rv32/os/kernel.c").read_text()
+        procs = int(re.search(r"#define MAX_PROCS (\d+)", text).group(1))
+        tables = int(re.search(r"#define PAGE_TABLES (\d+)u", text).group(1))
+        self.assertEqual(section.type, 8, "NOBITS: startup does not clear it, the kernel does")
+        self.assertEqual(section.addr % 4096, 0)
+        self.assertEqual(section.size, procs * tables * 4096)
+        self.assertEqual((elf.symbols["__pagetables_start"], elf.symbols["__pagetables_end"]),
+                         (section.addr, section.addr + section.size))
+        self.assertLessEqual(section.addr + section.size, elf.symbols["_stack_bottom"])
+        first, last = rv32_ramdisk.SLOT_BASE, rv32_ramdisk.SLOT_BASE + rv32_ramdisk.SLOTS * rv32_ramdisk.SLOT_SIZE - 1
+        self.assertEqual(first >> 22, last >> 22, "the slots share one level-0 table")
+
 
 class KernelTest(unittest.TestCase):
     """The kernel's console session in step-tick mode: the emulator and the RTL agree trace for trace."""
@@ -220,7 +240,7 @@ class KernelTest(unittest.TestCase):
         self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
         self.assertEqual(rtl.console, (ROOT / "programs/rv32/os/session.expected").read_text())
         self.assertGreater(rtl.halt["interrupts"], 10, "the timer ticked and the kernel took it")
-        self.assertIn("kernel: pid 9 fault killed: cause 5", rtl.console)
+        self.assertIn("kernel: pid 9 fault killed: cause 13", rtl.console, "a page fault since issue #25")
 
 
     def test_two_jobs_share_the_machine_fairly(self):

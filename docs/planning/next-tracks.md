@@ -85,7 +85,7 @@ the screen, trace-identical in step-tick mode. O5 is done: user mode and eight
 PMP entries on the emulator and the RTL; every program runs in user mode, and
 one that touches kernel memory, another process's memory or a machine CSR is
 killed while the shell keeps running, with the same cause and address on QEMU.
-An Sv32 MMU remained a later milestone; issue #20 added S-mode and Sv32 to the hardware (docs/rv32.md), and issue #24 a 4-entry TLB to the RTL; the kernel's use of paging (#25) is still to come.
+An Sv32 MMU remained a later milestone; issue #20 added S-mode and Sv32 to the hardware (docs/rv32.md), and issue #24 a 4-entry TLB to the RTL; since #25 the kernel gives every process its own page table ([the record](../rv32-os.md#paging-issue-25)).
 
 - **O1 interrupts.** `mstatus` (MIE/MPIE), `mie`, `mip`, a CLINT timer
   interrupt and `wfi`, on the RTL and the emulator.

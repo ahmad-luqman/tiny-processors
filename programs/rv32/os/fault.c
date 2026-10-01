@@ -1,13 +1,17 @@
 /* fault: a program that goes wrong on purpose (Track 2). The kernel must
  * kill it with the right cause and keep the shell running.
  *
- *   fault load      a load from 0x0020_0000, unmapped on QEMU virt and on our machine (cause 5)
+ *   fault load      a load from 0x0020_0000, which nothing is at (cause 5 until issue #25)
  *   fault illegal   an illegal instruction (cause 2)
- *   fault kernel    a store to the kernel's memory, refused by PMP (O5, cause 7)
- *   fault shell     a store to the shell's slot, another process's memory (O5, cause 7)
+ *   fault kernel    a store to the kernel's memory (O5, cause 7 until issue #25)
+ *   fault shell     a store to the shell's slot, another process's memory (O5, cause 7 until issue #25)
  *   fault csr       a read of mstatus, a machine CSR, from user mode (O5, cause 2)
- *   fault read      a load from the kernel's memory, refused by PMP (O5, cause 5)
- *   fault exec      a jump into the kernel's code, a fetch PMP refuses (O5, cause 1)
+ *   fault read      a load from the kernel's memory (O5, cause 5 until issue #25)
+ *   fault exec      a jump into the kernel's code (O5, cause 1 until issue #25)
+ *
+ * Since issue #25 none of those addresses is in the process's page table, so
+ * the loads, stores and the fetch are page faults (causes 13, 15 and 12)
+ * before PMP, the backstop, is asked.
  *
  * The faulting instructions are written in assembly in their own section,
  * which user.ld places right after the entry code, so every fault's pc (and

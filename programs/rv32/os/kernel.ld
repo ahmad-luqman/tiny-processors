@@ -3,7 +3,7 @@
  * One RAM region holds code, read-only data, initialized data, zeroed data,
  * and the stack. Load addresses equal run addresses, so the image is placed
  * in RAM exactly as linked and startup copies nothing. The kernel, its RAM
- * disk and its 16 KiB stack fit the first 1 MiB; the program slots follow
+ * disk, the processes' page tables (issue #25) and its 16 KiB stack fit the first 1 MiB; the program slots follow
  * (programs/rv32/os/sys.h).
  */
 OUTPUT_ARCH(riscv)
@@ -50,6 +50,16 @@ SECTIONS
         *(COMMON)
         . = ALIGN(4);
         __bss_end = .;
+    } > RAM :ram
+
+    /* Issue #25: the processes' page tables, page-aligned and outside .bss, so startup does not
+     * spend 128 KiB of stores clearing them (the kernel clears a table when it first takes it). PMP lets the hart's
+     * page-table walks read exactly this range. */
+    .pagetables (NOLOAD) : ALIGN(4096) {
+        __pagetables_start = .;
+        *(.pagetables)
+        . = ALIGN(4096);
+        __pagetables_end = .;
     } > RAM :ram
 
     _end = .;

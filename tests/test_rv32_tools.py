@@ -127,6 +127,10 @@ class ImageCheckerTests(unittest.TestCase):
         self.assertTrue(any("missing section .bss" in p for p in self.problems(sections=without_bss)))
         extra = GOOD_SECTIONS + [(".eh_frame", SHT_PROGBITS, SHF_ALLOC, RAM + 0x170, b"E" * 8)]
         self.assertTrue(any("unexpected allocated section .eh_frame" in p for p in self.problems(sections=extra)))
+        tables = GOOD_SECTIONS + [(".pagetables", SHT_NOBITS, SHF_ALLOC | SHF_WRITE, RAM + 0x1000, 0x1000)]
+        self.assertEqual(self.problems(sections=tables), [], "the kernel's page tables (issue #25)")
+        tables = GOOD_SECTIONS + [(".pagetables", SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, RAM + 0x170, b"P" * 8)]
+        self.assertTrue(any("section .pagetables must be NOBITS" in p for p in self.problems(sections=tables)))
         symbols = {name: value for name, value in GOOD_SYMBOLS.items() if name != "_end"}
         self.assertTrue(any("missing symbol _end" in p for p in self.problems(symbols=symbols)))
         symbols = dict(GOOD_SYMBOLS, _stack_bottom=RAM + 0x100)

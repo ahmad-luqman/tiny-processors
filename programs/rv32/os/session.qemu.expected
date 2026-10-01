@@ -41,26 +41,26 @@ syscheck: list
 syscheck: time
 syscheck: ok
 $ fault load
-kernel: pid 9 fault killed: cause 5 at fault+0x18 tval 00200000
-sh: fault exited 133
+kernel: pid 9 fault killed: cause 13 at fault+0x18 tval 00200000
+sh: fault exited 141
 $ fault illegal
 kernel: pid 10 fault killed: cause 2 at fault+0x20 tval c0001073
 sh: fault exited 130
 $ fault kernel
-kernel: pid 11 fault killed: cause 7 at fault+0x2c tval 80000000
-sh: fault exited 135
+kernel: pid 11 fault killed: cause 15 at fault+0x2c tval 80000000
+sh: fault exited 143
 $ fault shell
-kernel: pid 12 fault killed: cause 7 at fault+0x38 tval 80100000
-sh: fault exited 135
+kernel: pid 12 fault killed: cause 15 at fault+0x38 tval 80100000
+sh: fault exited 143
 $ fault csr
 kernel: pid 13 fault killed: cause 2 at fault+0x40 tval 30002573
 sh: fault exited 130
 $ fault read
-kernel: pid 14 fault killed: cause 5 at fault+0x4c tval 80000000
-sh: fault exited 133
+kernel: pid 14 fault killed: cause 13 at fault+0x4c tval 80000000
+sh: fault exited 141
 $ fault exec
-kernel: pid 15 fault killed: cause 1 at 80000000 tval 80000000
-sh: fault exited 129
+kernel: pid 15 fault killed: cause 12 at 80000000 tval 80000000
+sh: fault exited 140
 $ hello still here
 hello from pid 16, args: still here
 $ files
@@ -108,4 +108,4 @@ long 704
 big 4096
 $ halt
 kernel: halt, 27 exits
-PASS dc3c1f20
+PASS dc3c1ef5

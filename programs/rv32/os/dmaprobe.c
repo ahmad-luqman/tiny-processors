@@ -1,15 +1,16 @@
 /* dmaprobe: the DMA window from a program that drives the engines (issue #20).
  *
- * The program is flagged `accelerators`, so PMP lets it at G1's and G2's registers, and the
- * kernel sets the DMA window to its own slot. The engines must refuse to reach the kernel or
+ * The program is flagged `accelerators`, so its page table maps G1's and G2's registers and PMP
+ * lets it at them, and the kernel sets the DMA window to its own slot. The slot is mapped at its
+ * own physical address (issue #25), so the addresses it gives the engines are the ones they use. The engines must refuse to reach the kernel or
  * another program's slot through their DMA:
  *
  *   dmaprobe          G1 blits from its own memory are accepted, up to the last byte of its
  *                     slot; blits that pass the slot's end, or come from the next slot, the
  *                     kernel or the shell's slot, and G2 depth-buffer clears at the kernel or
  *                     the shell, are refused
- *   dmaprobe window   a load of the window's START register, which PMP keeps from programs
- *                     (cause 5)
+ *   dmaprobe window   a load of the window's START register, which no program's page table
+ *                     maps (cause 13; PMP keeps it from programs too, cause 5 before issue #25)
  *
  * The blits have no destination pixels (W = H = 0): G1 still validates the source, so each
  * reports DONE or INVALID without touching the framebuffer. The refused clears write nothing.

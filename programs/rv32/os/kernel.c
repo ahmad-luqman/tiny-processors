@@ -24,6 +24,14 @@
  * fault kills the process. The kernel (machine mode, no locked entries) is not
  * held by PMP, so system calls still read and write the caller's memory.
  *
+ * Since issue #25 every process also runs under Sv32 paging: its own page
+ * table maps its slots, the framebuffer and, for a program that drives them,
+ * the accelerators' windows, each at its own physical address; nothing else is
+ * mapped, so a stray access is a page fault before PMP is asked. PMP stays as
+ * the backstop. The kernel stays in machine mode, where nothing is translated,
+ * and switches satp with PMP. The mapping is the identity, so the engines' DMA
+ * addresses, the DMA window and the transcripts' addresses mean what they did.
+ *
  * PMP holds the CPU, not the accelerators: G1 and G2 read and write memory by
  * DMA wherever their registers point (G2's depth buffer, G1's blit source). So
  * the kernel also sets the DMA window (issue #20) to the running process's
@@ -64,6 +72,18 @@
 #define CAUSE_ECALL_U 8u
 #define RAMDISK_MAGIC 0x4b534452u /* "RDSK" */
 #define OPEN_FILES 4u              /* descriptors 3..6 */
+
+/* Sv32 (issue #25): a page table entry's bits, and satp's mode. */
+#define PAGE_SIZE 4096u
+#define PTE_V 0x01u
+#define PTE_R 0x02u
+#define PTE_W 0x04u
+#define PTE_X 0x08u
+#define PTE_U 0x10u
+#define PTE_A 0x40u /* every leaf has A and D set: our hart never sets them (Svade), and QEMU then need not */
+#define PTE_D 0x80u
+#define SATP_SV32 0x80000000u
+#define PAGE_TABLES 4u /* per process: the root and a level-0 table for each 4 MiB it touches */
 
 /* A context: kentry.S knows these offsets. */
 struct frame {
@@ -112,6 +132,8 @@ static uint32_t next_pid = 1, exits, exit_sum;
 static uint32_t console, done_register, clint, plic;
 static uint32_t input, input_source, display, framebuffer, framebuffer_size, gpu, g3d, disk;
 static uint32_t accelerators, accelerators_end; /* O5: the window PMP grants a PROGRAM_ACCELERATORS program */
+static struct { uint32_t base, size; } engine_windows[5]; /* issue #25: the windows themselves, which its page table maps */
+static uint32_t engine_window_count;
 static uint32_t dma_window;                     /* issue #20: the engines' DMA bound, 0 where there is none (QEMU) */
 static uint32_t protected_pid;                  /* O5: the process PMP is set up for */
 static char model[48];
@@ -121,6 +143,13 @@ static int faulted; /* kernel_fault ran: halt must not touch the disk again */
 
 static uint32_t keys[KEY_BUFFER];
 static uint32_t key_head, key_count, keys_dropped;
+
+/* Issue #25: each process table entry's page tables, a root and its level-0 tables. kernel.ld places
+ * them in a page-aligned section of their own, not zeroed at boot (map() clears a table it takes),
+ * whose bounds PMP entries 6 and 7 let the hart's walks read. */
+static uint32_t page_tables[MAX_PROCS][PAGE_TABLES][PAGE_SIZE / 4] __attribute__((section(".pagetables"), aligned(PAGE_SIZE)));
+_Static_assert(sizeof page_tables[0][0] == PAGE_SIZE, "one table per page");
+extern uint8_t __pagetables_start[], __pagetables_end[];
 
 void *memcpy(void *dst, const void *src, size_t n); /* mem.c */
 void *memset(void *dst, int value, size_t n);
@@ -311,13 +340,16 @@ static void discover(uintptr_t address)
     gpu = find(&t, "tiny-processors,g1", 0, 0);
     g3d = find(&t, "tiny-processors,g2", 0, 0);
     /* O5: one PMP region from the lowest accelerator window to the end of the highest. */
-    static const struct { const char *compatible; uint32_t index; } windows[] = {
+    static const struct { const char *compatible; uint32_t index; } engines[] = {
         {"tiny-processors,simd4", 0}, {"tiny-processors,simd4", 1}, {"tiny-processors,simd4", 2},
         {"tiny-processors,g1", 0}, {"tiny-processors,g2", 0},
     };
-    for (uint32_t w = 0; w < sizeof windows / sizeof windows[0]; w++) {
+    _Static_assert(sizeof engine_windows / sizeof engine_windows[0] == sizeof engines / sizeof engines[0], "one per engine window");
+    for (uint32_t w = 0; w < sizeof engines / sizeof engines[0]; w++) {
         uint32_t base, size;
-        if (fdt_find(&t, "compatible", windows[w].compatible, windows[w].index, &base, &size) == FDT_OK) {
+        if (fdt_find(&t, "compatible", engines[w].compatible, engines[w].index, &base, &size) == FDT_OK) {
+            engine_windows[engine_window_count].base = base;
+            engine_windows[engine_window_count++].size = size;
             if (!accelerators_end || base < accelerators) {
                 accelerators = base;
             }
@@ -432,6 +464,76 @@ static int alive(const struct proc *p)
     return p->state != FREE && p->state != ZOMBIE;
 }
 
+/* Issue #25: what each process table entry's page tables map. The next process there starts from
+ * the same tables with the last one's leaves cleared, rather than from 16 KiB cleared again; a
+ * table is cleared once, when it is first taken. */
+static struct address_space {
+    uint32_t tables; /* how many of the entry's tables are in use, the root first; 0 before its first process */
+    uint32_t base, span, accelerators;
+} spaces[MAX_PROCS];
+
+static void clear_table(uint32_t *table)
+{
+    for (uint32_t i = 0; i < PAGE_SIZE / 4; i++) {
+        ((volatile uint32_t *)table)[i] = 0; /* volatile: a loop the compiler would make a byte-wise memset */
+    }
+}
+
+/* Map [start, end) at the same physical addresses with leaf flags `flags`, or with 0 clear the
+ * leaves there. A level-0 table is taken the first time a 4 MiB region is mapped. */
+static void map(uint32_t entry, uint32_t start, uint32_t end, uint32_t flags)
+{
+    uint32_t (*pt)[PAGE_SIZE / 4] = page_tables[entry];
+    for (uint32_t page = start & ~(PAGE_SIZE - 1u); page < end; page += PAGE_SIZE) {
+        uint32_t *pointer = &pt[0][page >> 22];
+        if (!(*pointer & PTE_V)) {
+            if (!flags) {
+                continue;
+            }
+            if (spaces[entry].tables == PAGE_TABLES) {
+                panic("page tables full");
+            }
+            uint32_t *table = pt[spaces[entry].tables++];
+            clear_table(table);
+            *pointer = (uint32_t)(uintptr_t)table >> 12 << 10 | PTE_V;
+        }
+        uint32_t *leaf = (uint32_t *)(uintptr_t)(*pointer >> 10 << 12);
+        leaf[page >> 12 & 1023u] = flags ? page >> 12 << 10 | flags | PTE_V | PTE_U | PTE_A | PTE_D : 0;
+    }
+}
+
+/* The address space `spaces[entry]` describes, mapped (on) or cleared: its slots readable, writable
+ * and executable; the framebuffer and, for a program that drives them, the accelerators' windows
+ * readable and writable. Nothing else is mapped. */
+static void lay_out(uint32_t entry, int on)
+{
+    const struct address_space *space = &spaces[entry];
+    map(entry, space->base, space->base + space->span, on ? PTE_R | PTE_W | PTE_X : 0);
+    if (framebuffer) {
+        map(entry, framebuffer, framebuffer + framebuffer_size, on ? PTE_R | PTE_W : 0);
+    }
+    for (uint32_t w = 0; space->accelerators && w < engine_window_count; w++) {
+        map(entry, engine_windows[w].base, engine_windows[w].base + engine_windows[w].size, on ? PTE_R | PTE_W : 0);
+    }
+}
+
+/* The page tables of the process about to start in `p`'s entry. */
+static void map_process(const struct proc *p)
+{
+    uint32_t entry = (uint32_t)(p - procs);
+    struct address_space *space = &spaces[entry];
+    if (space->tables) {
+        lay_out(entry, 0); /* the previous process's leaves */
+    } else {
+        clear_table(page_tables[entry][0]);
+        space->tables = 1;
+    }
+    space->base = p->base;
+    space->span = p->span;
+    space->accelerators = p->flags & PROGRAM_ACCELERATORS;
+    lay_out(entry, 1);
+}
+
 /* Load a program into its slots and make it ready; returns the process or 0. */
 static struct proc *spawn(const char *name, const char *args, uint32_t parent)
 {
@@ -477,6 +579,7 @@ static struct proc *spawn(const char *name, const char *args, uint32_t parent)
     for (i = 0; program->name[i] && i + 1 < sizeof p->name; i++) {
         p->name[i] = program->name[i];
     }
+    map_process(p);
     return p;
 }
 
@@ -669,8 +772,10 @@ static struct proc *next_ready(const struct proc *after)
 }
 
 /* O5: PMP for the process about to run, in TOR pairs: entries 0-1 its slots (RWX), 2-3 the
- * framebuffer (RW), 4-5 the accelerators (RW) for a program that drives them. Entries 6-7 stay
- * off. A user access nothing matches faults; the idle loop runs in machine mode and ignores it. */
+ * framebuffer (RW), 4-5 the accelerators (RW) for a program that drives them. A user access
+ * nothing matches faults; the idle loop runs in machine mode and ignores it. Since issue #25 its
+ * page table is the first check and PMP the backstop; entries 6-7 let the hart's page-table walks,
+ * which are supervisor reads, read the tables (and only read them). */
 static void protect(const struct proc *p)
 {
     if (p->pid == protected_pid) {
@@ -684,8 +789,15 @@ static void protect(const struct proc *p)
     csr_write(CSR_PMPADDR3, (framebuffer + framebuffer_size) >> 2);
     csr_write(CSR_PMPADDR4, accelerators >> 2);
     csr_write(CSR_PMPADDR5, accelerators_end >> 2);
+    csr_write(CSR_PMPADDR6, (uint32_t)(uintptr_t)__pagetables_start >> 2);
+    csr_write(CSR_PMPADDR7, (uint32_t)(uintptr_t)__pagetables_end >> 2);
     csr_write(CSR_PMPCFG0, tor_rwx << 8 | (framebuffer ? tor_rw << 24 : 0u));
-    csr_write(CSR_PMPCFG1, (p->flags & PROGRAM_ACCELERATORS) && accelerators_end ? tor_rw << 8 : 0u);
+    csr_write(CSR_PMPCFG1, ((p->flags & PROGRAM_ACCELERATORS) && accelerators_end ? tor_rw << 8 : 0u) |
+                               (PMP_TOR | PMP_R) << 24);
+    /* Its address space, after PMP: the satp write and the fence drop every cached translation,
+     * which the privileged spec asks for when PMP changes over the page tables too. */
+    csr_write(CSR_SATP, SATP_SV32 | (uint32_t)(uintptr_t)page_tables[p - procs][0] >> 12);
+    __asm__ volatile("sfence.vma" ::: "memory");
     /* The engines may reach only this process's slots. A job validated earlier keeps running
      * (a flagged program's, while the switch goes to another flagged one or the idle loop). */
     if (dma_window) {

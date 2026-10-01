@@ -737,6 +737,142 @@ Silicon macOS, QEMU 11.1.2, llvm@22):
 - **Cost** (Yosys 0.69 generic cells): the window is 103 cells, and its test
   adds 307 to G1 (52,097 to 52,404).
 
+## Paging (issue #25)
+
+Issue #20 gave the hart supervisor mode and Sv32, and the kernel went on
+isolating processes with PMP alone. Now every process runs under its own page
+table, and PMP stays as the backstop.
+
+### Two choices
+
+The issue left two things open.
+
+**The kernel stays in machine mode.** An S-mode kernel needs a machine-mode
+shim: the timer interrupt cannot be delegated, and our PLIC has only a machine
+context, so the shim would forward both through `mip.STIP` and `mip.SEIP`. The
+kernel would also have to map itself and every device into each page table,
+and PMP would have to grant supervisor mode the kernel's memory. In machine
+mode nothing is translated (MPRV stays clear), so the kernel's code, its
+devices and its system calls' copies to and from user memory are as they were.
+A page fault reaches it in `mcause` and `mtval`, which an S-mode kernel would
+read as `scause` and `stval`.
+
+**Each process's slots are mapped at their own physical addresses.** Programs
+are still linked for their slots, so the identity mapping changes nothing they
+can see. It also settles the other two questions in the issue:
+
+- G1 and G2 address physical memory. Every address a program gives them is
+  already physical, so the [DMA window](rv32.md#dma-window-at-0x1100_a000)
+  keeps bounding them to the running process's slots, as since issue #20.
+  These are the issue's identity-mapped engine buffers.
+- The runner groups trap records by the 128 KiB region of their pc. The pc is
+  virtual now, but it is also the physical pc, which the issue names as a key
+  that still identifies the process. `satp` would not work as a key. A process
+  table entry, and so a page table, outlives its process, and which entry a
+  background job's successor gets depends on device time.
+  `trap_records_by_region` in [rv32_rtl.py](../tools/rv32_rtl.py) is
+  unchanged and says why.
+
+The price is the one O2 paid: a program still cannot run twice at once. Lifting
+that means linking every program at one virtual address, which reopens both
+questions (exercise 1).
+
+### The page tables
+
+| Mapped | Pages | Leaf |
+| --- | --- | --- |
+| The process's slots, `base` to `base + span` | 32 per slot | R, W, X |
+| The framebuffer, from the tree | 19 (75 KiB, rounded up) | R, W |
+| Each accelerator window, from the tree, for a program flagged `accelerators` | 5 | R, W |
+
+Every leaf also has V, U, A and D set. Our hart never sets A or D (Svade), and
+a leaf that has them already behaves the same on QEMU, whatever it does about
+them. A process table entry owns four tables, its root and a level-0 table for
+each 4 MiB region it touches: the slots (all 24 lie in `0x8000_0000`'s
+megapage), the framebuffer and the accelerators. Eight entries make 128 KiB,
+in a page-aligned NOBITS section of [kernel.ld](../programs/rv32/os/kernel.ld),
+`.pagetables`, which startup does not clear.
+[rv32_image.py](../tools/rv32_image.py) admits that section by name, and only
+when it holds no bytes. `spawn()` builds the new process's tables in its entry,
+and a table is cleared once, the first time it is taken. After that the next
+process clears only the last one's leaves before it maps its own. The
+byte-wise `memset` the kernel shares with the programs would otherwise cost
+16 KiB of stores per spawn, which nearly doubled the console session's steps.
+
+### Switching
+
+`protect()` already ran whenever a different process was about to run. It now
+writes PMP, then `satp` (MODE Sv32, the root's page number) and `sfence.vma`.
+Both empty the RTL's TLB, so no translation survives a switch. The fence after
+PMP is what the privileged spec asks for when PMP changes over the page
+tables. A process table entry is rebuilt only while another process's table
+is live, and its new process gets a new pid, so its first resume always
+passes through `protect()`. The idle loop runs in machine mode, where `satp`
+does not matter.
+
+### PMP as the backstop
+
+Entries 0 to 5 are unchanged. Every user address PMP grants is also mapped, so
+PMP now refuses only what a wrong page table would let through: the end of the
+framebuffer's last page, say. A page-table walk is a supervisor read that PMP
+must grant, on our hart and on QEMU alike. Entries 6 and 7 therefore grant
+read (and only read) on `.pagetables`. PMP cannot tell supervisor from user
+mode, so this also grants user mode those reads, but no page table maps
+`.pagetables`.
+
+### Faults
+
+Translation comes before PMP, so the faults O5 added are page faults now, at
+the same pc and `mtval`:
+
+```
+$ fault load
+kernel: pid 9 fault killed: cause 13 at fault+0x18 tval 00200000
+sh: fault exited 141
+...
+$ fault kernel
+kernel: pid 11 fault killed: cause 15 at fault+0x2c tval 80000000
+sh: fault exited 143
+$ fault shell
+kernel: pid 12 fault killed: cause 15 at fault+0x38 tval 80100000
+sh: fault exited 143
+...
+$ fault read
+kernel: pid 14 fault killed: cause 13 at fault+0x4c tval 80000000
+sh: fault exited 141
+$ fault exec
+kernel: pid 15 fault killed: cause 12 at 80000000 tval 80000000
+sh: fault exited 140
+```
+
+`dmaprobe window` is a load page fault too (cause 13 at `0x1100_a000`).
+`kill()` reports the new causes as it reported the access faults. A fault's
+exit code, 128 plus the cause, goes into the PASS word, so the two sessions
+with faults get new words: the console session `PASS dc3c1ef5` (was
+`dc3c1f20`) and the menu session `PASS 53e2ea67` (was `53e2ea5f`). Neither
+session's sequence of events changed, only the causes. The jobs session and
+Pong have no faults and keep `PASS 408a6738` and `PASS 814f72be`. QEMU `virt`
+prints the same transcripts.
+
+EVIDENCE_PLACEHOLDER
+
+## Exercises (issue #25)
+
+1. **Two shells.** Link every program at `0x0001_0000` and map its slots there.
+   What must the kernel then do with a pointer a system call is given? What
+   happens to the menu's G2 depth buffer and to `dmaprobe`'s blits? What does
+   the runner need to keep comparing trap records per process?
+2. **Write xor execute.** Map a program's text read-and-execute and the rest
+   read-and-write. What would the RAM disk need to record, and which program's
+   transcript would show the difference?
+3. **Without the fence.** Delete the `sfence.vma` from `protect()` and run the
+   jobs session in step-tick mode. Why does neither backend notice? Which
+   sentence of [the TLB's contract](rv32.md#s-mode-and-sv32-issue-20) is the
+   kernel then relying on, and which harts does the privileged spec allow to
+   behave otherwise?
+4. **Without entries 6 and 7.** Leave them off and run the console session.
+   What does the shell's first fetch become, and what is the halt code?
+
 ## Exercises (O5)
 
 1. **One entry for a slot.** Slots are 128 KiB and aligned, so one NAPOT entry

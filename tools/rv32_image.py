@@ -30,6 +30,9 @@ EF_RISCV_FLOAT_ABI = 0x6
 EF_RISCV_RVE = 0x8
 EF_RISCV_TSO = 0x10
 REQUIRED_SECTIONS = (".text", ".rodata", ".data", ".bss")
+# Zero-filled sections an image may add, as long as they carry no bytes: the kernel's page tables
+# (issue #25), which startup does not clear.
+NOBITS_SECTIONS = (".pagetables",)
 REQUIRED_SYMBOLS = ("_start", "__bss_start", "__bss_end", "_end", "_stack_bottom", "_stack_top")
 # Base RV32I only: no M, no CSRs, no compressed, no traps in the M1 slice.
 FORBIDDEN_MNEMONIC = re.compile(r"\A(mul\w*|div\w*|rem\w*|csr\w*|fence\.i|c\.\w+|ecall|ebreak|wfi|[msu]ret|sfence\.vma)\Z")
@@ -261,7 +264,9 @@ def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, e
         elif by_name[name].size == 0 and name == ".text":  # a program may have no data (Track 2's small ones)
             problems.append(f"section {name} is empty")
     for section in elf.sections:
-        if section.flags & SHF_ALLOC and section.size and section.name not in REQUIRED_SECTIONS:
+        if section.name in NOBITS_SECTIONS and section.type != SHT_NOBITS:
+            problems.append(f"section {section.name} must be NOBITS")
+        elif section.flags & SHF_ALLOC and section.size and section.name not in REQUIRED_SECTIONS + NOBITS_SECTIONS:
             problems.append(f"unexpected allocated section {section.name} ({section.size} bytes)")
     bss = by_name.get(".bss")
     if bss and all(name in symbols for name in ("__bss_start", "__bss_end")):
