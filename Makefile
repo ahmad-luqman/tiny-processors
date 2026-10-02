@@ -1422,9 +1422,8 @@ run-rv32-os-qemu-reboot: run-rv32-os-qemu run-rv32-os-emu
 	diff -u $(RV32_OS)/reboot.session.qemu.expected build/rv32/os/reboot.qemu.transcript
 	test "$$($(PYTHON) tools/rv32_mkfs.py build/rv32/os/session.qemu.disk --cat note)" = hi
 # Issue #30: an interactive QEMU console sends \r for Enter. The console session typed that way gives
-# the transcript and the disk the piped one does: the shell echoes each key as it comes instead of
-# each line once read, and the session has no background job to land between the keys (test-rv32-os
-# checks that). The per-key path runs on Verilator too, results-identical to the emulator.
+# the transcript and the disk the piped one does, on QEMU and on Verilator (results-identical to the
+# emulator there).
 build/rv32/os/enter.session: $(RV32_OS)/session.txt
 	mkdir -p $(@D)
 	tr '\n' '\r' < $< > $@

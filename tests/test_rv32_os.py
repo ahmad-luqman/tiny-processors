@@ -223,9 +223,8 @@ class LayoutTest(unittest.TestCase):
 
 
 class ShellTest(unittest.TestCase):
-    """Issue #30: the shell at a terminal, on the emulator. Enter is \\r there, and from the line
-    after the first \\r the shell echoes each key, so backspace, ^U and a full line show as they
-    happen. The piped sessions never send \\r and see the same editing with whole-line echo."""
+    """Issue #30: the shell at a terminal, on the emulator. Enter is \\r there, and the shell echoes
+    each key as it comes, so backspace, ^U and a full line show as they happen."""
 
     @classmethod
     def setUpClass(cls):
@@ -257,49 +256,29 @@ class ShellTest(unittest.TestCase):
         blank = self.console(b"hello a\r\n\nhalt\n")
         self.assertIn("args: a\n$ \n$ halt\n", blank, "\\r\\n\\n is one empty line, not two")
 
-    def test_piped_lines_are_edited_and_echoed_whole(self):
-        console = self.console(b"helx\x7flo b\x08c\n" + b"\x1b[Ajunk\x15hello d\te\n" + b"hello \x80f\xff\x03\n" +
-                               b"x" * 79 + b"\n" + b"x" * 80 + b"\n" + b"x" * 85 + b"\x7f" * 10 + b"\n" +
-                               b"x" * 85 + b"\x15hello g\n" + b"halt\n")
-        self.assertIn("$ hello c\nhello from pid 2, args: c\n", console)
-        self.assertIn("$ hello d e\nhello from pid 3, args: d e\n", console, "a tab is a space")
-        self.assertIn("$ hello f\nhello from pid 4, args: f\n", console, "control and non-ASCII bytes are dropped")
-        self.assertIn(f"$ {'x' * 79}\nsh: {'x' * 79}: cannot run\n", console, "79 bytes fit")
-        self.assertIn(f"$ {'x' * 79}\nsh: line too long\n", console, "the 80th byte does not")
-        self.assertIn(f"$ {'x' * 69}\nsh: line too long\n", console, "a line that lost a byte stays refused")
-        self.assertIn("$ hello g\nhello from pid 5, args: g\n", console, "^U clears the line and its refusal")
-
-    def test_a_terminal_sees_each_key(self):
-        rub = "\b \b"
-        console = self.console(b"hello a\r" + b"helx\x7flo b\x08c\r" + b"\x1b[Ajunk\x15hello d\te\x1bOA\r" +
-                               b"x" * 85 + b"\r" + b"x" * 80 + b"\x15hello h\r" +
-                               b"hello \x1b[3~\x1bx\x1b\x1b[A\x1b[[Ai\r" + b"hello \x03\xc3\xa9j\r" +
-                               b"hello e\x1b\r" + b"hello f\x1b[\r" + b"\x7fhalt\r")
-        self.assertIn("$ hello a\nhello from pid 2, args: a\n", console, "the first line was piped-style")
-        self.assertIn(f"$ helx{rub}lo b{rub}c\nhello from pid 3, args: c\n", console)
-        self.assertIn(f"$ junk{rub * 4}hello d e\nhello from pid 4, args: d e\n", console,
+    def test_each_key_is_echoed_as_it_comes(self):
+        keys = (b"helx\x7flo b\x08c\n" + b"\x1b[Ajunk\x15hello d\te\x1bOA\n" + b"hello \x80f\xff\x03\n" +
+                b"x" * 79 + b"\n" + b"x" * 80 + b"\n" + b"x" * 85 + b"\x7f" * 10 + b"\n" + b"x" * 80 + b"\x15hello h\n" +
+                b"hello \x1b[3~\x1bx\x1b\x1b[A\x1b[[Ai\n" + b"hello e\x1b\n" + b"hello f\x1b[\n" + b"\x7fhalt\n")
+        console = self.console(keys)
+        self.assertEqual(self.console(keys.replace(b"\n", b"\r")), console, "typed or piped, the same echo")
+        rub, x = "\b \b", "x" * 79
+        self.assertIn(f"$ helx{rub}lo b{rub}c\nhello from pid 2, args: c\n", console, "from the first key")
+        self.assertIn(f"$ junk{rub * 4}hello d e\nhello from pid 3, args: d e\n", console,
                       "escape sequences are dropped, a tab is a space, ^U rubs out the line")
-        self.assertIn(f"$ {'x' * 79}{chr(7) * 6}\nsh: line too long\n", console,
-                      "a full line rings for each refused key and is refused, not cut")
-        self.assertIn(f"$ {'x' * 79}\a{rub * 79}hello h\nhello from pid 5, args: h\n", console,
+        self.assertIn("$ hello \af\a\a\nhello from pid 4, args: f\n", console,
+                      "a control byte and each non-ASCII byte ring and are dropped")
+        self.assertIn(f"$ {x}\nsh: {x}: cannot run\n", console, "79 bytes fit")
+        self.assertIn(f"$ {x}\a\nsh: line too long\n", console, "the 80th rings and refuses the line")
+        self.assertIn(f"$ {x}{chr(7) * 6}{rub * 10}\nsh: line too long\n", console,
+                      "a line that lost a byte stays refused, not cut")
+        self.assertIn(f"$ {x}\a{rub * 79}hello h\nhello from pid 5, args: h\n", console,
                       "^U clears the line and its refusal")
         self.assertIn("$ hello i\nhello from pid 6, args: i\n", console,
                       "ESC [3~, ESC x, ESC ESC [A and the Linux console's ESC [[A are dropped whole")
-        self.assertIn("$ hello \a\a\aj\nhello from pid 7, args: j\n", console,
-                      "a control byte and each non-ASCII byte ring and are dropped")
-        self.assertIn("$ hello e\nhello from pid 8, args: e\n$ hello f\nhello from pid 9, args: f\n", console,
+        self.assertIn("$ hello e\nhello from pid 7, args: e\n$ hello f\nhello from pid 8, args: f\n", console,
                       "Enter ends the line even inside an escape sequence")
         self.assertIn("$ halt\n", console, "backspace on an empty line rubs out nothing")
-
-    def test_the_console_session_can_be_typed_at_a_terminal(self):
-        """run-rv32-os-qemu-enter types session.txt with \\r and expects the piped golden: that
-        holds only while no line runs a background job (per-key echo could land between its
-        output) and no line holds a byte the two echo modes show differently."""
-        session = (ROOT / "programs/rv32/os/session.txt").read_bytes()
-        for line in session.split(b"\n"):
-            self.assertFalse(line.rstrip().endswith(b"&"), line)
-            self.assertTrue(all(0x20 <= byte <= 0x7e for byte in line), line)
-            self.assertLess(len(line), 80, line)
 
 
 def kernel_constant(name):

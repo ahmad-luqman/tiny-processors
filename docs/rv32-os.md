@@ -251,7 +251,7 @@ fault, cause 13; see [Paging](#paging-issue-25).)
 
 | Slot (since O4) | Program | What |
 | --- | --- | --- |
-| 0 | [sh](../programs/rv32/os/sh.c) | The shell, pid 1: `ls`, `NAME [ARGS]`, `NAME &`, `wait`, `halt [CODE]`; it echoes each line, since the host does not, and each key once it has seen a terminal's Enter (issue #30) |
+| 0 | [sh](../programs/rv32/os/sh.c) | The shell, pid 1: `ls`, `NAME [ARGS]`, `NAME &`, `wait`, `halt [CODE]`; it echoes each key, since the host does not (issue #30) |
 | 1 | [hello](../programs/rv32/os/hello.c) | Its pid and arguments |
 | 2 | [primes](../programs/rv32/os/primes.c) | A sieve on `sbrk` memory |
 | 3 | [pong](../programs/rv32/os/pong.c) | [pong.c](../programs/rv32/pong.c) on system calls |
@@ -316,9 +316,7 @@ qemu-system-riscv32 -M virt -cpu rv32 -bios none -m 4M \
 ```
 
 `-nographic` puts the terminal in raw mode, so Enter sends `\r`. The shell
-takes `\n`, `\r` and `\r\n` alike as Enter, and from the line after the first
-`\r` it echoes each key as it comes. Press Enter once at the first prompt:
-until then a line shows only when it is complete.
+takes `\n`, `\r` and `\r\n` alike as Enter and echoes each key as it comes.
 
 | Key | Effect |
 | --- | --- |
@@ -339,14 +337,11 @@ writing the disk may leave it half-written. With `-monitor none`, Ctrl-A goes
 to the guest and Ctrl-A X does nothing. Ctrl-C goes to the guest too, and the
 shell drops it: there is no way to interrupt a program.
 
-The pinned sessions (console, jobs, menu, Pong, reboot, boot2) are piped and never
-send `\r`, so they keep the echo of each whole line: per-key echo would let a
-background job's output land between the keys, and the jobs transcript would
-depend on timing. [.gitattributes](../.gitattributes) keeps their files at
-`\n` endings on every checkout. The same editing applies to them, and a line
-that loses a byte is refused there too. `run-rv32-os-qemu-enter` types the
-console session with `\r` on QEMU and `run-rv32-os-enter-rtl-verilator` on
-Verilator; both get the piped session's transcript and disk.
+The pinned sessions are piped with `\n` endings and get the same echo and
+editing; their jobs write files rather than the console, so nothing lands
+inside an echoed line. `run-rv32-os-qemu-enter` types the console session
+with `\r` on QEMU and `run-rv32-os-enter-rtl-verilator` on Verilator; both
+get the piped session's transcript and disk.
 
 ### Evidence (O2)
 

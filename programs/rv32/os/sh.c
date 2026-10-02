@@ -13,13 +13,9 @@
  * Enter is \n, \r or \r\n. Backspace (DEL or ^H) removes a character, ^U the
  * line, and a tab is a space. Escape sequences (arrow keys), other control
  * bytes and non-ASCII bytes are dropped, so a character is one byte and one
- * column. Until a \r arrives, as in the scripted sessions, each line is echoed
- * whole once read. A terminal sends \r for Enter (issue #30), so from the line
- * after the first \r the shell echoes each key as it comes and rings the bell
- * for a key it drops or refuses. That echo can interleave with a background
- * job's output, which is why the scripted sessions, whose files .gitattributes
- * pins to \n endings, keep the whole-line echo. (There is no `sh -i`: the
- * kernel runs one instance of a program at a time, and pid 1 is the shell.)
+ * column. Each key is echoed as it is read (issue #30), and one the shell
+ * drops or refuses rings the bell. A background job's console output can land
+ * inside the line being typed; the pinned sessions' jobs write files instead.
  *
  * The shell is pid 1: when it exits, the kernel halts with its code. */
 #include "ulib.h"
@@ -35,7 +31,6 @@ enum escape { TEXT, AFTER_ESC, SEQUENCE }; /* SEQUENCE: after ESC [ or ESC O, to
 
 static char line[LINE];
 static uint32_t background[BACKGROUND];
-static int interactive; /* a \r has been read: echo each key, from the next line on */
 static char previous;   /* the last byte read, only to take \r\n as one Enter */
 
 /* Rub out the last `count` characters on the terminal. */
@@ -51,7 +46,6 @@ static void rub_out(uint32_t count)
  * edited after, unless ^U clears it: a line that lost a byte is never run. */
 static int read_line(void)
 {
-    int echo = interactive;
     enum escape escape = TEXT;
     uint32_t n = 0;
     int fits = 1;
@@ -73,9 +67,6 @@ static int read_line(void)
             continue;
         }
         if (c == '\r' || c == '\n') { /* Enter, even inside a cut-off escape sequence */
-            if (c == '\r') {
-                interactive = 1;
-            }
             break;
         }
         if (escape == AFTER_ESC) {
@@ -94,38 +85,25 @@ static int read_line(void)
         if (c == DEL || c == CTRL_H) {
             if (n) {
                 n--;
-                if (echo) {
-                    rub_out(1);
-                }
+                rub_out(1);
             }
         } else if (c == CTRL_U) {
-            if (echo) {
-                rub_out(n);
-            }
+            rub_out(n);
             n = 0;
             fits = 1;
         } else if (c == ESC) {
             escape = AFTER_ESC;
         } else if ((uint8_t)c < 0x20 || (uint8_t)c > 0x7e) { /* dropped */
-            if (echo) {
-                u_putc('\a');
-            }
+            u_putc('\a');
         } else if (n + 1 < LINE) {
             line[n++] = c;
-            if (echo) {
-                u_putc(c);
-            }
+            u_putc(c);
         } else { /* lost: the line will be refused */
             fits = 0;
-            if (echo) {
-                u_putc('\a');
-            }
+            u_putc('\a');
         }
     }
     line[n] = 0;
-    if (!echo) {
-        u_puts(line);
-    }
     u_puts("\n");
     return fits;
 }
