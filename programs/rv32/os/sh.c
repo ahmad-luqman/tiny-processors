@@ -61,6 +61,8 @@ static int read_line(void)
         if (got == SYS_ERROR) { /* the console is fd 0; this would be a kernel bug, not input */
             u_puts("sh: cannot read the console\n");
             sys_halt(1);
+            for (;;) {
+            }
         }
         if (got != 1) {
             continue;
