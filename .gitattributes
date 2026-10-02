@@ -1,0 +1,4 @@
+# The OS shell takes \r as a terminal's Enter and then echoes each key (issue #30). The scripted
+# sessions keep \n endings on every checkout, so they keep the whole-line echo and their transcripts.
+programs/rv32/os/*.session text eol=lf
+programs/rv32/os/session.txt text eol=lf

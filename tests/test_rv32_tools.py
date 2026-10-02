@@ -332,13 +332,16 @@ class QemuDriverTests(unittest.TestCase):
     def test_os_sessions_run_on_instruction_counted_time(self):
         # A dropped --icount only shows in the jobs golden on a fast host, so pin the wiring here.
         makefile = (ROOT / "Makefile").read_text()
-        for target in ("run-rv32-os-qemu", "run-rv32-os-qemu-reboot", "run-rv32-os-jobs-qemu"):
+        command = makefile.split("\nRV32_OS_QEMU = ", 1)[1].split("\n", 1)[0]
+        self.assertIn("rv32_run_qemu.py", command)
+        self.assertIn("--icount $(RV32_OS_QEMU_ICOUNT)", command)
+        for target in ("run-rv32-os-qemu", "run-rv32-os-qemu-reboot", "run-rv32-os-qemu-enter", "run-rv32-os-jobs-qemu"):
             lines = makefile.split(f"\n{target}:", 1)[1].splitlines()[1:]
             recipe = lines[:next((i for i, line in enumerate(lines) if not line.startswith("\t")), len(lines))]
-            runs = [line for line in recipe if "rv32_run_qemu.py" in line]
-            self.assertTrue(runs, target)
-            for line in runs:
-                self.assertIn("--icount $(RV32_OS_QEMU_ICOUNT)", line, target)
+            self.assertTrue(any("$(RV32_OS_QEMU) " in line for line in recipe), target)
+            for line in recipe:
+                if "rv32_run_qemu.py" in line:
+                    self.assertIn("--icount $(RV32_OS_QEMU_ICOUNT)", line, target)
 
     def test_classify_pass_and_fail(self):
         self.assertEqual(classify(0, "PASS 807d9fad\n", False), (True, "pass", 0, "807d9fad"))

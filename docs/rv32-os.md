@@ -316,23 +316,37 @@ qemu-system-riscv32 -M virt -cpu rv32 -bios none -m 4M \
 ```
 
 `-nographic` puts the terminal in raw mode, so Enter sends `\r`. The shell
-takes `\n`, `\r` and `\r\n` alike as Enter. From the first `\r` on, it
-echoes each key as it comes, so press Enter once at the first prompt: until
-then a line shows only when it is complete. Backspace and ^H remove a
-character, ^U clears the line, a key past the 79th rings the bell, and other
-control keys and escape sequences (arrow keys) are dropped. A background
-job's output can land in the middle of the line you are typing.
+takes `\n`, `\r` and `\r\n` alike as Enter, and from the line after the first
+`\r` it echoes each key as it comes. Press Enter once at the first prompt:
+until then a line shows only when it is complete.
 
-Quit with `halt`. Ctrl-A X stops QEMU at once, so a disk write still in
-flight may be lost. With `-monitor none`, Ctrl-A goes to the guest and
-Ctrl-A X does nothing. Ctrl-C goes to the guest too, and the shell drops it:
-there is no way to interrupt a program.
+| Key | Effect |
+| --- | --- |
+| Backspace, ^H | Removes the last character |
+| ^U | Clears the line |
+| Tab | A space |
+| A key past the 79th | Rings the bell and is dropped; the line is refused at Enter (`sh: line too long`) unless ^U clears it first, so a cut line never runs |
+| Arrow and function keys (escape sequences) | Dropped |
+| Other control keys, non-ASCII bytes | Ring the bell and are dropped, so each character is one byte and one column |
 
-The scripted sessions are piped, never send `\r`, and keep the echo of each
-whole line: per-key echo would let a background job's output land between
-the keys, and the jobs transcript would depend on timing.
-`run-rv32-os-qemu-enter` types the console session with `\r` on QEMU and
-gets the piped session's transcript and disk.
+Two things stay rough. A background job's output can land in the middle of
+the line you are typing. And rubbing out past a line wrap (79 characters
+after the `$ ` prompt wrap on an 80-column terminal) leaves characters on the
+row above, though the line the shell holds is right.
+
+Quit with `halt`. Ctrl-A X stops QEMU at once, so a command that is still
+writing the disk may leave it half-written. With `-monitor none`, Ctrl-A goes
+to the guest and Ctrl-A X does nothing. Ctrl-C goes to the guest too, and the
+shell drops it: there is no way to interrupt a program.
+
+The pinned sessions (console, jobs, menu, Pong, reboot, boot2) are piped and never
+send `\r`, so they keep the echo of each whole line: per-key echo would let a
+background job's output land between the keys, and the jobs transcript would
+depend on timing. [.gitattributes](../.gitattributes) keeps their files at
+`\n` endings on every checkout. The same editing applies to them, and a line
+that loses a byte is refused there too. `run-rv32-os-qemu-enter` types the
+console session with `\r` on QEMU and `run-rv32-os-enter-rtl-verilator` on
+Verilator; both get the piped session's transcript and disk.
 
 ### Evidence (O2)
 
