@@ -1,0 +1,5 @@
+libccheck one "two words"
+3 plus 4
+cat libc.out
+fault stack
+halt

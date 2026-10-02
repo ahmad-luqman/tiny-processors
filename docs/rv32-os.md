@@ -160,7 +160,7 @@ Yosys 0.33.
 | Range | What |
 | --- | --- |
 | `0x8000_0000`–`0x800F_FFFF` | The kernel: code, data, the RAM disk, a 16 KiB stack at the top ([kernel.ld](../programs/rv32/os/kernel.ld)) |
-| `0x8010_0000 + 0x2_0000 × n`, n = 0..23 | Program slot n of 128 KiB (256 KiB, 12 slots, until O4); a program spans one or more: code, data and `.bss` from the bottom, the heap above them, a 32 KiB stack at the top ([user.ld](../programs/rv32/os/user.ld)) |
+| `0x8010_0000 + 0x2_0000 × n`, n = 0..23 | Program slot n of 128 KiB (256 KiB, 12 slots, until O4); a program spans one or more: code, data and `.bss` from the bottom, the heap above them, a 32 KiB stack at the top ([user.ld](../programs/rv32/os/user.ld)); since Track 3 a program may ask for a larger stack, and its lowest page is an unmapped guard ([record](rv32-libc.md#the-stack-a-size-per-program-and-a-guard-page)) |
 
 Each program is linked for its own slot (`--defsym SLOT_BASE=...`), so any
 set of programs can be resident at once with no relocation and no MMU; the
@@ -213,6 +213,7 @@ back in `a0` ([sys.h](../programs/rv32/os/sys.h)):
 | `sbrk(n)` | Grow the heap; it stops below the stack |
 | `spawn(name, args)`, `wait(pid)`, `list(i, buf, len)` | Run a program from the RAM disk, wait for a child, list the RAM disk |
 | `yield()`, `sleep(ticks)`, `time()`, `getpid()`, `halt(code)` | Scheduling and time; `halt` stops the machine |
+| `seek(fd, offset, whence)` | Move an open file's position (Track 3, for the C library's `fseek`) |
 
 Every pointer must lie inside the caller's slot, and every call that cannot
 be served returns `0xffff_ffff`. [syscheck.c](../programs/rv32/os/syscheck.c)
@@ -258,11 +259,13 @@ fault, cause 13; see [Paging](#paging-issue-25).)
 | 4 | [tetris](../programs/rv32/os/tetris.c) | The M7 Tetris, Q quits |
 | 5 | [dmaprobe](../programs/rv32/os/dmaprobe.c) | The DMA window: engine jobs that reach outside its slot are refused (issue #20) |
 | 7 | [syscheck](../programs/rv32/os/syscheck.c) | System-call edge cases |
-| 8 | [fault](../programs/rv32/os/fault.c) | A load from an unmapped address, or an illegal instruction; since O5 also kernel and other-slot accesses and a machine CSR; since issue #25 the slot the last program left, an engine's registers and the byte past the framebuffer |
+| 8 | [fault](../programs/rv32/os/fault.c) | A load from an unmapped address, or an illegal instruction; since O5 also kernel and other-slot accesses and a machine CSR; since issue #25 the slot the last program left, an engine's registers and the byte past the framebuffer; since Track 3 a stack that reaches its guard page |
 | 9, 10, 11 | [cat](../programs/rv32/os/cat.c), [write](../programs/rv32/os/write.c), [files](../programs/rv32/os/files.c) | Print a file, write one, list them (O3) |
 | 12, 13 | [bars](../programs/rv32/os/bars.c), [life](../programs/rv32/os/life.c) | Two programs that share the screen (O4) |
 | 14 | [fill](../programs/rv32/os/fill.c) | Numbered lines into a file, to a given size (after O5's review) |
 | 15–17 | [menu](../programs/rv32/os/menu.c) | The capstone runtime (menu, games, 2D, 3D, digit screen) on system calls, accelerators direct; slots 5–6 until issue #20 gave it room for its own depth buffer |
+| 6 | [libccheck](../programs/rv32/os/libc/libccheck.c) | The C library on the kernel (Track 3, [record](rv32-libc.md)) |
+| 18–23 | lua | Lua 5.4.7 with a 160 KiB stack (Track 3) |
 
 The user library ([ulib.c](../programs/rv32/os/ulib.c)) also defines
 `console.h`'s functions and `rv32_exit` on top of system calls, so the game

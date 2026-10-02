@@ -166,6 +166,11 @@ uint32_t fs_write(int file, uint32_t position, const uint8_t *from, uint32_t len
     return done;
 }
 
+uint32_t fs_size(int file)
+{
+    return directory[file].size;
+}
+
 int fs_name(uint32_t index, char *name, uint32_t *size)
 {
     for (uint32_t i = 0; mounted && i < ENTRIES; i++) {

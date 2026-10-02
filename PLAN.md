@@ -89,6 +89,16 @@ mode with PMP, so a program that touches kernel memory is killed while the
 shell keeps running (O5). Each step runs on QEMU `virt`, the emulator and the
 RTL.
 
+Track 3 runs other people's programs, split into two streams
+([plan](docs/planning/track3-apps.md)). Stream A is done
+([record](docs/rv32-libc.md)): picolibc, cut down to what the programs link,
+runs on the kernel's system calls with a new `seek` call and a console line
+discipline (L1), and Lua 5.4.7, unmodified, gives its REPL and runs scripts
+from the disk (L2), on QEMU `virt`, the emulator and the RTL. Lua's C stack
+needs led to a stack size per program and an unmapped guard page below every
+program's stack. Stream B (an FPU showcase, Linux without an MMU, Doom) is
+planned, not started.
+
 ## Later optional tracks
 
 Expand the OS with shell/files/program loading and eventually scheduling/protection; build a small language/compiler/software VM; explore pipelining, GPU scheduling/masks, deeper NPU designs, a browser frontend, or an FPGA. Each track gets its own contract and completion checks when chosen. No fabricated chip or Linux-compatible platform is required by the current plan.

@@ -43,6 +43,7 @@ static inline uint32_t sys_close(uint32_t fd) { return syscall3(SYS_CLOSE, fd, 0
 static inline uint32_t sys_files(uint32_t index, char *buf, uint32_t len) { return syscall3(SYS_FILES, index, (uint32_t)(uintptr_t)buf, len); }
 static inline uint32_t sys_ps(uint32_t index, char *buf, uint32_t len) { return syscall3(SYS_PS, index, (uint32_t)(uintptr_t)buf, len); }
 static inline uint32_t sys_switches(void) { return syscall3(SYS_SWITCHES, 0, 0, 0); }
+static inline uint32_t sys_seek(uint32_t fd, int32_t offset, uint32_t whence) { return syscall3(SYS_SEEK, fd, (uint32_t)offset, whence); }
 
 uint32_t u_strlen(const char *s);
 int u_strcmp(const char *a, const char *b);

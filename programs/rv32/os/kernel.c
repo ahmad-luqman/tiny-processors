@@ -109,13 +109,18 @@ struct proc {
     uint64_t wake;
     char name[24];
 };
+/* A power of two, so indexing the process table is a shift: RV32I has no multiply, and at 260
+ * bytes every procs[i] in the scheduler's loops became a call (Track 3 measured a third more
+ * steps in the console session). A new per-process field belongs in struct address_space. */
+_Static_assert(sizeof(struct proc) == 256, "struct proc is 256 bytes");
 
 /* A RAM disk entry (tools/rv32_ramdisk.py). */
 struct program {
     char name[24];
     uint32_t load, entry, file_size, memory_size, offset, flags, span; /* span in bytes, whole slots */
+    uint32_t stack; /* the top of the span the stack takes, whole pages, the lowest a guard (Track 3) */
 };
-_Static_assert(sizeof(struct program) == 52, "tools/rv32_ramdisk.py's <24s7I entry");
+_Static_assert(sizeof(struct program) == 56, "tools/rv32_ramdisk.py's <24s8I entry");
 #define PROGRAM_ACCELERATORS 1u /* it drives SIMD4, G1 and G2 itself */
 
 extern void trap_vector(void);
@@ -458,7 +463,8 @@ static void check_programs(void)
         if (e->name[sizeof e->name - 1] || e->offset > size || e->file_size > size - e->offset ||
             e->file_size > e->memory_size || e->span == 0 || e->span % OS_SLOT_SIZE ||
             e->span > OS_SLOTS * OS_SLOT_SIZE || e->load < OS_SLOT_BASE || (e->load - OS_SLOT_BASE) % OS_SLOT_SIZE ||
-            e->load > slots_end - e->span || e->memory_size > e->span - OS_STACK_SIZE ||
+            e->load > slots_end - e->span || e->stack % PAGE_SIZE || e->stack < 2 * PAGE_SIZE ||
+            e->stack >= e->span || e->memory_size > e->span - e->stack ||
             e->entry < e->load || e->entry - e->load >= e->file_size) {
             kputs("kernel: RAM disk entry ");
             kputdec(i);
@@ -492,7 +498,7 @@ static int alive(const struct proc *p)
  * cleared. */
 static struct address_space {
     uint32_t tables; /* the entry's tables in use, the root first; 0 before its first process */
-    uint32_t base, span;
+    uint32_t base, span, guard; /* guard: the stack's lowest page, never mapped (Track 3) */
     uint32_t drives_engines; /* a PROGRAM_ACCELERATORS program's: the engines' windows mapped */
 } spaces[MAX_PROCS];
 
@@ -537,7 +543,8 @@ static void lay_out(uint32_t entry, uint32_t rights)
 {
     const struct address_space *space = &spaces[entry];
     uint32_t data = rights & ~PTE_X;
-    map(entry, space->base, space->base + space->span, rights);
+    map(entry, space->base, space->guard, rights);
+    map(entry, space->guard + OS_GUARD_SIZE, space->base + space->span, rights);
     if (framebuffer) {
         map(entry, framebuffer, framebuffer + framebuffer_size, data);
     }
@@ -548,8 +555,9 @@ static void lay_out(uint32_t entry, uint32_t rights)
     }
 }
 
-/* The page tables of the process about to start in `p`'s entry. */
-static void map_process(const struct proc *p)
+/* The page tables of the process about to start in `p`'s entry, whose stack is the top `stack`
+ * bytes of its span. */
+static void map_process(const struct proc *p, uint32_t stack)
 {
     uint32_t entry = (uint32_t)(p - procs);
     struct address_space *space = &spaces[entry];
@@ -561,6 +569,7 @@ static void map_process(const struct proc *p)
     }
     space->base = p->base;
     space->span = p->span;
+    space->guard = p->base + p->span - stack;
     space->drives_engines = !!(p->flags & PROGRAM_ACCELERATORS);
     lay_out(entry, PTE_R | PTE_W | PTE_X);
 }
@@ -644,7 +653,7 @@ static struct proc *spawn(const char *name, const char *args, uint32_t parent)
     for (i = 0; program->name[i] && i + 1 < sizeof p->name; i++) {
         p->name[i] = program->name[i];
     }
-    map_process(p);
+    map_process(p, program->stack);
     return p;
 }
 
@@ -964,7 +973,7 @@ static int syscall(struct proc *p)
         }
         break;
     case SYS_SBRK:
-        if (a0 <= p->base + p->span - OS_STACK_SIZE - p->brk) {
+        if (a0 <= spaces[p - procs].guard - p->brk) { /* the heap stops below the stack */
             result = p->brk;
             p->brk += a0;
         }
@@ -1071,6 +1080,23 @@ static int syscall(struct proc *p)
         }
         break;
     }
+    case SYS_SEEK: { /* Track 3: the C library's lseek; a position stays within the file */
+        struct open_file *o = open_file_of(p, a0, 0);
+        uint32_t from = SYS_ERROR;
+        if (o) {
+            from = a2 == SEEK_FROM_START ? 0 : a2 == SEEK_FROM_CURRENT ? o->position
+                 : a2 == SEEK_FROM_END ? fs_size(o->file) : SYS_ERROR;
+        }
+        if (from != SYS_ERROR) {
+            uint32_t to = from + a1; /* a1 is a signed offset */
+            int32_t offset = (int32_t)a1;
+            if ((offset >= 0 ? to >= from : to < from) && to <= fs_size(o->file)) {
+                o->position = to;
+                result = to;
+            }
+        }
+        break;
+    }
     case SYS_CLOSE:
         if (open_file_of(p, a0, 0)) {
             result = close_file(open_file_of(p, a0, 0));
@@ -1099,6 +1125,11 @@ static int syscall(struct proc *p)
     return 1;
 }
 
+static int is_page_fault(uint32_t cause)
+{
+    return cause == 12 || cause == 13 || cause == 15;
+}
+
 static void kill(struct proc *p, uint32_t cause, uint32_t tval)
 {
     kputs("kernel: pid ");
@@ -1117,6 +1148,9 @@ static void kill(struct proc *p, uint32_t cause, uint32_t tval)
     }
     kputs(" tval ");
     kputhex(tval);
+    if (is_page_fault(cause) && tval - spaces[p - procs].guard < OS_GUARD_SIZE) {
+        kputs(" (stack overflow)"); /* Track 3: the guard page below the stack */
+    }
     kputc('\n');
     finish(p, 128u + cause);
 }

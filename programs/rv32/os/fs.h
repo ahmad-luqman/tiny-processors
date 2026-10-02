@@ -21,6 +21,7 @@ void fs_truncate(int file);                                  /* size 0, in memor
 uint32_t fs_read(int file, uint32_t position, uint8_t *to, uint32_t length);
 /* Bytes written, fewer than `length` when the file's capacity ends first; grows the size. */
 uint32_t fs_write(int file, uint32_t position, const uint8_t *from, uint32_t length);
+uint32_t fs_size(int file);                                  /* the file's size in bytes (Track 3) */
 int fs_flush(void);                                          /* write the directory back; 1 on success */
 int fs_name(uint32_t index, char *name, uint32_t *size);     /* the index-th file; 0 past the last */
 
