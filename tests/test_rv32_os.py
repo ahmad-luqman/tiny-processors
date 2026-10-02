@@ -222,6 +222,58 @@ class LayoutTest(unittest.TestCase):
         self.assertLessEqual(1 + len(touched), kernel_constant("PAGE_TABLES"))
 
 
+class ShellTest(unittest.TestCase):
+    """Issue #30: the shell at a terminal, on the emulator. Enter is \\r there, and from the first
+    \\r on the shell echoes each key, so backspace, ^U and a full line show as they happen."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.workdir = tempfile.TemporaryDirectory()
+        cls.emulator = Path(cls.workdir.name) / "rv32emu"
+        integer_tests.build_emulator(cls.emulator)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.workdir.cleanup()
+
+    def console(self, keys):
+        """The console transcript of a boot that receives `keys`, which must end in a halt."""
+        image = OS / "kernel.bin"
+        if not image.exists():
+            self.skipTest("run make check-rv32-os-image")
+        with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
+            keys_path, disk = Path(directory) / "keys", Path(directory) / "disk"
+            keys_path.write_bytes(keys)
+            shutil.copy(OS / "disk.img", disk)
+            run = run_emulator(self.emulator, image, None, console_input=keys_path, disk=disk)
+        self.assertEqual(run.halt["outcome"], "pass", run.stderr)
+        return run.console
+
+    def test_enter_is_lf_cr_or_crlf(self):
+        lf = self.console(b"hello hi\nhello x\nhalt\n")
+        self.assertIn("$ hello hi\nhello from pid 2, args: hi\n$ hello x\n", lf)
+        self.assertEqual(self.console(b"hello hi\rhello x\rhalt\r"), lf)
+        self.assertEqual(self.console(b"hello hi\r\nhello x\r\nhalt\r\n"), lf, "\\r\\n is one Enter, not two")
+
+    def test_piped_lines_are_edited_and_echoed_whole(self):
+        console = self.console(b"helx\x7flo b\x08c\n\x1b[Ajunk\x15hello d\te\nhalt\n")
+        self.assertIn("$ hello c\nhello from pid 2, args: c\n", console)
+        self.assertIn("$ hello de\nhello from pid 3, args: de\n", console)
+
+    def test_a_terminal_sees_each_key(self):
+        console = self.console(b"hello a\r" + b"helx\x7flo b\x08c\r" + b"\x1b[Ajunk\x15hello d\te\x1bOA\r" +
+                               b"x" * 85 + b"\r" + b"hello e\x1b\r" + b"hello f\x1b[\r" + b"\x7fhalt\r")
+        self.assertIn("$ hello a\nhello from pid 2, args: a\n", console, "the first line was piped-style")
+        self.assertIn("$ helx\b \blo b\b \bc\nhello from pid 3, args: c\n", console)
+        self.assertIn("$ junk" + "\b \b" * 4 + "hello de\nhello from pid 4, args: de\n", console,
+                      "escape sequences and \\t are dropped, ^U rubs out the line")
+        self.assertIn("$ " + "x" * 79 + "\a" * 6 + "\n", console, "a full line refuses a key with a bell")
+        self.assertNotIn("line too long", console)
+        self.assertIn("$ hello e\nhello from pid 5, args: e\n$ hello f\nhello from pid 6, args: f\n", console,
+                      "Enter ends the line even inside an escape sequence")
+        self.assertIn("$ halt\n", console, "backspace on an empty line rubs out nothing")
+
+
 def kernel_constant(name):
     """A #define of kernel.c, a decimal number with or without the u suffix."""
     text = (ROOT / "programs/rv32/os/kernel.c").read_text()

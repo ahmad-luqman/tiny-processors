@@ -1300,7 +1300,7 @@ test-rv32: run-rv32-irq-qemu run-rv32-irq-emu run-rv32-irq-rtl run-rv32-irq-rtl-
 # --console-input (the emulator), +console-input= (the testbench) and stdin (QEMU).
 .PHONY: firmware-rv32-os check-rv32-os-image run-rv32-os-qemu run-rv32-os-emu run-rv32-os-rtl run-rv32-os-rtl-verilator
 .PHONY: run-rv32-os-pong-emu run-rv32-os-pong-rtl-steps run-rv32-os-boot2 run-rv32-os-menu-emu run-rv32-os-menu-rtl-verilator test-rv32-os
-.PHONY: run-rv32-os-qemu-reboot print-rv32-os-layout
+.PHONY: run-rv32-os-qemu-reboot run-rv32-os-qemu-enter print-rv32-os-layout
 RV32_OS := programs/rv32/os
 RV32_OS_CFLAGS := $(RV32_CFLAGS) -I$(RV32_OS) -Ibuild/rv32
 RV32_OS_HEADERS := $(RV32_OS)/sys.h $(RV32_OS)/ulib.h $(RV32_OS)/udecimal.h $(RV32_OS)/fs.h $(RV32_OS)/virtio.h $(RV32_OS)/score.h $(RV32_OS)/report.h programs/rv32/csr.h programs/rv32/fdt.h programs/rv32/clint.h programs/rv32/virtio_mmio.h $(RV32_HEADERS)
@@ -1420,6 +1420,15 @@ run-rv32-os-qemu-reboot: run-rv32-os-qemu run-rv32-os-emu
 	$(PYTHON) tools/rv32_run_qemu.py build/rv32/os/kernel.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --icount $(RV32_OS_QEMU_ICOUNT) --stdin $(RV32_OS)/reboot.session --drive build/rv32/os/session.qemu.disk --last-line --timeout 30 --transcript build/rv32/os/reboot.qemu.transcript
 	diff -u $(RV32_OS)/reboot.session.qemu.expected build/rv32/os/reboot.qemu.transcript
 	test "$$($(PYTHON) tools/rv32_mkfs.py build/rv32/os/session.qemu.disk --cat note)" = hi
+# Issue #30: an interactive QEMU console sends \r for Enter. The session typed that way gives the
+# transcript and the disk the piped one does: the shell echoes each key as it comes instead of each
+# line once read, and the session has no background job to land between the keys.
+run-rv32-os-qemu-enter: check-rv32-os-image run-rv32-os-emu
+	tr '\n' '\r' < $(RV32_OS)/session.txt > build/rv32/os/enter.session
+	cp $(RV32_OS_DISK) build/rv32/os/enter.qemu.disk
+	$(PYTHON) tools/rv32_run_qemu.py build/rv32/os/kernel.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --icount $(RV32_OS_QEMU_ICOUNT) --stdin build/rv32/os/enter.session --drive build/rv32/os/enter.qemu.disk --last-line --timeout 30 --transcript build/rv32/os/enter.qemu.transcript
+	diff -u $(RV32_OS)/session.qemu.expected build/rv32/os/enter.qemu.transcript
+	cmp build/rv32/os/emu/kernel.emu.disk build/rv32/os/enter.qemu.disk
 run-rv32-os-emu: check-rv32-os-image $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32/os/emu
 run-rv32-os-rtl: check-rv32-os-image $(RV32EMU) $(RV32_TB_VVP)
@@ -1465,7 +1474,7 @@ run-rv32-os-jobs-rtl-steps: check-rv32-os-image $(RV32EMU) $(RV32_TB_VERILATOR)
 test-rv32: run-rv32-os-jobs-qemu run-rv32-os-jobs-emu run-rv32-os-jobs-rtl-verilator run-rv32-os-jobs-rtl-steps
 test-rv32-os: check-rv32-os-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) QEMU_RV32=$(QEMU_RV32) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_os.py' -v
-test-rv32: run-rv32-os-qemu run-rv32-os-qemu-reboot run-rv32-os-emu run-rv32-os-rtl-verilator run-rv32-os-pong-emu run-rv32-os-pong-rtl-steps run-rv32-os-boot2 run-rv32-os-menu-emu run-rv32-os-menu-rtl-verilator test-rv32-os
+test-rv32: run-rv32-os-qemu run-rv32-os-qemu-reboot run-rv32-os-qemu-enter run-rv32-os-emu run-rv32-os-rtl-verilator run-rv32-os-pong-emu run-rv32-os-pong-rtl-steps run-rv32-os-boot2 run-rv32-os-menu-emu run-rv32-os-menu-rtl-verilator test-rv32-os
 
 # O3: storage. virtiocheck drives the virtio-blk device directly on QEMU virt (a 128 KiB drive on
 # virtio-mmio-bus.0), the emulator (--disk) and the RTL (+disk); the runner compares the disks the

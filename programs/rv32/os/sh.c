@@ -10,35 +10,109 @@
  * A line longer than LINE - 1 bytes, or a halt code that is not a number, is
  * refused with a message rather than cut or read as 0.
  *
+ * Enter is \n, \r or \r\n. Backspace (DEL or ^H) removes a byte and ^U the
+ * line; other control bytes and escape sequences (arrow keys) are dropped.
+ * Piped input is echoed a whole line at a time, after it is read. A terminal
+ * sends \r for Enter (issue #30), so from the first \r on the shell echoes each
+ * key as it comes. That echo can interleave with a background job's output, so
+ * the scripted sessions, which never send \r, keep the whole-line echo and
+ * their transcripts. (There is no `sh -i`: the kernel runs one instance of a
+ * program at a time, and pid 1 is already the shell.)
+ *
  * The shell is pid 1: when it exits, the kernel halts with its code. */
 #include "ulib.h"
 
 #define LINE 80
 #define BACKGROUND 4
+#define CTRL_H 0x08
+#define CTRL_U 0x15
+#define ESC 0x1b
+#define DEL 0x7f
 
 static char line[LINE];
 static uint32_t background[BACKGROUND];
+static int interactive; /* echo each key as it is read */
 
-/* One line into `line`; returns 0 when it was too long (its end is read and dropped). */
+static void put_char(char c)
+{
+    (void)sys_write(1, &c, 1);
+}
+
+/* Rub out the last `count` characters on the terminal. */
+static void rub_out(uint32_t count)
+{
+    while (count--) {
+        u_puts("\b \b");
+    }
+}
+
+/* One line into `line`, echoed with its newline; returns 0 when it was too long
+ * (its end is read and dropped). An interactive shell refuses the key that
+ * would overflow with a bell instead, so its lines always fit. */
 static int read_line(void)
 {
+    static char previous; /* the last byte read, which may be the \r of a \r\n */
+    int echo = interactive;
     uint32_t n = 0;
     int fits = 1;
+    int escape = 0; /* 1 after ESC, 2 inside ESC [ or ESC O, until the final byte */
     for (;;) {
         char c;
-        if (sys_read(0, &c, 1) != 1 || c == '\r') {
+        if (sys_read(0, &c, 1) != 1) {
             continue;
         }
-        if (c == '\n') {
+        char before = previous;
+        previous = c;
+        if (escape && c != '\r' && c != '\n') { /* Enter still ends a cut-off sequence's line */
+            if (escape == 1 && (c == '[' || c == 'O')) {
+                escape = 2;
+            } else if (escape == 1 || (c >= 0x40 && c <= 0x7e)) {
+                escape = 0;
+            }
+            continue;
+        }
+        escape = 0;
+        if (c == '\n' && before == '\r') {
+            continue;
+        }
+        if (c == '\r' || c == '\n') {
+            if (c == '\r') {
+                interactive = 1;
+            }
             break;
         }
-        if (n + 1 < LINE) {
+        if (c == DEL || c == CTRL_H) {
+            if (n) {
+                n--;
+                if (echo) {
+                    rub_out(1);
+                }
+            }
+        } else if (c == CTRL_U) {
+            if (echo) {
+                rub_out(n);
+            }
+            n = 0;
+        } else if (c == ESC) {
+            escape = 1;
+        } else if ((uint8_t)c < 0x20) {
+            /* another control byte: dropped */
+        } else if (n + 1 < LINE) {
             line[n++] = c;
+            if (echo) {
+                put_char(c);
+            }
+        } else if (echo) {
+            put_char('\a');
         } else {
             fits = 0;
         }
     }
     line[n] = 0;
+    if (!echo) {
+        u_puts(line);
+    }
+    u_puts("\n");
     return fits;
 }
 
@@ -109,8 +183,6 @@ int main(void)
     for (;;) {
         u_puts("$ ");
         int fits = read_line();
-        u_puts(line);
-        u_puts("\n");
         if (!fits) {
             u_puts("sh: line too long\n");
             continue;
