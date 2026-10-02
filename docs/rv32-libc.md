@@ -296,7 +296,12 @@ and 5.020's runtime does not know.
   changed in its transcripts: `PASS 8b4402e5` still), Pong (200 checkpoints,
   `PASS 814f72be`), the jobs session (40 presents, `PASS 408a6738`) and the
   menu session (185 checkpoints, `PASS b1f2b253`) on the emulator; the console
-  (with its reboot and its typed-Enter twin) and jobs sessions on QEMU. The
+  (with its reboot and its typed-Enter twin) and jobs sessions on QEMU; and on
+  Verilator the console session (piped and typed, 8,880,028 cycles), the second
+  boot, the jobs session (40 presents) and the menu session (185 checkpoints,
+  seeded waits), results-identical to the emulator, with Pong and the jobs
+  session trace-identical in step-tick mode (1,168,126 and 6,742,051 lines) and
+  `test-rv32-os` passing. The
   console session takes 1,448,225 steps against 1,797,082 before Track 3 on the
   same toolchain: the word-wise `memcpy` saves more than the two new `ls`
   lines and the page tables split around each guard cost (1,821,505 steps
