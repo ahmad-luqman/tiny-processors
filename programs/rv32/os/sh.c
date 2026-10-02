@@ -10,35 +10,101 @@
  * A line longer than LINE - 1 bytes, or a halt code that is not a number, is
  * refused with a message rather than cut or read as 0.
  *
+ * Enter is \n, \r or \r\n. Backspace (DEL or ^H) removes a character, ^U the
+ * line, and a tab is a space. Escape sequences (arrow keys), other control
+ * bytes and non-ASCII bytes are dropped, so a character is one byte and one
+ * column. Each key is echoed as it is read (issue #30), and one the shell
+ * drops or refuses rings the bell. A background job's console output can land
+ * inside the line being typed; the pinned sessions' jobs write files instead.
+ *
  * The shell is pid 1: when it exits, the kernel halts with its code. */
 #include "ulib.h"
 
 #define LINE 80
 #define BACKGROUND 4
+#define CTRL_H 0x08
+#define CTRL_U 0x15
+#define ESC 0x1b
+#define DEL 0x7f
+
+enum escape { TEXT, AFTER_ESC, SEQUENCE }; /* SEQUENCE: after ESC [ or ESC O, to a final byte */
 
 static char line[LINE];
 static uint32_t background[BACKGROUND];
+static char previous;   /* the last byte read, only to take \r\n as one Enter */
 
-/* One line into `line`; returns 0 when it was too long (its end is read and dropped). */
+/* Rub out the last `count` characters on the terminal. */
+static void rub_out(uint32_t count)
+{
+    while (count--) {
+        u_puts("\b \b");
+    }
+}
+
+/* One line into `line`, echoed with its newline; returns 0 when it was too long.
+ * A byte past LINE - 1 is dropped and the line is refused at Enter however it is
+ * edited after, unless ^U clears it: a line that lost a byte is never run. */
 static int read_line(void)
 {
+    enum escape escape = TEXT;
     uint32_t n = 0;
     int fits = 1;
     for (;;) {
         char c;
-        if (sys_read(0, &c, 1) != 1 || c == '\r') {
+        uint32_t got = sys_read(0, &c, 1);
+        if (got == SYS_ERROR) { /* the console is fd 0; this would be a kernel bug, not input */
+            u_puts("sh: cannot read the console\n");
+            sys_halt(1);
+            for (;;) {
+            }
+        }
+        if (got != 1) {
             continue;
         }
-        if (c == '\n') {
+        char before = previous;
+        previous = c;
+        if (c == '\n' && before == '\r') {
+            continue;
+        }
+        if (c == '\r' || c == '\n') { /* Enter, even inside a cut-off escape sequence */
             break;
         }
-        if (n + 1 < LINE) {
+        if (escape == AFTER_ESC) {
+            escape = c == '[' || c == 'O' ? SEQUENCE : c == ESC ? AFTER_ESC : TEXT;
+            continue;
+        }
+        if (escape == SEQUENCE) {
+            if (c >= 0x40 && c <= 0x7e && c != '[') { /* ESC [ [ A is a Linux console F1 */
+                escape = TEXT;
+            }
+            continue;
+        }
+        if (c == '\t') {
+            c = ' ';
+        }
+        if (c == DEL || c == CTRL_H) {
+            if (n) {
+                n--;
+                rub_out(1);
+            }
+        } else if (c == CTRL_U) {
+            rub_out(n);
+            n = 0;
+            fits = 1;
+        } else if (c == ESC) {
+            escape = AFTER_ESC;
+        } else if ((uint8_t)c < 0x20 || (uint8_t)c > 0x7e) { /* dropped */
+            u_putc('\a');
+        } else if (n + 1 < LINE) {
             line[n++] = c;
-        } else {
+            u_putc(c);
+        } else { /* lost: the line will be refused */
             fits = 0;
+            u_putc('\a');
         }
     }
     line[n] = 0;
+    u_puts("\n");
     return fits;
 }
 
@@ -109,8 +175,6 @@ int main(void)
     for (;;) {
         u_puts("$ ");
         int fits = read_line();
-        u_puts(line);
-        u_puts("\n");
         if (!fits) {
             u_puts("sh: line too long\n");
             continue;

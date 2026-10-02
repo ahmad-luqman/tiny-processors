@@ -48,6 +48,7 @@ uint32_t u_strlen(const char *s);
 int u_strcmp(const char *a, const char *b);
 void *memcpy(void *dst, const void *src, size_t n); /* mem.c */
 void *memset(void *dst, int value, size_t n);
+void u_putc(char c);
 void u_puts(const char *s);                        /* the string, no newline */
 void u_putdec(uint32_t value);
 void u_puthex(uint32_t value);                     /* eight lowercase digits */

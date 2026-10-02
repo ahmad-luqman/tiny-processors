@@ -251,7 +251,7 @@ fault, cause 13; see [Paging](#paging-issue-25).)
 
 | Slot (since O4) | Program | What |
 | --- | --- | --- |
-| 0 | [sh](../programs/rv32/os/sh.c) | The shell, pid 1: `ls`, `NAME [ARGS]`, `NAME &`, `wait`, `halt [CODE]`; it echoes each line, since the host does not |
+| 0 | [sh](../programs/rv32/os/sh.c) | The shell, pid 1: `ls`, `NAME [ARGS]`, `NAME &`, `wait`, `halt [CODE]`; it echoes each key, since the host does not (issue #30) |
 | 1 | [hello](../programs/rv32/os/hello.c) | Its pid and arguments |
 | 2 | [primes](../programs/rv32/os/primes.c) | A sieve on `sbrk` memory |
 | 3 | [pong](../programs/rv32/os/pong.c) | [pong.c](../programs/rv32/pong.c) on system calls |
@@ -299,6 +299,49 @@ PASS 34b7bb53
 and our backends print the same lines but the first two. The PASS word is a
 sum over every process that exited of a hash of its name xor its exit code:
 a sum, so the order processes finish in does not change it (O4).
+
+### At an interactive QEMU console
+
+The shell also works typed at by hand (issue #30). Boot QEMU on a copy of
+the disk, since the session writes to it:
+
+```sh
+make check-rv32-os-image
+cp build/rv32/os/disk.img build/rv32/os/my.disk
+qemu-system-riscv32 -M virt -cpu rv32 -bios none -m 4M \
+  -kernel build/rv32/os/kernel.elf -nographic -no-reboot \
+  -icount shift=3,sleep=off -global virtio-mmio.force-legacy=false \
+  -drive file=build/rv32/os/my.disk,if=none,format=raw,id=disk0 \
+  -device virtio-blk-device,drive=disk0,bus=virtio-mmio-bus.0
+```
+
+`-nographic` puts the terminal in raw mode, so Enter sends `\r`. The shell
+takes `\n`, `\r` and `\r\n` alike as Enter and echoes each key as it comes.
+
+| Key | Effect |
+| --- | --- |
+| Backspace, ^H | Removes the last character |
+| ^U | Clears the line |
+| Tab | A space |
+| A key past the 79th | Rings the bell and is dropped; the line is refused at Enter (`sh: line too long`) unless ^U clears it first, so a cut line never runs |
+| Arrow and function keys (escape sequences) | Dropped |
+| Other control keys, non-ASCII bytes | Ring the bell and are dropped, so each character is one byte and one column |
+
+Two things stay rough. A background job's output can land in the middle of
+the line you are typing. And rubbing out past a line wrap (79 characters
+after the `$ ` prompt wrap on an 80-column terminal) leaves characters on the
+row above, though the line the shell holds is right.
+
+Quit with `halt`. Ctrl-A X stops QEMU at once, so a command that is still
+writing the disk may leave it half-written. With `-monitor none`, Ctrl-A goes
+to the guest and Ctrl-A X does nothing. Ctrl-C goes to the guest too, and the
+shell drops it: there is no way to interrupt a program.
+
+The pinned sessions are piped with `\n` endings and get the same echo and
+editing; their jobs write files rather than the console, so nothing lands
+inside an echoed line. `run-rv32-os-qemu-enter` types the console session
+with `\r` on QEMU and `run-rv32-os-enter-rtl-verilator` on Verilator; both
+get the piped session's transcript and disk.
 
 ### Evidence (O2)
 

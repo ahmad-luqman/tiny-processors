@@ -222,6 +222,65 @@ class LayoutTest(unittest.TestCase):
         self.assertLessEqual(1 + len(touched), kernel_constant("PAGE_TABLES"))
 
 
+class ShellTest(unittest.TestCase):
+    """Issue #30: the shell at a terminal, on the emulator. Enter is \\r there, and the shell echoes
+    each key as it comes, so backspace, ^U and a full line show as they happen."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not (OS / "kernel.bin").exists():
+            raise unittest.SkipTest("run make check-rv32-os-image")
+        cls.workdir = tempfile.TemporaryDirectory()
+        cls.emulator = Path(cls.workdir.name) / "rv32emu"
+        integer_tests.build_emulator(cls.emulator)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.workdir.cleanup()
+
+    def console(self, keys):
+        """The console transcript of a boot that receives `keys`, which must end in a halt."""
+        with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
+            work = Path(directory)
+            (work / "keys").write_bytes(keys)
+            shutil.copy(OS / "disk.img", work / "disk")
+            run = run_emulator(self.emulator, OS / "kernel.bin", None, console_input=work / "keys", disk=work / "disk")
+        self.assertEqual(run.halt["outcome"], "pass", run.stderr)
+        return run.console
+
+    def test_enter_is_lf_cr_or_crlf(self):
+        lf = self.console(b"hello hi\nhello x\nhalt\n")
+        self.assertIn("$ hello hi\nhello from pid 2, args: hi\n$ hello x\n", lf)
+        self.assertEqual(self.console(b"hello hi\rhello x\rhalt\r"), lf)
+        self.assertEqual(self.console(b"hello hi\r\nhello x\r\nhalt\r\n"), lf, "\\r\\n is one Enter, not two")
+        blank = self.console(b"hello a\r\n\nhalt\n")
+        self.assertIn("args: a\n$ \n$ halt\n", blank, "\\r\\n\\n is one empty line, not two")
+
+    def test_each_key_is_echoed_as_it_comes(self):
+        keys = (b"helx\x7flo b\x08c\n" + b"\x1b[Ajunk\x15hello d\te\x1bOA\n" + b"hello \x80f\xff\x03\n" +
+                b"x" * 79 + b"\n" + b"x" * 80 + b"\n" + b"x" * 85 + b"\x7f" * 10 + b"\n" + b"x" * 80 + b"\x15hello h\n" +
+                b"hello \x1b[3~\x1bx\x1b\x1b[A\x1b[[Ai\n" + b"hello e\x1b\n" + b"hello f\x1b[\n" + b"\x7fhalt\n")
+        console = self.console(keys)
+        self.assertEqual(self.console(keys.replace(b"\n", b"\r")), console, "typed or piped, the same echo")
+        rub, x = "\b \b", "x" * 79
+        self.assertIn(f"$ helx{rub}lo b{rub}c\nhello from pid 2, args: c\n", console, "from the first key")
+        self.assertIn(f"$ junk{rub * 4}hello d e\nhello from pid 3, args: d e\n", console,
+                      "escape sequences are dropped, a tab is a space, ^U rubs out the line")
+        self.assertIn("$ hello \af\a\a\nhello from pid 4, args: f\n", console,
+                      "a control byte and each non-ASCII byte ring and are dropped")
+        self.assertIn(f"$ {x}\nsh: {x}: cannot run\n", console, "79 bytes fit")
+        self.assertIn(f"$ {x}\a\nsh: line too long\n", console, "the 80th rings and refuses the line")
+        self.assertIn(f"$ {x}{chr(7) * 6}{rub * 10}\nsh: line too long\n", console,
+                      "a line that lost a byte stays refused, not cut")
+        self.assertIn(f"$ {x}\a{rub * 79}hello h\nhello from pid 5, args: h\n", console,
+                      "^U clears the line and its refusal")
+        self.assertIn("$ hello i\nhello from pid 6, args: i\n", console,
+                      "ESC [3~, ESC x, ESC ESC [A and the Linux console's ESC [[A are dropped whole")
+        self.assertIn("$ hello e\nhello from pid 7, args: e\n$ hello f\nhello from pid 8, args: f\n", console,
+                      "Enter ends the line even inside an escape sequence")
+        self.assertIn("$ halt\n", console, "backspace on an empty line rubs out nothing")
+
+
 def kernel_constant(name):
     """A #define of kernel.c, a decimal number with or without the u suffix."""
     text = (ROOT / "programs/rv32/os/kernel.c").read_text()

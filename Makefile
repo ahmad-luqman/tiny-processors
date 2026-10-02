@@ -1300,7 +1300,7 @@ test-rv32: run-rv32-irq-qemu run-rv32-irq-emu run-rv32-irq-rtl run-rv32-irq-rtl-
 # --console-input (the emulator), +console-input= (the testbench) and stdin (QEMU).
 .PHONY: firmware-rv32-os check-rv32-os-image run-rv32-os-qemu run-rv32-os-emu run-rv32-os-rtl run-rv32-os-rtl-verilator
 .PHONY: run-rv32-os-pong-emu run-rv32-os-pong-rtl-steps run-rv32-os-boot2 run-rv32-os-menu-emu run-rv32-os-menu-rtl-verilator test-rv32-os
-.PHONY: run-rv32-os-qemu-reboot print-rv32-os-layout
+.PHONY: run-rv32-os-qemu-reboot run-rv32-os-qemu-enter run-rv32-os-enter-rtl-verilator print-rv32-os-layout
 RV32_OS := programs/rv32/os
 RV32_OS_CFLAGS := $(RV32_CFLAGS) -I$(RV32_OS) -Ibuild/rv32
 RV32_OS_HEADERS := $(RV32_OS)/sys.h $(RV32_OS)/ulib.h $(RV32_OS)/udecimal.h $(RV32_OS)/fs.h $(RV32_OS)/virtio.h $(RV32_OS)/score.h $(RV32_OS)/report.h programs/rv32/csr.h programs/rv32/fdt.h programs/rv32/clint.h programs/rv32/virtio_mmio.h $(RV32_HEADERS)
@@ -1409,17 +1409,31 @@ print-rv32-os-layout:
 # the kernel's 100 us quantum ("preempted no"). The OS sessions count instructions instead: 2^3 ns
 # of virtual time each makes the quantum 12,500 instructions, near the emulator's 10,000 (issue #20).
 RV32_OS_QEMU_ICOUNT ?= 3
+RV32_OS_QEMU = $(PYTHON) tools/rv32_run_qemu.py build/rv32/os/kernel.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --icount $(RV32_OS_QEMU_ICOUNT) --last-line
 run-rv32-os-qemu: check-rv32-os-image
 	cp $(RV32_OS_DISK) build/rv32/os/session.qemu.disk
-	$(PYTHON) tools/rv32_run_qemu.py build/rv32/os/kernel.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --icount $(RV32_OS_QEMU_ICOUNT) --stdin $(RV32_OS)/session.txt --drive build/rv32/os/session.qemu.disk --last-line --timeout 30 --transcript build/rv32/os/session.qemu.transcript
+	$(RV32_OS_QEMU) --stdin $(RV32_OS)/session.txt --drive build/rv32/os/session.qemu.disk --timeout 30 --transcript build/rv32/os/session.qemu.transcript
 	diff -u $(RV32_OS)/session.qemu.expected build/rv32/os/session.qemu.transcript
 # O3 on QEMU as well: the disk QEMU's session left is byte for byte the emulator's, and QEMU boots
 # from it again and finds what the session wrote.
 run-rv32-os-qemu-reboot: run-rv32-os-qemu run-rv32-os-emu
 	cmp build/rv32/os/session.qemu.disk build/rv32/os/emu/kernel.emu.disk
-	$(PYTHON) tools/rv32_run_qemu.py build/rv32/os/kernel.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --icount $(RV32_OS_QEMU_ICOUNT) --stdin $(RV32_OS)/reboot.session --drive build/rv32/os/session.qemu.disk --last-line --timeout 30 --transcript build/rv32/os/reboot.qemu.transcript
+	$(RV32_OS_QEMU) --stdin $(RV32_OS)/reboot.session --drive build/rv32/os/session.qemu.disk --timeout 30 --transcript build/rv32/os/reboot.qemu.transcript
 	diff -u $(RV32_OS)/reboot.session.qemu.expected build/rv32/os/reboot.qemu.transcript
 	test "$$($(PYTHON) tools/rv32_mkfs.py build/rv32/os/session.qemu.disk --cat note)" = hi
+# Issue #30: an interactive QEMU console sends \r for Enter. The console session typed that way gives
+# the transcript and the disk the piped one does, on QEMU and on Verilator (results-identical to the
+# emulator there).
+build/rv32/os/enter.session: $(RV32_OS)/session.txt
+	mkdir -p $(@D)
+	tr '\n' '\r' < $< > $@
+run-rv32-os-qemu-enter: check-rv32-os-image build/rv32/os/enter.session run-rv32-os-emu
+	cp $(RV32_OS_DISK) build/rv32/os/enter.qemu.disk
+	$(RV32_OS_QEMU) --stdin build/rv32/os/enter.session --drive build/rv32/os/enter.qemu.disk --timeout 30 --transcript build/rv32/os/enter.qemu.transcript
+	diff -u $(RV32_OS)/session.qemu.expected build/rv32/os/enter.qemu.transcript
+	cmp build/rv32/os/emu/kernel.emu.disk build/rv32/os/enter.qemu.disk
+run-rv32-os-enter-rtl-verilator: check-rv32-os-image build/rv32/os/enter.session $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) -m tools.rv32_rtl $(subst $(RV32_OS)/session.txt,build/rv32/os/enter.session,$(RV32_OS_ARGS)) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --max-cycles 50000000 --out build/rv32/os/enter-verilator
 run-rv32-os-emu: check-rv32-os-image $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32/os/emu
 run-rv32-os-rtl: check-rv32-os-image $(RV32EMU) $(RV32_TB_VVP)
@@ -1454,7 +1468,7 @@ RV32_OS_JOBS_ARGS := --image build/rv32/os/kernel.bin --console-input $(RV32_OS)
 .PHONY: run-rv32-os-jobs-qemu run-rv32-os-jobs-emu run-rv32-os-jobs-rtl-verilator run-rv32-os-jobs-rtl-steps
 run-rv32-os-jobs-qemu: check-rv32-os-image
 	cp $(RV32_OS_DISK) build/rv32/os/jobs.qemu.disk
-	$(PYTHON) tools/rv32_run_qemu.py build/rv32/os/kernel.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --icount $(RV32_OS_QEMU_ICOUNT) --stdin $(RV32_OS)/jobs.session --drive build/rv32/os/jobs.qemu.disk --last-line --timeout 60 --transcript build/rv32/os/jobs.qemu.transcript
+	$(RV32_OS_QEMU) --stdin $(RV32_OS)/jobs.session --drive build/rv32/os/jobs.qemu.disk --timeout 60 --transcript build/rv32/os/jobs.qemu.transcript
 	diff -u $(RV32_OS)/jobs.session.qemu.expected build/rv32/os/jobs.qemu.transcript
 run-rv32-os-jobs-emu: check-rv32-os-image $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_OS_JOBS_ARGS) --compare results --backend emulator --emulator $(RV32EMU) --out build/rv32/os/jobs-emu
@@ -1465,7 +1479,7 @@ run-rv32-os-jobs-rtl-steps: check-rv32-os-image $(RV32EMU) $(RV32_TB_VERILATOR)
 test-rv32: run-rv32-os-jobs-qemu run-rv32-os-jobs-emu run-rv32-os-jobs-rtl-verilator run-rv32-os-jobs-rtl-steps
 test-rv32-os: check-rv32-os-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) QEMU_RV32=$(QEMU_RV32) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_os.py' -v
-test-rv32: run-rv32-os-qemu run-rv32-os-qemu-reboot run-rv32-os-emu run-rv32-os-rtl-verilator run-rv32-os-pong-emu run-rv32-os-pong-rtl-steps run-rv32-os-boot2 run-rv32-os-menu-emu run-rv32-os-menu-rtl-verilator test-rv32-os
+test-rv32: run-rv32-os-qemu run-rv32-os-qemu-reboot run-rv32-os-qemu-enter run-rv32-os-emu run-rv32-os-rtl-verilator run-rv32-os-enter-rtl-verilator run-rv32-os-pong-emu run-rv32-os-pong-rtl-steps run-rv32-os-boot2 run-rv32-os-menu-emu run-rv32-os-menu-rtl-verilator test-rv32-os
 
 # O3: storage. virtiocheck drives the virtio-blk device directly on QEMU virt (a 128 KiB drive on
 # virtio-mmio-bus.0), the emulator (--disk) and the RTL (+disk); the runner compares the disks the

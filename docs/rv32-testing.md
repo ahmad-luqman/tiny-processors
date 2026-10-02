@@ -105,9 +105,9 @@ the same file. The audit for issue #26 checked every recipe's expanded command
 
 - `tools/rv32_rtl.py` writes `<out>/<image name>.*`. Two targets may share an
   `--out` directory only if they run different images, or if one depends on the
-  other. `run-rv32-os-qemu-reboot` reuses `run-rv32-os-qemu`'s disk and
-  `run-rv32-os-boot2` reuses `run-rv32-os-pong-rtl-steps`'s, both through such a
-  dependency.
+  other. `run-rv32-os-qemu-reboot` reuses `run-rv32-os-qemu`'s disk,
+  `run-rv32-os-qemu-enter` reuses `run-rv32-os-emu`'s and `run-rv32-os-boot2`
+  reuses `run-rv32-os-pong-rtl-steps`'s, all through such a dependency.
 - A test file that one target runs on Icarus and another on Verilator must write
   under a directory of the simulator's own. Before issue #26,
   `tests/test_rv32_gfx.py` wrote `build/gfx/native.dylib` and
@@ -199,6 +199,7 @@ two halves are:
 | `test-rv32-m` | fast | 13.7 | 14.1 |
 | `test-rv32-dma-window-icarus` | fast | 11.7 | 13.6 |
 | `synth-rv32-gfx` | fast | 12.2 | 13.5 |
+| `run-rv32-os-enter-rtl-verilator` | fast | — | 13.4\* |
 | `run-rv32-mmu-rtl` | fast | 11.4 | 13.2 |
 | `run-rv32-virtio-rtl` | fast | 11.8 | 13.1 |
 | `run-rv32-irq-rtl` | fast | 11.3 | 12.5 |
@@ -226,6 +227,7 @@ two halves are:
 | `run-rv32-pong-rtl-verilator` | fast | 2.8 | 3.9 |
 | `test-rv32-emu` | fast | 3.1 | 3.9 |
 | `test-rv32-platform` | fast | 3.4 | 3.8 |
+| `run-rv32-os-qemu-enter` | fast | — | 3.8\* |
 | `run-rv32-gfx-emu` | fast | 3.1 | 3.7 |
 | `run-rv32m-emu` | fast | 2.9 | 3.5 |
 | `run-rv32-capstone-emu` | fast | 2.3 | 3.3 |
@@ -285,3 +287,5 @@ two halves are:
 | `run-rv32-f-soft-qemu` | fast | 0.1 | 0.1 |
 | `lint-rv32-gfx` | fast | 0.1 | 0.1 |
 | `check-rv32-dtb` | fast | 0.0 | 0.0 |
+
+\* Added after issue #26 (issue #30) and timed alone, `run-rv32-os-qemu-enter` with its `run-rv32-os-emu` prerequisite.

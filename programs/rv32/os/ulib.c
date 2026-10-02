@@ -34,6 +34,11 @@ int u_strcmp(const char *a, const char *b)
     return (unsigned char)*a - (unsigned char)*b;
 }
 
+void u_putc(char c)
+{
+    (void)sys_write(1, &c, 1);
+}
+
 void u_puts(const char *s)
 {
     (void)sys_write(1, s, u_strlen(s));
@@ -72,7 +77,7 @@ uint32_t u_parse(const char *s, const char **end)
 /* console.h on top of the write call. */
 void rv32_putc(char c)
 {
-    (void)sys_write(1, &c, 1);
+    u_putc(c);
 }
 
 void rv32_puts(const char *s)
