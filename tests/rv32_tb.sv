@@ -8,7 +8,7 @@
 // trace contract. Contract for its plusargs, counters, and halt line:
 // docs/rv32-rtl.md.
 module rv32_tb;
-    parameter integer RAM_WORDS = 1048576; // the contract's 4 MiB
+    parameter integer RAM_WORDS = 2097152; // the contract's 8 MiB
     parameter integer CONSOLE_BUSY = 0;    // cycles the console waits before each byte
     parameter integer FB_WORDS = 19200;    // 320 x 240 one-byte pixels, as 32-bit words
     localparam integer STDERR = 32'h8000_0002;

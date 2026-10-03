@@ -627,7 +627,7 @@ class RtlTest(unittest.TestCase):
             ("load from the done register", LI(1, DONE) + [LW(2, 1, 0)], 5, DONE),
             ("byte store to the done register", LI(1, DONE) + [SB(1, 1, 0)], 7, DONE),
             ("word store past the done register", LI(1, DONE) + [SW(1, 1, 4)], 7, DONE + 4),
-            ("store past the end of RAM", LI(1, RAM + 0x400000) + [SW(1, 1, 0)], 7, RAM + 0x400000),
+            ("store past the end of RAM", LI(1, RAM + 0x800000) + [SW(1, 1, 0)], 7, RAM + 0x800000),
             ("misaligned halfword load", LI(1, RAM + 0x201) + [LH(2, 1, 0)], 4, RAM + 0x201),
             ("misaligned halfword store", LI(1, RAM + 0x203) + [SH(1, 1, 0)], 6, RAM + 0x203),
             ("halfword load of the console status", LI(1, CONSOLE) + [LHU(2, 1, 4)], 5, CONSOLE + 4),
@@ -662,7 +662,7 @@ class RtlTest(unittest.TestCase):
             ("aligned halfword inside a device window", LI(1, MTIME + 2) + [LHU(2, 1, 0)], 5, MTIME + 2),
             ("load from the palette window reserved for M6", LI(1, 0x11003000) + [LW(2, 1, 0)], 5, 0x11003000),
             ("store to the palette window reserved for M6", LI(1, 0x11003000) + [SW(1, 1, 0)], 7, 0x11003000),
-            ("fetch from the first word past RAM", LI(1, RAM + 0x400000) + [JALR(0, 1, 0)], 1, RAM + 0x400000),
+            ("fetch from the first word past RAM", LI(1, RAM + 0x800000) + [JALR(0, 1, 0)], 1, RAM + 0x800000),
         ]
         for name, words, cause, value in cases:
             with self.subTest(name=name):
@@ -672,12 +672,12 @@ class RtlTest(unittest.TestCase):
                 self.assertEqual(len(rtl.trace), len(words) + 2 if cause == 1 else len(words) + 1)
                 self.assertNotIn("]<-", rtl.trace[-2], "a faulting store writes nothing")
         # The last RAM word, halfword, and byte are inside the map, for stores and loads.
-        words = LI(1, RAM + 0x3FFFFC) + [SW(1, 1, 0), LW(2, 1, 0), SH(1, 1, 2), SB(1, 1, 3), LHU(3, 1, 2), LBU(4, 1, 3)] + FINISH()
+        words = LI(1, RAM + 0x7FFFFC) + [SW(1, 1, 0), LW(2, 1, 0), SH(1, 1, 2), SB(1, 1, 3), LHU(3, 1, 2), LBU(4, 1, 3)] + FINISH()
         emulator, rtl = self.assert_same_pass(words, stall=0)
-        self.assertEqual(effects(rtl.trace[3]), "x2=803ffffc mem[803ffffc]->803ffffc/4")
+        self.assertEqual(effects(rtl.trace[3]), "x2=807ffffc mem[807ffffc]->807ffffc/4")
         self.assertEqual([effects(line) for line in rtl.trace[4:8]],
-                         ["mem[803ffffe]<-0000fffc/2", "mem[803fffff]<-000000fc/1",
-                          "x3=0000fcfc mem[803ffffe]->0000fcfc/2", "x4=000000fc mem[803fffff]->000000fc/1"])
+                         ["mem[807ffffe]<-0000fffc/2", "mem[807fffff]<-000000fc/1",
+                          "x3=0000fcfc mem[807ffffe]->0000fcfc/2", "x4=000000fc mem[807fffff]->000000fc/1"])
 
     def test_console_bytes_and_done_words(self):
         say = LI(1, CONSOLE)

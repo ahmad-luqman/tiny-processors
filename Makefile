@@ -1172,7 +1172,7 @@ test-rv32: test-rv32-arch-model test-rv32-arch test-rv32-arch-verilator
 .PHONY: check-rv32-dtb check-rv32-virt-map check-rv32-platcheck-image test-rv32-platform
 .PHONY: run-rv32-platform-qemu run-rv32-platform-emu run-rv32-platform-rtl run-rv32-platform-rtl-verilator
 RV32_PLATCHECK_OBJS := build/rv32/platcheck.o build/rv32/fdt.o $(RV32_COMMON_OBJS)
-RV32_PLATCHECK_HEX := b8a59113
+RV32_PLATCHECK_HEX := 91659113
 # QEMU 8.2 has no bare `rv32i` model; the generic CPU runs the RV32I image as is.
 RV32_PLATFORM_QEMU_CPU ?= rv32
 RV32_PLATFORM_ARGS := --image build/rv32/platcheck.bin --compare results --expect-last-line "PASS $(RV32_PLATCHECK_HEX)" --expect-console-file programs/rv32/platcheck.expected
@@ -1331,7 +1331,8 @@ RV32_OS_SLOT_files := 11
 RV32_OS_SLOT_bars := 12
 RV32_OS_SLOT_life := 13
 RV32_OS_SLOT_fill := 14
-# Track 3: libccheck in the slot the menu left; Lua's 370 KB image, its heap and stack in the six at the top.
+# Track 3: libccheck in the slot the menu left; Lua's 370 KB image, its heap and stack in the six
+# that were the top of 4 MiB RAM (issue #33 made it 8 MiB: slots 24 to 55 are new).
 RV32_OS_SLOT_libccheck := 6
 RV32_OS_SLOT_lua := 18
 RV32_OS_SPAN_lua := 6

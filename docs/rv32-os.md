@@ -276,8 +276,9 @@ and demo sources link unchanged.
 The kernel finds its devices only through the tree: the console
 (`tiny-processors,console`, else `ns16550a`), the done register
 (`sifive,test0`), the CLINT and PLIC, and our input, display and engines where
-listed. QEMU puts its tree at `0x8020_0000`, inside slot 8 (slot 4 of O2's
-256 KiB slots, where `tetris` was linked then), so the kernel reads
+listed. QEMU puts its tree 2 MiB below the end of RAM: at `0x8020_0000` with 4 MiB,
+inside slot 8 (slot 4 of O2's 256 KiB slots, where `tetris` was linked then), and
+at `0x8060_0000` (slot 40) since issue #33's 8 MiB, so the kernel reads
 everything it needs (including the model string) before loading the first
 program. The same `kernel.elf` then ran O2's console session on QEMU `virt`
 (the addresses and the count have moved with later steps; the pinned
@@ -311,7 +312,7 @@ the disk, since the session writes to it:
 ```sh
 make check-rv32-os-image
 cp build/rv32/os/disk.img build/rv32/os/my.disk
-qemu-system-riscv32 -M virt -cpu rv32 -bios none -m 4M \
+qemu-system-riscv32 -M virt -cpu rv32 -bios none -m 8M \
   -kernel build/rv32/os/kernel.elf -nographic -no-reboot \
   -icount shift=3,sleep=off -global virtio-mmio.force-legacy=false \
   -drive file=build/rv32/os/my.disk,if=none,format=raw,id=disk0 \
@@ -503,7 +504,7 @@ fast it passes.
 ### Slots
 
 Twelve 256 KiB slots were all taken by the end of O3. Slots are now 128 KiB
-(24 of them), and a program may span several: its link script's
+(24 of them, 56 since issue #33 made RAM 8 MiB), and a program may span several: its link script's
 `SLOT_SPAN`, recorded in the RAM disk entry, sets where its stack starts. The
 menu, the only program larger than 96 KiB, spans three since issue #20 gave it
 its own depth buffer (two before). `spawn` refuses a
@@ -836,13 +837,14 @@ questions (exercise 1).
 
 Every leaf also has V, U, A and D set. Our hart never sets A or D (Svade), and
 a leaf that has them already behaves the same on QEMU, whatever it does about
-them. A process table entry owns four tables, its root and a level-0 table for
-each 4 MiB region it touches: the slots (all 24 lie in `0x8000_0000`'s
-megapage), the framebuffer and the accelerators. The kernel checks at boot that
+them. A process table entry owns five tables, its root and a level-0 table for
+each 4 MiB region it touches: the slots (the 56 of 8 MiB RAM lie in two
+megapages, `0x8000_0000`'s and `0x8040_0000`'s; four tables sufficed for 24),
+the framebuffer and the accelerators. The kernel checks at boot that
 the most any process could touch (every slot, the framebuffer and every engine
 window in the tree) fits, and panics if not, rather than at the first spawn of
-the program that would need a fifth table; `test-rv32-os` checks the same on
-our tree. Eight entries make 128 KiB, in a page-aligned NOBITS section of
+the program that would need a sixth table; `test-rv32-os` checks the same on
+our tree. Eight entries make 160 KiB (128 KiB with four tables), in a page-aligned NOBITS section of
 [kernel.ld](../programs/rv32/os/kernel.ld), `.pagetables`, which startup does
 not clear. [rv32_image.py](../tools/rv32_image.py) admits that section only
 when asked (`--page-tables`, which only the kernel's check passes), and then
