@@ -216,5 +216,82 @@ class FloatingTest(unittest.TestCase):
         self.assertTrue(rtl.trace[-1].endswith(f' trap 2 {bad:08x}'))
 
 
+class FloatingStateTest(unittest.TestCase):
+    """Issue #33: mstatus.FS. Dirty at reset, so bare F firmware runs as it did; Off makes every F
+    instruction and fflags/frm/fcsr access illegal; an instruction that writes an f register or
+    changes fcsr makes it Dirty, and SD reads FS == Dirty."""
+    setUpClass = classmethod(integer_tests.RtlTest.setUpClass.__func__)
+    tearDownClass = classmethod(integer_tests.RtlTest.tearDownClass.__func__)
+    run_both = integer_tests.RtlTest.run_both
+    assert_same_pass = integer_tests.RtlTest.assert_same_pass
+    assert_same_double_fault = integer_tests.RtlTest.assert_same_double_fault
+
+    @staticmethod
+    def set_fs(value, csr=MSTATUS):
+        """FS = value through `csr` (x6, x7)."""
+        return LI(6, 0x6000) + [CSRRC(0, csr, 6)] + (LI(7, value << 13) + [CSRRS(0, csr, 7)] if value else [])
+
+    def check_reads(self, steps):
+        """steps: (words, expected effect of the last word); all run as one program."""
+        words, checks = [], []
+        for chunk, effect in steps:
+            words += chunk
+            if effect is not None:
+                checks.append((len(words) - 1, effect))
+        emu, _ = self.assert_same_pass(words + FINISH())
+        for index, effect in checks:
+            self.assertEqual(integer_tests.effects(emu.trace[index]), effect, emu.trace[index])
+
+    def test_reset_is_dirty_and_fs_is_writable(self):
+        self.check_reads([
+            ([CSRRS(9, MSTATUS, 0)], f'x9={MSTATUS_RESET:08x}'),
+            (self.set_fs(0) + [CSRRS(9, MSTATUS, 0)], 'x9=00001800'),        # SD follows FS
+            (self.set_fs(1) + [CSRRS(9, MSTATUS, 0)], 'x9=00003800'),
+            (self.set_fs(2) + [CSRRS(9, SSTATUS, 0)], 'x9=00004000'),
+            (self.set_fs(3) + [CSRRS(9, SSTATUS, 0)], 'x9=80006000'),
+            (self.set_fs(1, SSTATUS) + [CSRRS(9, MSTATUS, 0)], 'x9=00003800'),  # sstatus writes FS too
+        ])
+
+    def test_off_makes_every_floating_access_illegal(self):
+        cases = [arithmetic(0, 0), arithmetic(3, 0), arithmetic(13, 0), fp(0x70, 9, 4), fp(0x78, 1, 6),
+                 flw(1, 0), fsw(1, 0), CSRRS(9, 1, 0), CSRRS(9, 2, 0), CSRRS(9, 3, 0), CSRRWI(0, 1, 0),
+                 CSRRWI(0, 2, 1), CSRRW(0, 3, 0)]
+        for word in cases:
+            with self.subTest(f'{word:08x}'):
+                self.assert_same_double_fault(self.set_fs(0) + [word], 2, word)
+        # Illegal outranks the misaligned, access and page faults an FLW or FSW would take.
+        for addr in (RAM + 1, UNMAPPED):
+            for word in (flw(0, 8), fsw(0, 8)):
+                self.assert_same_double_fault(LI(8, addr) + self.set_fs(0) + [word], 2, word)
+
+    def test_what_makes_it_dirty(self):
+        clean = 'x9=00004000'
+        dirty = f'x9={0x80006000:08x}'
+        read = [CSRRS(9, SSTATUS, 0)]
+        self.check_reads([
+            # Writing only an x register, without flags: fmv.x.w, fclass, an exact comparison,
+            # reading fflags, and FSW leave it Clean.
+            (self.set_fs(2) + [fp(0x70, 10, 4), fp(0x70, 10, 4, funct3=1), arithmetic(13, 0, rd=10)] + read, clean),
+            (LI(8, RAM + 0x18000) + [CSRRS(10, 1, 0), fsw(4, 8)] + read, clean),
+            ([CSRRS(0, 3, 0), CSRRSI(0, 1, 0)] + read, clean),   # neither writes the CSR
+            # An f register written: an F op, FMV.W.X, FLW.
+            ([arithmetic(0, 0)] + read, dirty),
+            (self.set_fs(2) + [fp(0x78, 1, 0)] + read, dirty),
+            (self.set_fs(2) + [flw(2, 8)] + read, dirty),
+            # fcsr changed without an f register: a comparison raising NV, then fflags written.
+            (fli(1, 0x7f800001) + self.set_fs(2) + [arithmetic(13, 0, rd=10)] + read, dirty),
+            (self.set_fs(1) + [CSRRWI(0, 1, 0)] + read, dirty),
+            (self.set_fs(1) + [CSRRCI(0, 2, 0)] + read, 'x9=00002000'),  # rs1 = 0: a read, not a write
+        ])
+
+    def test_off_preserves_the_registers(self):
+        """Off hides the floating state; turning it back on finds it as it was."""
+        self.check_reads([
+            (fli(5, 0x40490fdb) + [CSRRWI(0, 1, 9)] + self.set_fs(0) + self.set_fs(1) + [fp(0x70, 10, 5)],
+             'x10=40490fdb'),
+            ([CSRRS(11, 1, 0)], 'x11=00000009'),
+        ])
+
+
 if __name__ == '__main__':
     unittest.main()

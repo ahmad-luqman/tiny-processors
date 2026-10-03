@@ -313,7 +313,7 @@ class GdbStubTest(unittest.TestCase):
         self.assertEqual(client.ask("Z2,80000000,4"), "", "watchpoints are not supported")
         self.assertEqual(client.ask("p9999"), "E01")
         self.assertEqual(client.ask(f"p{REG_CSR0 + 0x7C0:x}"), "E01", "no CSR 0x7c0")
-        self.assertEqual(client.reg(REG_CSR0 + 0x300), 0x80007800, "mstatus at reset: MPP, FS and SD read as constants")
+        self.assertEqual(client.reg(REG_CSR0 + 0x300), 0x80007800, "mstatus at reset: MPP 3, FS Dirty, so SD")
         client.send("k")
         self.assert_exit(session, 2, "stopped")
 
@@ -665,7 +665,7 @@ class GdbStubTest(unittest.TestCase):
         self.assertEqual(client.ask(f"P{REG_CSR0 + 0x7C0:x}={reg_hex(0)}"), "E01", "no CSR 0x7c0")
         self.assertEqual(client.ask(f"P{REG_CSR0 + 0x300:x}={reg_hex(0xFFFFFFFF)}"), "OK")
         self.assertEqual(client.reg(REG_CSR0 + 0x300), 0x807E79AA,
-                         "only the S and M enables, SPP, MPRV, SUM, MXR, TVM, TW and TSR are writable")
+                         "only the S and M enables, SPP, MPRV, SUM, MXR, TVM, TW, TSR and FS are writable")
         self.assertEqual(client.ask(f"P{REG_CSR0 + 0x300:x}={reg_hex(0)}"), "OK")
         self.assertEqual(client.ask(f"P5={reg_hex(1)[:6]}"), "E01", "short value")
         # G writes the whole block: keep everything but x7.

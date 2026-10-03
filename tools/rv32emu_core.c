@@ -52,7 +52,8 @@ enum csr { CSR_FFLAGS = 0x001, CSR_FRM = 0x002, CSR_FCSR = 0x003, CSR_MSTATUS = 
            CSR_SSTATUS = 0x100, CSR_SIE = 0x104, CSR_STVEC = 0x105, CSR_SCOUNTEREN = 0x106, CSR_SSCRATCH = 0x140,
            CSR_SEPC = 0x141, CSR_SCAUSE = 0x142, CSR_STVAL = 0x143, CSR_SIP = 0x144, CSR_SATP = 0x180 };
 /* mstatus and the interrupt bits (O1, docs/rv32.md "Behavior fixed in Track 2"). MPP is 3 (machine) or
- * 0 (user) since O5, and 1 (supervisor) too since issue #20, kept in machine.mpp; FS reads 3 and SD 1 because floating state is always on. */
+ * 0 (user) since O5, and 1 (supervisor) too since issue #20, kept in machine.mpp. FS is writable since issue #33
+ * (Dirty from reset) and SD reads FS == Dirty. */
 #define MSTATUS_SIE 0x2u
 #define MSTATUS_MIE 0x8u
 #define MSTATUS_SPIE 0x20u
@@ -64,13 +65,14 @@ enum csr { CSR_FFLAGS = 0x001, CSR_FRM = 0x002, CSR_FCSR = 0x003, CSR_MSTATUS = 
 #define MSTATUS_TVM 0x100000u
 #define MSTATUS_TW 0x200000u
 #define MSTATUS_TSR 0x400000u
-/* The bits machine.mstatus holds; MPP is machine.mpp, FS and SD are constant. */
+#define MSTATUS_FS 0x6000u /* issue #33: Off 0, Initial 1, Clean 2, Dirty 3 */
+#define MSTATUS_SD 0x80000000u
+/* The bits machine.mstatus holds; MPP is machine.mpp, SD is derived from FS. */
 #define MSTATUS_WRITABLE (MSTATUS_SIE | MSTATUS_MIE | MSTATUS_SPIE | MSTATUS_MPIE | MSTATUS_SPP | MSTATUS_MPRV | \
-                          MSTATUS_SUM | MSTATUS_MXR | MSTATUS_TVM | MSTATUS_TW | MSTATUS_TSR)
-#define MSTATUS_CONSTANT 0x80006000u /* SD, FS = 3 */
+                          MSTATUS_SUM | MSTATUS_MXR | MSTATUS_TVM | MSTATUS_TW | MSTATUS_TSR | MSTATUS_FS)
 #define MSTATUS_MPP 0x1800u
 /* sstatus: the supervisor's view of mstatus. */
-#define SSTATUS_MASK (MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_SUM | MSTATUS_MXR | MSTATUS_CONSTANT)
+#define SSTATUS_MASK (MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_SUM | MSTATUS_MXR | MSTATUS_FS | MSTATUS_SD)
 #define PRIV_U 0u
 #define PRIV_S 1u
 #define PRIV_M 3u
@@ -1068,14 +1070,27 @@ static void take_interrupt(machine *m, uint32_t code)
     enter_handler(m, INTERRUPT | code, 0);
 }
 
+/* mstatus as read: the held bits, MPP, and SD when FS is Dirty (issue #33). */
+static uint32_t mstatus_value(const machine *m)
+{
+    uint32_t value = m->mstatus | (uint32_t)m->mpp << 11;
+    return (value & MSTATUS_FS) == MSTATUS_FS ? value | MSTATUS_SD : value;
+}
+
+/* Issue #33: FS Off makes the F instructions and fflags, frm and fcsr illegal. */
+static bool fs_off(const machine *m)
+{
+    return (m->mstatus & MSTATUS_FS) == 0;
+}
+
 static bool csr_read(const machine *m, uint32_t number, uint32_t *value)
 {
     switch (number) {
     case CSR_FFLAGS: *value = m->fcsr & 31u; return true;
     case CSR_FRM: *value = m->fcsr >> 5; return true;
     case CSR_FCSR: *value = m->fcsr; return true;
-    case CSR_MSTATUS: *value = m->mstatus | MSTATUS_CONSTANT | (uint32_t)m->mpp << 11; return true;
-    case CSR_SSTATUS: *value = (m->mstatus | MSTATUS_CONSTANT) & SSTATUS_MASK; return true;
+    case CSR_MSTATUS: *value = mstatus_value(m); return true;
+    case CSR_SSTATUS: *value = mstatus_value(m) & SSTATUS_MASK; return true;
     case CSR_MEDELEG: *value = m->medeleg; return true;
     case CSR_MIDELEG: *value = m->mideleg; return true;
     case CSR_SIE: *value = m->mie & m->mideleg; return true;
@@ -1370,7 +1385,7 @@ static void step(machine *m)
     }
     case 0x07: /* FLW */
     case 0x03: { /* loads */
-        if ((opcode == 0x07 && funct3 != 2) || funct3 == 3 || funct3 > 5) {
+        if ((opcode == 0x07 && (funct3 != 2 || fs_off(m))) || funct3 == 3 || funct3 > 5) {
             goto illegal;
         }
         int width = width_of(funct3);
@@ -1397,7 +1412,7 @@ static void step(machine *m)
     }
     case 0x27: /* FSW */
     case 0x23: { /* stores */
-        if ((opcode == 0x27 && funct3 != 2) || funct3 > 2) {
+        if ((opcode == 0x27 && (funct3 != 2 || fs_off(m))) || funct3 > 2) {
             goto illegal;
         }
         int width = width_of(funct3);
@@ -1473,6 +1488,9 @@ static void step(machine *m)
         }
         break;
     case 0x43: case 0x47: case 0x4b: case 0x4f: case 0x53: {
+        if (fs_off(m)) {
+            goto illegal;
+        }
         uint32_t fa = m->f[rs1], fb = m->f[rs2], fc = m->f[word >> 27];
         unsigned op = OP_ADD, rm = 0;
         bool arithmetic = true, rounded = false;
@@ -1580,7 +1598,8 @@ static void step(machine *m)
         }
         uint32_t number = word >> 20, old, operand = (funct3 & 4u) ? rs1 : a;
         bool writes = (funct3 & 3u) == 1 || rs1 != 0; /* csrrs/csrrc with a zero field only read */
-        if (!csr_read(m, number, &old) || (writes && csr_read_only(number)) || !csr_allowed(m, number)) {
+        if (!csr_read(m, number, &old) || (writes && csr_read_only(number)) || !csr_allowed(m, number) ||
+            (number >= CSR_FFLAGS && number <= CSR_FCSR && fs_off(m))) {
             goto illegal;
         }
         switch (funct3 & 3u) {
@@ -1597,6 +1616,9 @@ static void step(machine *m)
     }
 
     if (writes_fd) { m->f[rd] = result; m->wr_freg = (int)rd; }
+    if (writes_fd || m->wr_fcsr) {
+        m->mstatus |= MSTATUS_FS; /* issue #33: an f register written or fcsr changed: Dirty */
+    }
     if (writes_rd && rd != 0) { /* x0 stays zero: the write is discarded, not stored */
         m->x[rd] = result;
         m->wr_reg = (int)rd;
@@ -1638,7 +1660,7 @@ void emu_dump_state(const machine *m, FILE *out)
     for (int i = 0; i < 32; ++i) fprintf(out, "f%d %08" PRIx32 "\n", i, m->f[i]);
     fprintf(out, "fcsr %02x\n", m->fcsr);
     fprintf(out, "mstatus %08" PRIx32 "\nmie %08" PRIx32 "\nmip %08" PRIx32 "\nmscratch %08" PRIx32 "\n",
-            m->mstatus | MSTATUS_CONSTANT | (uint32_t)m->mpp << 11, m->mie, mip_now(m), m->mscratch);
+            mstatus_value(m), m->mie, mip_now(m), m->mscratch);
     fprintf(out, "priv %u\n", m->priv);
     fprintf(out, "mtvec %08" PRIx32 "\nmepc %08" PRIx32 "\nmcause %08" PRIx32 "\nmtval %08" PRIx32 "\n",
             m->mtvec, m->mepc, m->mcause, m->mtval);
@@ -1962,6 +1984,7 @@ void emu_init(machine *m)
     m->dma_end = RAM_BASE + RAM_SIZE;
     m->mtimecmp = ~0ull;
     m->priv = m->mpp = PRIV_M; /* O5: machine mode from reset, MPP reading 3 until a trap or a write */
+    m->mstatus = MSTATUS_FS;   /* issue #33: floating state Dirty from reset, so F firmware runs as it is */
     /* Boot convention (docs/rv32.md, "Reset"): the hart id in a0, the device tree in a1. */
     m->x[10] = BOOT_HART;
     m->x[11] = RV32_DTB_ROM_BASE;

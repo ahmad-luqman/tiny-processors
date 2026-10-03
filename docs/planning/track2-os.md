@@ -64,7 +64,8 @@ PLIC, as the privileged specification defines them for M-mode only.
 
 1. **CSRs.** `mstatus` (0x300): MIE (bit 3), MPIE (bit 7) writable; MPP
    (12:11) reads 3 (M) until O5; FS (14:13) reads 3 and SD (31) reads 1,
-   because floating state is always on ([F2](../rv32-f.md)); every other bit
+   because floating state is always on ([F2](../rv32-f.md); writable since
+   issue #33); every other bit
    reads 0. `mie` (0x304): MSIE, MTIE, MEIE (bits 3, 7, 11) writable, the rest
    0. `mip` (0x344): MSIP, MTIP, MEIP read-only, the live levels from the
    CLINT and the PLIC; a write is legal and changes nothing. `mscratch`

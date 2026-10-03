@@ -9,9 +9,9 @@
  *   touch a privileged CSR is RVTEST_FP_ENABLE's `csrs mstatus, a0`, which sets
  *   FS so F instructions work on a machine that can turn them off. Until
  *   Track 2 the machine had no mstatus and the handler skipped exactly that
- *   word; since O1 mstatus exists, FS reads 3 whatever is written (floating
- *   state is always on, docs/rv32.md), and the write simply retires, as on
- *   QEMU.
+ *   word; since O1 mstatus exists and the write simply retires, as on QEMU.
+ *   FS read 3 whatever was written until issue #33 made it writable; it is
+ *   Dirty from reset and the write keeps it on.
  * - Halt prints the signature (begin_signature to end_signature) on the
  *   console, one line per 32-bit word: the word's value as eight lowercase hex
  *   digits, most significant first, the format the suite's reference
