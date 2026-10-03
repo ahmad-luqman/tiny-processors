@@ -1,8 +1,9 @@
 `timescale 1ns/1ps
 
 // Standalone multicycle binary32 hardware. Contract and bit weights: docs/fp32.md.
-// The wide exact accumulator is deliberately serially aligned/normalized; it
-// retains cancellation bits in FMA and never rounds the product separately.
+// Add, multiply and FMA align the smaller operand to the larger one in an
+// 80-bit window with a sticky jam, then normalize with a leading-zero count:
+// a few cycles each, still rounded once from an exact sum (see docs/fp32.md).
 module fp32 (
     input wire clk, input wire reset,
     input wire req_valid, output wire req_ready,
@@ -27,10 +28,10 @@ module fp32 (
     reg [4:0] operation;
     reg [2:0] mode;
     reg [31:0] x, y, z;
-    reg [575:0] magnitude, addend;
+    reg [79:0] magnitude, addend;
     reg sign_result, sign_addend;
     reg tiny_after_rounding;
-    reg [9:0] shift_main, shift_addend;
+    reg [6:0] shift_main, shift_addend;
     reg signed [11:0] exponent;
     reg [5:0] iteration;
     reg [25:0] quotient;
@@ -99,6 +100,30 @@ module fp32 (
             endcase
         end
     endfunction
+    // Right shift with every shifted-out bit ORed into bit 0 (sticky jam).
+    function [79:0] jam_right;
+        input [79:0] v;
+        input [6:0] amount;
+        begin
+            if (amount >= 7'd80) jam_right = {79'b0,|v};
+            else jam_right = (v >> amount) | {79'b0,|(v & ~({80{1'b1}} << amount))};
+        end
+    endfunction
+    function [6:0] leading_zeros;
+        input [79:0] v;
+        integer i;
+        begin
+            leading_zeros = 7'd80;
+            for (i=0; i<80; i=i+1) if (v[i]) leading_zeros = 7'd79 - i[6:0];
+        end
+    endfunction
+    // Clamp a non-negative shift distance to the 80-bit window.
+    function [6:0] clamp_shift;
+        input signed [12:0] distance;
+        begin
+            clamp_shift = distance < 0 ? 7'd0 : distance > 13'sd80 ? 7'd80 : distance[6:0];
+        end
+    endfunction
     task finish;
         input [31:0] value;
         input [4:0] exceptions;
@@ -108,23 +133,46 @@ module fp32 (
             state <= RESPONSE;
         end
     endtask
+    // Place both addition operands in the window; ALIGN shifts the trailing one.
+    task load_operands;
+        begin
+            magnitude <= {1'b0,lhs_mag,31'b0};
+            addend <= {1'b0,rhs_mag,31'b0};
+            shift_main <= lhs_leads ? 7'd0 : clamp_shift(-exp_gap);
+            shift_addend <= lhs_leads ? clamp_shift(exp_gap) : 7'd0;
+            exponent <= (lhs_leads ? lhs_exp : rhs_exp) + 12'sd1;
+            state <= ALIGN;
+        end
+    endtask
 
-    wire [35:0] unpack_x = unpack(x), unpack_y = unpack(y);
+    wire [35:0] unpack_x = unpack(x), unpack_y = unpack(y), unpack_z = unpack(z);
     wire signed [11:0] exp_x = $signed(unpack_x[35:24]);
     wire signed [11:0] exp_y = $signed(unpack_y[35:24]);
-    wire [23:0] sig_x = unpack_x[23:0], sig_y = unpack_y[23:0];
-    wire [47:0] product = significand(x) * significand(y);
+    wire signed [11:0] exp_z = $signed(unpack_z[35:24]);
+    wire [23:0] sig_x = unpack_x[23:0], sig_y = unpack_y[23:0], sig_z = unpack_z[23:0];
+    wire [47:0] product = sig_x * sig_y;
     wire product_sign = x[31] ^ y[31] ^ (operation == OP_FNMSUB || operation == OP_FNMADD);
     wire third_sign = z[31] ^ (operation == OP_FMSUB || operation == OP_FNMADD);
     wire second_sign = y[31] ^ (operation == OP_SUB);
     wire fused = operation >= OP_FMADD && operation <= OP_FNMADD;
+    // Both addition operands as 48-bit magnitudes whose bit 47 weighs
+    // 2^exponent: x or the normalized product, then y, z or nothing.
+    wire is_add = operation == OP_ADD || operation == OP_SUB;
+    wire [47:0] lhs_mag = is_add ? {sig_x,24'b0} : product[47] ? product : product << 1;
+    wire signed [11:0] lhs_exp = is_add ? exp_x : exp_x + exp_y + (product[47] ? 12'sd1 : 12'sd0);
+    wire [47:0] rhs_mag = is_add ? {sig_y,24'b0} : fused ? {sig_z,24'b0} : 48'b0;
+    wire signed [11:0] rhs_exp = is_add ? exp_y : exp_z;
+    // The larger exponent sets bit 78 of the window; the other operand
+    // shifts right by the gap. A zero operand never leads.
+    wire lhs_leads = rhs_mag == 0 || (lhs_mag != 0 && lhs_exp >= rhs_exp);
+    wire signed [12:0] exp_gap = {lhs_exp[11],lhs_exp} - {rhs_exp[11],rhs_exp};
     wire eq_xy = x == y || (is_zero(x) && is_zero(y));
     wire lt_xy = !eq_xy && ((x[31] != y[31]) ? x[31] :
                       (x[31] ? x[30:0] > y[30:0] : x[30:0] < y[30:0]));
 
-    wire discarded = |magnitude[551:0];
-    wire round_up = increment(mode,sign_result,magnitude[552],magnitude[551],|magnitude[550:0]);
-    wire [24:0] rounded = {1'b0,magnitude[575:552]} + {24'b0,round_up};
+    wire discarded = |magnitude[55:0];
+    wire round_up = increment(mode,sign_result,magnitude[56],magnitude[55],|magnitude[54:0]);
+    wire [24:0] rounded = {1'b0,magnitude[79:56]} + {24'b0,round_up};
     wire signed [11:0] final_exponent = exponent + (rounded[24] ? 12'sd1 : 12'sd0);
     wire [23:0] final_significand = rounded[24] ? rounded[24:1] : rounded[23:0];
     // Only the low eight bits are packed; final_exponent checks the upper range.
@@ -133,9 +181,9 @@ module fp32 (
     wire overflow_inf = mode == RM_RNE || mode == RM_RMM ||
                               (mode == RM_RDN && sign_result) || (mode == RM_RUP && !sign_result);
 
-    wire integer_discarded = |magnitude[543:0];
-    wire integer_up = increment(mode,sign_result,magnitude[544],magnitude[543],|magnitude[542:0]);
-    wire [32:0] integer_rounded = {1'b0,magnitude[575:544]} + {32'b0,integer_up};
+    wire integer_discarded = |magnitude[47:0];
+    wire integer_up = increment(mode,sign_result,magnitude[48],magnitude[47],|magnitude[46:0]);
+    wire [32:0] integer_rounded = {1'b0,magnitude[79:48]} + {32'b0,integer_up};
     wire integer_invalid = operation == OP_F32_TO_U32 ?
         (integer_rounded[32] || (sign_result && |integer_rounded)) :
         (integer_rounded > (sign_result ? 33'h080000000 : 33'h07fffffff));
@@ -177,12 +225,8 @@ module fp32 (
                         else if (is_inf(x) || is_inf(y))
                             finish({is_inf(x) ? x[31] : second_sign,8'hff,23'b0},0,0);
                         else begin
-                            magnitude <= {552'b0,significand(x)};
-                            addend <= {552'b0,significand(y)};
-                            shift_main <= effective_exp(x) + 10'd148;
-                            shift_addend <= effective_exp(y) + 10'd148;
+                            load_operands();
                             sign_result <= x[31]; sign_addend <= second_sign;
-                            state <= ALIGN;
                         end
                     end else if (operation >= OP_MUL && operation <= OP_FNMADD) begin
                         if ((is_zero(x) && is_inf(y)) || (is_inf(x) && is_zero(y)))
@@ -194,13 +238,9 @@ module fp32 (
                         else if (is_inf(x) || is_inf(y) || (fused && is_inf(z)))
                             finish({(is_inf(x)||is_inf(y)) ? product_sign : third_sign,8'hff,23'b0},0,0);
                         else begin
-                            magnitude <= {528'b0,product};
-                            shift_main <= effective_exp(x) + effective_exp(y) - 10'd2;
+                            load_operands();
                             sign_result <= product_sign;
-                            addend <= fused ? {552'b0,significand(z)} : 576'b0;
-                            shift_addend <= fused ? effective_exp(z) + 10'd148 : 10'b0;
                             sign_addend <= fused ? third_sign : product_sign;
-                            state <= ALIGN;
                         end
                     end else if (operation == OP_DIV) begin
                         sign_result <= x[31] ^ y[31];
@@ -230,7 +270,7 @@ module fp32 (
                         end
                     end else if (operation == OP_I32_TO_F32 || operation == OP_U32_TO_F32) begin
                         sign_result <= operation == OP_I32_TO_F32 && x[31];
-                        magnitude <= {((operation == OP_I32_TO_F32 && x[31]) ? (~x + 32'd1) : x),544'b0};
+                        magnitude <= {((operation == OP_I32_TO_F32 && x[31]) ? (~x + 32'd1) : x),48'b0};
                         exponent <= 12'sd31; state <= NORMALIZE;
                     end else if (operation == OP_F32_TO_I32 || operation == OP_F32_TO_U32) begin
                         sign_result <= x[31];
@@ -239,7 +279,7 @@ module fp32 (
                             finish(operation == OP_F32_TO_U32 ? (x[31] ? 32'b0 : 32'hffffffff) :
                                    (x[31] ? 32'h80000000 : 32'h7fffffff),FLAG_NV,0);
                         else begin
-                            magnitude <= {sig_x,552'b0}; exponent <= exp_x;
+                            magnitude <= {sig_x,56'b0}; exponent <= exp_x;
                             state <= INT_SHIFT;
                         end
                     end else if (operation >= OP_EQ && operation <= OP_LE) begin
@@ -254,9 +294,9 @@ module fp32 (
                     end
                 end
                 ALIGN: begin
-                    if (shift_main != 0) begin magnitude <= magnitude << 1; shift_main <= shift_main-10'd1; end
-                    if (shift_addend != 0) begin addend <= addend << 1; shift_addend <= shift_addend-10'd1; end
-                    if (shift_main == 0 && shift_addend == 0) state <= COMBINE;
+                    magnitude <= jam_right(magnitude,shift_main);
+                    addend <= jam_right(addend,shift_addend);
+                    state <= COMBINE;
                 end
                 COMBINE: begin
                     if (sign_result == sign_addend) magnitude <= magnitude + addend;
@@ -264,11 +304,14 @@ module fp32 (
                         magnitude <= magnitude-addend;
                         if (magnitude == addend) sign_result <= mode == RM_RDN;
                     end else begin magnitude <= addend-magnitude; sign_result <= sign_addend; end
-                    exponent <= 12'sd277; state <= NORMALIZE;
+                    state <= NORMALIZE;
                 end
                 NORMALIZE: begin
                     if (magnitude == 0) finish({sign_result,31'b0},0,0);
-                    else if (!magnitude[575]) begin magnitude <= magnitude << 1; exponent <= exponent-12'sd1; end
+                    else if (!magnitude[79]) begin
+                        magnitude <= magnitude << leading_zeros(magnitude);
+                        exponent <= exponent - $signed({5'b0,leading_zeros(magnitude)});
+                    end
                     else begin
                         // Tininess after rounding uses precision rounding with
                         // an unbounded exponent, before subnormal quantization.
@@ -278,8 +321,8 @@ module fp32 (
                 end
                 DENORMALIZE: begin
                     if (exponent < -12'sd126) begin
-                        magnitude <= {1'b0,magnitude[575:2],|magnitude[1:0]};
-                        exponent <= exponent+12'sd1;
+                        magnitude <= jam_right(magnitude,clamp_shift(-13'sd126 - {exponent[11],exponent}));
+                        exponent <= -12'sd126;
                     end else state <= ROUND;
                 end
                 ROUND: begin
@@ -293,20 +336,20 @@ module fp32 (
                     div_remainder <= div_difference << 1;
                     iteration <= iteration-6'd1;
                     if (iteration == 1) begin
-                        magnitude <= {next_quotient,548'b0,|div_difference}; state <= NORMALIZE;
+                        magnitude <= {next_quotient,52'b0,|div_difference}; state <= NORMALIZE;
                     end
                 end
                 SQRT: begin
                     root <= next_root; sqrt_remainder <= sqrt_difference[53:0];
                     radicand <= radicand << 2; iteration <= iteration-6'd1;
                     if (iteration == 1) begin
-                        magnitude <= {next_root,548'b0,|sqrt_difference}; state <= NORMALIZE;
+                        magnitude <= {next_root,52'b0,|sqrt_difference}; state <= NORMALIZE;
                     end
                 end
                 INT_SHIFT: begin
                     if (exponent < 31) begin
-                        magnitude <= {1'b0,magnitude[575:2],|magnitude[1:0]};
-                        exponent <= exponent+12'sd1;
+                        magnitude <= jam_right(magnitude,clamp_shift(13'sd31 - {exponent[11],exponent}));
+                        exponent <= 12'sd31;
                     end else state <= INT_ROUND;
                 end
                 INT_ROUND: begin

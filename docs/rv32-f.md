@@ -97,7 +97,7 @@ The seeded CPU corpus has 1,080 requests: all 18 standalone operation mappings,
 five modes, and 12 edge/random operand triples per combination, seed 20260922.
 Static and dynamic literal anchors run separately. Known instruction encodings
 and the C/RTL operation enums are statically pinned. The 1/3 division test pins
-34 FPU issue/wait cycles, and compiled-image runners pin 5,081 / 89 / 0 waits
+34 FPU issue/wait cycles, and compiled-image runners pin 179 / 25 / 0 waits
 for arithmetic / conversion / software, so latency drift cannot hide inside
 the accounting identity. The F1 suite retains its
 much larger arithmetic corpus; CPU tests concentrate on state and integration.
@@ -139,9 +139,15 @@ we make no code-size optimization claim.
 
 | Whole firmware | Retirements | RTL cycles, no stalls | RTL cycles, one stall/transfer | Result |
 | --- | ---: | ---: | ---: | --- |
-| F arithmetic (`floatcheck`) | 223 | 6,037 | 6,324 | PASS c0800000 |
+| F arithmetic (`floatcheck`) | 223 | 1,135 | 1,422 | PASS c0800000 |
 | Same C / RV32I SoftFloat (`floatsoft`) | 20,146 | 80,924 | 101,410 | PASS c0800000 |
-| C conversion/flags (`floatconvert`) | 178 | 859 | 1,095 | PASS 4f800003 |
+| C conversion/flags (`floatconvert`) | 178 | 795 | 1,031 | PASS 4f800003 |
+
+The hardware rows reflect the FPU's [narrow datapath](fp32.md#narrow-datapath-2026-10-03)
+(2026-10-03). Its wait cycles were measured on images built with clang 18, where
+the 576-bit unit reproduced the pinned 5,081 and 89 exactly; the totals here are
+the earlier measurements less the 4,902 and 64 cycles saved, since FPU waits do
+not depend on memory stalls or on the integer code around them.
 
 These totals include startup, self-checks and console output; they are not
 isolated arithmetic throughput. The unstalled whole arithmetic run is about
@@ -162,13 +168,15 @@ memory sizes). Strict lint, `check -assert` and no-latch assertions pass.
 
 | Synthesized unit | Generic cells | Flip-flops |
 | --- | ---: | ---: |
-| F1 standalone FPU, unchanged | 25,685 | 1,530 |
+| F1 standalone FPU, as integrated in F2 | 25,685 | 1,530 |
 | F2 CPU including FPU | 42,006 | 4,162 |
 | F2 SoC with small memories | 57,999 | 8,915 |
 
 The pre-F2 CPU was 8,175 cells/1,457 flip-flops. Module-context optimization
 means the integrated FPU's mapped count can differ from standalone synthesis;
-do not add standalone counts and treat the sum as the measured SoC. These are
+do not add standalone counts and treat the sum as the measured SoC. These counts
+predate the FPU's narrow datapath, which is smaller; [its record](fp32.md#narrow-datapath-2026-10-03)
+has the standalone comparison. These are
 logical generic cells, not silicon area, clock timing or FPGA resource claims.
 
 ## Inspected waveforms
@@ -199,8 +207,8 @@ Payload ports have meaning only with their enables, so unrelated changes on
    Identify the information lost at the intermediate rounding boundary.
 4. Reset just after response acceptance but before WRITEBACK. Explain why neither
    the destination register nor accrued flags may survive that cancellation.
-5. Derive the 6,037-cycle arithmetic total from 223 retirements, 64 memory
-   operations and 5,081 FPU issue/wait cycles; add one stall per 287 transfers.
+5. Derive the 1,135-cycle arithmetic total from 223 retirements, 64 memory
+   operations and 179 FPU issue/wait cycles; add one stall per 287 transfers.
 
 
 ## Acceptance record (2026-09-22)
