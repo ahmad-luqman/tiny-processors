@@ -246,7 +246,7 @@ with a file name a script with `arg`.
 | stack | 160 KiB |
 | heap, up to the stack | 252 KB |
 
-It spans slots 18 to 23, the six at the top of RAM. Lua's image is the RAM disk's
+It spans slots 18 to 23, the six at the top of 4 MiB RAM (issue #33 doubled RAM to 8 MiB). Lua's image is the RAM disk's
 largest program, and spawning it copied its 370 KB a byte at a time; [mem.c](../programs/rv32/os/mem.c)'s
 `memcpy` and `memset` now move words when both addresses allow, which took
 the Lua session from 24.7 M steps to 14.7 M.
@@ -325,6 +325,55 @@ sh: lua exited 1
 function, and writes `words.out`, which `cat` then prints. One REPL line is
 typed with a typo and three rubouts, so the transcript holds the echo's
 `\b \b`s.
+
+## Hard float (issue #33)
+
+A program may do its arithmetic in the F extension's registers and pass floats
+in them: [mandel](../programs/rv32/os/libc/mandel.c) is built for
+`-march=rv32imf_zicsr -mabi=ilp32f`, a C library program like `libccheck`.
+Every other program keeps the soft-float ABI (ILP32); all but fpcheck and fpmate (rv32if) are RV32I.
+
+- **Why a second library.** An object's ELF header records its float ABI, and
+  lld refuses to link an ilp32f object with an ilp32 one, and rightly: a
+  `float` argument or result (picolibc's `sqrtf`, say) travels in an f
+  register under ilp32f and in an integer register under ilp32, so a call
+  across the two would find it in the wrong place. The Makefile builds
+  picolibc and the compiler-rt builtins a second time from the same `SOURCES`
+  (`RV32_ARCH_HF`, objects under `build/rv32/libc-hf`), and the glue (crt0,
+  crt, syscalls, tty, line) under `build/rv32/os/libc-hf`. One header was
+  missing: `machine/fenv-fp.h`, which `fenv.h` includes when there are float
+  registers ([the vendoring note](../third_party/picolibc/README.md)).
+- **Building one.** Put `name.c` in `programs/rv32/os/libc`, list `name` in
+  `RV32_OS_HF_PROGRAMS` and give it a slot (`RV32_OS_SLOT_name`); its object
+  (`build/rv32/os/libc-hf/libc/name.o`), link and gate follow from the list,
+  and it goes in `tests/test_rv32_os.py`'s `PROGRAMS`. Its
+  image is checked with `--allow-user --allow-f --allow-m --hard-float`:
+  [rv32_image.py](../tools/rv32_image.py)'s `--hard-float` expects `e_flags`
+  0x2 where every other image must have 0. The link always pulls in `stdin`,
+  which picolibc's `bufio.c` refers to weakly and the image check refuses to
+  leave undefined.
+- **The kernel's side.** A float program's registers are saved and restored by
+  the kernel only when another float program takes the FPU
+  ([the record](rv32-os.md#floating-state-issue-33)); nothing here depends on
+  it but the program's own correctness under preemption.
+
+`mandel [BLOCK]` draws the set in 320×240 RGB332, sampling one point per
+BLOCK×BLOCK pixels (1, 2, 4 or 8; 2 unless given), and prints the frame's
+checkpoint hash, which it folds itself, so QEMU, which has no display, pins
+the same picture as a hash. The F1 unit is a serial baseline
+([docs/fp32.md](fp32.md)): one add, multiply or fused multiply-add of ordinary
+operands waits 560, 537 and 558 cycles on Verilator (a divide 33), so the picture
+costs the RTL hundreds of millions of cycles, which is why the block size is
+an argument. It tests 8 iterations before asking whether a point lies in the
+main cardioid or the period-2 bulb: most points have escaped by then, so the
+test costs only the points it saves.
+
+| `mandel` | Samples | Iterations | Frame |
+| --- | --- | --- | --- |
+| `1` | 320×240 | 576,777 | `9bec6e7f` |
+| `2` (default) | 160×120 | 144,978 | `c7e54ac5` |
+| `4` | 80×60 | 36,711 | `4ee3d585` |
+| `8` | 40×30 | 8,929 | `44e75c05` |
 
 ## Evidence
 

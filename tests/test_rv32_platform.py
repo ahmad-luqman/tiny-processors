@@ -19,9 +19,9 @@ from tools import rv32_dtb, rv32_virt_map
 
 ROOT = Path(__file__).resolve().parents[1]
 QEMU = os.environ.get("QEMU_RV32", "qemu-system-riscv32")
-# QEMU 8.2.2's own tree for `-M virt -bios none -m 4M`, dumped with `-M virt,dumpdtb=`, so the map
+# QEMU 11.1.2's own tree for `-M virt -bios none -m 8M`, dumped with `-M virt,dumpdtb=`, so the map
 # checker and the reader's two-cell path are tested without QEMU installed.
-VIRT_FIXTURE = ROOT / "tests" / "fixtures" / "qemu-8.2.2-virt-4M.dtb"
+VIRT_FIXTURE = ROOT / "tests" / "fixtures" / "qemu-11.1.2-virt-8M.dtb"
 HEADER_FIELDS = ("magic", "totalsize", "off_dt_struct", "off_dt_strings", "off_mem_rsvmap", "version",
                  "last_comp_version", "boot_cpuid_phys", "size_dt_strings", "size_dt_struct")
 
@@ -161,7 +161,7 @@ class GeneratorTest(unittest.TestCase):
         self.assertLessEqual(len(blob), rv32_dtb.ROM_SIZE)
         self.assertEqual(rv32_dtb.parse(blob), rv32_dtb.MACHINE)
         regions = {(base, size) for _, base, size in rv32_dtb.regions(rv32_dtb.parse(blob))}
-        for window in [(0x8000_0000, 0x40_0000), (0x0010_0000, 4), (0x1000_0000, 8), (0x0200_0000, 0x1_0000),
+        for window in [(0x8000_0000, 0x80_0000), (0x0010_0000, 4), (0x1000_0000, 8), (0x0200_0000, 0x1_0000),
                        (0x1100_1000, 16), (0x1100_2000, 16), (0x1200_0000, 76800), (0x1100_4000, 32),
                        (0x1100_5000, 1024), (0x1100_6000, 1024), (0x1100_7000, 128), (0x1100_8000, 0x2000)]:
             self.assertIn(window, regions)
@@ -242,9 +242,9 @@ class VirtMapTest(unittest.TestCase):
 
     def test_shared_devices_must_match_and_be_present(self):
         def resized_memory(tree):
-            tree.child(f"memory@{rv32_dtb.RAM_BASE:x}").props["reg"] = rv32_dtb.u32(rv32_dtb.RAM_BASE, 0x80_0000)
+            tree.child(f"memory@{rv32_dtb.RAM_BASE:x}").props["reg"] = rv32_dtb.u32(rv32_dtb.RAM_BASE, 0x40_0000)
         problems = rv32_virt_map.check(self.virt, rv32_dtb.parse(variant(resized_memory)))
-        self.assertIn("memory 0x80000000+0x800000 differs from virt's", " ".join(problems))
+        self.assertIn("memory 0x80000000+0x400000 differs from virt's", " ".join(problems))
         problems = rv32_virt_map.check(self.virt, moved(rv32_dtb.MACHINE, "test", 0x0010_2000))
         self.assertIn("is not inside virt's sifive,test0", " ".join(problems))
 
@@ -279,7 +279,7 @@ class PlatcheckOnQemuTest(unittest.TestCase):
             dtb = Path(directory) / "tree.dtb"
             dtb.write_bytes(rv32_dtb.build(tree))
             result = subprocess.run([QEMU, "-M", "virt", "-cpu", os.environ.get("RV32_PLATFORM_QEMU_CPU", "rv32"),
-                                     "-bios", "none", "-m", "4M", "-nographic", "-monitor", "none", "-no-reboot",
+                                     "-bios", "none", "-m", "8M", "-nographic", "-monitor", "none", "-no-reboot",
                                      "-dtb", str(dtb), "-kernel", str(self.ELF)],
                                     capture_output=True, text=True, timeout=60)
         return result.returncode, result.stdout.replace("\r", "")
@@ -359,7 +359,7 @@ class FirmwareReaderTest(unittest.TestCase):
 
     def test_nth_node(self):
         """fdt_find_nth (O3): QEMU lists its eight virtio slots from the highest address down."""
-        virt = (ROOT / "tests/fixtures/qemu-8.2.2-virt-4M.dtb").read_bytes()
+        virt = (ROOT / "tests/fixtures/qemu-11.1.2-virt-8M.dtb").read_bytes()
         self.assertEqual(self.query(virt, "compatible", "virtio,mmio", "nth", "0", "0"), "10008000 00001000")
         self.assertEqual(self.query(virt, "compatible", "virtio,mmio", "nth", "7", "0"), "10001000 00001000")
         self.assertEqual(self.query(virt, "compatible", "virtio,mmio", "nth", "8", "0"), "error 4")
@@ -381,14 +381,14 @@ class FirmwareReaderTest(unittest.TestCase):
         for args, expected in cases.items():
             with self.subTest(args):
                 self.assertEqual(self.query(blob, *args), expected)
-        virt = (ROOT / "tests/fixtures/qemu-8.2.2-virt-4M.dtb").read_bytes()
+        virt = (ROOT / "tests/fixtures/qemu-11.1.2-virt-8M.dtb").read_bytes()
         self.assertEqual(self.query(virt, "compatible", "ns16550a", "interrupts", "0"), "0000000a")
         self.assertEqual(self.query(virt, "compatible", "riscv,plic0", "riscv,ndev", "0"), "0000005f")
 
     def test_our_tree(self):
         blob = rv32_dtb.build(rv32_dtb.MACHINE)
         self.assertEqual(self.query(blob, "model"), "tiny-processors RV32 machine")
-        cases = {("device_type", "memory", "0"): "80000000 00400000",
+        cases = {("device_type", "memory", "0"): "80000000 00800000",
                  ("compatible", "sifive,test0", "0"): "00100000 00000004",
                  ("compatible", "tiny-processors,console", "0"): "10000000 00000008",
                  ("compatible", "riscv,clint0", "0"): "02000000 00010000",
@@ -409,7 +409,7 @@ class FirmwareReaderTest(unittest.TestCase):
                                      ("riscv,clint0", "02000000 00010000"), ("tiny-processors,input", "error 4")):
             with self.subTest(compatible):
                 self.assertEqual(self.query(blob, "compatible", compatible, "0"), expected)
-        self.assertEqual(self.query(blob, "device_type", "memory", "0"), "80000000 00400000")
+        self.assertEqual(self.query(blob, "device_type", "memory", "0"), "80000000 00800000")
         # A two-cell address whose high cell is zero fits in 32 bits.
         self.assertEqual(self.query(blob, "compatible", "pci-host-ecam-generic", "0"), "30000000 10000000")
 

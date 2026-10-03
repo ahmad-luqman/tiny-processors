@@ -77,6 +77,7 @@
   "newlib/libc/locale/setlocale.c": "a3d41cfeaf67028ae24d0287b6150e942e40a749a2f01286fae55b240475ff3b",
   "newlib/libc/locale/timedata.c": "d1dbba8c16e44cb026c56e2031fae1a6269e7e47d2701fe4b70365910f03d2a3",
   "newlib/libc/machine/riscv/asm.h": "e3fe8848f43bd772077c5a898330dc1eddfb32291d9a8f6a44b7cbd8d2c13e72",
+  "newlib/libc/machine/riscv/machine/fenv-fp.h": "69c31c4bc3e59e1c260a1c79ba64efad69da8256de713c6b8346c62ae4ca93b7",
   "newlib/libc/machine/riscv/machine/fenv.h": "0274a62777d88484b9a630079eef5b826e12e4129f9287554b226b1b5d3e3b7f",
   "newlib/libc/machine/riscv/machine/math.h": "1b160ce5eed3b06bf17b2919539255e107efd46ff6199e6527682606bec9f513",
   "newlib/libc/machine/riscv/memcpy.c": "61d2d586789307c3e171ee2fa642af6d95678450958a223218d397c466f633f2",

@@ -59,7 +59,7 @@
 #define OS_KERNEL_SIZE 0x00100000u
 #define OS_SLOT_BASE   0x80100000u
 #define OS_SLOT_SIZE   0x00020000u
-#define OS_SLOTS       24u
+#define OS_SLOTS       56u
 #define OS_STACK_SIZE  0x00008000u /* a program's stack unless it asks for more (the Makefile's default) */
 #define OS_GUARD_SIZE  0x00001000u /* the stack's lowest page, left unmapped (Track 3) */
 

@@ -24,3 +24,10 @@ with a cross file naming clang for `--target=riscv32-unknown-elf -march=rv32i
 copied the files from that build and the programs' link maps; run it again
 when a program needs a function that is not here. `SHA256SUMS.json` holds each
 file's SHA-256.
+
+Issue #33 builds the same sources a second time for the single-float ABI
+(`-march=rv32imf_zicsr -mabi=ilp32f`, the Makefile's `RV32_ARCH_HF`), for
+`mandel`. Under `__riscv_flen` picolibc's `machine/fenv.h` includes
+`machine/fenv-fp.h`, the one header that build needs beyond the soft one's; it
+was copied from the same commit, unmodified. No source was added: the
+hard-float link resolves from `SOURCES` as it is.

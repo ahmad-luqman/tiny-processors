@@ -290,12 +290,48 @@ def trap_records_by_region(trace, faults_only=False):
     process; satp would not, since a process table entry, and so a page table, outlives the
     process, and which entry a background job's successor gets depends on device time. A kernel
     that put two processes at one virtual address would need the physical PC in the trap record."""
+    claims = claim_lines(trace) if faults_only else set()
     groups = {}
-    for record in trap_records(trace):
-        if faults_only and record.split()[3] in ("8", "11"):
+    for index, line in enumerate(trace):
+        if " trap " not in line:
+            continue
+        record = line.split(" ", 1)[1]
+        fields = record.split()
+        if faults_only and fields[3] in ("8", "11"):
             continue  # an environment call: a kernel may run it again when it had to wait
-        groups.setdefault(int(record.split()[0], 16) >> 17, []).append(record)
+        if index in claims:
+            continue  # issue #33: a first F instruction since another process took the FPU, run again
+        groups.setdefault(int(fields[0], 16) >> 17, []).append(record)
     return groups
+
+
+def claim_lines(trace):
+    """The indices of the trace's FPU claims (issue #33): illegal-instruction traps on an F
+    instruction (floating_word) whose PC is the next one its 128 KiB region runs, so the kernel ran
+    it again; where those land depends on device time. A trap the process does not come back from,
+    such as an invalid F instruction it is killed for, is not one, and is compared."""
+    claims, pending = set(), {}  # region -> (index, pc) of a trap waiting for its region's next line
+    for index, line in enumerate(trace):
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        region = int(fields[1], 16) >> 17
+        if region in pending:
+            trap_index, pc = pending.pop(region)
+            if fields[1] == pc:  # run again, whether it then retires or traps for good
+                claims.add(trap_index)
+        if len(fields) >= 5 and fields[3] == "trap" and fields[4] == "2" and floating_word(int(fields[2], 16)):
+            pending[region] = (index, fields[1])
+    return claims
+
+
+def floating_word(word):
+    """Whether `word` is an F instruction (FLW, FSW, the arithmetic opcodes) or a CSR instruction on
+    fflags, frm or fcsr: what mstatus.FS Off makes illegal (issue #33). The OS's lazy switch turns FS
+    Off for every process but the FPU's owner, so where such a trap lands depends on device time.
+    The same test as the kernel's floating_instruction() and the RTL's fs_illegal (rv32.v)."""
+    opcode, funct3, csr = word & 0x7F, (word >> 12) & 7, word >> 20
+    return opcode in (0x07, 0x27, 0x43, 0x47, 0x4B, 0x4F, 0x53) or (opcode == 0x73 and funct3 & 3 and 1 <= csr <= 3)
 
 
 def takes_interrupts(trace):
@@ -501,7 +537,8 @@ def main():
                              "depend on how the scheduler interleaved them (O4); results mode only")
     parser.add_argument("--compare-traps", choices=("all", "faults"), default="all",
                         help="`faults` leaves environment calls out of the compared trap records, for a kernel that "
-                             "retries a blocked system call (O2) under preemption (O4); results mode only")
+                             "retries a blocked system call (O2) under preemption (O4), and the illegal-instruction "
+                             "traps of F instructions its lazy FPU switch runs again (issue #33); results mode only")
     parser.add_argument("--compare-stores", action="store_true",
                         help="also compare ordered stores in results mode; firmware must have timing-independent stores")
     parser.add_argument("--ticks", choices=("cycles", "steps"), default="cycles",
