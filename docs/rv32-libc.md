@@ -46,7 +46,11 @@ down to the 142 source files the two programs link, with every header they
 include and the `picolibc.h` that meson generated for our configuration
 (tiny stdio, nano-malloc, a global `errno`, single-threaded, `long long` in
 printf). [third_party/compiler-rt](../third_party/compiler-rt/README.md) is
-the 26 builtins they call, from LLVM 18.1.8. Neither directory has a build
+the 63 builtins clang may call on RV32I (multiply, divide, 64-bit integers,
+soft single and double floating point), from LLVM 18.1.8. Not only the ones the
+programs call today: which ones a program calls depends on the compiler too.
+The first version vendored only the 26 that clang 18 called, and with clang 20
+Lua's `math.random` needed `__floatundidf` and Lua did not link. Neither directory has a build
 system of its own: each has a `SOURCES` list, and the Makefile compiles the
 lists into `build/rv32/libc/libc.a` and `builtins.a` with our clang.
 

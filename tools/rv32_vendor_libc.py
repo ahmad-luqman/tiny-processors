@@ -41,6 +41,23 @@ PROGRAM_INCLUDES = [".", "newlib/libc/tinystdio", "newlib/libc/machine/riscv", "
 PICOLIBC_LICENSES = ["COPYING.picolibc", "COPYING.NEWLIB"]
 COMPILER_RT_LICENSES = ["LICENSE.TXT", "CODE_OWNERS.TXT", "CREDITS.TXT"]
 
+# Every libcall clang may emit for RV32I's missing multiply, divide, 64-bit and floating-point
+# operations, vendored whether or not today's programs reach it: which of them a program calls
+# depends on the compiler's version (clang 20 calls __floatundidf for Lua's math.random, clang 18
+# does not), not only on the program. The link maps add anything outside this list.
+RV32I_BUILTINS = [
+    "mulsi3", "divsi3", "modsi3", "udivsi3", "umodsi3", "udivmodsi4", "divmodsi4",
+    "muldi3", "divdi3", "moddi3", "udivdi3", "umoddi3", "udivmoddi4", "divmoddi4",
+    "ashldi3", "ashrdi3", "lshrdi3", "negdi2", "cmpdi2", "ucmpdi2",
+    "clzsi2", "clzdi2", "ctzsi2", "ctzdi2", "popcountsi2", "popcountdi2", "paritysi2", "paritydi2",
+    "bswapsi2", "bswapdi2",
+    "adddf3", "subdf3", "muldf3", "divdf3", "negdf2", "comparedf2", "powidf2",
+    "addsf3", "subsf3", "mulsf3", "divsf3", "negsf2", "comparesf2", "powisf2",
+    "extendsfdf2", "truncdfsf2",
+    "fixdfsi", "fixdfdi", "fixunsdfsi", "fixunsdfdi", "floatsidf", "floatdidf", "floatunsidf", "floatundidf",
+    "fixsfsi", "fixsfdi", "fixunssfsi", "fixunssfdi", "floatsisf", "floatdisf", "floatunsisf", "floatundisf",
+]
+
 MEMBER = re.compile(r"\blibc\.a\(([^)]+\.o)\)")
 BUILTIN = re.compile(r"\bbuiltins\.a\(([^)]+)\.o\)")
 
@@ -103,6 +120,7 @@ def main():
         text = open(path).read()
         members |= set(MEMBER.findall(text))
         builtins |= set(BUILTIN.findall(text))
+    builtins |= set(RV32I_BUILTINS)
 
     picolibc_out = os.path.join(args.out, "picolibc")
     rt_out = os.path.join(args.out, "compiler-rt")
