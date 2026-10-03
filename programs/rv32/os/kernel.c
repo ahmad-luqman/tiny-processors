@@ -67,7 +67,7 @@
 #define KEY_BUFFER 64u          /* input events waiting for a program */
 #define ARGS_MAX OS_ARGS_MAX
 #define MSTATUS_MPP_M 0x1800u  /* the idle loop; a process's MPP is 0, user mode (O5) */
-#define MSTATUS_FS 0x6000u       /* issue #33: a process starts with FS Off; its first F instruction traps */
+#define MSTATUS_FS 0x6000u       /* issue #33: the FS field (14:13), Dirty when all set */
 #define MSTATUS_FS_CLEAN 0x4000u
 #define CAUSE_ILLEGAL 2u
 #define CAUSE_ECALL_M 11u
@@ -511,8 +511,8 @@ struct fstate {
     uint32_t f[32];
     uint32_t fcsr;
 };
-_Static_assert(offsetof(struct fstate, fcsr) == 128, "kfpu.S offsets");
-extern void fpu_save(struct fstate *s, uint32_t registers);
+_Static_assert(offsetof(struct fstate, fcsr) == 128 && sizeof(struct fstate) == 132, "kfpu.S offsets");
+extern void fpu_save(struct fstate *s);
 extern void fpu_load(const struct fstate *s);
 
 /* Issue #25: what each process table entry's page tables map. The next process there starts from
@@ -1214,7 +1214,8 @@ static void report_disk_failure(void)
 }
 
 /* Issue #33: whether `word` is an F instruction (FLW, FSW, the arithmetic opcodes) or an access to
- * fflags, frm or fcsr: what FS Off makes illegal. */
+ * fflags, frm or fcsr: what FS Off makes illegal (rv32.v's fs_illegal; tools/rv32_rtl.py's
+ * floating_word repeats the test). */
 static int floating_instruction(uint32_t word)
 {
     uint32_t opcode = word & 0x7fu, funct3 = (word >> 12) & 7u, csr = word >> 20;
@@ -1224,8 +1225,9 @@ static int floating_instruction(uint32_t word)
 
 /* Issue #33: the lazy switch. Only the process whose state the FPU holds, fpu_owner, runs with FS on;
  * every other one has FS Off, so its first F instruction traps here as illegal. Its owner gives the
- * FPU up (fcsr saved, and f0..f31 only if FS says Dirty: Clean means its saved copy is current) and
- * runs with FS Off from now on; this process's state is loaded, FS is Clean, and the instruction
+ * FPU up (its state saved only if FS says Dirty: Clean means its saved copy is current, since any
+ * write of an f register or fcsr, flags accrued included, makes it Dirty on our hart and on QEMU)
+ * and runs with FS Off from now on; this process's state is loaded, FS is Clean, and the instruction
  * runs again. A process that never uses the FPU never comes here, so switching to it costs nothing.
  * Returns 0 for an illegal instruction that is not this case: it is killed as before. */
 static int claim_fpu(struct proc *p, uint32_t word)
@@ -1235,8 +1237,9 @@ static int claim_fpu(struct proc *p, uint32_t word)
     }
     struct proc *owner = fpu_owner;
     if (owner) {
-        /* QEMU leaves FS alone when an operation only accrues flags, so fcsr is saved either way. */
-        fpu_save(&spaces[owner - procs].fp, (owner->f.mstatus & MSTATUS_FS) == MSTATUS_FS);
+        if ((owner->f.mstatus & MSTATUS_FS) == MSTATUS_FS) {
+            fpu_save(&spaces[owner - procs].fp);
+        }
         owner->f.mstatus &= ~MSTATUS_FS;
     }
     fpu_load(&spaces[p - procs].fp);

@@ -10,8 +10,7 @@
  */
     .section .text, "ax", @progbits
 
-    /* fpu_save(struct fstate *s, uint32_t registers): fcsr always; f0..f31 when
-     * `registers` is nonzero (the owner's FS was Dirty: Clean means memory has them). */
+    /* fpu_save(struct fstate *s): f0..f31 and fcsr. */
     .balign 4
     .globl fpu_save
     .type fpu_save, @function
@@ -20,7 +19,6 @@ fpu_save:
     csrs mstatus, t0
     frcsr t1
     sw t1, 128(a0)
-    beqz a1, 1f
     fsw f0, 0(a0)
     fsw f1, 4(a0)
     fsw f2, 8(a0)
@@ -53,10 +51,11 @@ fpu_save:
     fsw f29, 116(a0)
     fsw f30, 120(a0)
     fsw f31, 124(a0)
-1:  ret
+    ret
     .size fpu_save, . - fpu_save
 
-    /* fpu_load(const struct fstate *s): f0..f31 and fcsr. */
+    /* fpu_load(const struct fstate *s): f0..f31 and fcsr, every one of them, so that nothing of
+     * an owner that exited unsaved is left for the next. */
     .balign 4
     .globl fpu_load
     .type fpu_load, @function

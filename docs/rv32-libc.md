@@ -331,7 +331,7 @@ typed with a typo and three rubouts, so the transcript holds the echo's
 A program may do its arithmetic in the F extension's registers and pass floats
 in them: [mandel](../programs/rv32/os/libc/mandel.c) is built for
 `-march=rv32imf_zicsr -mabi=ilp32f`, a C library program like `libccheck`.
-Every other program stays RV32I, soft float.
+Every other program keeps the soft-float ABI (ILP32); all but fpcheck and fpmate (rv32if) are RV32I.
 
 - **Why a second library.** An object's ELF header records its float ABI, and
   lld refuses to link an ilp32f object with an ilp32 one, and rightly: a
@@ -343,8 +343,10 @@ Every other program stays RV32I, soft float.
   crt, syscalls, tty, line) under `build/rv32/os/libc-hf`. One header was
   missing: `machine/fenv-fp.h`, which `fenv.h` includes when there are float
   registers ([the vendoring note](../third_party/picolibc/README.md)).
-- **Building one.** List it in `RV32_OS_HF_PROGRAMS`, give it a slot and its
-  objects (`RV32_OS_OBJS_name`, compiled into `build/rv32/os/libc-hf`). Its
+- **Building one.** Put `name.c` in `programs/rv32/os/libc`, list `name` in
+  `RV32_OS_HF_PROGRAMS` and give it a slot (`RV32_OS_SLOT_name`); its object
+  (`build/rv32/os/libc-hf/libc/name.o`), link and gate follow from the list,
+  and it goes in `tests/test_rv32_os.py`'s `PROGRAMS`. Its
   image is checked with `--allow-user --allow-f --allow-m --hard-float`:
   [rv32_image.py](../tools/rv32_image.py)'s `--hard-float` expects `e_flags`
   0x2 where every other image must have 0. The link always pulls in `stdin`,
@@ -358,8 +360,9 @@ Every other program stays RV32I, soft float.
 `mandel [BLOCK]` draws the set in 320×240 RGB332, sampling one point per
 BLOCK×BLOCK pixels (1, 2, 4 or 8; 2 unless given), and prints the frame's
 checkpoint hash, which it folds itself, so QEMU, which has no display, pins
-the same picture as a hash. The F1 unit is a serial baseline: an add or a
-multiply takes about 560 cycles ([docs/fp32.md](fp32.md)), so the picture
+the same picture as a hash. The F1 unit is a serial baseline
+([docs/fp32.md](fp32.md)): one add, multiply or fused multiply-add of ordinary
+operands waits 560, 537 and 558 cycles on Verilator (a divide 33), so the picture
 costs the RTL hundreds of millions of cycles, which is why the block size is
 an argument. It tests 8 iterations before asking whether a point lies in the
 main cardioid or the period-2 bulb: most points have escaped by then, so the

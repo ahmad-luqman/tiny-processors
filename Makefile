@@ -1310,7 +1310,9 @@ RV32_OS_HEADERS := $(RV32_OS)/sys.h $(RV32_OS)/ulib.h $(RV32_OS)/line.h $(RV32_O
 RV32_OS_LIBC_PROGRAMS := libccheck lua
 # Issue #33: fpcheck and fpmate use the F extension (rv32if, ILP32) on the bare user library.
 RV32_OS_FLOAT_PROGRAMS := fpcheck fpmate
-RV32_OS_PROGRAMS := sh hello primes pong tetris menu syscheck fault cat write files bars life fill dmaprobe $(RV32_OS_LIBC_PROGRAMS) $(RV32_OS_FLOAT_PROGRAMS) mandel
+# Issue #33: C library programs built for the single-float ABI (the hard-float block below).
+RV32_OS_HF_PROGRAMS := mandel
+RV32_OS_PROGRAMS := sh hello primes pong tetris menu syscheck fault cat write files bars life fill dmaprobe $(RV32_OS_LIBC_PROGRAMS) $(RV32_OS_FLOAT_PROGRAMS) $(RV32_OS_HF_PROGRAMS)
 # Slots of 128 KiB from 0x8010_0000 (programs/rv32/os/sys.h and tools/rv32_ramdisk.py, which
 # test-rv32-os holds to these values); a program's span is 1 slot unless given.
 RV32_OS_SLOT_BASE := 0x80100000
@@ -1376,7 +1378,7 @@ RV32_OS_OBJS_pong := build/rv32/os/pong.o build/rv32/os/score.o build/rv32/pong_
 RV32_OS_OBJS_tetris := build/rv32/os/tetris.o build/rv32/os/score.o build/rv32/tetris_game.o build/rv32/gfx.o build/rv32/gfx_text.o
 RV32_OS_OBJS_menu := build/rv32/os/menu.o $(filter-out build/rv32/capstone.o $(RV32_COMMON_OBJS),$(RV32_CAPSTONE_OBJS))
 RV32_OS_ELFS := $(foreach p,$(RV32_OS_PROGRAMS),build/rv32/os/$(p).elf)
-RV32_OS_BARE_ELFS := $(foreach p,$(filter-out $(RV32_OS_LIBC_PROGRAMS) mandel,$(RV32_OS_PROGRAMS)),build/rv32/os/$(p).elf)
+RV32_OS_BARE_ELFS := $(foreach p,$(filter-out $(RV32_OS_LIBC_PROGRAMS) $(RV32_OS_HF_PROGRAMS),$(RV32_OS_PROGRAMS)),build/rv32/os/$(p).elf)
 RV32_OS_KERNEL_OBJS := build/rv32/os/kentry.o build/rv32/os/kfpu.o build/rv32/os/kernel.o build/rv32/os/mem.o build/rv32/os/virtio.o build/rv32/os/fs.o build/rv32/fdt.o build/rv32/muldiv.o
 RV32_OS_DISK := build/rv32/os/disk.img
 RV32_OS_ARGS := --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/session.txt --disk $(RV32_OS_DISK) --compare results --compare-traps faults --expect-console-file $(RV32_OS)/session.expected
@@ -1502,17 +1504,19 @@ $(RV32_OS_LIBC_ELFS): build/rv32/os/%.elf: build/rv32/os/libc/crt-%.o $$(RV32_OS
 # the single-float ABI (ilp32f), so its floats travel in f registers. lld will not link ilp32f objects
 # with ilp32 ones, so it gets the same C library built again, from the same SOURCES, and its own glue,
 # all under build/rv32/libc-hf and build/rv32/os/libc-hf; everything else stays RV32I soft float.
-RV32_OS_HF_PROGRAMS := mandel
 RV32_ARCH_HF := $(subst -march=rv32i -mabi=ilp32,-march=rv32imf_zicsr -mabi=ilp32f,$(RV32_ARCH))
 ifeq ($(RV32_ARCH_HF),$(RV32_ARCH))
 $(error RV32_ARCH_HF: RV32_ARCH no longer reads -march=rv32i -mabi=ilp32)
 endif
 rv32_hf = $(subst $(RV32_ARCH),$(RV32_ARCH_HF) -ffp-contract=off,$(1))
+$(foreach v,RV32_PICOLIBC_CFLAGS RV32_COMPILER_RT_CFLAGS RV32_OS_LIBC_CFLAGS RV32_OS_CFLAGS,\
+	$(if $(findstring $(RV32_ARCH),$($(v))),,$(error rv32_hf: $(v) no longer holds RV32_ARCH)))
 RV32_LIBC_HF_OBJS_libc := $(patsubst build/rv32/libc/%,build/rv32/libc-hf/%,$(RV32_LIBC_OBJS_libc))
 RV32_LIBC_HF_OBJS_builtins := $(patsubst build/rv32/libc/%,build/rv32/libc-hf/%,$(RV32_LIBC_OBJS_builtins))
 RV32_LIBC_HF_ARCHIVES := build/rv32/libc-hf/libc.a build/rv32/libc-hf/builtins.a
 # picolibc's bufio.c refers to stdin weakly; a program that never reads it would leave the symbol
-# undefined, which the image check refuses, so stdin is always linked.
+# undefined, which the image check refuses, so stdin is always linked (lld has no
+# --require-defined; the image check names it if it ever goes missing).
 RV32_LIBC_HF_GROUP := -Wl,--undefined=stdin -Wl,--start-group $(RV32_LIBC_HF_ARCHIVES) -Wl,--end-group
 $(RV32_LIBC_HF_OBJS_libc): build/rv32/libc-hf/picolibc/%.o: $(RV32_PICOLIBC)/%
 	@mkdir -p $(@D)
@@ -1525,12 +1529,13 @@ $(RV32_LIBC_HF_ARCHIVES): build/rv32/libc-hf/%.a: $$(RV32_LIBC_HF_OBJS_$$*)
 	$(RV32_AR) rcs $@ $^
 RV32_OS_LIBC_HF_GLUE := build/rv32/os/libc-hf/libc/crt0.o build/rv32/os/libc-hf/libc/syscalls.o build/rv32/os/libc-hf/libc/tty.o \
 	build/rv32/os/libc-hf/libc/line.o
-build/rv32/os/libc-hf/libc/syscalls.o build/rv32/os/libc-hf/libc/tty.o build/rv32/os/libc-hf/libc/mandel.o: build/rv32/os/libc-hf/libc/%.o: $(RV32_OS_LIBC)/%.c
+RV32_OS_HF_MAIN_OBJS := $(foreach p,$(RV32_OS_HF_PROGRAMS),build/rv32/os/libc-hf/libc/$(p).o)
+build/rv32/os/libc-hf/libc/syscalls.o build/rv32/os/libc-hf/libc/tty.o $(RV32_OS_HF_MAIN_OBJS): build/rv32/os/libc-hf/libc/%.o: $(RV32_OS_LIBC)/%.c
 	@mkdir -p $(@D)
 	$(RV32_CC) $(call rv32_hf,$(RV32_OS_LIBC_CFLAGS)) -MD -MP -c -o $@ $<
 build/rv32/os/libc-hf/libc/line.o: $(RV32_OS)/line.c
 	@mkdir -p $(@D)
-	$(RV32_CC) $(subst -march=rv32i -mabi=ilp32,-march=rv32imf_zicsr -mabi=ilp32f,$(RV32_OS_CFLAGS)) -MD -MP -c -o $@ $<
+	$(RV32_CC) $(call rv32_hf,$(RV32_OS_CFLAGS)) -MD -MP -c -o $@ $<
 build/rv32/os/libc-hf/libc/crt0.o: $(RV32_OS_LIBC)/crt0.S
 	@mkdir -p $(@D)
 	$(RV32_CC) $(RV32_ARCH_HF) -c -o $@ $<
@@ -1538,11 +1543,11 @@ build/rv32/os/libc-hf/libc/crt-%.o: $(RV32_OS_LIBC)/crt.c
 	@mkdir -p $(@D)
 	$(RV32_CC) $(call rv32_hf,$(RV32_OS_LIBC_CFLAGS)) -DLIBC_PROGRAM='"$*"' -MD -MP -c -o $@ $<
 RV32_LIBC_HF_DEPS := $(patsubst %.o,%.d,$(RV32_LIBC_HF_OBJS_libc) $(RV32_LIBC_HF_OBJS_builtins) \
-	$(filter-out %/crt0.o,$(RV32_OS_LIBC_HF_GLUE)) build/rv32/os/libc-hf/libc/mandel.o \
+	$(filter-out %/crt0.o,$(RV32_OS_LIBC_HF_GLUE)) $(RV32_OS_HF_MAIN_OBJS) \
 	$(foreach p,$(RV32_OS_HF_PROGRAMS),build/rv32/os/libc-hf/libc/crt-$(p).o))
 -include $(RV32_LIBC_HF_DEPS)
 $(RV32_LIBC_HF_DEPS): ;
-RV32_OS_OBJS_mandel := build/rv32/os/libc-hf/libc/mandel.o
+$(foreach p,$(RV32_OS_HF_PROGRAMS),$(eval RV32_OS_OBJS_$(p) := build/rv32/os/libc-hf/libc/$(p).o))
 RV32_OS_HF_ELFS := $(foreach p,$(RV32_OS_HF_PROGRAMS),build/rv32/os/$(p).elf)
 $(RV32_OS_HF_ELFS): RV32_OS_LINK_ARCH := $(RV32_ARCH_HF)
 $(RV32_OS_HF_ELFS): build/rv32/os/%.elf: build/rv32/os/libc-hf/libc/crt-%.o $$(RV32_OS_OBJS_$$*) $(RV32_OS_LIBC_HF_GLUE) \
@@ -1550,7 +1555,7 @@ $(RV32_OS_HF_ELFS): build/rv32/os/%.elf: build/rv32/os/libc-hf/libc/crt-%.o $$(R
 	$(call rv32_os_link,$(RV32_OS_LIBC_LDFLAGS) $(filter %.o,$^) $(RV32_LIBC_HF_GROUP))
 $(foreach p,$(RV32_OS_HF_PROGRAMS),$(eval RV32_OS_GATE_$(p) := --allow-user --allow-f --allow-m --hard-float))
 .SECONDARY: $(RV32_LIBC_HF_OBJS_libc) $(RV32_LIBC_HF_OBJS_builtins) $(RV32_OS_LIBC_HF_GLUE) \
-	$(foreach p,$(RV32_OS_HF_PROGRAMS),build/rv32/os/libc-hf/libc/crt-$(p).o build/rv32/os/libc-hf/libc/$(p).o)
+	$(foreach p,$(RV32_OS_HF_PROGRAMS),build/rv32/os/libc-hf/libc/crt-$(p).o) $(RV32_OS_HF_MAIN_OBJS)
 
 firmware-rv32-os: build/rv32/os/kernel.elf build/rv32/os/kernel.bin build/rv32/os/kernel.lst $(RV32_OS_ELFS:.elf=.lst)
 
@@ -1564,7 +1569,7 @@ check-rv32-os-image: firmware-rv32-os $(RV32_OS_DISK)
 		$(PYTHON) tools/rv32_image.py build/rv32/os/$(p).elf --listing build/rv32/os/$(p).lst --ram-base $(call rv32_os_base,$(p)) \
 			--ram-size $(call rv32_os_size,$(p)) $(call rv32_os_gate,$(p)) > /dev/null; \
 		echo "build/rv32/os/$(p).elf: slot at $(call rv32_os_base,$(p))";)
-	$(PYTHON) tools/rv32_image.py build/rv32/os/kernel.elf --listing build/rv32/os/kernel.lst --bin build/rv32/os/kernel.bin --hex build/rv32/os/kernel.hex --ram-size 0x100000 --allow-system --allow-f --page-tables
+	$(PYTHON) tools/rv32_image.py build/rv32/os/kernel.elf --listing build/rv32/os/kernel.lst --bin build/rv32/os/kernel.bin --hex build/rv32/os/kernel.hex --ram-size 0x100000 --allow-system --allow-f-in fpu_save --allow-f-in fpu_load --page-tables
 	$(PYTHON) tools/rv32_ramdisk.py --list build/rv32/os/ramdisk.img
 print-rv32-os-slot-%:
 	@echo $(RV32_OS_SLOT_$*) $(call rv32_os_span,$*)
@@ -1665,7 +1670,7 @@ rv32_os_apps_args = --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/
 # session, its default 2x2 in the mandel session.
 RV32_OS_APPS_ARGS_float := --expect-checkpoint "frame 1 4ee3d585"
 RV32_OS_APPS_ARGS_mandel := --expect-checkpoint "frame 1 c7e54ac5"
-# Verilator's cycle budget; mandel's 2x2 picture takes about 900 M (an add or multiply is ~560).
+# Verilator's cycle budget; mandel's 2x2 picture takes about 900 M (an add or multiply waits ~540-560).
 rv32_os_apps_cycles = $(or $(RV32_OS_APPS_CYCLES_$(1)),400000000)
 RV32_OS_APPS_CYCLES_mandel := 1500000000
 RV32_OS_APPS_TIMEOUT_mandel := 3600

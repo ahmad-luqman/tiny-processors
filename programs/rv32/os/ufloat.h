@@ -50,4 +50,33 @@ static inline uint32_t f_registers_or(void)
     return all;
 }
 
+/* Every round of the hold phase: f8 and f9 hold `a` and `b`, written once, then read and compared
+ * `rounds` times, with a quiet comparison (no flag) between; nothing writes an f register or fcsr,
+ * so after the FPU comes back FS stays Clean and the kernel's next claim skips the save. Returns
+ * the rounds that found either register changed. One asm statement, so the compiler cannot touch
+ * f8 or f9 in between. */
+static inline uint32_t f_hold(uint32_t a, uint32_t b, uint32_t rounds)
+{
+    uint32_t wrong = 0, t;
+    __asm__ volatile(
+        "fmv.w.x f8, %[a]\n\t"
+        "fmv.w.x f9, %[b]\n\t"
+        "1: fmv.x.w %[t], f8\n\t"
+        "bne %[t], %[a], 2f\n\t"
+        "fmv.x.w %[t], f9\n\t"
+        "bne %[t], %[b], 2f\n\t"
+        "feq.s %[t], f8, f9\n\t"
+        "j 3f\n\t"
+        "2: addi %[w], %[w], 1\n\t"
+        "3: addi %[n], %[n], -1\n\t"
+        "bnez %[n], 1b"
+        : [w] "+r"(wrong), [n] "+r"(rounds), [t] "=&r"(t)
+        : [a] "r"(a), [b] "r"(b)
+        : "f8", "f9", "memory");
+    return wrong;
+}
+
+#define FLOAT_ROUNDS 6000u /* each of fpcheck's and fpmate's arithmetic rounds */
+#define HOLD_ROUNDS 60000u /* and of their hold rounds: several timer ticks on every backend */
+
 #endif

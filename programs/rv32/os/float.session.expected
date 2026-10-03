@@ -7,11 +7,15 @@ $ fpcheck
 fpcheck: fresh state
 fpcheck: rounding
 fpcheck: flags
+fpcheck: held
 fpcheck: fpmate
 fpcheck: preempted
 fpcheck: ok
+$ fpmate bad
+kernel: pid 5 fpmate killed: cause 2 at fpmate+0x384 tval 0010f0d3
+sh: fpmate exited 130
 $ mandel 4
 mandel: 4 by 4 blocks, 36711 iterations, frame 4ee3d585
 $ halt
-kernel: halt, 3 exits
-PASS f06a88d3
+kernel: halt, 5 exits
+PASS ce2c91dd

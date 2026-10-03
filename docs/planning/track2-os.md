@@ -11,7 +11,7 @@ own commit with its own evidence; the record is
 from it, the [record](../rv32-os.md) and [docs/rv32.md](../rv32.md) are the
 contract:
 
-- Slots are 128 KiB, 24 of them from `0x8010_0000`, and a program may span
+- Slots are 128 KiB, 24 of them from `0x8010_0000` (56 since issue #33's 8 MiB), and a program may span
   several (O4); they were 256 KiB in O2, as planned.
 - The shell runs a program by its name (`NAME [ARGS]`, `NAME &`), not
   `run NAME`, and gained `wait` (O4) and file programs (`cat`, `write`,

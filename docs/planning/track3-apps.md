@@ -76,21 +76,22 @@ A extension), [#35](https://github.com/ahmad-luqman/tiny-processors/issues/35)
 (B3, Doom) and [#36](https://github.com/ahmad-luqman/tiny-processors/issues/36)
 (B4, Linux without an MMU, on B2 and B3's RAM).
 
-1. **An FPU showcase (B1, done).** A Mandelbrot, drawn to the framebuffer with
+1. **An FPU showcase (B1, PR #37).** A Mandelbrot, drawn to the framebuffer with
    the F extension's single-precision instructions (F2), as a C library
    program built for the single-float ABI. The real work was the kernel
    saving the F registers on a context switch: `mstatus.FS` became real on
    both backends and the kernel switches the FPU lazily. All 24 slots were
    taken, so RAM went to 8 MiB (56 slots) here, ahead of Doom
    ([record](../rv32-os.md#floating-state-issue-33)).
-2. **The A extension, then Linux without an MMU.** `mini-rv32ima` shows Linux
-   booting on RV32IMA with a CLINT and a UART. The A extension is a hardware
-   milestone on both backends; Linux then runs on the emulator first and on
-   Verilator slowly.
-3. **Doom.** doomgeneric at 320×200 fits the framebuffer. It needs the
+2. **The A extension (B2).** A hardware milestone on both backends, like F1
+   and F2: the atomic instructions Linux needs.
+3. **Doom (B3).** doomgeneric at 320×200 fits the framebuffer. It needs the
    reserved palette window built, more than 4 MiB of RAM (B1 made it 8 MiB;
-   whether Doom needs more is #35's to measure), and a file system that holds a WAD (tfs files
-   are 4 KiB).
+   whether Doom needs more is #35's to measure), and a file system that holds
+   a WAD (tfs files are 4 KiB).
+4. **Linux without an MMU (B4).** `mini-rv32ima` shows Linux booting on
+   RV32IMA with a CLINT and a UART; on B2's A extension and B3's RAM, it runs
+   on the emulator first and on Verilator slowly.
 
 MicroPython is an alternative to Lua that stream A did not need. Its port
 would reuse L1 unchanged.
