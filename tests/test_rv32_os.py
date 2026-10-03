@@ -23,7 +23,7 @@ from tools.rv32_rtl import ROOT, Run, compare_backends, diff_traces, run_emulato
 
 OS = ROOT / "build/rv32/os"
 PROGRAMS = ("sh", "hello", "primes", "pong", "tetris", "menu", "syscheck", "fault", "cat", "write", "files", "bars", "life",
-            "fill", "dmaprobe", "libccheck", "lua")
+            "fill", "dmaprobe", "libccheck", "lua", "fpcheck", "fpmate")
 ENGINES = frozenset({"menu", "dmaprobe"})  # the programs flagged `accelerators`
 SPANS = {"menu": 3, "lua": 6}  # slots; every other program takes one
 STACKS = {"lua": 0x28000}  # bytes (Track 3); every other program has the default
@@ -374,6 +374,44 @@ class KernelTest(unittest.TestCase):
         share = sum(which == bars for _, which in both) / len(both)
         self.assertGreater(share, 0.4, f"bars ran {share:.0%} of the time both were ready")
         self.assertLess(share, 0.6, f"bars ran {share:.0%} of the time both were ready")
+
+    def test_the_fpu_changes_hands_only_on_a_claim(self):
+        """Issue #33's lazy switch, measured: in the float session the emulator's trace shows each
+        of fpcheck and fpmate taking the FPU by an illegal-instruction trap on an F instruction (FS
+        Off), the claims alternating between the two (a process with FS on keeps it until the
+        other claims), and the claiming instruction running again right after."""
+        image, disk_image = OS / "kernel.bin", OS / "apps.disk"
+        if not image.exists() or not disk_image.exists():
+            self.skipTest("run make check-rv32-os-image build/rv32/os/apps.disk")
+        slot = lambda pc: (pc - 0x80100000) // 0x20000 if pc >= 0x80100000 else None  # noqa: E731
+        fpcheck, fpmate = 24, 25
+        with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
+            disk, fifo = Path(directory) / "float.disk", Path(directory) / "trace"
+            shutil.copy(disk_image, disk)
+            os.mkfifo(fifo)
+            process = subprocess.Popen([str(self.emulator), "--image", str(image), "--disk", str(disk), "--trace", str(fifo),
+                                        "--console-input", str(ROOT / "programs/rv32/os/float.session")],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            claims, rerun, pending = [], 0, {}
+            with open(fifo) as trace:
+                for line in trace:
+                    fields = line.split()
+                    which = slot(int(fields[1], 16))
+                    if which not in (fpcheck, fpmate):
+                        continue
+                    if pending.get(which) is not None:  # this process's next instruction since its claim
+                        rerun += fields[1] == pending[which] and "trap" not in fields
+                        pending[which] = None
+                    if fields[3:5] == ["trap", "2"]:
+                        claims.append(which)
+                        pending[which] = fields[1]
+            console, _ = process.communicate(timeout=300)
+        self.assertEqual(process.returncode, 0)
+        self.assertIn("fpcheck: ok", console)
+        self.assertEqual(claims[0], fpcheck, "fpcheck's first F instruction claims the FPU")
+        self.assertGreater(len(claims), 20, "the FPU changed hands many times")
+        self.assertTrue(all(a != b for a, b in zip(claims, claims[1:])), f"claims alternate: {claims[:20]}")
+        self.assertEqual(rerun, len(claims), "every claiming instruction runs again, untrapped")
 
 
 if __name__ == "__main__":

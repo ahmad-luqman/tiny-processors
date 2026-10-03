@@ -67,7 +67,9 @@
 #define KEY_BUFFER 64u          /* input events waiting for a program */
 #define ARGS_MAX OS_ARGS_MAX
 #define MSTATUS_MPP_M 0x1800u  /* the idle loop; a process's MPP is 0, user mode (O5) */
-#define MSTATUS_FS_INITIAL 0x2000u /* QEMU's FPU is off until FS is set; ours is always on */
+#define MSTATUS_FS 0x6000u       /* issue #33: a process starts with FS Off; its first F instruction traps */
+#define MSTATUS_FS_CLEAN 0x4000u
+#define CAUSE_ILLEGAL 2u
 #define CAUSE_ECALL_M 11u
 #define CAUSE_ECALL_U 8u
 #define CAUSE_LOAD_PAGE 13u  /* issue #25: a load, or a store, the page table refuses */
@@ -133,6 +135,7 @@ extern const uint8_t ramdisk[], ramdisk_end[];
 
 static struct proc procs[MAX_PROCS];
 static struct proc *current; /* 0 while the idle loop runs */
+static struct proc *fpu_owner; /* issue #33: whose floating state the FPU holds, or 0 */
 static struct frame idle_frame;
 static uint32_t idle_stack[64];
 static uint32_t next_pid = 1, exits, exit_sum;
@@ -503,6 +506,15 @@ static int alive(const struct proc *p)
     return p->state != FREE && p->state != ZOMBIE;
 }
 
+/* Issue #33: a process's floating state while another holds the FPU; kfpu.S knows the layout. */
+struct fstate {
+    uint32_t f[32];
+    uint32_t fcsr;
+};
+_Static_assert(offsetof(struct fstate, fcsr) == 128, "kfpu.S offsets");
+extern void fpu_save(struct fstate *s, uint32_t registers);
+extern void fpu_load(const struct fstate *s);
+
 /* Issue #25: what each process table entry's page tables map. The next process there starts from
  * the same tables with the last one's leaves cleared, rather than from 16 KiB cleared again; a
  * table is cleared once, when it is first taken. The layout is kept here, not read from the
@@ -512,6 +524,7 @@ static struct address_space {
     uint32_t tables; /* the entry's tables in use, the root first; 0 before its first process */
     uint32_t base, span, guard; /* guard: the stack's lowest page, never mapped (Track 3) */
     uint32_t drives_engines; /* a PROGRAM_ACCELERATORS program's: the engines' windows mapped */
+    struct fstate fp; /* issue #33: the floating state, when the FPU is not holding it */
 } spaces[MAX_PROCS];
 
 static void clear_table(uint32_t *table)
@@ -589,6 +602,7 @@ static void map_process(const struct proc *p, uint32_t stack)
     space->span = p->span;
     space->guard = p->base + p->span - stack;
     space->drives_engines = !!(p->flags & PROGRAM_ACCELERATORS);
+    memset(&space->fp, 0, sizeof space->fp); /* a new process's floating state: zeros, as at reset */
     lay_out(entry, PTE_R | PTE_W | PTE_X);
 }
 
@@ -663,7 +677,7 @@ static struct proc *spawn(const char *name, const char *args, uint32_t parent)
     p->f.x[2] = (top - ARGS_MAX - 16u) & ~15u; /* sp */
     p->f.x[10] = (uint32_t)(uintptr_t)copy;      /* a0: the arguments */
     p->f.pc = program->entry;
-    p->f.mstatus = MSTATUS_MPIE | MSTATUS_FS_INITIAL; /* MPP 0: mret enters user mode (O5) */
+    p->f.mstatus = MSTATUS_MPIE; /* MPP 0: mret enters user mode (O5); FS Off (issue #33) */
     p->brk = (program->load + program->memory_size + 15u) & ~15u;
     p->pid = next_pid++;
     p->parent = parent;
@@ -731,6 +745,9 @@ static void stop_orphaned_engines(const struct proc *p)
 static void finish(struct proc *p, uint32_t code)
 {
     stop_orphaned_engines(p);
+    if (fpu_owner == p) {
+        fpu_owner = 0; /* issue #33: its floating state goes with it, unsaved */
+    }
     for (uint32_t i = 0; i < OPEN_FILES; i++) {
         if (close_file(&p->files[i]) == SYS_ERROR) {
             kputs("kernel: pid ");
@@ -1196,6 +1213,48 @@ static void report_disk_failure(void)
     }
 }
 
+/* Issue #33: whether `word` is an F instruction (FLW, FSW, the arithmetic opcodes) or an access to
+ * fflags, frm or fcsr: what FS Off makes illegal. */
+static int floating_instruction(uint32_t word)
+{
+    uint32_t opcode = word & 0x7fu, funct3 = (word >> 12) & 7u, csr = word >> 20;
+    return opcode == 0x07u || opcode == 0x27u || opcode == 0x43u || opcode == 0x47u || opcode == 0x4bu ||
+           opcode == 0x4fu || opcode == 0x53u || (opcode == 0x73u && (funct3 & 3u) && csr >= 1u && csr <= 3u);
+}
+
+/* Issue #33: the lazy switch. Only the process whose state the FPU holds, fpu_owner, runs with FS on;
+ * every other one has FS Off, so its first F instruction traps here as illegal. Its owner gives the
+ * FPU up (fcsr saved, and f0..f31 only if FS says Dirty: Clean means its saved copy is current) and
+ * runs with FS Off from now on; this process's state is loaded, FS is Clean, and the instruction
+ * runs again. A process that never uses the FPU never comes here, so switching to it costs nothing.
+ * Returns 0 for an illegal instruction that is not this case: it is killed as before. */
+static int claim_fpu(struct proc *p, uint32_t word)
+{
+    if ((p->f.mstatus & MSTATUS_FS) || !floating_instruction(word)) {
+        return 0;
+    }
+    struct proc *owner = fpu_owner;
+    if (owner) {
+        /* QEMU leaves FS alone when an operation only accrues flags, so fcsr is saved either way. */
+        fpu_save(&spaces[owner - procs].fp, (owner->f.mstatus & MSTATUS_FS) == MSTATUS_FS);
+        owner->f.mstatus &= ~MSTATUS_FS;
+    }
+    fpu_load(&spaces[p - procs].fp);
+    p->f.mstatus |= MSTATUS_FS_CLEAN;
+    fpu_owner = p;
+    return 1;
+}
+
+/* The instruction a trap names: mtval, which our hart and QEMU set to it for an illegal
+ * instruction, else read where the process was (its code is mapped where it was linked). */
+static uint32_t trapped_instruction(const struct proc *p, uint32_t tval)
+{
+    if (tval || !user_range(p, p->f.pc, 4)) {
+        return tval;
+    }
+    return *(const uint32_t *)(uintptr_t)p->f.pc;
+}
+
 /* Called by kentry.S with the frame it saved; returns the frame to resume. */
 struct frame *kernel_trap(struct frame *f)
 {
@@ -1222,6 +1281,8 @@ struct frame *kernel_trap(struct frame *f)
             f->pc += 4;
         }
         report_disk_failure();
+    } else if (cause == CAUSE_ILLEGAL && claim_fpu(p, trapped_instruction(p, tval))) {
+        /* issue #33: the FPU is this process's now; the instruction runs again */
     } else {
         kill(p, cause, tval);
     }

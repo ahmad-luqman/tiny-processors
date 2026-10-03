@@ -294,8 +294,18 @@ def trap_records_by_region(trace, faults_only=False):
     for record in trap_records(trace):
         if faults_only and record.split()[3] in ("8", "11"):
             continue  # an environment call: a kernel may run it again when it had to wait
+        if faults_only and record.split()[3] == "2" and floating_word(int(record.split()[1], 16)):
+            continue  # issue #33: a first F instruction since another process took the FPU, run again
         groups.setdefault(int(record.split()[0], 16) >> 17, []).append(record)
     return groups
+
+
+def floating_word(word):
+    """Whether `word` is an F instruction (FLW, FSW, the arithmetic opcodes) or a CSR instruction on
+    fflags, frm or fcsr: what mstatus.FS Off makes illegal (issue #33). The OS's lazy switch turns FS
+    Off for every process but the FPU's owner, so where such a trap lands depends on device time."""
+    opcode, funct3, csr = word & 0x7F, (word >> 12) & 7, word >> 20
+    return opcode in (0x07, 0x27, 0x43, 0x47, 0x4B, 0x4F, 0x53) or (opcode == 0x73 and funct3 & 3 and 1 <= csr <= 3)
 
 
 def takes_interrupts(trace):
@@ -501,7 +511,8 @@ def main():
                              "depend on how the scheduler interleaved them (O4); results mode only")
     parser.add_argument("--compare-traps", choices=("all", "faults"), default="all",
                         help="`faults` leaves environment calls out of the compared trap records, for a kernel that "
-                             "retries a blocked system call (O2) under preemption (O4); results mode only")
+                             "retries a blocked system call (O2) under preemption (O4), and the illegal-instruction "
+                             "traps of F instructions its lazy FPU switch runs again (issue #33); results mode only")
     parser.add_argument("--compare-stores", action="store_true",
                         help="also compare ordered stores in results mode; firmware must have timing-independent stores")
     parser.add_argument("--ticks", choices=("cycles", "steps"), default="cycles",
