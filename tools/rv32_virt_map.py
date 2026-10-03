@@ -37,7 +37,7 @@ SHARED = (("test", "sifive,test0", "inside"), ("console", "ns16550a", "inside"),
 
 
 def dump_virt(qemu: str, memory: int = rv32_dtb.RAM_SIZE) -> bytes:
-    """virt's own tree, for a machine with the contract's RAM (4 MiB unless the contract changes)."""
+    """virt's own tree, for a machine with the contract's RAM (8 MiB unless the contract changes)."""
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "virt.dtb"
         try:

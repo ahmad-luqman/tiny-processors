@@ -33,7 +33,7 @@ BOOTROM = 0x00001000
 INPUT = 0x11001000
 DISPLAY = 0x11002000
 FB = 0x12000000
-RAM_SIZE = 0x00400000
+RAM_SIZE = 0x00800000
 FB_SIZE = 320 * 240
 UNMAPPED = 0x50000000  # no window: the probe address for "outside the map" tests
 SIMD_BASE = 0x11004000
@@ -224,7 +224,7 @@ def CSRRCI(rd, csr, uimm): return i_type(0x73, rd, 7, uimm, csr)
 MTVEC, MEPC, MCAUSE, MTVAL, MSTATUS = 0x305, 0x341, 0x342, 0x343, 0x300
 MCOUNTEREN, PMPCFG0, PMPCFG1, PMPADDR0 = 0x306, 0x3A0, 0x3A1, 0x3B0  # O5: pmpaddr n is PMPADDR0 + n
 MIE_CSR, MIP_CSR, MSCRATCH, FCSR = 0x304, 0x344, 0x340, 0x003  # O1's interrupt CSRs; F2's fcsr
-MSTATUS_RESET = 0x80007800  # SD and FS = 3 read as constants; MPP = 3 (machine) from reset
+MSTATUS_RESET = 0x80007800  # FS = 3 (Dirty) from reset, so SD; MPP = 3 (machine) from reset
 MSTATUS_MPP = 0x1800        # O5: WARL, machine (3), supervisor (1, issue #20) or user (0); mret leaves it user
 MSTATUS_USER = MSTATUS_RESET & ~MSTATUS_MPP
 MSTATUS_SUPERVISOR = MSTATUS_USER | 0x800

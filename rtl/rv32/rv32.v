@@ -107,6 +107,9 @@ module rv32 #(
     // supervisor's trap CSRs and satp (MODE and a 22-bit PPN; the ASID is 0 bits wide).
     reg mstatus_sie, mstatus_spie, mstatus_spp, mstatus_mprv, mstatus_sum, mstatus_mxr;
     reg mstatus_tvm, mstatus_tw, mstatus_tsr;
+    // Floating state (issue #33): mstatus.FS, Off 0, Initial 1, Clean 2, Dirty 3. Dirty from reset,
+    // so F firmware that never writes it runs; Off makes the F instructions and CSRs illegal.
+    reg [1:0] mstatus_fs;
     reg [15:0] medeleg;
     reg [2:0] mideleg, mie_s, mip_soft, scounteren;
     reg [31:0] stvec, sscratch, sepc, scause, stval;
@@ -241,9 +244,9 @@ module rv32 #(
         (width == 2'd0) ? {{24{load_byte[7] & ~funct3[2]}}, load_byte} :
         (width == 2'd1) ? {{16{load_half[15] & ~funct3[2]}}, load_half} : mdr;
 
-    // mstatus: SD and FS constant (floating state is always on), MPP, and the fields S-mode added.
-    wire [31:0] mstatus_value = {1'b1, 8'd0, mstatus_tsr, mstatus_tw, mstatus_tvm, mstatus_mxr, mstatus_sum, mstatus_mprv,
-                                 2'b00, 2'b11, mpp, 2'b00, mstatus_spp, mstatus_mpie, 1'b0, mstatus_spie, 1'b0,
+    // mstatus: SD (FS Dirty), FS, MPP, and the fields S-mode added.
+    wire [31:0] mstatus_value = {&mstatus_fs, 8'd0, mstatus_tsr, mstatus_tw, mstatus_tvm, mstatus_mxr, mstatus_sum, mstatus_mprv,
+                                 2'b00, mstatus_fs, mpp, 2'b00, mstatus_spp, mstatus_mpie, 1'b0, mstatus_spie, 1'b0,
                                  mstatus_mie, 1'b0, mstatus_sie, 1'b0};
     wire [31:0] sstatus_value = mstatus_value & 32'h800c_6122; // SD, MXR, SUM, FS, SPP, SPIE, SIE
 
@@ -455,6 +458,10 @@ module rv32 #(
                                     (is_sret && (priv == PRIV_U || mstatus_tsr)) ||
                                     (is_wfi && (priv == PRIV_U || mstatus_tw)) ||
                                     (is_sfence && (priv == PRIV_U || mstatus_tvm)));
+    // Issue #33: with FS Off, an F instruction (FLW and FSW too) or any access to fflags, frm or fcsr
+    // is illegal, in every mode; decided in DECODE, so it outranks the faults an FLW or FSW would take.
+    wire fs_illegal = mstatus_fs == 2'd0 &&
+                      (fp_valid || fp_load || fp_store || (is_csr && csr_addr >= CSR_FFLAGS && csr_addr <= CSR_FCSR));
 
     // The page-table walk (issue #20). A read of the entry at pte_addr is a supervisor read: PMP
     // must grant it, it must lie in the 32-bit space, and only RAM answers it (mem_ptw keeps the
@@ -572,6 +579,7 @@ module rv32 #(
             mcounteren <= 3'd0;
             mstatus_sie <= 1'b0; mstatus_spie <= 1'b0; mstatus_spp <= 1'b0; mstatus_mprv <= 1'b0;
             mstatus_sum <= 1'b0; mstatus_mxr <= 1'b0; mstatus_tvm <= 1'b0; mstatus_tw <= 1'b0; mstatus_tsr <= 1'b0;
+            mstatus_fs <= 2'd3;
             medeleg <= 16'd0; mideleg <= 3'd0; mie_s <= 3'd0; mip_soft <= 3'd0; scounteren <= 3'd0;
             stvec <= 32'd0; sscratch <= 32'd0; sepc <= 32'd0; scause <= 32'd0; stval <= 32'd0;
             satp_mode <= 1'b0; satp_ppn <= 22'd0;
@@ -638,7 +646,7 @@ module rv32 #(
                     b <= fp_store ? f2 : rs2_value;
                     fa <= fp_from_integer ? rs1_value : f1;
                     fb <= f2; fc <= f3; fp_flags <= 5'd0;
-                    if ((illegal && !fp_valid) || priv_illegal)
+                    if ((illegal && !fp_valid) || priv_illegal || fs_illegal)
                         take_trap(1'b0, CAUSE_ILLEGAL, ir, ir_pc);
                     else if (is_ecall)
                         take_trap(1'b0, priv_m ? CAUSE_ECALL : priv == PRIV_S ? CAUSE_ECALL_S : CAUSE_ECALL_U, 32'd0, ir_pc);
@@ -753,6 +761,9 @@ module rv32 #(
                     retire_fcsr_we <= fp_csr_write || (fp_valid && fp_flags != 5'd0);
                     retire_fcsr <= fcsr_next;
                     if (fp_csr_write || fp_valid) fcsr <= fcsr_next;
+                    // Issue #33: an f register written or fcsr changed (the retire port's fd and fcsr
+                    // effects) makes the state Dirty. No such instruction writes mstatus as well.
+                    if (fp_write || fp_csr_write || (fp_valid && fp_flags != 5'd0)) mstatus_fs <= 2'd3;
                     if (csr_we) begin
                         case (csr_addr)
                             CSR_MTVEC: mtvec <= {csr_new[31:2], 2'b00}; // direct mode only
@@ -772,11 +783,13 @@ module rv32 #(
                                 mstatus_tvm <= csr_new[20];
                                 mstatus_tw <= csr_new[21];
                                 mstatus_tsr <= csr_new[22];
+                                mstatus_fs <= csr_new[14:13];
                             end
                             CSR_SSTATUS: begin
                                 mstatus_sie <= csr_new[1];
                                 mstatus_spie <= csr_new[5];
                                 mstatus_spp <= csr_new[8];
+                                mstatus_fs <= csr_new[14:13];
                                 mstatus_sum <= csr_new[18];
                                 mstatus_mxr <= csr_new[19];
                             end

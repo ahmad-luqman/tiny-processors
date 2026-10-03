@@ -105,10 +105,29 @@ class ImageCheckerTests(unittest.TestCase):
         self.assertTrue(any("EM_RISCV" in p for p in self.problems(machine=62)))
         self.assertTrue(any("ET_EXEC" in p for p in self.problems(etype=3)))
 
+    def test_floating_point_only_in_named_functions(self):
+        """Issue #33: the kernel may hold F instructions only in its FPU save and load."""
+        listing = ("80000000 <fpu_save>:\n80000000: 00a52027     \tfsw\tft0, 0x0(a0)\n"
+                   "80000004: 003022f3     \tfrcsr\tt0\n"
+                   "80000008 <kernel_trap>:\n80000008: 00a52027     \tfsw\tft0, 0x0(a0)\n"
+                   "8000000c: 003022f3     \tfrcsr\tt0\n")
+        problems = check_listing(listing, f_functions={"fpu_save", "fpu_load"})
+        self.assertEqual([p.split(":")[0] for p in problems], ["listing line 5", "listing line 6"])
+        self.assertEqual(check_listing(listing, allow_f=True), [])
+        self.assertEqual(len(check_listing(listing)), 4)
+
     def test_rejects_flags_and_entry(self):
         self.assertTrue(any("RVC" in p for p in self.problems(flags=0x1)))
         self.assertTrue(any("float ABI" in p for p in self.problems(flags=0x4)))
         self.assertTrue(any("entry point" in p for p in self.problems(entry=RAM + 4)))
+        # Issue #33: the single-float ABI (ilp32f, 0x2) only when asked for, and then only it.
+        self.assertTrue(any("expected soft float" in p for p in self.problems(flags=0x2)))
+        self.assertEqual(check_image(parse_elf(build_elf(flags=0x2)), hard_float=True, allow_f=True), [])
+        for flags in (0x0, 0x4, 0x3):
+            with self.subTest(flags=flags):
+                self.assertTrue(check_image(parse_elf(build_elf(flags=flags)), hard_float=True, allow_f=True))
+        self.assertTrue(any("needs F" in p for p in check_image(parse_elf(build_elf(flags=0x2)), hard_float=True,
+                                                                 allow_f=False)))
         symbols = dict(GOOD_SYMBOLS, _start=RAM + 8)
         self.assertTrue(any("_start is" in p for p in self.problems(symbols=symbols)))
 
@@ -321,7 +340,7 @@ class QemuDriverTests(unittest.TestCase):
                                        "-kernel", "fw.elf"])
         self.assertIn("-no-reboot", command)
         self.assertNotIn("-no-shutdown", command)
-        self.assertEqual(command[command.index("-m") + 1], "4M")
+        self.assertEqual(command[command.index("-m") + 1], "8M")
         self.assertEqual(command[command.index("-monitor") + 1], "none")
         self.assertNotIn("-d", command)
         self.assertIn("-D", qemu_command("q", "fw.elf", log="q.log"))
@@ -724,6 +743,40 @@ class VendoredSourcesTest(unittest.TestCase):
             self.assertEqual(sorted(rv32_vendor_libc.verify(str(root))),
                              ["a.c: SHA-256 differs from SHA256SUMS.json", "b.c: missing",
                               "c.c: in SOURCES, not in SHA256SUMS.json", "extra.h: not in SHA256SUMS.json"])
+
+
+class FloatingClaimTest(unittest.TestCase):
+    """Issue #33: the results comparison leaves out exactly the illegal-instruction traps that a
+    lazy FPU switch runs again: F instructions and the floating CSRs, not other illegal words."""
+
+    def test_floating_words(self):
+        from tools.rv32_asm import ADDI, CSRRC, CSRRS, CSRRWI, LW, MSTATUS, i_type
+        from tools.rv32_f_asm import arithmetic, flw, fsw
+        from tools.rv32_rtl import floating_word
+        for word in (flw(1, 2), fsw(1, 2), arithmetic(0, 0), arithmetic(3, 0), arithmetic(4, 0), arithmetic(5, 0),
+                     arithmetic(6, 0), arithmetic(13, 0), CSRRS(5, 1, 0), CSRRWI(0, 2, 1), CSRRC(0, 3, 6)):
+            self.assertTrue(floating_word(word), f"{word:08x}")
+        for word in (CSRRS(5, MSTATUS, 0), CSRRS(5, 0xC00, 0), 0x00000000, 0xFFFFFFFF, ADDI(1, 1, 1), LW(1, 2, 0),
+                     i_type(0x73, 0, 0, 0, 1), i_type(0x73, 0, 4, 0, 1)):  # ecall-shaped and the hypervisor funct3
+            self.assertFalse(floating_word(word), f"{word:08x}")
+
+    def test_only_a_claim_the_process_comes_back_from_is_left_out(self):
+        from tools.rv32_rtl import trap_records_by_region
+        fadd, flw_word, illegal = 0x00208053, 0x00012087, 0xC0001073  # fadd.s, flw, csrw cycle
+        trace = [
+            "1 80400000 00000013",
+            f"2 80400004 {fadd:08x} trap 2 {fadd:08x}",    # a claim: the kernel runs it again
+            "3 80000100 34202573",                           # the kernel, in its own region
+            f"4 80400004 {fadd:08x} f1=00000000",
+            f"5 80420010 {flw_word:08x} trap 2 {flw_word:08x}",  # a claim, then killed for the same word
+            f"6 80420010 {flw_word:08x} trap 2 {flw_word:08x}",
+            f"7 80440020 {illegal:08x} trap 2 {illegal:08x}",    # not an F instruction
+        ]
+        groups = trap_records_by_region(trace, faults_only=True)
+        self.assertNotIn(0x80400000 >> 17, groups)
+        self.assertEqual(groups[0x80420000 >> 17], [f"80420010 {flw_word:08x} trap 2 {flw_word:08x}"])
+        self.assertEqual(groups[0x80440000 >> 17], [f"80440020 {illegal:08x} trap 2 {illegal:08x}"])
+        self.assertEqual(len(trap_records_by_region(trace)[0x80420000 >> 17]), 2, "all of them without faults_only")
 
 if __name__ == "__main__":
     unittest.main()

@@ -41,7 +41,7 @@ failures:
   find its devices.
 
 The hole the devices moved into was chosen from `virt`'s own tree:
-`qemu-system-riscv32 -M virt,dumpdtb=virt.dtb -bios none -m 4M` (QEMU 8.2.2)
+`qemu-system-riscv32 -M virt,dumpdtb=virt.dtb -bios none -m 4M` (QEMU 8.2.2; RAM is 8 MiB since issue #33)
 describes nothing between its `fw_cfg` at `0x1010_0000` (24 bytes) and its
 flash at `0x2000_0000`. [rv32_virt_map.py](../tools/rv32_virt_map.py) repeats
 the check on every run of `make check-rv32-virt-map`. It parses both trees and
@@ -140,7 +140,7 @@ platcheck: display absent
 platcheck: simd4 absent
 platcheck: g1 absent
 platcheck: g2 absent
-PASS b8a59113
+PASS 91659113
 ```
 
 On our backends the model line is `tiny-processors RV32 machine` and each of
@@ -170,15 +170,16 @@ Verilator 5.040 built from their release tags, Yosys 0.33, dtc 1.7.
 
 - **Map:** `check-rv32-virt-map`: 12 windows against `virt`'s 22 regions,
   shared devices equal, the rest disjoint.
-- **platcheck:** `PASS b8a59113` on QEMU `virt` (exit status 0, transcript
+- **platcheck:** `PASS 91659113` on QEMU `virt` (exit status 0, transcript
   equal to the pinned one), the emulator (118,151 instructions), Icarus
   (498,994 cycles) and Verilator with one stall per request (643,535 cycles),
   the RTL runs results-identical to the emulator (18 console lines).
 - **Unit tests:** `test-rv32-platform` 23 tests. The generator round-trips,
   its copies are current, `dtc` agrees, and the Python parser refuses eleven
   malformed blobs and partial `reg` entries. The map checker passes ours
-  against the installed QEMU and against a committed QEMU 8.2.2 tree
-  ([fixture](../tests/fixtures/qemu-8.2.2-virt-4M.dtb), so it also runs
+  against the installed QEMU and against a committed QEMU tree
+  (QEMU 8.2.2 with 4 MiB then; since issue #33 the
+  [fixture](../tests/fixtures/qemu-11.1.2-virt-8M.dtb) is QEMU 11.1.2 with 8 MiB, so it also runs
   without QEMU), and rejects the old input window, a moved CLINT or done
   register, a window on a virtio slot, a resized memory and a missing shared
   node. `fdt.c`, built natively under AddressSanitizer and UBSan (the tests
@@ -243,7 +244,7 @@ reproduced before it was fixed:
   clean under both sanitizers.
 - A matching node without a usable `reg` read as "not found", and platcheck
   printed every reader error as "absent", which QEMU's run accepts: given a
-  tree with a broken node of ours, the old image printed `PASS b8a59113`.
+  tree with a broken node of ours, the old image printed `PASS b8a59113` (with 4 MiB of RAM).
   Such a node is now `FDT_NO_REG` and platcheck fails on any status but "not
   found".
 - The generated ROM module's header gave the ROM's address as `0x1000_1000`.

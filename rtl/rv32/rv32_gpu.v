@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 // G1 bounded integer rasterizer. Byte transfers; one outstanding request.
 module rv32_gpu #(
-    parameter integer RAM_WORDS=1048576
+    parameter integer RAM_WORDS = 2097152
 )(
     input wire clk, reset, valid, we,
     input wire [31:0] addr, wdata,

@@ -41,7 +41,7 @@ MAGIC = 0x4B534452
 HEADER = struct.Struct("<4I")
 ENTRY = struct.Struct("<24s8I")
 assert ENTRY.size == 56, "the kernel's struct program"
-SLOT_BASE, SLOT_SIZE, SLOTS = 0x80100000, 0x20000, 24
+SLOT_BASE, SLOT_SIZE, SLOTS = 0x80100000, 0x20000, 56
 STACK_SIZE = 0x8000  # a program's stack unless its link asks for more (sys.h's OS_STACK_SIZE)
 PAGE = 0x1000
 PT_LOAD = 1

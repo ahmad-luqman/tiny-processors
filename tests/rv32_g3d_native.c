@@ -12,7 +12,7 @@ size_t native_g3d_size(void) { return sizeof(g3d_device); }
 #include <stdlib.h>
 #include <string.h>
 
-#define RAM_SIZE 0x400000u
+#define RAM_SIZE 0x800000u
 #define ZBASE 0x80040000u
 
 static uint32_t hash(const uint8_t *bytes, uint32_t n)

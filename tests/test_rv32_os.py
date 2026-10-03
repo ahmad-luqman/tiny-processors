@@ -23,7 +23,7 @@ from tools.rv32_rtl import ROOT, Run, compare_backends, diff_traces, run_emulato
 
 OS = ROOT / "build/rv32/os"
 PROGRAMS = ("sh", "hello", "primes", "pong", "tetris", "menu", "syscheck", "fault", "cat", "write", "files", "bars", "life",
-            "fill", "dmaprobe", "libccheck", "lua")
+            "fill", "dmaprobe", "libccheck", "lua", "fpcheck", "fpmate", "mandel")
 ENGINES = frozenset({"menu", "dmaprobe"})  # the programs flagged `accelerators`
 SPANS = {"menu": 3, "lua": 6}  # slots; every other program takes one
 STACKS = {"lua": 0x28000}  # bytes (Track 3); every other program has the default
@@ -375,6 +375,58 @@ class KernelTest(unittest.TestCase):
         self.assertGreater(share, 0.4, f"bars ran {share:.0%} of the time both were ready")
         self.assertLess(share, 0.6, f"bars ran {share:.0%} of the time both were ready")
 
+    def test_the_fpu_changes_hands_only_on_a_claim(self):
+        """Issue #33's lazy switch, measured: in the float session the emulator's trace shows each
+        of fpcheck and fpmate taking the FPU by an illegal-instruction trap on an F instruction (FS
+        Off), the claims alternating between the two (a process with FS on keeps it until the
+        other claims), the claiming instruction running again right after, and the kernel saving
+        the previous owner's state on some claims (it was Dirty) and not on others (Clean: f_hold
+        writes neither f registers nor fcsr)."""
+        image, disk_image, elf = OS / "kernel.bin", OS / "apps.disk", OS / "kernel.elf"
+        if not image.exists() or not disk_image.exists():
+            self.skipTest("run make check-rv32-os-image build/rv32/os/apps.disk")
+        fpu_save = f"{parse_elf(elf.read_bytes()).symbols['fpu_save']:08x}"
+        slot = lambda pc: (pc - 0x80100000) // 0x20000 if pc >= 0x80100000 else None  # noqa: E731
+        fpcheck, fpmate = 24, 25  # the Makefile's RV32_OS_SLOT_fpcheck and _fpmate
+        with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
+            disk, fifo, out = Path(directory) / "float.disk", Path(directory) / "trace", Path(directory) / "console"
+            shutil.copy(disk_image, disk)
+            os.mkfifo(fifo)
+            with open(out, "w") as console_file:  # a file, not a pipe: the trace is read to the end first
+                process = subprocess.Popen([str(self.emulator), "--image", str(image), "--disk", str(disk), "--trace",
+                                            str(fifo), "--console-input", str(ROOT / "programs/rv32/os/float.session")],
+                                           stdout=console_file, stderr=subprocess.DEVNULL, text=True)
+                # A claim is a cause-2 trap whose instruction the process runs again next: (slot, saved).
+                claims, kills, pending, saving = [], 0, {}, False
+                with open(fifo) as trace:
+                    for line in trace:
+                        fields = line.split()
+                        saving = saving or fields[1] == fpu_save  # since the last trap in either slot
+                        which = slot(int(fields[1], 16))
+                        if which not in (fpcheck, fpmate):
+                            continue
+                        if which in pending:
+                            if fields[1] == pending.pop(which):
+                                claims.append((which, saving))
+                            else:
+                                kills += 1
+                        if fields[3:5] == ["trap", "2"]:
+                            pending[which] = fields[1]
+                            saving = False
+                self.assertEqual(process.wait(timeout=300), 0)
+            console = out.read_text()
+        kills += len(pending)  # a trap with nothing after it: `fpmate bad`, killed
+        self.assertIn("fpcheck: ok", console)
+        self.assertIn("fpmate killed: cause 2", console)
+        self.assertEqual(kills, 1, "only fpmate bad's invalid instruction is not run again")
+        order = [which for which, _ in claims]
+        self.assertEqual(order[0], fpcheck, "fpcheck's first F instruction claims the FPU")
+        while_both = order[:len(order) - order[::-1].index(fpcheck)]  # to fpcheck's last claim
+        self.assertGreater(len(while_both), 20, "the FPU changed hands many times")
+        self.assertTrue(all(a != b for a, b in zip(while_both, while_both[1:])), f"claims alternate: {while_both[:20]}")
+        saved = sum(saved for _, saved in claims[1:len(while_both)])
+        self.assertGreater(saved, 10, "a Dirty owner's state is saved")
+        self.assertGreater(len(while_both) - 1 - saved, 10, "a Clean owner's is not")
 
 if __name__ == "__main__":
     unittest.main()
