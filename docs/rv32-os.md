@@ -504,7 +504,10 @@ fast it passes.
 ### Slots
 
 Twelve 256 KiB slots were all taken by the end of O3. Slots are now 128 KiB
-(24 of them, 56 since issue #33 made RAM 8 MiB), and a program may span several: its link script's
+(24 of them, 56 since issue #33 made RAM 8 MiB, though the RAM disk,
+linked into the kernel's 1 MiB, still bounds the programs' bytes: the kernel
+with its 580 KB RAM disk, 609 KB, then its page tables (160 KiB) and stack
+(16 KiB) leave 244 KiB), and a program may span several: its link script's
 `SLOT_SPAN`, recorded in the RAM disk entry, sets where its stack starts. The
 menu, the only program larger than 96 KiB, spans three since issue #20 gave it
 its own depth buffer (two before). `spawn` refuses a
@@ -1059,8 +1062,9 @@ The trace comparison leaves the claims out with the retried ecalls
 A claim costs 357 instructions with a Dirty owner to save, and 285 with no
 owner (trap entry and exit, the decode, 33 loads, and 33 stores when saved).
 A switch between a float program and any other costs nothing; only two float
-programs taking turns pay, once per turn. The float session's 35 claims are
-35 of fpcheck and fpmate's turns. Sessions without a float program never take
+programs taking turns pay, once per turn. Of the float session's 35 claims on
+the emulator, 34 are fpcheck and fpmate's turns and one is mandel's first
+instruction, with no owner to save. Sessions without a float program never take
 the path; their step counts grew only by the bookkeeping: three more programs
 to look through and list, and 132 bytes cleared at each spawn.
 
@@ -1147,8 +1151,9 @@ Their PASS words are unchanged: console `8b4402e5`, jobs `408a6738`, menu
 1. **Blocking by retry.** Run the console session with `--trace` and find a
    `read` ecall that executes more than once. What changed between the two
    executions, and which function made the process ready again?
-2. **Where the tree is.** Swap the slots of `sh` and `fault` (so the shell,
-   the first program spawned, is linked at slot 8) and move the kernel's
+2. **Where the tree is.** Link the shell, the first program spawned, at
+   slot 40, where QEMU puts its tree since issue #33's 8 MiB (slot 8 before),
+   and move the kernel's
    `discover()` after that first `spawn`. Run the session on QEMU and on the
    emulator. How does the QEMU run end, what does the done register say, and
    why does the emulator not notice?

@@ -1658,7 +1658,8 @@ RV32_OS_APPS_DISK := build/rv32/os/apps.disk
 $(RV32_OS_APPS_DISK): tools/rv32_mkfs.py $(RV32_OS)/welcome.txt $(RV32_OS_LUA_SCRIPTS) | build/rv32/os
 	$(PYTHON) tools/rv32_mkfs.py --new --add welcome=$(RV32_OS)/welcome.txt $(foreach f,$(RV32_OS_LUA_SCRIPTS),--add $(notdir $(f))=$(f)) $@
 rv32_os_apps_args = --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/$(1).session --disk $(RV32_OS_APPS_DISK) \
-	--compare results --compare-traps faults --expect-console-file $(RV32_OS)/$(1).session.expected --timeout 1800 \
+	--compare results --compare-traps faults --expect-console-file $(RV32_OS)/$(1).session.expected \
+	--timeout $(or $(RV32_OS_APPS_TIMEOUT_$(1)),1800) \
 	$(RV32_OS_APPS_ARGS_$(1))
 # Issue #33: mandel's frames, which it also prints (QEMU has no display): 4x4 blocks in the float
 # session, its default 2x2 in the mandel session.
@@ -1667,6 +1668,7 @@ RV32_OS_APPS_ARGS_mandel := --expect-checkpoint "frame 1 c7e54ac5"
 # Verilator's cycle budget; mandel's 2x2 picture takes about 900 M (an add or multiply is ~560).
 rv32_os_apps_cycles = $(or $(RV32_OS_APPS_CYCLES_$(1)),400000000)
 RV32_OS_APPS_CYCLES_mandel := 1500000000
+RV32_OS_APPS_TIMEOUT_mandel := 3600
 # QEMU's disk ends byte for byte the emulator's.
 run-rv32-libc-qemu run-rv32-lua-qemu run-rv32-float-qemu run-rv32-mandel-qemu: run-rv32-%-qemu: check-rv32-os-image $(RV32_OS_APPS_DISK) run-rv32-%-emu
 	cp $(RV32_OS_APPS_DISK) build/rv32/os/$*.qemu.disk

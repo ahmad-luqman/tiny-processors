@@ -14,8 +14,8 @@ tiers are safe to run in parallel.
 | `make -j8 test-rv32-slow` | The long Icarus twins of Verilator checks in `test-rv32` | Before merging |
 | `make -j8 test-rv32-full` | Both | Before merging, or nightly |
 
-`test-rv32-full` runs exactly the 123 checks the single `test-rv32` ran before
-issue #26, with one exception. `test-rv32-3d` used to run four test files in
+`test-rv32-full` ran exactly the 123 checks the single `test-rv32` ran before
+issue #26 (issue #33 added the float and mandel sessions since), with one exception. `test-rv32-3d` used to run four test files in
 one process. The aggregate now runs them as two targets:
 
 - `test-rv32-3d-model` (in `test-rv32`) runs the oracle, the C reference and the
@@ -88,7 +88,8 @@ One slow-tier run is Verilator's own (issue #33): `run-rv32-mandel-rtl-verilator
 draws mandel's default picture, about 900 M cycles and 12 minutes, because the
 F1 unit's adds and multiplies take ~560 cycles each. Its fast twin is
 `run-rv32-float-rtl-verilator`, the same program drawing in 4×4 blocks
-(235 M cycles, 3 minutes).
+(235 M cycles, 3 minutes). With it, `make -j8 test-rv32-full` took 16 min 44 s
+on the M-series Mac that measured 908 s for issue #26.
 
 The OS sessions never ran on Icarus in the aggregate; `run-rv32-os-rtl` is a
 manual target.
