@@ -146,7 +146,7 @@ uint32_t fs_write(int file, uint32_t position, const uint8_t *from, uint32_t len
     while (done < length && position < limit) {
         uint32_t sector = e->first + position / VIRTIO_SECTOR, at = position % VIRTIO_SECTOR;
         if (!virtio_transfer(sector, sector_buffer, 1, 0)) {
-            break;
+            return FS_ERROR; /* as below: a device error is never a short count, which means full */
         }
         uint8_t *bytes = (uint8_t *)sector_buffer;
         uint32_t n = 0;

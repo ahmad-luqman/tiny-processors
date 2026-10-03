@@ -59,6 +59,7 @@ newlib/libc/tinystdio/fdopen.c
 newlib/libc/tinystdio/fflush.c
 newlib/libc/tinystdio/fgetc.c
 newlib/libc/tinystdio/fgets.c
+newlib/libc/tinystdio/fileno.c
 newlib/libc/tinystdio/filestrget.c
 newlib/libc/tinystdio/filestrput.c
 newlib/libc/tinystdio/fopen.c

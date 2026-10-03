@@ -19,7 +19,8 @@ uint32_t fs_corrupt(void);                                  /* how many entries 
 int fs_open(const char *name, int create);                   /* the file's index, or -1 */
 void fs_truncate(int file);                                  /* size 0, in memory until fs_flush */
 uint32_t fs_read(int file, uint32_t position, uint8_t *to, uint32_t length);
-/* Bytes written, fewer than `length` when the file's capacity ends first; grows the size. */
+/* Bytes written, fewer than `length` (0 at the end) only when the file's capacity ends first;
+ * grows the size. A device error is FS_ERROR. */
 uint32_t fs_write(int file, uint32_t position, const uint8_t *from, uint32_t length);
 uint32_t fs_size(int file);                                  /* the file's size in bytes (Track 3) */
 int fs_flush(void);                                          /* write the directory back; 1 on success */

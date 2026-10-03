@@ -43,6 +43,7 @@ syscheck: sbrk
 hello from pid 9, args: from syscheck
 syscheck: processes
 syscheck: list
+syscheck: seek
 syscheck: time
 syscheck: ok
 $ fault load

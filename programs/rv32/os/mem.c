@@ -1,6 +1,7 @@
-/* memcpy and memset for the kernel and the programs (Track 2): the compiler may call them for
- * structure copies even with -fno-builtin, and there is no C library. A word at a time where the
- * addresses allow, since Track 3: spawn copies Lua's 360 KiB image with memcpy. */
+/* memcpy and memset for the kernel and the user library's programs (Track 2): the compiler may
+ * call them for structure copies even with -fno-builtin, and neither links a C library (Track 3's
+ * programs get picolibc's). A word at a time where the addresses allow, since Track 3: spawn
+ * copies Lua's 370 KB image with memcpy. */
 #include <stddef.h>
 #include <stdint.h>
 

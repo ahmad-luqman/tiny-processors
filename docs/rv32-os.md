@@ -258,14 +258,14 @@ fault, cause 13; see [Paging](#paging-issue-25).)
 | 3 | [pong](../programs/rv32/os/pong.c) | [pong.c](../programs/rv32/pong.c) on system calls |
 | 4 | [tetris](../programs/rv32/os/tetris.c) | The M7 Tetris, Q quits |
 | 5 | [dmaprobe](../programs/rv32/os/dmaprobe.c) | The DMA window: engine jobs that reach outside its slot are refused (issue #20) |
+| 6 | [libccheck](../programs/rv32/os/libc/libccheck.c) | The C library on the kernel (Track 3, [record](rv32-libc.md)) |
 | 7 | [syscheck](../programs/rv32/os/syscheck.c) | System-call edge cases |
 | 8 | [fault](../programs/rv32/os/fault.c) | A load from an unmapped address, or an illegal instruction; since O5 also kernel and other-slot accesses and a machine CSR; since issue #25 the slot the last program left, an engine's registers and the byte past the framebuffer; since Track 3 a stack that reaches its guard page |
 | 9, 10, 11 | [cat](../programs/rv32/os/cat.c), [write](../programs/rv32/os/write.c), [files](../programs/rv32/os/files.c) | Print a file, write one, list them (O3) |
 | 12, 13 | [bars](../programs/rv32/os/bars.c), [life](../programs/rv32/os/life.c) | Two programs that share the screen (O4) |
 | 14 | [fill](../programs/rv32/os/fill.c) | Numbered lines into a file, to a given size (after O5's review) |
 | 15–17 | [menu](../programs/rv32/os/menu.c) | The capstone runtime (menu, games, 2D, 3D, digit screen) on system calls, accelerators direct; slots 5–6 until issue #20 gave it room for its own depth buffer |
-| 6 | [libccheck](../programs/rv32/os/libc/libccheck.c) | The C library on the kernel (Track 3, [record](rv32-libc.md)) |
-| 18–23 | lua | Lua 5.4.7 with a 160 KiB stack (Track 3) |
+| 18–23 | [lua](../third_party/lua/lua.c) | Lua 5.4.7's stand-alone interpreter on the C library, with a 160 KiB stack (Track 3, [record](rv32-libc.md#l2-lua)) |
 
 The user library ([ulib.c](../programs/rv32/os/ulib.c)) also defines
 `console.h`'s functions and `rv32_exit` on top of system calls, so the game

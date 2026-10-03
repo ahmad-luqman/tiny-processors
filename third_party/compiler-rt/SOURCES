@@ -40,6 +40,8 @@ moddi3.c
 modsi3.c
 muldf3.c
 muldi3.c
+mulodi4.c
+mulosi4.c
 mulsf3.c
 riscv/mulsi3.S
 negdf2.c

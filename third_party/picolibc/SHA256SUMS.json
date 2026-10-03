@@ -1,7 +1,7 @@
 {
   "COPYING.NEWLIB": "fcfb5ec69b6ab52676dcc4dab7cf4338c8000ef97812dadd35b8592a640a8419",
   "COPYING.picolibc": "1e427387b690483dad761268beb0f09a824ecba6132c4dfee78d1fb21a6e75b5",
-  "SOURCES": "2273e84e855a2fe038d30ee96c266cfa400f9bbc84b810e634afba02611ceca6",
+  "SOURCES": "ea029e2344a90192b2bbc217b5f323167342ee6abfb4e189c69f5a047a4e8149",
   "newlib/libc/ctype/ctype_.c": "61df40e926bd876b3a7122027713c105d6fd140c18a85817e4176ae851f952c1",
   "newlib/libc/ctype/ctype_.h": "457451c183c4588b3925bdf4576fa8dea5da7bfdfb6869d4f76b2dc2b4515811",
   "newlib/libc/ctype/local.h": "10735a23f9d37c85b6aaa49b8519592a39562adcb2a304c7d497d258620edb9f",
@@ -154,6 +154,7 @@
   "newlib/libc/tinystdio/fflush.c": "d8e28da4554489c7b66bc5dbca7ea437388d284dbcadcec95cffc5b22b924bb1",
   "newlib/libc/tinystdio/fgetc.c": "55a844c7f41ced1a6124edc30603ae01fba8b1080cd9f91473450ebc43637ca8",
   "newlib/libc/tinystdio/fgets.c": "4f6d47e1327b2fee676dbeaee4b15a86f93d7224013d5a1315dc18395d3bf9ed",
+  "newlib/libc/tinystdio/fileno.c": "b033c7785f5fd75369bcad2d92e3cb28471c8556c263ec4d1ced5f81778c088a",
   "newlib/libc/tinystdio/filestrget.c": "41256bd134605f2366c5bbe7985bcf9acf7ae372edb8119c6ac978425976696c",
   "newlib/libc/tinystdio/filestrput.c": "14fc3ff77167e990d1cf55c5ebf7edb6e68ebaae5ed4e77ca23ee9456011369a",
   "newlib/libc/tinystdio/fopen.c": "1bd2fcf6af5b4e5d0b69cf821a44cb9b62d16bf3d189aa4b5a9fa039de57255b",

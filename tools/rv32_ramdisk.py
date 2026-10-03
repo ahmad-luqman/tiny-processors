@@ -4,8 +4,8 @@
 Each program is an ELF linked for one or more 128 KiB slots above the kernel
 (programs/rv32/os/user.ld, `--defsym SLOT_BASE=... --defsym SLOT_SPAN=... --defsym STACK_SIZE=...`);
 its span is its `_stack_top` less its load address, and its stack the top
-`_stack_top - _stack_bottom` bytes of the span (32 KiB unless the link gives
-`--defsym STACK_SIZE=...`, Track 3). The RAM disk the kernel bundles is a
+`_stack_top - _stack_bottom` bytes of the span (Track 3; the link script has no
+default, and the Makefile gives 32 KiB unless a program asks for more). The RAM disk the kernel bundles is a
 16-byte header and a table of 56-byte entries, then the programs' bytes, all
 little-endian:
 
@@ -30,6 +30,7 @@ import argparse
 import struct
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -39,7 +40,9 @@ from tools.rv32_image import ImageError, flatten, parse_elf  # noqa: E402
 MAGIC = 0x4B534452
 HEADER = struct.Struct("<4I")
 ENTRY = struct.Struct("<24s8I")
-SLOT_BASE, SLOT_SIZE, SLOTS, STACK_SIZE = 0x80100000, 0x20000, 24, 0x8000  # STACK_SIZE: the default
+assert ENTRY.size == 56, "the kernel's struct program"
+SLOT_BASE, SLOT_SIZE, SLOTS = 0x80100000, 0x20000, 24
+STACK_SIZE = 0x8000  # a program's stack unless its link asks for more (sys.h's OS_STACK_SIZE)
 PAGE = 0x1000
 PT_LOAD = 1
 ACCELERATORS = 1
@@ -49,8 +52,19 @@ class RamdiskError(ValueError):
     """A program that cannot go on the RAM disk, or a RAM disk that is malformed."""
 
 
-def program(path: Path) -> tuple[str, int, int, bytes, int, int, int]:
-    """(name, load, entry, bytes, memory size, span, stack) of one program ELF, checked against the slot rules."""
+class Program(NamedTuple):
+    """One program ELF's RAM disk entry, its image included."""
+    name: str
+    load: int
+    entry: int
+    image: bytes
+    memory: int
+    span: int
+    stack: int
+
+
+def program(path: Path) -> Program:
+    """One program ELF's entry, checked against the slot rules."""
     name = path.stem
     if not 0 < len(name.encode()) < 24:
         raise RamdiskError(f"{path}: a name must be 1 to 23 bytes")
@@ -67,32 +81,34 @@ def program(path: Path) -> tuple[str, int, int, bytes, int, int, int]:
     span = elf.symbols.get("_stack_top", load) - load
     if span <= 0 or span % SLOT_SIZE or load + span > SLOT_BASE + SLOTS * SLOT_SIZE:
         raise RamdiskError(f"{path}: a span of {span:#x} bytes is not whole slots inside the slot area")
-    stack = load + span - elf.symbols.get("_stack_bottom", load + span - STACK_SIZE)
+    if "_stack_bottom" not in elf.symbols:
+        raise RamdiskError(f"{path}: no _stack_bottom (programs/rv32/os/user.ld defines it)")
+    stack = load + span - elf.symbols["_stack_bottom"]
     if stack < 2 * PAGE or stack % PAGE or stack >= span:
         raise RamdiskError(f"{path}: a stack of {stack:#x} bytes is not two or more pages inside the span")
     if segment.memsz > span - stack:
         raise RamdiskError(f"{path}: {segment.memsz} bytes leave no room for the stack")
-    return name, load, elf.entry, flatten(elf, load), segment.memsz, span, stack
+    return Program(name, load, elf.entry, flatten(elf, load), segment.memsz, span, stack)
 
 
 def build(paths: list[Path], accelerators: frozenset[str] = frozenset()) -> bytes:
     programs = [program(p) for p in paths]
-    names = [p[0] for p in programs]
-    for index, (name, load, _, _, _, span, _) in enumerate(programs):
-        if names.index(name) != index:
-            raise RamdiskError(f"two programs are named {name}")
-        for other, other_load, _, _, _, other_span, _ in programs[:index]:
-            if load < other_load + other_span and other_load < load + span:
-                raise RamdiskError(f"{name} and {other} share slots at {max(load, other_load):#x}")
+    names = [p.name for p in programs]
+    for index, p in enumerate(programs):
+        if names.index(p.name) != index:
+            raise RamdiskError(f"two programs are named {p.name}")
+        for other in programs[:index]:
+            if p.load < other.load + other.span and other.load < p.load + p.span:
+                raise RamdiskError(f"{p.name} and {other.name} share slots at {max(p.load, other.load):#x}")
     offset = HEADER.size + ENTRY.size * len(programs)
     table, data = [], []
     unknown = set(accelerators) - set(names)
     if unknown:
         raise RamdiskError(f"--accelerators names no program: {', '.join(sorted(unknown))}")
-    for name, load, entry, image, memory, span, stack in programs:
-        flags = ACCELERATORS if name in accelerators else 0
-        table.append(ENTRY.pack(name.encode(), load, entry, len(image), memory, offset, flags, span, stack))
-        padded = image + bytes(-len(image) % 4)
+    for p in programs:
+        flags = ACCELERATORS if p.name in accelerators else 0
+        table.append(ENTRY.pack(p.name.encode(), p.load, p.entry, len(p.image), p.memory, offset, flags, p.span, p.stack))
+        padded = p.image + bytes(-len(p.image) % 4)
         data.append(padded)
         offset += len(padded)
     return HEADER.pack(MAGIC, len(programs), 0, 0) + b"".join(table) + b"".join(data)

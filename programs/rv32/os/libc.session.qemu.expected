@@ -13,15 +13,26 @@ libccheck: setjmp
 libccheck: maths 1.4142135623731 0.841470984807897
 libccheck: nosuch: No such file or directory
 libccheck: files
+libccheck: errors
 libccheck: type a line: 3 plus 4
 libccheck: 3 plus 4 is 7
 libccheck: time
 libccheck: ok
 $ cat libc.out
 rewritten
+$ cat left.out
+left open at exit
+$ files
+welcome 83
+hello.lua 319
+queens.lua 560
+words.lua 859
+libc.out 10
+full.out 4096
+left.out 18
 $ fault stack
-kernel: pid 4 fault killed: cause 15 at fault+0x80 tval 80218fa0 (stack overflow)
+kernel: pid 6 fault killed: cause 15 at fault+0x80 tval 80218fa0 (stack overflow)
 sh: fault exited 143
 $ halt
-kernel: halt, 3 exits
-PASS ccbfe7c6
+kernel: halt, 5 exits
+PASS 121b845d

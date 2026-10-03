@@ -15,6 +15,7 @@ from tools.rv32_devices import (DIAG_EXPECTED_VALUES, EVENT_PRESS, EVENT_VALID, 
 from tools.rv32_image import (ImageError, check_image, check_listing, check_m_build, flatten, parse_elf,
                               to_hex_words)
 from tools.rv32_run_qemu import classify, qemu_command
+from tools import rv32_vendor_libc
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -695,6 +696,34 @@ class TestHarnessTests(unittest.TestCase):
             self.assertNotEqual(failed.returncode, 0)
             self.assertRegex(failed.stderr, r"shard\(s\) \d failed")
 
+
+
+class VendoredSourcesTest(unittest.TestCase):
+    """Track 3: picolibc, compiler-rt and Lua match their SHA256SUMS.json manifests, as SoftFloat
+    and MNIST are checked against theirs (docs/rv32-libc.md)."""
+
+    DIRECTORIES = ("third_party/picolibc", "third_party/compiler-rt", "third_party/lua")
+
+    def test_each_directory_matches_its_manifest(self):
+        root = Path(__file__).resolve().parents[1]
+        for directory in self.DIRECTORIES:
+            with self.subTest(directory):
+                self.assertEqual(rv32_vendor_libc.verify(str(root / directory)), [])
+
+    def test_a_change_is_found(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "a.c").write_text("int a;\n")
+            (root / "b.c").write_text("int b;\n")
+            (root / "SOURCES").write_text("a.c\nb.c\nc.c\n")
+            rv32_vendor_libc.write_sums(str(root), {"a.c", "b.c", "SOURCES"})
+            self.assertEqual(rv32_vendor_libc.verify(str(root)), ["c.c: in SOURCES, not in SHA256SUMS.json"])
+            (root / "a.c").write_text("int a = 1;\n")
+            (root / "b.c").unlink()
+            (root / "extra.h").write_text("")
+            self.assertEqual(sorted(rv32_vendor_libc.verify(str(root))),
+                             ["a.c: SHA-256 differs from SHA256SUMS.json", "b.c: missing",
+                              "c.c: in SOURCES, not in SHA256SUMS.json", "extra.h: not in SHA256SUMS.json"])
 
 if __name__ == "__main__":
     unittest.main()

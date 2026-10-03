@@ -23,14 +23,16 @@ math functions. What it needs is short:
 | `open(name, O_RDONLY)` / `O_WRONLY \| O_CREAT \| O_TRUNC` | `open`; append and read-write refused | `open` |
 | `lseek`, `fstat` | positions within a tfs file | `seek` (new) |
 | `sbrk` | nano-malloc's heap | `sbrk` |
-| `gettimeofday`, `times` | the epoch; device ticks | `time` |
+| `gettimeofday` | the epoch: there is no real-time clock | none |
+| `times` (so `clock()`) | the low word of `mtime`, in device ticks | `time` |
 | `_exit` | the end of the process | `exit` |
 | `unlink`, `rename`, `stat`, `getentropy` | not provided: `ENOSYS` | |
 
-and three compiler-runtime facts: RV32I has no multiply or divide, no floating
-point and no 64-bit arithmetic, so clang emits calls to `__muldf3`,
-`__divdi3` and so on. Those come from LLVM's compiler-rt builtins, vendored
-next to picolibc.
+and three compiler-runtime facts: the programs are built for RV32I, which has
+no multiply or divide, no floating point (the core has RV32F, but the OS's
+programs do not use it) and no 64-bit arithmetic, so clang emits calls to
+`__muldf3`, `__divdi3` and so on. Those come from LLVM's compiler-rt builtins,
+vendored next to picolibc.
 
 The kernel gains one system call for all of this. `seek(fd, offset, whence)`
 moves an open file's position (from the start, the current position or the end,
@@ -42,15 +44,18 @@ run side by side.
 ### Vendoring
 
 [third_party/picolibc](../third_party/picolibc/README.md) is picolibc 1.8.10 cut
-down to the 142 source files the two programs link, with every header they
+down to the 143 source files the two programs link, with every header they
 include and the `picolibc.h` that meson generated for our configuration
 (tiny stdio, nano-malloc, a global `errno`, single-threaded, `long long` in
 printf). [third_party/compiler-rt](../third_party/compiler-rt/README.md) is
-the 63 builtins clang may call on RV32I (multiply, divide, 64-bit integers,
-soft single and double floating point), from LLVM 18.1.8. Not only the ones the
-programs call today: which ones a program calls depends on the compiler too.
-The first version vendored only the 26 that clang 18 called, and with clang 20
-Lua's `math.random` needed `__floatundidf` and Lua did not link. Neither directory has a build
+the 65 builtins clang calls on RV32I for multiply and divide and for 64-bit
+integers and single and double floats, overflow-checked multiplies included
+(plus `fp_mode.c`, which the float functions use), from LLVM 18.1.8. Not only
+the ones the programs call today: which ones a program calls depends on the
+compiler too. The first version vendored only the 26 that clang 18 called, and
+with clang 20 Lua's `math.random` needed `__floatundidf` and Lua did not link.
+Left out: long double (binary128, which needs `__int128`), complex division and
+`-ftrapv`'s checks. Neither directory has a build
 system of its own: each has a `SOURCES` list, and the Makefile compiles the
 lists into `build/rv32/libc/libc.a` and `builtins.a` with our clang.
 
@@ -87,14 +92,30 @@ bell and is dropped at Enter with a message, as the shell refuses one.
 
 **Errors.** A failed call sets `errno` as POSIX names it. The kernel's
 refusals carry no reason, so `open` works one out afterwards: every descriptor
-taken (`EMFILE`), the file exists but someone is writing it (`EBUSY`), it does
-not exist (`ENOENT`), or it would have been new (`ENOSPC`).
+taken (`EMFILE`); the file exists but is in use (`EBUSY`: some process, this
+one included, has it open for writing, or, to open it for writing, any process
+has it open at all); it does not exist (`ENOENT`); or it would have been new
+and the directory or the disk is full (`ENOSPC`). A write that finds its file
+at its 4 KiB capacity is `ENOSPC`; stdio returns a short count and keeps
+`errno` (tinystdio does not set the stream's error flag). A `close` whose file
+size could not be written back is `EIO` (the descriptor is released anyway),
+and a call on a descriptor that is not open is `EBADF`.
+
+**Streams left open.** picolibc's `exit` flushes stdout and stderr, but it
+keeps no list of the streams `fopen` made, so a program that exits without
+`fclose` (Lua's `os.exit()` does) would lose what was still buffered. The link
+wraps `fdopen` and `fclose` (`-Wl,--wrap`) so syscalls.c keeps that list, and a
+destructor flushes them at exit; the kernel then closes the files and writes
+their sizes. `cat left.out` in both sessions shows a line written that way.
 
 **Time.** The machine has no real-time clock, so `time()` is 0 and
 `os.date()` says 1970-01-01 on every backend. That also keeps Lua
 deterministic: its string hash seed and `math.random`'s default seed mix in
 `time(NULL)`. `clock()` counts device ticks, which differ between backends by
 design ([device time](rv32.md#device-time)); no session prints them.
+`CLOCKS_PER_SEC` is picolibc's 1,000,000 whatever a tick is, so `os.clock()`
+is not seconds, and the low word of `mtime` makes `clock()` negative after
+2^31 ticks.
 
 ### Two things picolibc does differently
 
@@ -126,27 +147,36 @@ libccheck: setjmp
 libccheck: maths 1.4142135623731 0.841470984807897
 libccheck: nosuch: No such file or directory
 libccheck: files
+libccheck: errors
 libccheck: type a line: 3 plus 4
 libccheck: 3 plus 4 is 7
 libccheck: time
 libccheck: ok
 $ cat libc.out
 rewritten
+$ cat left.out
+left open at exit
 ```
 
 Formatting covers integers, `long long`, doubles, infinities and NaN,
-truncation; conversions `strtol`, `strtoull`, `strtod` (hex too) and a
-`%.17g` round trip; the heap 32 blocks, `realloc`, `calloc`, a refused 16 MiB
-`malloc` with `ENOMEM` and a `malloc` after it; maths compares `sqrt`, `sin`,
-`cos`, `exp`, `log`, `pow`, `fmod`, `atan2` and `sqrtf` with their correctly
-rounded values; files write a file, read it back with `fgets`, `ftell`,
-`fseek` from the end, `fread` after `rewind`, refuse a seek past the end and an
-append, and rewrite it. `cat libc.out` shows the rewrite reached the disk.
+truncation; conversions `strtol`, `strtoul`, `strtoll`, `strtod` (hex too) and
+a `%.17g` round trip; the heap 32 blocks, `realloc`, `calloc`, a refused 16 MiB
+`malloc` with `ENOMEM` and a `malloc` after it; maths compares `sqrt`, `sqrtf`,
+`fmod` and `pow(2, 10)` with their exact values and `sin`, `cos`, `exp`,
+`log`, `pow(2, 0.5)` and `atan2` within 10^-15 relative; files write a file,
+read it back with `fgets`, `ftell`, `fseek` from the end, `fread` after
+`rewind`, refuse a seek past the end and an append, and rewrite it. The errors
+group reaches every `errno` above: `EMFILE` at a fifth open file, `EBUSY` both
+ways, `ENAMETOOLONG`, `EINVAL` for `"r+"` and a seek past the end, `ESPIPE`,
+`EBADF`, `ENOTTY`, `fstat`'s size with the position kept, and `ENOSPC` from a
+file filled past 4 KiB. `cat libc.out` shows the rewrite reached the disk, and
+`cat left.out` a stream libccheck never closed.
 
 ## The stack: a size per program and a guard page
 
 Lua needs far more stack than our programs. A `pcall` costs 656 bytes of C
-stack per level (picolibc's RISC-V `jmp_buf` alone is 208 bytes), and Lua
+stack per level (picolibc's RISC-V `jmp_buf` alone is 304 bytes, 38 eight-byte
+slots), and Lua
 allows 200 C levels, as on a desktop. Measured by painting the stack and
 looking at what was overwritten:
 
@@ -165,28 +195,36 @@ Lowering Lua's limit (`LUAI_MAXCCALLS`) would have fitted 32 KiB only at about
 - **A stack size per program.** [user.ld](../programs/rv32/os/user.ld) takes
   `STACK_SIZE` with `--defsym`, as it takes the slot base and span (the
   Makefile passes 32 KiB unless `RV32_OS_STACK_name` says otherwise). The RAM
-  disk entry grows a ninth word, the stack size
-  ([rv32_ramdisk.py](../tools/rv32_ramdisk.py)), checked to be whole pages, at
-  least two, above the program; the kernel checks it again at boot and stops
-  `sbrk` below the stack rather than below a fixed 32 KiB. Lua asks for
-  160 KiB, 27 KB over the worst case measured.
+  disk entry grows a ninth word, the stack size, so an entry is 56 bytes
+  ([rv32_ramdisk.py](../tools/rv32_ramdisk.py)); the size must be whole pages,
+  at least two, above the program, which the link script, the tool and the
+  kernel at boot each check. `sbrk` stops below the stack rather than below a
+  fixed 32 KiB. Lua asks for 160 KiB, 27 KB over the worst case measured.
 - **A guard page.** The kernel maps every page of a process's slots but the
   stack's lowest, so a stack that outgrows its size takes a page fault instead
   of writing the heap, and the kernel names it:
 
   ```
   $ fault stack
-  kernel: pid 4 fault killed: cause 15 at fault+0x80 tval 80218fa0 (stack overflow)
+  kernel: pid 6 fault killed: cause 15 at fault+0x80 tval 80218fa0 (stack overflow)
   sh: fault exited 143
   ```
 
   `fault stack` grows a stack 1 KiB at a time until it gets there. QEMU prints
   the same line: its page tables are the kernel's. The guard costs every
   default program 4 KiB of its 32, which none of the pinned sessions noticed.
+  The note is printed for a load or a store on the guard page (causes 13 and
+  15), not for a jump there. A single frame larger than 4 KiB could step over
+  the guard into the heap; none of our programs has one, and Lua's largest is
+  well under a kilobyte.
+- **System calls respect it too.** The kernel copies to and from user memory
+  by physical address in machine mode, where the page table does not apply, so
+  `user_range` also refuses a buffer that touches the guard page; syscheck
+  checks buffers on it and across both of its edges.
 
 A first version kept the stack size in `struct proc`, which made it 260 bytes;
 RV32I has no multiply, so every `procs[i]` in the scheduler's loops became a call
-and the console session took 2.86 M steps instead of 1.80 M. The guard address
+and the console session took 2.86 M steps instead of 1.80 M, 59% more. The guard address
 now lives in the per-entry `struct address_space` with the page-table layout,
 and a static assertion keeps `struct proc` at 256 bytes.
 
@@ -194,21 +232,22 @@ and a static assertion keeps `struct proc` at 256 bytes.
 
 [third_party/lua](../third_party/lua/README.md) is Lua 5.4.7 from the Lua
 team's repository, unmodified: the interpreter's sources less the test suite.
-The build is Lua's own "generic" platform, `LUA_COMPAT_5_3` and nothing else, so
+The build is configured as the release's `src/Makefile` configures its `generic`
+platform, `LUA_COMPAT_5_3` and nothing else, so
 integers are 64-bit and numbers doubles, all in software. The program is
 `lua.c`, the stand-alone interpreter: with no arguments a REPL on the console,
 with a file name a script with `arg`.
 
 | | Bytes |
 | --- | --- |
-| Lua's code and data (32 files, -O2, RV32I) | 255 KB |
+| Lua's code and data (33 files, -O2, RV32I) | 255 KB |
 | picolibc and compiler-rt as linked | 99 KB |
 | the image, `.bss` included | 370 KB |
 | stack | 160 KiB |
 | heap, up to the stack | 252 KB |
 
 It spans slots 18 to 23, the six at the top of RAM. Lua's image is the RAM disk's
-largest program, and spawning it copied 368 KB a byte at a time; [mem.c](../programs/rv32/os/mem.c)'s
+largest program, and spawning it copied its 370 KB a byte at a time; [mem.c](../programs/rv32/os/mem.c)'s
 `memcpy` and `memset` now move words when both addresses allow, which took
 the Lua session from 24.7 M steps to 14.7 M.
 
@@ -248,11 +287,22 @@ stack traceback:
 nil	nosuch: No such file or directory	2
 > print(os.time(), os.date("!%Y-%m-%d %H:%M"), os.getenv("HOME"), pcall(io.popen, "ls"))
 0	1970-01-01 00:00	nil	false	'popen' not supported
+...
+> print(pcall(string.rep, "x", 1 << 20))
+false	not enough memory
+> print(#string.rep("y", 1000), "still here")
+1000	still here
+> print(pcall(load, "return " .. string.rep("(", 300) .. "1" .. string.rep(")", 300)))
+true	nil	C stack overflow
 > os.exit(3)
 sh: lua exited 3
 ```
 
-then a second REPL ended with ^D, and the scripts:
+A 1 MiB string does not fit the 252 KB heap: Lua reports it and carries on.
+Nesting 300 deep stops at Lua's own limit, with the stack to spare, rather than
+at the guard page. A second REPL writes `left.out` and leaves with `os.exit(0)`
+without closing it (`cat left.out` shows the line arrived), a third ends with
+^D, and then the scripts:
 
 ```
 $ lua hello.lua one two three
@@ -271,7 +321,7 @@ lua: cannot open nosuch.lua: No such file or directory
 sh: lua exited 1
 ```
 
-`words.lua` reads `welcome` with `io.lines`, sorts with a comparison
+`words.lua` reads `welcome` with `file:lines()`, sorts with a comparison
 function, and writes `words.out`, which `cat` then prints. One REPL line is
 typed with a typo and three rubouts, so the transcript holds the echo's
 `\b \b`s.
@@ -286,33 +336,46 @@ was run through a wrapper that drops `+verilator+quiet`, which the runner passes
 and 5.020's runtime does not know.
 
 - **libc session** ([libc.session](../programs/rv32/os/libc.session):
-  libccheck, `cat libc.out`, `fault stack`): `PASS ccbfe7c6` on QEMU `virt`
-  (transcript pinned in [libc.session.qemu.expected](../programs/rv32/os/libc.session.qemu.expected)),
-  the emulator (2,361,798 steps) and Verilator with a stall per request
-  (14,162,058 cycles), results-identical over 27 console lines and 240 exception records, with identical disks; QEMU's disk is byte for byte the
+  libccheck, `cat libc.out`, `cat left.out`, `files`, `fault stack`):
+  `PASS 121b845d` on QEMU `virt` (transcript pinned in
+  [libc.session.qemu.expected](../programs/rv32/os/libc.session.qemu.expected)),
+  the emulator (2,726,115 steps) and Verilator with a stall per request
+  (16,616,106 cycles, 64 s), results-identical over 38 console lines and 418
+  exception records, with identical disks; QEMU's disk is byte for byte the
   emulator's.
-- **Lua session**: `PASS 76c88bdd` on QEMU `virt`
+- **Lua session:** `PASS dacf0fc5` on QEMU `virt`
   ([lua.session.qemu.expected](../programs/rv32/os/lua.session.qemu.expected)),
-  the emulator (14,718,454 steps) and Verilator with a stall per request
-  (94,903,246 cycles, 6 m 49 s with the libc session alongside), results-identical over its 87 console
-  lines and 4,277 exception records, with identical disks; QEMU's disk is byte for byte the emulator's.
-- **Earlier sessions:** the console session (only `ls` and the program count
-  changed in its transcripts: `PASS 8b4402e5` still), Pong (200 checkpoints,
-  `PASS 814f72be`), the jobs session (40 presents, `PASS 408a6738`) and the
-  menu session (185 checkpoints, `PASS b1f2b253`) on the emulator; the console
-  (with its reboot and its typed-Enter twin) and jobs sessions on QEMU; and on
-  Verilator the console session (piped and typed, 8,880,028 cycles), the second
-  boot, the jobs session (40 presents) and the menu session (185 checkpoints,
-  seeded waits), results-identical to the emulator, with Pong and the jobs
-  session trace-identical in step-tick mode (1,168,126 and 6,742,051 lines) and
-  `test-rv32-os` passing. The
-  console session takes 1,448,225 steps against 1,797,082 before Track 3 on the
-  same toolchain: the word-wise `memcpy` saves more than the two new `ls`
-  lines and the page tables split around each guard cost (1,821,505 steps
-  without it).
-- **Tools:** `test-rv32-os` checks the RAM disk's new stack word (round trip,
-  the Makefile's sizes, and four refusals: not whole pages, one page, the
-  whole span, over the program).
+  the emulator (16,920,400 steps) and Verilator with a stall per request
+  (108,960,728 cycles, 410 s), results-identical over 100 console lines and
+  5,147 exception records, with identical disks; QEMU's disk is byte for byte
+  the emulator's.
+- **Two compilers:** both sessions also pass on QEMU and the emulator built
+  with clang 20.1.2, with the same transcripts.
+- **Earlier sessions:** the console session (its transcripts changed only in
+  the program count, `ls` and syscheck's new `seek` line: `PASS 8b4402e5`
+  still), Pong (200 checkpoints, `PASS 814f72be`), the jobs session (40
+  presents, `PASS 408a6738`) and the menu session (185 checkpoints,
+  `PASS b1f2b253`) on the emulator; the console (with its reboot and its
+  typed-Enter twin) and jobs sessions on QEMU; and on Verilator the console
+  session (piped and typed, 9,382,739 cycles), the second boot, the jobs
+  session (40 presents) and the menu session (185 checkpoints, seeded waits),
+  results-identical to the emulator, with Pong and the jobs session
+  trace-identical in step-tick mode (1,173,219 and 6,753,100 lines) and
+  `test-rv32-os` passing. The console session takes 1,537,701 steps against
+  1,797,082 before Track 3 on the same toolchain: the word-wise `memcpy` saves
+  more than the two new `ls` lines, syscheck's seek and guard checks and the
+  page tables split around each guard cost (1,821,505 steps with the
+  byte-wise `memcpy`, before syscheck's new checks).
+- **Tools:** `test-rv32-os` checks the RAM disk's stack word (round trip, the
+  Makefile's sizes, and five refusals, each by its message: not whole pages,
+  one page, the whole span, a program that reaches into the stack, no
+  `_stack_bottom`). `test-rv32-tools` checks the three vendored directories
+  against their `SHA256SUMS.json` (and that a changed, missing or unlisted
+  file is found).
+- **Tiers:** the libc and Lua Verilator runs are in `test-rv32`, the fast tier,
+  which holds every Verilator check ([docs/rv32-testing.md](rv32-testing.md));
+  at 410 s the Lua run is shorter than the menu session's 511 s there
+  (`-j3`, `RV32_TIMING=1`).
 
 ## Running it
 
@@ -327,18 +390,21 @@ Or by hand, at an interactive QEMU console, as in
 `build/rv32/os/apps.disk` copied for the drive, then `lua` at the `$` prompt.
 On Linux the Makefile needs `RV32_LLVM=/usr/bin RV32_LD=/usr/bin/ld.lld`.
 
-To add a program on the C library: put its sources where the Makefile can
-compile them with `RV32_OS_LIBC_CFLAGS`, list it in `RV32_OS_LIBC_PROGRAMS`
-with a slot (and a span or a stack if it needs more), and link. If the link
+To add a program on the C library: give its sources a compile rule with
+`RV32_OS_LIBC_CFLAGS` (as `libccheck.o` has), list its objects in
+`RV32_OS_OBJS_name`, add it to `RV32_OS_LIBC_PROGRAMS` with a slot in
+`RV32_OS_SLOT_name` (and `RV32_OS_SPAN_name` or `RV32_OS_STACK_name` if it
+needs more), and add it to `PROGRAMS` (and `SPANS` or `STACKS`) in
+`tests/test_rv32_os.py`. If the link
 names a missing function, rebuild picolibc with meson as
 [third_party/picolibc/README.md](../third_party/picolibc/README.md) says and
 run `tools/rv32_vendor_libc.py` with the new program's map.
 
 ## Exercises
 
-1. `tty.c` and `sh.c` hold the same line editor twice. Move it into one place
-   both can link. What does the shell lose if it starts depending on the C
-   library?
+1. `tty.c` and `sh.c` share one line editor, [line.c](../programs/rv32/os/line.c),
+   which uses only system calls so both kinds of program can link it. What
+   would the shell gain, and lose, if it were built on the C library instead?
 2. Give tfs an append mode: what has to change in `fs_truncate`'s callers, and
    what does `fopen(name, "a")` then need from `syscalls.c`?
 3. Lua's REPL reads with `fgets`. Add a history to `tty.c` (the up arrow

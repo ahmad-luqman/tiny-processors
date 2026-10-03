@@ -4,8 +4,11 @@
  * line is `libccheck: ok` or the number of failures, and so is the exit code.
  *
  * It reads one line from the console (the session types it) and writes,
- * rewrites and reads back a file, libc.out, on the disk. */
+ * rewrites and reads back a file, libc.out, on the disk; fills another,
+ * full.out, to its capacity; and leaves a third, left.out, open at exit, so the
+ * session's `cat` shows its buffered line reached the disk anyway. */
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <math.h>
 #include <setjmp.h>
@@ -13,7 +16,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 static int failures;
 
@@ -101,21 +106,21 @@ static void heap(void)
 {
     char *blocks[32];
     for (int i = 0; i < 32; i++) {
-        blocks[i] = malloc(100 + 37 * i);
+        blocks[i] = malloc(100 + 13 * i);
         if (blocks[i]) {
-            memset(blocks[i], i, 100 + 37 * i);
+            memset(blocks[i], i, 100 + 13 * i);
         }
     }
     int intact = 1;
     for (int i = 0; i < 32; i++) {
-        intact &= blocks[i] && blocks[i][0] == i && blocks[i][99 + 37 * i] == i;
+        intact &= blocks[i] && blocks[i][0] == i && blocks[i][99 + 13 * i] == i;
     }
     check("malloc", intact);
     for (int i = 0; i < 32; i += 2) {
         free(blocks[i]);
     }
     char *grown = realloc(blocks[1], 5000);
-    check("realloc keeps the contents", grown && grown[0] == 1 && grown[136] == 1);
+    check("realloc keeps the contents", grown && grown[0] == 1 && grown[112] == 1);
     blocks[1] = grown;
     int *zeros = calloc(256, sizeof *zeros);
     int all_zero = zeros != 0;
@@ -220,6 +225,80 @@ static void files(void)
     puts("libccheck: files");
 }
 
+/* Each way a POSIX call under stdio can fail says why (syscalls.c). */
+static void errors(void)
+{
+    FILE *readers[4];
+    int opened = 0;
+    for (int i = 0; i < 4; i++) {
+        readers[i] = fopen("libc.out", "r");
+        opened += readers[i] != 0;
+    }
+    errno = 0;
+    check("4 files at once", opened == 4);
+    check("a 5th is EMFILE", fopen("libc.out", "r") == 0 && errno == EMFILE);
+    check("a reader is not a tty", !isatty(fileno(readers[0])) && errno == ENOTTY && isatty(1));
+    fclose(readers[3]); /* a descriptor free, so the next refusal is for the file itself */
+    readers[3] = 0;
+    errno = 0;
+    check("writing what is read is EBUSY", fopen("libc.out", "w") == 0 && errno == EBUSY);
+    for (int i = 0; i < 4; i++) {
+        if (readers[i]) {
+            fclose(readers[i]);
+        }
+    }
+    FILE *writer = fopen("libc.out", "w");
+    errno = 0;
+    check("reading what is written is EBUSY", fopen("libc.out", "r") == 0 && errno == EBUSY);
+    errno = 0;
+    check("two writers is EBUSY", fopen("libc.out", "w") == 0 && errno == EBUSY);
+    if (writer) {
+        fputs("rewritten\n", writer);
+        fclose(writer);
+    }
+    errno = 0;
+    check("a long name is ENAMETOOLONG", fopen("a-name-of-twenty-bytes", "w") == 0 && errno == ENAMETOOLONG);
+    errno = 0;
+    check("read-write is EINVAL", fopen("libc.out", "r+") == 0 && errno == EINVAL);
+    errno = 0;
+    check("seeking the console is ESPIPE", lseek(0, 0, SEEK_SET) == -1 && errno == ESPIPE);
+    errno = 0;
+    check("closing nothing is EBADF", close(5) == -1 && errno == EBADF);
+    errno = 0;
+    check("reading nothing is EBADF", read(5, &opened, 1) == -1 && errno == EBADF);
+    errno = 0;
+    check("writing nothing is EBADF", write(9, "x", 1) == -1 && errno == EBADF);
+    int fd = open("welcome", O_RDONLY);
+    char five[5];
+    struct stat st;
+    check("open and read", fd >= 0 && read(fd, five, 5) == 5);
+    check("fstat's size", fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == 83);
+    check("fstat keeps the position", lseek(fd, 0, SEEK_CUR) == 5);
+    errno = 0;
+    check("seeking past the end is EINVAL", lseek(fd, 84, SEEK_SET) == -1 && errno == EINVAL);
+    close(fd);
+    /* A tfs file holds 4 KiB: the write that finds it full says so, and stdio passes it on as a
+     * short count with errno set (tinystdio does not set the stream's error flag). */
+    FILE *full = fopen("full.out", "w");
+    char block[500];
+    memset(block, 'x', sizeof block);
+    errno = 0;
+    size_t put = 0;
+    for (int i = 0; full && i < 10; i++) {
+        put += fwrite(block, 1, sizeof block, full);
+    }
+    check("a full file is ENOSPC", put < 10 * sizeof block && errno == ENOSPC);
+    if (full) {
+        fclose(full);
+    }
+    full = fopen("full.out", "r");
+    check("it holds 4 KiB", full && fseek(full, 0, SEEK_END) == 0 && ftell(full) == 4096);
+    if (full) {
+        fclose(full);
+    }
+    puts("libccheck: errors");
+}
+
 static void console(void)
 {
     char text[64];
@@ -255,8 +334,15 @@ int main(int argc, char **argv)
     control();
     maths();
     files();
+    errors();
     console();
     clock_and_time();
+    /* Not closed: the C library flushes it at exit (syscalls.c), and the session prints it. */
+    FILE *left = fopen("left.out", "w");
+    check("fopen left.out", left != 0);
+    if (left) {
+        fputs("left open at exit\n", left);
+    }
     if (failures) {
         printf("libccheck: %d FAILED\n", failures);
     } else {

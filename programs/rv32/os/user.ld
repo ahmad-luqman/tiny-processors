@@ -1,8 +1,9 @@
 /* Link script for programs (Track 2, O2): SLOT_SPAN bytes (one or more slots
  * of 128 KiB since O4) at SLOT_BASE, both given with --defsym. Code, data and
  * .bss from the bottom, the heap above them, the stack in the top STACK_SIZE
- * bytes (--defsym too since Track 3; 32 KiB, programs/rv32/os/sys.h, unless a
- * program needs more). */
+ * bytes (--defsym too, since Track 3; this script has no default: the
+ * Makefile gives 32 KiB, sys.h's OS_STACK_SIZE, unless a program asks for
+ * more). */
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
@@ -55,9 +56,10 @@ SECTIONS
     } :slot
     _end = .;
     _stack_top = SLOT_BASE + SLOT_SPAN;
-    /* STACK_SIZE, given with --defsym too, is 32 KiB unless a program asks for more (Track 3: Lua).
-     * The kernel leaves the stack's lowest page unmapped, so an overflow faults rather than running
-     * into the heap. */
+    /* The kernel leaves the stack's lowest page unmapped, so an overflow faults rather than running
+     * into the heap (Track 3); tools/rv32_ramdisk.py and the kernel check the same rule. */
+    ASSERT(STACK_SIZE % 0x1000 == 0 && STACK_SIZE >= 0x2000 && STACK_SIZE < SLOT_SPAN,
+           "STACK_SIZE must be two or more whole pages inside the span")
     _stack_bottom = _stack_top - STACK_SIZE;
     ASSERT(_end <= _stack_bottom, "the program and its .bss overlap the stack")
 }

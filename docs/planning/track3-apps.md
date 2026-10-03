@@ -22,14 +22,15 @@ own session; the [record](../rv32-libc.md) has the evidence.
   from a meson build, with the configuration meson generated
   (`picolibc.h`). Tiny stdio, nano-malloc, the libm double and float functions,
   setjmp, strings, time.
-- **compiler-rt builtins** for what RV32I lacks: soft double-precision floating
-  point and 64-bit multiply and divide. Clang calls them; nothing in the
-  programs names them.
-- **The OS layer** (`programs/rv32/os/libc/`): a crt0 that turns the kernel's
-  one argument string into `argc`/`argv`; `read`, `write`, `open`, `close`,
-  `lseek`, `fstat`, `sbrk`, `gettimeofday` and `times` on the kernel's system
-  calls; a console line discipline, so a program reading stdin echoes and
-  edits as the shell does.
+- **compiler-rt builtins** for what RV32I lacks: multiply and divide, 64-bit
+  integers, and soft single- and double-precision floating point. Clang calls
+  them; nothing in the programs names them.
+- **The OS layer** (`programs/rv32/os/libc/`): startup (`crt0.S`, and
+  `crt.c`, which turns the kernel's one argument string into `argc`/`argv`); `read`, `write`, `open`, `close`,
+  `lseek`, `fstat`, `sbrk` and `times` on the kernel's system calls
+  (`gettimeofday` needs none); a console line discipline, so a program reading
+  stdin echoes and edits as the shell does (since the review, with the shell's
+  own editor, `line.c`).
 - **Kernel:** one new call, `seek`, so `fseek` and `ftell` work on tfs files.
   Nothing else in the system-call interface changes.
 - **Acceptance:** `libccheck`, a program that checks printf/scanf formatting,
@@ -40,10 +41,10 @@ own session; the [record](../rv32-libc.md) has the evidence.
 
 ### L2: Lua
 
-- **Lua 5.4.7**, vendored unmodified, built as its own Makefile's generic
-  platform (`LUA_COMPAT_5_3`, 64-bit integers, double floats): the stand-alone
+- **Lua 5.4.7**, vendored unmodified, configured as the release's
+  `src/Makefile` configures its `generic` platform (`LUA_COMPAT_5_3`, 64-bit integers, double floats): the stand-alone
   `lua.c` interpreter is the program.
-- **Room:** six slots at the top (768 KiB) for 360 KiB of code, the heap and
+- **Room:** six slots at the top (768 KiB) for a 370 KB image, the heap and
   the stack.
 - **Acceptance:** a REPL session (arithmetic, strings, tables, metatables,
   coroutines, errors with tracebacks, files through `io`, `os.exit`) and three

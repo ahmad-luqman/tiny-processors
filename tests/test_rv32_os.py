@@ -71,14 +71,25 @@ class RamdiskTest(unittest.TestCase):
                 with self.subTest(name), self.assertRaises(rv32_ramdisk.RamdiskError):
                     rv32_ramdisk.build(paths, accelerators)
         # Track 3: a stack is whole pages, at least two (one is the kernel's guard), inside the span
-        # and above the program.
-        for name, bottom in (("stack not whole pages", 0x80137f00), ("stack of one page", 0x8013f000),
-                             ("stack of the whole span", 0x80120000), ("stack over the program", 0x80120400)):
-            elf = parse_elf(hello.read_bytes())
-            elf.symbols["_stack_bottom"] = bottom
+        # and above the program. hello loads at 0x8012_0000 with one slot; each case changes its
+        # stack's bottom or, to reach the last rule with a well-formed stack, its size in memory.
+        original = parse_elf(hello.read_bytes())
+        not_pages, too_small = "is not two or more pages inside the span", "is not two or more pages"
+        for name, bottom, memsz, message in (
+                ("stack not whole pages", 0x80137f00, None, not_pages),
+                ("stack of one page", 0x8013f000, None, too_small),
+                ("stack of the whole span", 0x80120000, None, not_pages),
+                ("stack over the program", 0x8013e000, 0x1f000, "leave no room for the stack"),
+                ("no stack symbol", None, None, "no _stack_bottom")):
+            symbols = {k: v for k, v in original.symbols.items() if k != "_stack_bottom" or bottom is not None}
+            if bottom is not None:
+                symbols["_stack_bottom"] = bottom
+            segments = [seg._replace(memsz=memsz) if memsz and seg.type == 1 else seg for seg in original.segments]
+            elf = original._replace(symbols=symbols, segments=segments)
             with self.subTest(name), mock.patch.object(rv32_ramdisk, "parse_elf", return_value=elf), \
-                    self.assertRaises(rv32_ramdisk.RamdiskError):
+                    self.assertRaisesRegex(rv32_ramdisk.RamdiskError, message):
                 rv32_ramdisk.program(hello)
+        self.assertEqual(rv32_ramdisk.program(hello).stack, rv32_ramdisk.STACK_SIZE, "the unpatched ELF passes")
         blob = rv32_ramdisk.build([hello, primes])
         for name, bad in (("magic", b"XXXX" + blob[4:]), ("short", blob[:8]),
                           ("count", blob[:4] + struct.pack("<I", 1000) + blob[8:]),

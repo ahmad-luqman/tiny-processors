@@ -35,6 +35,13 @@
 
 #define SYS_ERROR 0xffffffffu
 
+/* Limits both sides of the interface rely on (Track 3 put them here, out of the kernel, so the
+ * C library's checks cannot drift from the kernel's). */
+#define OS_ARGS_MAX   64u /* bytes of a program's argument string, NUL included */
+#define OS_FIRST_FILE 3u  /* descriptors 0 to 2 are the console; open files are 3 on */
+#define OS_OPEN_FILES 4u  /* a process's open files at once: descriptors 3 to 6 */
+#define OS_FILE_NAME  20u /* bytes of a file's name, NUL included (tfs, fs.h) */
+
 /* open() flags (O3). */
 #define O_READ   1u
 #define O_WRITE  2u  /* write from the start; the file's size becomes what is written */
@@ -53,7 +60,7 @@
 #define OS_SLOT_BASE   0x80100000u
 #define OS_SLOT_SIZE   0x00020000u
 #define OS_SLOTS       24u
-#define OS_STACK_SIZE  0x00008000u /* the default; sbrk stops below a program's stack */
+#define OS_STACK_SIZE  0x00008000u /* a program's stack unless it asks for more (the Makefile's default) */
 #define OS_GUARD_SIZE  0x00001000u /* the stack's lowest page, left unmapped (Track 3) */
 
 #endif

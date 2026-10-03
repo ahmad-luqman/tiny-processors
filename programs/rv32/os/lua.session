@@ -16,7 +16,14 @@ for line in io.lines("lua.out") do io.write("[", line, "] ") end print()
 print(io.open("nosuch"))
 print(os.time(), os.date("!%Y-%m-%d %H:%M"), os.getenv("HOME"), pcall(io.popen, "ls"))
 print(select("#", load("return 1, 2, 3")()), load("syntax error here"))
+print(pcall(string.rep, "x", 1 << 20))
+print(#string.rep("y", 1000), "still here")
+print(pcall(load, "return " .. string.rep("(", 300) .. "1" .. string.rep(")", 300)))
 os.exit(3)
+lua
+x = 6 * 7
+left = io.open("left.out", "w") left:write("left open by lua\n") os.exit(0)
+cat left.out
 lua
 x = 6 * 7
 lua hello.lua one two three

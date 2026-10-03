@@ -4,7 +4,7 @@
 `51a8b32857e75345c37652a80b5cda98b28d69e5` (2025-04-16), the C library of the
 OS's Track 3 programs ([record](../../docs/rv32-libc.md)).
 
-Only part of picolibc is here: the 142 source files that `libccheck` and `lua`
+Only part of picolibc is here: the 143 source files that `libccheck` and `lua`
 link (listed in `SOURCES`, the Makefile's input), every header those sources
 and the programs include, and the licences (`COPYING.picolibc`,
 `COPYING.NEWLIB`; each file keeps its own notice). The files are copied

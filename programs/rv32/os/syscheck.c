@@ -3,7 +3,7 @@
  * promises; one line per group, then `syscheck: ok` or the failures. */
 #include "ulib.h"
 
-extern char _stack_top[]; /* the end of my slots (user.ld) */
+extern char _stack_top[], _stack_bottom[]; /* the end of my slots, and my stack's guard page (user.ld) */
 
 static uint32_t failures;
 
@@ -46,6 +46,13 @@ int main(void)
     check("files into kernel memory", sys_files(0, (char *)(uintptr_t)kernel, 20), SYS_ERROR);
     check("files across my end", sys_files(0, (char *)(uintptr_t)(top - 4), 20), SYS_ERROR);
     check("open a kernel name", sys_open((const char *)(uintptr_t)kernel, O_READ), SYS_ERROR);
+    /* Track 3: the guard page below my stack is in my slots but never mine to use, through a
+     * system call either. */
+    uint32_t guard = (uint32_t)(uintptr_t)_stack_bottom;
+    check("write from the guard page", sys_write(1, (const void *)(uintptr_t)guard, 4), SYS_ERROR);
+    check("read into the guard page", sys_read(0, (void *)(uintptr_t)(guard + 0xffcu), 4), SYS_ERROR);
+    check("write across into the guard", sys_write(1, (const void *)(uintptr_t)(guard - 2), 4), SYS_ERROR);
+    check("write across out of the guard", sys_write(1, (const void *)(uintptr_t)(guard + 0xffeu), 4), SYS_ERROR);
     u_puts("syscheck: pointers\n");
     /* The heap: sbrk moves the break and stops below the stack. */
     uint32_t start = (uint32_t)(uintptr_t)sys_sbrk(0);
@@ -69,6 +76,28 @@ int main(void)
     check("list into too little", sys_list(0, buffer, 2), SYS_ERROR);
     check("list past the end", sys_list(99, buffer, sizeof buffer), SYS_ERROR);
     u_puts("syscheck: list\n");
+    /* Seeking (Track 3): within 0 and the file's size, from the start, the current position or
+     * the end, on an open file only. */
+    char name[20];
+    uint32_t size = SYS_ERROR;
+    for (uint32_t i = 0; size == SYS_ERROR && sys_files(i, name, sizeof name) != SYS_ERROR; i++) {
+        size = u_strcmp(name, "welcome") ? SYS_ERROR : sys_files(i, name, sizeof name);
+    }
+    uint32_t fd = sys_open("welcome", O_READ);
+    check("seek on the console", sys_seek(0, 0, SEEK_FROM_START), SYS_ERROR);
+    check("seek on a closed file", sys_seek(fd + 1, 0, SEEK_FROM_START), SYS_ERROR);
+    check("seek from nowhere", sys_seek(fd, 0, 3), SYS_ERROR);
+    check("seek before the start", sys_seek(fd, -1, SEEK_FROM_START), SYS_ERROR);
+    check("seek past the end", sys_seek(fd, 1, SEEK_FROM_END), SYS_ERROR);
+    check("seek to the end", sys_seek(fd, 0, SEEK_FROM_END), size);
+    check("seek to 10", sys_seek(fd, 10, SEEK_FROM_START), 10);
+    check("seek back far", sys_seek(fd, INT32_MIN, SEEK_FROM_CURRENT), SYS_ERROR);
+    check("a refused seek stays", sys_seek(fd, 0, SEEK_FROM_CURRENT), 10);
+    check("seek back 10", sys_seek(fd, -10, SEEK_FROM_CURRENT), 0);
+    check("read from there", sys_read(fd, buffer, 7) == 7 && buffer[0] == 'W', 1);
+    check("close", sys_close(fd), 0);
+    check("seek after close", sys_seek(fd, 0, SEEK_FROM_START), SYS_ERROR);
+    u_puts("syscheck: seek\n");
     /* Time. */
     uint32_t before = sys_time();
     sys_sleep(100);
