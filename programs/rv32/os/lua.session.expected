@@ -1,0 +1,100 @@
+kernel: tiny-processors RV32 machine, hart 0
+kernel: devices console clint plic input display g1 g2 dma disk
+kernel: 17 programs
+kernel: disk 256 sectors, tfs
+sh: ls, NAME [ARGS] [&], wait, halt [CODE]
+$ lua
+Lua 5.4.7  Copyright (C) 1994-2024 Lua.org, PUC-Rio
+> print("hello from Lua", 1 + 2, 10 / 4, 2^53, 7 // 2, 0.1 + 0.2, 1/0)
+hello from Lua	3	2.5	9.007199254741e+15	3	0.3	inf
+> print(math.maxinteger, math.mininteger, 3 % -2, -7 // 2, 2^0.5, math.pi)
+9223372036854775807	-9223372036854775808	-1	-4	1.4142135623731	3.1415926535898
+> print(string.format("%5.2f|%x|%q|%g", math.pi, 255, "a\tb", 1e20))
+ 3.14|ff|"a\9b"|1e+20
+> print(("hello"):upper(), ("%d items"):format(3), utf8.char(72, 228, 8364), #"\u{20AC}")
+HELLO	3 items	Hä€	3
+> local t = {} for i = 1, 10 do t[i] = i * i end print(table.concat(t, " "))
+1 4 9 16 25 36 49 64 81 100
+> fib = setmetatable({[0] = 0, 1}, {__index = function(f, n) f[n] = f[n - 1] + f[n - 2] return f[n] end})
+> print(fib[50], fib[90])
+12586269025	2880067194370816120
+> co = coroutine.wrap(function(a) local b = coroutine.yield(a + 1) return b * 2 end)
+> print(co(1), co(10))
+2	20
+> print(pcall(function() return nil + 1 end))
+false	stdin:1: attempt to perform arithmetic on a nil value
+> error({code = 7})
+(error object is a table value)
+stack traceback:
+	[C]: in function 'error'
+	stdin:1: in main chunk
+	[C]: in ?
+> print(tpyo   ypo)
+nil
+> f = io.open("lua.out", "w") f:write("from lua\n", 42, "\n") f:close()
+> for line in io.lines("lua.out") do io.write("[", line, "] ") end print()
+[from lua] [42] 
+> print(io.open("nosuch"))
+nil	nosuch: No such file or directory	2
+> print(os.time(), os.date("!%Y-%m-%d %H:%M"), os.getenv("HOME"), pcall(io.popen, "ls"))
+0	1970-01-01 00:00	nil	false	'popen' not supported
+> print(select("#", load("return 1, 2, 3")()), load("syntax error here"))
+3	nil	[string "syntax error here"]:1: syntax error near 'error'
+> print(pcall(string.rep, "x", 1 << 20))
+false	not enough memory
+> print(#string.rep("y", 1000), "still here")
+1000	still here
+> print(pcall(load, "return " .. string.rep("(", 300) .. "1" .. string.rep(")", 300)))
+true	nil	C stack overflow
+> os.exit(3)
+sh: lua exited 3
+$ lua
+Lua 5.4.7  Copyright (C) 1994-2024 Lua.org, PUC-Rio
+> x = 6 * 7
+> left = io.open("left.out", "w") left:write("left open by lua\n") os.exit(0)
+$ cat left.out
+left open by lua
+$ lua
+Lua 5.4.7  Copyright (C) 1994-2024 Lua.org, PUC-Rio
+> x = 6 * 7
+> 
+$ lua hello.lua one two three
+hello from Lua 5.4 on the tiny computer
+3 arguments: one, two, three
+squares: 1 4 9 16 25 36 49 64
+$ lua queens.lua 6
+6 queens: 4 solutions
+$ lua words.lua welcome
+welcome: 15 words, 12 different
+  3 the
+  2 files
+  1 computer
+  1 disk
+  1 lists
+$ cat words.out
+the 3
+files 2
+computer 1
+disk 1
+lists 1
+ls 1
+on 1
+programs 1
+this 1
+tiny 1
+to 1
+welcome 1
+$ lua nosuch.lua
+lua: cannot open nosuch.lua: No such file or directory
+sh: lua exited 1
+$ files
+welcome 83
+hello.lua 319
+queens.lua 560
+words.lua 859
+lua.out 12
+left.out 17
+words.out 90
+$ halt
+kernel: halt, 10 exits
+PASS dacf0fc5

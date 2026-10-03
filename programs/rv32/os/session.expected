@@ -1,6 +1,6 @@
 kernel: tiny-processors RV32 machine, hart 0
 kernel: devices console clint plic input display g1 g2 dma disk
-kernel: 15 programs
+kernel: 17 programs
 kernel: disk 256 sectors, tfs
 sh: ls, NAME [ARGS] [&], wait, halt [CODE]
 $ ls
@@ -19,6 +19,8 @@ bars
 life
 fill
 dmaprobe
+libccheck
+lua
 $ hello
 hello from pid 2
 $ hello a b c
@@ -41,6 +43,7 @@ syscheck: sbrk
 hello from pid 9, args: from syscheck
 syscheck: processes
 syscheck: list
+syscheck: seek
 syscheck: time
 syscheck: ok
 $ fault load

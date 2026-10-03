@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import test_rv32_rtl as integer_tests
 from tools import rv32_mkfs as mkfs
@@ -22,8 +23,10 @@ from tools.rv32_rtl import ROOT, Run, compare_backends, diff_traces, run_emulato
 
 OS = ROOT / "build/rv32/os"
 PROGRAMS = ("sh", "hello", "primes", "pong", "tetris", "menu", "syscheck", "fault", "cat", "write", "files", "bars", "life",
-            "fill", "dmaprobe")
+            "fill", "dmaprobe", "libccheck", "lua")
 ENGINES = frozenset({"menu", "dmaprobe"})  # the programs flagged `accelerators`
+SPANS = {"menu": 3, "lua": 6}  # slots; every other program takes one
+STACKS = {"lua": 0x28000}  # bytes (Track 3); every other program has the default
 
 
 def elfs(*names):
@@ -45,8 +48,9 @@ class RamdiskTest(unittest.TestCase):
                 self.assertEqual(entry["entry"], entry["load"])
                 self.assertEqual(entry["flags"], rv32_ramdisk.ACCELERATORS if entry["name"] in ENGINES else 0)
                 self.assertLessEqual(entry["size"], entry["memory"])
-                self.assertEqual(entry["span"], rv32_ramdisk.SLOT_SIZE * (3 if entry["name"] == "menu" else 1))
-                self.assertLessEqual(entry["memory"], entry["span"] - rv32_ramdisk.STACK_SIZE)
+                self.assertEqual(entry["span"], rv32_ramdisk.SLOT_SIZE * SPANS.get(entry["name"], 1))
+                self.assertEqual(entry["stack"], STACKS.get(entry["name"], rv32_ramdisk.STACK_SIZE))
+                self.assertLessEqual(entry["memory"], entry["span"] - entry["stack"])
                 elf = parse_elf((OS / f"{entry['name']}.elf").read_bytes())
                 self.assertEqual(entry["data"], flatten(elf, entry["load"]))
         ranges = sorted((e["load"], e["load"] + e["span"]) for e in entries)
@@ -66,6 +70,26 @@ class RamdiskTest(unittest.TestCase):
             for name, (paths, accelerators) in cases.items():
                 with self.subTest(name), self.assertRaises(rv32_ramdisk.RamdiskError):
                     rv32_ramdisk.build(paths, accelerators)
+        # Track 3: a stack is whole pages, at least two (one is the kernel's guard), inside the span
+        # and above the program. hello loads at 0x8012_0000 with one slot; each case changes its
+        # stack's bottom or, to reach the last rule with a well-formed stack, its size in memory.
+        original = parse_elf(hello.read_bytes())
+        not_pages, too_small = "is not two or more pages inside the span", "is not two or more pages"
+        for name, bottom, memsz, message in (
+                ("stack not whole pages", 0x80137f00, None, not_pages),
+                ("stack of one page", 0x8013f000, None, too_small),
+                ("stack of the whole span", 0x80120000, None, not_pages),
+                ("stack over the program", 0x8013e000, 0x1f000, "leave no room for the stack"),
+                ("no stack symbol", None, None, "no _stack_bottom")):
+            symbols = {k: v for k, v in original.symbols.items() if k != "_stack_bottom" or bottom is not None}
+            if bottom is not None:
+                symbols["_stack_bottom"] = bottom
+            segments = [seg._replace(memsz=memsz) if memsz and seg.type == 1 else seg for seg in original.segments]
+            elf = original._replace(symbols=symbols, segments=segments)
+            with self.subTest(name), mock.patch.object(rv32_ramdisk, "parse_elf", return_value=elf), \
+                    self.assertRaisesRegex(rv32_ramdisk.RamdiskError, message):
+                rv32_ramdisk.program(hello)
+        self.assertEqual(rv32_ramdisk.program(hello).stack, rv32_ramdisk.STACK_SIZE, "the unpatched ELF passes")
         blob = rv32_ramdisk.build([hello, primes])
         for name, bad in (("magic", b"XXXX" + blob[4:]), ("short", blob[:8]),
                           ("count", blob[:4] + struct.pack("<I", 1000) + blob[8:]),

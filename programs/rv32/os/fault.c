@@ -16,6 +16,8 @@
  *   fault tail      a load just past the framebuffer, in the last page its mapping covers: the
  *                   page table lets it through and PMP, the backstop, refuses it (issue #25,
  *                   cause 5); without a display it says so and exits 1
+ *   fault stack     a stack that grows 1 KiB at a time until it reaches the guard page below it
+ *                   (Track 3, cause 15): the kernel kills it and says "stack overflow"
  *
  * Since issue #25 the page table is asked first, so every address above that
  * the process does not own is a page fault (13 load, 15 store, 12 fetch).
@@ -32,12 +34,13 @@
 void fault_load(void), fault_illegal(void), fault_kernel(void), fault_shell(void), fault_csr(void), fault_read(void),
     fault_exec(void), fault_prev(void), fault_engine(void);
 void fault_tail(uint32_t address);
+void fault_stack(void);
 
 __asm__(
     "    .pushsection .text.fault, \"ax\", @progbits\n"
     "    .balign 4\n"
     "    .globl fault_load, fault_illegal, fault_kernel, fault_shell, fault_csr, fault_read, fault_exec\n"
-    "    .globl fault_prev, fault_engine, fault_tail\n"
+    "    .globl fault_prev, fault_engine, fault_tail, fault_stack\n"
     "fault_load:    lui t0, 0x200\n"        /* 0x0020_0000 */
     "               lw a0, 0(t0)\n"
     "               ret\n"
@@ -64,6 +67,9 @@ __asm__(
     "               ret\n"
     "fault_tail:    lw a0, 0(a0)\n"         /* the address in a0 */
     "               ret\n"
+    "fault_stack:   addi sp, sp, -1024\n"   /* a frame of 1 KiB that is never popped */
+    "               sw zero, 0(sp)\n"
+    "               j fault_stack\n"
     "    .popsection\n");
 
 int main(const char *args)
@@ -74,7 +80,7 @@ int main(const char *args)
     } faults[] = {
         {"load", fault_load}, {"illegal", fault_illegal}, {"kernel", fault_kernel}, {"shell", fault_shell},
         {"csr", fault_csr},   {"read", fault_read},       {"exec", fault_exec},  {"prev", fault_prev},
-        {"engine", fault_engine},
+        {"engine", fault_engine}, {"stack", fault_stack},
     };
     if (!u_strcmp(args, "tail")) {
         uint8_t *framebuffer = sys_display();
@@ -89,6 +95,6 @@ int main(const char *args)
             faults[i].run();
         }
     }
-    u_puts("fault: load | illegal | kernel | shell | csr | read | exec | prev | engine | tail\n");
+    u_puts("fault: load | illegal | kernel | shell | csr | read | exec | prev | engine | tail | stack\n");
     return 1;
 }

@@ -81,6 +81,14 @@ _Avoid_: an MMU, virtual memory, page tables, the bus decoder's access faults (t
 A process's Sv32 address space (issue #25): the root and level-0 tables in the kernel's memory that `satp` names while the process runs. The kernel maps the process's slots, the framebuffer and, for a program that drives them, the accelerators' windows, each at its own physical address; anything else is a page fault (12, 13, 15) before PMP, which stays as the backstop, is asked. See [the record](docs/rv32-os.md#paging-issue-25).
 _Avoid_: relocation (a program still runs at the address it was linked for), the TLB (the RTL's cache of leaves), PMP.
 
+**Guard page**:
+The lowest page of a program's stack, which the kernel leaves out of its page table (Track 3), so a stack that outgrows its size takes a page fault and the kernel kills the process with "(stack overflow)" instead of letting it write the heap below; a system call refuses a buffer on it too. A program's stack is 32 KiB unless its link asks for more (Lua's is 160 KiB); the RAM disk entry records the size. See [the record](docs/rv32-libc.md#the-stack-a-size-per-program-and-a-guard-page).
+_Avoid_: a stack limit the hardware enforces, a red zone.
+
+**C library**:
+picolibc as built for the OS's programs (Track 3, L1): the vendored sources a program links, on a thin layer (programs/rv32/os/libc) that turns POSIX calls into the kernel's system calls and gives fd 0 the shell's echo and line editing (line.c, shared with the shell). Programs built on it, such as `libccheck` and `lua`, run beside those built on the user library. See [the record](docs/rv32-libc.md).
+_Avoid_: the user library (ulib, Track 2's), the host's libc, newlib.
+
 **SAP8**:
 The project's SAP-inspired teaching CPU and its instruction set.
 _Avoid_: Hack computer, RISC-V CPU.

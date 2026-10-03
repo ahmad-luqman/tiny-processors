@@ -30,21 +30,37 @@
 #define SYS_FILES   18  /* files(index, buf, len): the name of file `index` into buf (O3); returns its size in bytes */
 #define SYS_PS      19  /* ps(index, buf, len): one line about process table entry `index` (O4) */
 #define SYS_SWITCHES 20 /* switches(): how often the timer took the machine from the caller (O4) */
-#define SYS_CALLS   21
+#define SYS_SEEK    21  /* seek(fd, offset, whence): move an open file's position (Track 3); returns the new one */
+#define SYS_CALLS   22
 
 #define SYS_ERROR 0xffffffffu
+
+/* Limits both sides of the interface rely on (Track 3 put them here, out of the kernel, so the
+ * C library's checks cannot drift from the kernel's). */
+#define OS_ARGS_MAX   64u /* bytes of a program's argument string, NUL included */
+#define OS_FIRST_FILE 3u  /* descriptors 0 to 2 are the console; open files are 3 on */
+#define OS_OPEN_FILES 4u  /* a process's open files at once: descriptors 3 to 6 */
+#define OS_FILE_NAME  20u /* bytes of a file's name, NUL included (tfs, fs.h) */
 
 /* open() flags (O3). */
 #define O_READ   1u
 #define O_WRITE  2u  /* write from the start; the file's size becomes what is written */
 #define O_CREATE 4u
 
+/* seek() whence values (Track 3), as in C's SEEK_SET, SEEK_CUR and SEEK_END. The offset is signed;
+ * the new position must lie between 0 and the file's size. */
+#define SEEK_FROM_START   0u
+#define SEEK_FROM_CURRENT 1u
+#define SEEK_FROM_END     2u
+
 /* The layout every program is linked for: from slot n of 128 KiB above the kernel's 1 MiB, one
- * or more slots (a program's span, O4); the top 32 KiB of the span is its stack. */
+ * or more slots (a program's span, O4); the top 32 KiB of the span is its stack, or as much as
+ * its RAM disk entry says (Track 3), of which the lowest page is a guard. */
 #define OS_KERNEL_SIZE 0x00100000u
 #define OS_SLOT_BASE   0x80100000u
 #define OS_SLOT_SIZE   0x00020000u
 #define OS_SLOTS       24u
-#define OS_STACK_SIZE  0x00008000u /* sbrk stops below it */
+#define OS_STACK_SIZE  0x00008000u /* a program's stack unless it asks for more (the Makefile's default) */
+#define OS_GUARD_SIZE  0x00001000u /* the stack's lowest page, left unmapped (Track 3) */
 
 #endif

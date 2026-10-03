@@ -111,6 +111,13 @@ An Sv32 MMU remained a later milestone; issue #20 added S-mode and Sv32 to the h
 
 ## Track 3: run more apps
 
+**Split into two streams (2026-10-02):** see the [plan](track3-apps.md).
+Stream A is done: picolibc with the kernel's system calls under it (L1) and
+Lua 5.4.7's REPL and scripts (L2) run on QEMU `virt`, the emulator and the RTL,
+and every program's stack now has a size of its own and a guard page
+([record](../rv32-libc.md)). Stream B (the FPU showcase, Linux without an MMU,
+Doom) waits for what each needs underneath.
+
 - **C library.** Port picolibc or newlib with `sbrk` and file access backed
   by O2 and O3. Most of the list below needs it.
 - **Lua or MicroPython REPL** on the console: the first real third-party
@@ -156,7 +163,8 @@ This track does not depend on the others and can run alongside any of them.
    through its CLINT and a PLIC at `virt`'s address.
 3. O2 kernel, syscalls, separate programs and a shell, run on QEMU `virt` as
    well as our backends.
-4. C library, then Lua: the first "runs more apps" result.
+4. C library, then Lua: the first "runs more apps" result (done, Track 3
+   stream A, [record](../rv32-libc.md)).
 5. A extension, then Linux without an MMU on the emulator and then the RTL;
    or the Jack compiler and OS if Nand2Tetris is the priority.
 6. Storage, palette and more RAM, then Doom. After that: the MMU, the

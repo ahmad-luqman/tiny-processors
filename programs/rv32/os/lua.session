@@ -1,0 +1,35 @@
+lua
+print("hello from Lua", 1 + 2, 10 / 4, 2^53, 7 // 2, 0.1 + 0.2, 1/0)
+print(math.maxinteger, math.mininteger, 3 % -2, -7 // 2, 2^0.5, math.pi)
+print(string.format("%5.2f|%x|%q|%g", math.pi, 255, "a\tb", 1e20))
+print(("hello"):upper(), ("%d items"):format(3), utf8.char(72, 228, 8364), #"\u{20AC}")
+local t = {} for i = 1, 10 do t[i] = i * i end print(table.concat(t, " "))
+fib = setmetatable({[0] = 0, 1}, {__index = function(f, n) f[n] = f[n - 1] + f[n - 2] return f[n] end})
+print(fib[50], fib[90])
+co = coroutine.wrap(function(a) local b = coroutine.yield(a + 1) return b * 2 end)
+print(co(1), co(10))
+print(pcall(function() return nil + 1 end))
+error({code = 7})
+print(tpyoypo)
+f = io.open("lua.out", "w") f:write("from lua\n", 42, "\n") f:close()
+for line in io.lines("lua.out") do io.write("[", line, "] ") end print()
+print(io.open("nosuch"))
+print(os.time(), os.date("!%Y-%m-%d %H:%M"), os.getenv("HOME"), pcall(io.popen, "ls"))
+print(select("#", load("return 1, 2, 3")()), load("syntax error here"))
+print(pcall(string.rep, "x", 1 << 20))
+print(#string.rep("y", 1000), "still here")
+print(pcall(load, "return " .. string.rep("(", 300) .. "1" .. string.rep(")", 300)))
+os.exit(3)
+lua
+x = 6 * 7
+left = io.open("left.out", "w") left:write("left open by lua\n") os.exit(0)
+cat left.out
+lua
+x = 6 * 7
+lua hello.lua one two three
+lua queens.lua 6
+lua words.lua welcome
+cat words.out
+lua nosuch.lua
+files
+halt

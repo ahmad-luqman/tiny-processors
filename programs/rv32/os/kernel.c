@@ -65,13 +65,16 @@
 #define MAX_PROCS 8
 #define KERNEL_TICK 10000u      /* device ticks between timer interrupts, where ticks have no rate */
 #define KEY_BUFFER 64u          /* input events waiting for a program */
-#define ARGS_MAX 64u            /* bytes of argument string, NUL included */
+#define ARGS_MAX OS_ARGS_MAX
 #define MSTATUS_MPP_M 0x1800u  /* the idle loop; a process's MPP is 0, user mode (O5) */
 #define MSTATUS_FS_INITIAL 0x2000u /* QEMU's FPU is off until FS is set; ours is always on */
 #define CAUSE_ECALL_M 11u
 #define CAUSE_ECALL_U 8u
+#define CAUSE_LOAD_PAGE 13u  /* issue #25: a load, or a store, the page table refuses */
+#define CAUSE_STORE_PAGE 15u
 #define RAMDISK_MAGIC 0x4b534452u /* "RDSK" */
-#define OPEN_FILES 4u              /* descriptors 3..6 */
+#define OPEN_FILES OS_OPEN_FILES /* descriptors OS_FIRST_FILE on */
+_Static_assert(FS_NAME == OS_FILE_NAME, "sys.h and fs.h agree on a file name's length");
 
 /* Sv32 (issue #25): a page table entry's bits, and satp's mode. */
 #define PAGE_SIZE 4096u
@@ -109,13 +112,18 @@ struct proc {
     uint64_t wake;
     char name[24];
 };
+/* A power of two, so indexing the process table is a shift: RV32I has no multiply, and at 260
+ * bytes every procs[i] in the scheduler's loops became a call (Track 3 measured 59% more
+ * steps in the console session: 2.86 M against 1.80 M). A new per-process field belongs in struct address_space. */
+_Static_assert(sizeof(struct proc) == 256, "struct proc is 256 bytes");
 
 /* A RAM disk entry (tools/rv32_ramdisk.py). */
 struct program {
     char name[24];
     uint32_t load, entry, file_size, memory_size, offset, flags, span; /* span in bytes, whole slots */
+    uint32_t stack; /* the top of the span the stack takes, whole pages, the lowest a guard (Track 3) */
 };
-_Static_assert(sizeof(struct program) == 52, "tools/rv32_ramdisk.py's <24s7I entry");
+_Static_assert(sizeof(struct program) == 56, "tools/rv32_ramdisk.py's <24s8I entry");
 #define PROGRAM_ACCELERATORS 1u /* it drives SIMD4, G1 and G2 itself */
 
 extern void trap_vector(void);
@@ -412,9 +420,18 @@ static struct proc *proc_of(struct frame *f)
 }
 
 /* A user range is `len` bytes inside the process's own slots. */
+static uint32_t guard_of(const struct proc *p);
+
+/* Whether [address, address + len) lies in `p`'s slots and off its stack's guard page: the
+ * kernel copies to and from user memory by physical address, in machine mode, so the page table
+ * that keeps the program out of the guard would not stop a system call (Track 3). */
 static int user_range(const struct proc *p, uint32_t address, uint32_t len)
 {
-    return address >= p->base && len <= p->span && address - p->base <= p->span - len;
+    if (!(address >= p->base && len <= p->span && address - p->base <= p->span - len)) {
+        return 0;
+    }
+    uint32_t guard = guard_of(p); /* inside the slots, so address + len cannot wrap */
+    return !(len && address < guard + OS_GUARD_SIZE && address + len > guard);
 }
 
 /* A NUL-terminated user string of at most `max` bytes, copied out; 0 on a bad pointer or length. */
@@ -458,7 +475,8 @@ static void check_programs(void)
         if (e->name[sizeof e->name - 1] || e->offset > size || e->file_size > size - e->offset ||
             e->file_size > e->memory_size || e->span == 0 || e->span % OS_SLOT_SIZE ||
             e->span > OS_SLOTS * OS_SLOT_SIZE || e->load < OS_SLOT_BASE || (e->load - OS_SLOT_BASE) % OS_SLOT_SIZE ||
-            e->load > slots_end - e->span || e->memory_size > e->span - OS_STACK_SIZE ||
+            e->load > slots_end - e->span || e->stack % PAGE_SIZE || e->stack < 2 * PAGE_SIZE ||
+            e->stack >= e->span || e->memory_size > e->span - e->stack ||
             e->entry < e->load || e->entry - e->load >= e->file_size) {
             kputs("kernel: RAM disk entry ");
             kputdec(i);
@@ -492,7 +510,7 @@ static int alive(const struct proc *p)
  * cleared. */
 static struct address_space {
     uint32_t tables; /* the entry's tables in use, the root first; 0 before its first process */
-    uint32_t base, span;
+    uint32_t base, span, guard; /* guard: the stack's lowest page, never mapped (Track 3) */
     uint32_t drives_engines; /* a PROGRAM_ACCELERATORS program's: the engines' windows mapped */
 } spaces[MAX_PROCS];
 
@@ -537,7 +555,8 @@ static void lay_out(uint32_t entry, uint32_t rights)
 {
     const struct address_space *space = &spaces[entry];
     uint32_t data = rights & ~PTE_X;
-    map(entry, space->base, space->base + space->span, rights);
+    map(entry, space->base, space->guard, rights);
+    map(entry, space->guard + OS_GUARD_SIZE, space->base + space->span, rights);
     if (framebuffer) {
         map(entry, framebuffer, framebuffer + framebuffer_size, data);
     }
@@ -548,8 +567,15 @@ static void lay_out(uint32_t entry, uint32_t rights)
     }
 }
 
-/* The page tables of the process about to start in `p`'s entry. */
-static void map_process(const struct proc *p)
+/* The guard page below `p`'s stack (Track 3). */
+static uint32_t guard_of(const struct proc *p)
+{
+    return spaces[p - procs].guard;
+}
+
+/* The page tables of the process about to start in `p`'s entry, whose stack is the top `stack`
+ * bytes of its span. */
+static void map_process(const struct proc *p, uint32_t stack)
 {
     uint32_t entry = (uint32_t)(p - procs);
     struct address_space *space = &spaces[entry];
@@ -561,6 +587,7 @@ static void map_process(const struct proc *p)
     }
     space->base = p->base;
     space->span = p->span;
+    space->guard = p->base + p->span - stack;
     space->drives_engines = !!(p->flags & PROGRAM_ACCELERATORS);
     lay_out(entry, PTE_R | PTE_W | PTE_X);
 }
@@ -644,17 +671,18 @@ static struct proc *spawn(const char *name, const char *args, uint32_t parent)
     for (i = 0; program->name[i] && i + 1 < sizeof p->name; i++) {
         p->name[i] = program->name[i];
     }
-    map_process(p);
+    map_process(p, program->stack);
     return p;
 }
 
 /* Descriptor `fd` of `p` when it is open in `mode` (0: either), else 0. */
 static struct open_file *open_file_of(struct proc *p, uint32_t fd, uint32_t mode)
 {
-    if (fd < 3 || fd >= 3 + OPEN_FILES || !p->files[fd - 3].mode || (mode && p->files[fd - 3].mode != mode)) {
+    if (fd < OS_FIRST_FILE || fd >= OS_FIRST_FILE + OPEN_FILES || !p->files[fd - OS_FIRST_FILE].mode ||
+        (mode && p->files[fd - OS_FIRST_FILE].mode != mode)) {
         return 0;
     }
-    return &p->files[fd - 3];
+    return &p->files[fd - OS_FIRST_FILE];
 }
 
 /* Whether file `file` may be opened in `mode`: one writer at a time, and no readers while it is
@@ -897,6 +925,30 @@ static struct frame *schedule(void)
 /* ---- System calls ---- */
 
 /* Returns 1 when the call finished (pc moves past the ecall), 0 to run it again later. */
+/* Move an open file's position by `offset` from the start, the current position or the end;
+ * the new position, which must lie between 0 and the file's size, or SYS_ERROR (Track 3). */
+static uint32_t seek_file(struct open_file *o, int32_t offset, uint32_t whence)
+{
+    int64_t to = offset;
+    switch (whence) {
+    case SEEK_FROM_START:
+        break;
+    case SEEK_FROM_CURRENT:
+        to += o->position;
+        break;
+    case SEEK_FROM_END:
+        to += fs_size(o->file);
+        break;
+    default:
+        return SYS_ERROR;
+    }
+    if (to < 0 || to > fs_size(o->file)) {
+        return SYS_ERROR;
+    }
+    o->position = (uint32_t)to;
+    return o->position;
+}
+
 static int syscall(struct proc *p)
 {
     struct frame *f = &p->f;
@@ -964,7 +1016,7 @@ static int syscall(struct proc *p)
         }
         break;
     case SYS_SBRK:
-        if (a0 <= p->base + p->span - OS_STACK_SIZE - p->brk) {
+        if (a0 <= guard_of(p) - p->brk) { /* the heap stops below the stack */
             result = p->brk;
             p->brk += a0;
         }
@@ -1066,8 +1118,15 @@ static int syscall(struct proc *p)
                 if (mode == O_WRITE) {
                     fs_truncate(file); /* writing replaces the contents */
                 }
-                result = 3 + i;
+                result = OS_FIRST_FILE + i;
             }
+        }
+        break;
+    }
+    case SYS_SEEK: { /* Track 3: the C library's lseek */
+        struct open_file *o = open_file_of(p, a0, 0);
+        if (o) {
+            result = seek_file(o, (int32_t)a1, a2);
         }
         break;
     }
@@ -1117,6 +1176,9 @@ static void kill(struct proc *p, uint32_t cause, uint32_t tval)
     }
     kputs(" tval ");
     kputhex(tval);
+    if ((cause == CAUSE_LOAD_PAGE || cause == CAUSE_STORE_PAGE) && tval - guard_of(p) < OS_GUARD_SIZE) {
+        kputs(" (stack overflow)"); /* Track 3: a load or store on the guard page below the stack */
+    }
     kputc('\n');
     finish(p, 128u + cause);
 }
