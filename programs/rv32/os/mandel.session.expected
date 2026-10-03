@@ -3,11 +3,8 @@ kernel: devices console clint plic input display g1 g2 dma disk
 kernel: 20 programs
 kernel: disk 256 sectors, tfs
 sh: ls, NAME [ARGS] [&], wait, halt [CODE]
-$ pong
-PASS 8fef54bc
-pong: best 1
-$ cat scores
-pong 1
+$ mandel
+mandel: 2 by 2 blocks, 144978 iterations, frame c7e54ac5
 $ halt
-kernel: halt, 2 exits
-PASS 814f72be
+kernel: halt, 1 exits
+PASS beaf4610

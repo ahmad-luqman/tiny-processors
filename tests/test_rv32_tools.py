@@ -109,6 +109,12 @@ class ImageCheckerTests(unittest.TestCase):
         self.assertTrue(any("RVC" in p for p in self.problems(flags=0x1)))
         self.assertTrue(any("float ABI" in p for p in self.problems(flags=0x4)))
         self.assertTrue(any("entry point" in p for p in self.problems(entry=RAM + 4)))
+        # Issue #33: the single-float ABI (ilp32f, 0x2) only when asked for, and then only it.
+        self.assertTrue(any("expected soft float" in p for p in self.problems(flags=0x2)))
+        self.assertEqual(check_image(parse_elf(build_elf(flags=0x2)), hard_float=True), [])
+        for flags in (0x0, 0x4, 0x3):
+            with self.subTest(flags=flags):
+                self.assertTrue(check_image(parse_elf(build_elf(flags=flags)), hard_float=True))
         symbols = dict(GOOD_SYMBOLS, _start=RAM + 8)
         self.assertTrue(any("_start is" in p for p in self.problems(symbols=symbols)))
 
@@ -724,6 +730,22 @@ class VendoredSourcesTest(unittest.TestCase):
             self.assertEqual(sorted(rv32_vendor_libc.verify(str(root))),
                              ["a.c: SHA-256 differs from SHA256SUMS.json", "b.c: missing",
                               "c.c: in SOURCES, not in SHA256SUMS.json", "extra.h: not in SHA256SUMS.json"])
+
+
+class FloatingClaimTest(unittest.TestCase):
+    """Issue #33: the results comparison leaves out exactly the illegal-instruction traps that a
+    lazy FPU switch runs again: F instructions and the floating CSRs, not other illegal words."""
+
+    def test_floating_words(self):
+        from tools.rv32_asm import ADDI, CSRRC, CSRRS, CSRRWI, LW, MSTATUS, i_type
+        from tools.rv32_f_asm import arithmetic, flw, fsw
+        from tools.rv32_rtl import floating_word
+        for word in (flw(1, 2), fsw(1, 2), arithmetic(0, 0), arithmetic(3, 0), arithmetic(4, 0), arithmetic(5, 0),
+                     arithmetic(6, 0), arithmetic(13, 0), CSRRS(5, 1, 0), CSRRWI(0, 2, 1), CSRRC(0, 3, 6)):
+            self.assertTrue(floating_word(word), f"{word:08x}")
+        for word in (CSRRS(5, MSTATUS, 0), CSRRS(5, 0xC00, 0), 0x00000000, 0xFFFFFFFF, ADDI(1, 1, 1), LW(1, 2, 0),
+                     i_type(0x73, 0, 0, 0, 1), i_type(0x73, 0, 4, 0, 1)):  # ecall-shaped and the hypervisor funct3
+            self.assertFalse(floating_word(word), f"{word:08x}")
 
 if __name__ == "__main__":
     unittest.main()

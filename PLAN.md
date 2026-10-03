@@ -96,8 +96,13 @@ runs on the kernel's system calls with a new `seek` call and a console line
 discipline (L1), and Lua 5.4.7, unmodified, gives its REPL and runs scripts
 from the disk (L2), on QEMU `virt`, the emulator and the RTL. Lua's C stack
 needs led to a stack size per program and an unmapped guard page below every
-program's stack. Stream B (an FPU showcase, Linux without an MMU, Doom) is
-planned, not started.
+program's stack. Stream B is four issues, one PR each. B1
+([#33](https://github.com/ahmad-luqman/tiny-processors/issues/33), done) made
+`mstatus.FS` real on both backends, so the kernel saves a process's F
+registers lazily, only when another float program takes the FPU; it raised RAM
+to 8 MiB (56 program slots); and `mandel`, a hard-float C library program,
+draws the Mandelbrot set ([record](docs/rv32-os.md#floating-state-issue-33)).
+The A extension (#34), Doom (#35) and Linux without an MMU (#36) follow.
 
 ## Later optional tracks
 

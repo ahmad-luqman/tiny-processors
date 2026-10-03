@@ -1008,6 +1008,97 @@ so their "before" runs are the sessions without them.
   both transcripts fail; with `PAGE_TABLES` at 3 the kernel stops at boot with
   `panic: page tables: more 4 MiB regions than an entry has tables`.
 
+## Floating state (issue #33)
+
+Programs may now use the F extension: [fpcheck](../programs/rv32/os/fpcheck.c)
+and [fpmate](../programs/rv32/os/fpmate.c) on the bare user library (rv32if,
+ILP32), [mandel](../programs/rv32/os/libc/mandel.c) on the C library with the
+single-float ABI ([docs/rv32-libc.md](rv32-libc.md#hard-float-issue-33)). A
+process's floating state, `f0`–`f31` and `fcsr`, must then survive another
+process running in between, as its integer registers do.
+
+### Lazy, through mstatus.FS
+
+Saving the 33 words on every switch would cost every process, though only a
+few use the FPU. The kernel switches it lazily instead, which needs
+`mstatus.FS`: the hardware had it fixed at Dirty, so the same change made it
+real on the emulator and the RTL ([the contract](rv32.md#floating-state-issue-33)).
+
+- **One owner.** `fpu_owner` is the process whose state the FPU holds. It runs
+  with FS on; every other process runs with FS Off, and a new process starts
+  so (its frame's `mstatus` no longer sets FS Initial).
+- **A claim.** A process with FS Off that runs an F instruction, or touches
+  `fflags`, `frm` or `fcsr`, takes an illegal-instruction trap. `kernel_trap`
+  reads the instruction (`mtval` holds it on our hart and on QEMU; else it is
+  read at the pc), and if it is one of those, `claim_fpu()` hands the FPU over:
+  the owner's `fcsr` is saved, and its f registers too if its FS says Dirty
+  (Clean means the saved copy is still current); the owner's frame gets FS
+  Off; the claimer's state is loaded, its frame gets FS Clean, and the
+  instruction runs again. Any other illegal instruction kills the process as
+  before.
+- **Why fcsr is always saved.** QEMU leaves FS Clean when an operation only
+  accrues flags (a comparison raising NV writes no f register); our hart
+  makes it Dirty, as the specification asks. Saving `fcsr` regardless costs
+  one word and makes the kernel right on both.
+- **Where the state lives.** `struct fstate` (132 bytes) is in
+  `struct address_space`, beside the page-table bookkeeping, one per process
+  table entry: `struct proc` stays 256 bytes. `map_process()` clears it for
+  each new process, which therefore starts with zeros, as at reset. An owner
+  that exits gives the FPU up unsaved.
+- **The kernel's own F code** is [kfpu.S](../programs/rv32/os/kfpu.S),
+  assembled rv32if; the kernel's C stays RV32I. Each routine first sets
+  `mstatus.FS`: the kernel runs with the trapped process's `mstatus`, whose
+  FS is Off, so its own `fsw` would otherwise trap with `mscratch` 0.
+  `kernel_resume` writes the frame's `mstatus` back before `mret`.
+
+The trace comparison leaves the claims out with the retried ecalls
+(`--compare-traps faults`): where a claim lands depends on device time.
+
+### Costs
+
+A claim costs 357 instructions with a Dirty owner to save, and 285 with no
+owner (trap entry and exit, the decode, 33 loads, and 33 stores when saved).
+A switch between a float program and any other costs nothing; only two float
+programs taking turns pay, once per turn. The float session's 35 claims are
+35 of fpcheck and fpmate's turns. Sessions without a float program never take
+the path; their step counts grew only by the bookkeeping: three more programs
+to look through and list, and 132 bytes cleared at each spawn.
+
+| Session | Emulator steps before | After |
+| --- | --- | --- |
+| Console | 1,420,784 | 1,435,909 (+1.06%, of which `ls` lists three more names) |
+| Jobs | 1,859,596 | 1,862,646 (+0.16%) |
+| Pong | 1,006,024 | 1,009,281 (+0.32%) |
+| Menu | 20,390,125 | 20,393,869 (+0.02%) |
+| libc | 2,503,067 | 2,507,545 (+0.18%) |
+| Lua | 13,858,528 | 13,882,991 (+0.18%) |
+
+Their PASS words are unchanged: console `8b4402e5`, jobs `408a6738`, menu
+`b1f2b253`, Pong `814f72be`, libc `121b845d`, Lua `dacf0fc5`.
+
+### Evidence (issue #33)
+
+- **fpcheck** starts fpmate and both do float work for 6,000 rounds while the
+  timer switches them: fpcheck divides rounding down (frm RDN) and raises NX
+  and DZ, fpmate rounds to nearest and raises NX and, by signaling-NaN
+  comparisons that write no f register, NV. Every round each checks its
+  quotient, its `frm` and that `fflags` holds exactly its own flags, and each
+  first checks that a new process sees zeros. The float session
+  ([float.session](../programs/rv32/os/float.session): `fpcheck`, `mandel 4`)
+  gives `PASS f06a88d3` on QEMU `virt`, the emulator and Verilator with a stall
+  per request (234,872,316 cycles, 3 minutes, 21,516 timer interrupts),
+  results-identical with mandel's frame pinned, and identical disks.
+- **It can fail:** with the save taken out of `claim_fpu()`, fpcheck reports
+  every one of its 6,000 quotients and modes wrong, and fpmate's checks.
+- **The claims alternate:** `test-rv32-os` reads the emulator's trace of the
+  float session and checks that fpcheck claims first, that claims alternate
+  between the two (a process keeps the FPU until the other claims) and that
+  every claiming instruction runs again untrapped.
+- **mandel**'s default picture ([mandel.session](../programs/rv32/os/mandel.session))
+  gives `PASS beaf4610` and frame `c7e54ac5` on QEMU and the emulator, and on
+  Verilator with a stall per request in `test-rv32-slow`: 893,507,223 cycles,
+  712 M of them waiting on the FPU, in 12 minutes, results-identical.
+
 ## Exercises (issue #25)
 
 1. **Two shells.** Link every program at `0x0001_0000` and map its slots there.

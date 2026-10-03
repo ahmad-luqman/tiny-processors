@@ -23,7 +23,7 @@ from tools.rv32_rtl import ROOT, Run, compare_backends, diff_traces, run_emulato
 
 OS = ROOT / "build/rv32/os"
 PROGRAMS = ("sh", "hello", "primes", "pong", "tetris", "menu", "syscheck", "fault", "cat", "write", "files", "bars", "life",
-            "fill", "dmaprobe", "libccheck", "lua", "fpcheck", "fpmate")
+            "fill", "dmaprobe", "libccheck", "lua", "fpcheck", "fpmate", "mandel")
 ENGINES = frozenset({"menu", "dmaprobe"})  # the programs flagged `accelerators`
 SPANS = {"menu": 3, "lua": 6}  # slots; every other program takes one
 STACKS = {"lua": 0x28000}  # bytes (Track 3); every other program has the default

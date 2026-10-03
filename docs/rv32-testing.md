@@ -84,6 +84,12 @@ device class and the privilege modes, each in seconds:
 | `run-rv32-platform-rtl` | `run-rv32-platform-rtl-verilator` |
 | `test-rv32-f` | `test-rv32-f-verilator` |
 
+One slow-tier run is Verilator's own (issue #33): `run-rv32-mandel-rtl-verilator`
+draws mandel's default picture, about 900 M cycles and 12 minutes, because the
+F1 unit's adds and multiplies take ~560 cycles each. Its fast twin is
+`run-rv32-float-rtl-verilator`, the same program drawing in 4×4 blocks
+(235 M cycles, 3 minutes).
+
 The OS sessions never ran on Icarus in the aggregate; `run-rv32-os-rtl` is a
 manual target.
 

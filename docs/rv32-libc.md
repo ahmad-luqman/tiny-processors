@@ -326,6 +326,52 @@ function, and writes `words.out`, which `cat` then prints. One REPL line is
 typed with a typo and three rubouts, so the transcript holds the echo's
 `\b \b`s.
 
+## Hard float (issue #33)
+
+A program may do its arithmetic in the F extension's registers and pass floats
+in them: [mandel](../programs/rv32/os/libc/mandel.c) is built for
+`-march=rv32imf_zicsr -mabi=ilp32f`, a C library program like `libccheck`.
+Every other program stays RV32I, soft float.
+
+- **Why a second library.** An object's ELF header records its float ABI, and
+  lld refuses to link an ilp32f object with an ilp32 one, and rightly: a
+  `float` argument or result (picolibc's `sqrtf`, say) travels in an f
+  register under ilp32f and in an integer register under ilp32, so a call
+  across the two would find it in the wrong place. The Makefile builds
+  picolibc and the compiler-rt builtins a second time from the same `SOURCES`
+  (`RV32_ARCH_HF`, objects under `build/rv32/libc-hf`), and the glue (crt0,
+  crt, syscalls, tty, line) under `build/rv32/os/libc-hf`. One header was
+  missing: `machine/fenv-fp.h`, which `fenv.h` includes when there are float
+  registers ([the vendoring note](../third_party/picolibc/README.md)).
+- **Building one.** List it in `RV32_OS_HF_PROGRAMS`, give it a slot and its
+  objects (`RV32_OS_OBJS_name`, compiled into `build/rv32/os/libc-hf`). Its
+  image is checked with `--allow-user --allow-f --allow-m --hard-float`:
+  [rv32_image.py](../tools/rv32_image.py)'s `--hard-float` expects `e_flags`
+  0x2 where every other image must have 0. The link always pulls in `stdin`,
+  which picolibc's `bufio.c` refers to weakly and the image check refuses to
+  leave undefined.
+- **The kernel's side.** A float program's registers are saved and restored by
+  the kernel only when another float program takes the FPU
+  ([the record](rv32-os.md#floating-state-issue-33)); nothing here depends on
+  it but the program's own correctness under preemption.
+
+`mandel [BLOCK]` draws the set in 320×240 RGB332, sampling one point per
+BLOCK×BLOCK pixels (1, 2, 4 or 8; 2 unless given), and prints the frame's
+checkpoint hash, which it folds itself, so QEMU, which has no display, pins
+the same picture as a hash. The F1 unit is a serial baseline: an add or a
+multiply takes about 560 cycles ([docs/fp32.md](fp32.md)), so the picture
+costs the RTL hundreds of millions of cycles, which is why the block size is
+an argument. It tests 8 iterations before asking whether a point lies in the
+main cardioid or the period-2 bulb: most points have escaped by then, so the
+test costs only the points it saves.
+
+| `mandel` | Samples | Iterations | Frame |
+| --- | --- | --- | --- |
+| `1` | 320×240 | 576,777 | `9bec6e7f` |
+| `2` (default) | 160×120 | 144,978 | `c7e54ac5` |
+| `4` | 80×60 | 36,711 | `4ee3d585` |
+| `8` | 40×30 | 8,929 | `44e75c05` |
+
 ## Evidence
 
 Measured on Ubuntu 24.04 with clang 18.1.3, QEMU 8.2.2 and Verilator 5.020, from

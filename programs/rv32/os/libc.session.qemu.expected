@@ -1,6 +1,6 @@
 kernel: riscv-virtio,qemu, hart 0
 kernel: devices console clint plic disk
-kernel: 19 programs
+kernel: 20 programs
 kernel: disk 256 sectors, tfs
 sh: ls, NAME [ARGS] [&], wait, halt [CODE]
 $ libccheck one "two words"

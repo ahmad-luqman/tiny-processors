@@ -1,6 +1,6 @@
 kernel: tiny-processors RV32 machine, hart 0
 kernel: devices console clint plic input display g1 g2 dma disk
-kernel: 19 programs
+kernel: 20 programs
 kernel: disk 256 sectors, tfs
 sh: ls, NAME [ARGS] [&], wait, halt [CODE]
 $ fpcheck
@@ -10,6 +10,8 @@ fpcheck: flags
 fpcheck: fpmate
 fpcheck: preempted
 fpcheck: ok
+$ mandel 4
+mandel: 4 by 4 blocks, 36711 iterations, frame 4ee3d585
 $ halt
-kernel: halt, 2 exits
-PASS 31bb42c3
+kernel: halt, 3 exits
+PASS f06a88d3
