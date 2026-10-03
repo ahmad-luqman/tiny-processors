@@ -13,6 +13,7 @@
  */
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "ulib.h"
 
@@ -66,13 +67,28 @@ static uint8_t colour(uint32_t n)
     return n == MAX_ITERATIONS ? 0 : palette[n % 16u];
 }
 
+/* The block size an argument names: one digit, 1, 2, 4 or 8; else 0. */
+static uint32_t parse_block(const char *text)
+{
+    uint32_t block = text[0] && !text[1] ? (uint32_t)(text[0] - '0') : 0;
+    return block == 1 || block == 2 || block == 4 || block == 8 ? block : 0;
+}
+
+/* `hash` with one row of pixels folded in, as the framebuffer's little-endian words. */
+static uint32_t fold_row(uint32_t hash, const uint8_t *row)
+{
+    for (uint32_t x = 0; x < WIDTH; x += 4) {
+        uint32_t word = (uint32_t)row[x] | (uint32_t)row[x + 1] << 8 | (uint32_t)row[x + 2] << 16 |
+                        (uint32_t)row[x + 3] << 24;
+        hash = ((hash << 5) + hash) ^ word;
+    }
+    return hash;
+}
+
 int main(int argc, char **argv)
 {
-    uint32_t block = 2;
-    if (argc > 1) {
-        block = argv[1][0] && !argv[1][1] ? (uint32_t)(argv[1][0] - '0') : 0; /* one digit */
-    }
-    if (argc > 2 || (block != 1 && block != 2 && block != 4 && block != 8)) {
+    uint32_t block = argc == 1 ? 2 : argc == 2 ? parse_block(argv[1]) : 0;
+    if (!block) {
         printf("usage: mandel [1|2|4|8]\n");
         return 2;
     }
@@ -83,18 +99,11 @@ int main(int argc, char **argv)
     for (uint32_t y = 0; y < HEIGHT; y += block) {
         float ci = top + (float)(y / block) * step, ci2 = ci * ci;
         for (uint32_t x = 0; x < WIDTH; x += block) {
-            uint8_t c = colour(escape_time(left + (float)(x / block) * step, ci, ci2));
-            for (uint32_t k = 0; k < block; k++) {
-                row[x + k] = c;
-            }
+            memset(row + x, colour(escape_time(left + (float)(x / block) * step, ci, ci2)), block);
         }
         for (uint32_t copy = 0; copy < block; copy++) {
-            for (uint32_t x = 0; x < WIDTH; x += 4) {
-                uint32_t word = (uint32_t)row[x] | (uint32_t)row[x + 1] << 8 | (uint32_t)row[x + 2] << 16 |
-                                (uint32_t)row[x + 3] << 24;
-                hash = ((hash << 5) + hash) ^ word;
-            }
-            if (frame) {
+            hash = fold_row(hash, row);
+            if (frame) { /* a byte at a time: the framebuffer is a device */
                 for (uint32_t x = 0; x < WIDTH; x++) {
                     frame[(y + copy) * WIDTH + x] = row[x];
                 }

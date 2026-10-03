@@ -9,7 +9,10 @@ import sys
 import tempfile
 import unittest
 
-from tools.rv32_asm import BOOTROM, CLINT, CONSOLE, DISPLAY, DONE, FB, INPUT, PLIC, RAM, VIRTIO
+from tools.rv32_asm import (ADDI, BOOTROM, CLINT, CONSOLE, CSRRC, CSRRS, CSRRWI, DISPLAY, DONE, FB, INPUT, LW, MSTATUS,
+                            PLIC, RAM, VIRTIO, i_type)
+from tools.rv32_f_asm import arithmetic, flw, fsw
+from tools.rv32_rtl import floating_word, trap_records_by_region
 from tools.rv32_devices import (DIAG_EXPECTED_VALUES, EVENT_PRESS, EVENT_VALID, FB_SIZE, KEYS, QUEUE_SIZE, diag_checksum,
                                 event_word, frame_hash, is_decimal, key_code, parse_input_script, render_diag_frame)
 from tools.rv32_image import (ImageError, check_image, check_listing, check_m_build, flatten, parse_elf,
@@ -312,6 +315,20 @@ class ImageCheckerTests(unittest.TestCase):
         self.assertEqual(len(re.findall(r"^\s*CHECK\(", source, re.MULTILINE)), len(SELFCHECK_EXPECTED_VALUES))
         makefile = (ROOT / "Makefile").read_text()
         self.assertIn(f"RV32_SELFCHECK_HEX := {checksum:08x}", makefile)
+
+    def test_cli_hard_float_needs_allow_f(self):
+        """Issue #33: --hard-float without --allow-f is refused before anything is read."""
+        with tempfile.TemporaryDirectory() as directory:
+            elf = Path(directory) / "hf.elf"
+            elf.write_bytes(build_elf(flags=0x2))
+            listing = Path(directory) / "hf.lst"
+            listing.write_text("80000000: 00000013     \tnop\n")
+            tool = [sys.executable, str(ROOT / "tools/rv32_image.py"), str(elf), "--listing", str(listing)]
+            result = subprocess.run(tool + ["--hard-float"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("--hard-float requires --allow-f", result.stderr)
+            result = subprocess.run(tool + ["--hard-float", "--allow-f"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_cli_reports_problems_and_writes_hex(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -750,9 +767,6 @@ class FloatingClaimTest(unittest.TestCase):
     lazy FPU switch runs again: F instructions and the floating CSRs, not other illegal words."""
 
     def test_floating_words(self):
-        from tools.rv32_asm import ADDI, CSRRC, CSRRS, CSRRWI, LW, MSTATUS, i_type
-        from tools.rv32_f_asm import arithmetic, flw, fsw
-        from tools.rv32_rtl import floating_word
         for word in (flw(1, 2), fsw(1, 2), arithmetic(0, 0), arithmetic(3, 0), arithmetic(4, 0), arithmetic(5, 0),
                      arithmetic(6, 0), arithmetic(13, 0), CSRRS(5, 1, 0), CSRRWI(0, 2, 1), CSRRC(0, 3, 6)):
             self.assertTrue(floating_word(word), f"{word:08x}")
@@ -761,7 +775,6 @@ class FloatingClaimTest(unittest.TestCase):
             self.assertFalse(floating_word(word), f"{word:08x}")
 
     def test_only_a_claim_the_process_comes_back_from_is_left_out(self):
-        from tools.rv32_rtl import trap_records_by_region
         fadd, flw_word, illegal = 0x00208053, 0x00012087, 0xC0001073  # fadd.s, flw, csrw cycle
         trace = [
             "1 80400000 00000013",
@@ -777,6 +790,7 @@ class FloatingClaimTest(unittest.TestCase):
         self.assertEqual(groups[0x80420000 >> 17], [f"80420010 {flw_word:08x} trap 2 {flw_word:08x}"])
         self.assertEqual(groups[0x80440000 >> 17], [f"80440020 {illegal:08x} trap 2 {illegal:08x}"])
         self.assertEqual(len(trap_records_by_region(trace)[0x80420000 >> 17]), 2, "all of them without faults_only")
+
 
 if __name__ == "__main__":
     unittest.main()

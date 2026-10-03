@@ -88,7 +88,7 @@ One slow-tier run is Verilator's own (issue #33): `run-rv32-mandel-rtl-verilator
 draws mandel's default picture, about 900 M cycles and 12 minutes, because the
 F1 unit's adds and multiplies wait ~540–560 cycles each. Its fast twin is
 `run-rv32-float-rtl-verilator`, the float session, which runs fpcheck and then
-the same program drawing in 4×4 blocks. With it, `make -j8 test-rv32-full` took 17 min 37 s
+the same program drawing in 4×4 blocks. With it, `make -j8 test-rv32-full` took 16 min 5 s
 on the M-series Mac that measured 908 s for issue #26.
 
 The OS sessions never ran on Icarus in the aggregate; `run-rv32-os-rtl` is a

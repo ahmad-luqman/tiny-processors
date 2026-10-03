@@ -1046,8 +1046,8 @@ real on the emulator and the RTL ([the contract](rv32.md#floating-state-issue-33
   mean that the whole saved state, `fcsr` included, is current.
 - **Where the state lives.** `struct fstate` (132 bytes) is in
   `struct address_space`, beside the page-table bookkeeping, one per process
-  table entry: `struct proc` stays 256 bytes. `map_process()` clears it for
-  each new process, which therefore starts with zeros, as at reset. An owner
+  table entry: `struct proc` stays 256 bytes. `spawn()` clears it beside
+  setting FS Off, so a new process starts with zeros, as at reset. An owner
   that exits gives the FPU up unsaved.
 - **The kernel's own F code** is [kfpu.S](../programs/rv32/os/kfpu.S),
   assembled rv32if; the kernel's C stays RV32I. Each routine first sets
@@ -1060,11 +1060,12 @@ The trace comparison leaves the claims out with the retried ecalls
 
 ### Costs
 
-A claim costs 340 to 355 instructions when the owner was Dirty and is saved,
-290 to 305 when it was Clean and is not (the spread is the decode: a CSR
-instruction is recognised later than an arithmetic one), and about 290 with
-no owner at all: trap entry and exit, the decode, 33 loads, and 33 stores
-when saved. A switch between a float program and any other costs nothing;
+A claim costs 376 to 391 instructions when the owner was Dirty and is saved,
+326 to 341 when it was Clean and is not (the spread is the decode: a CSR
+instruction is recognised later than an arithmetic one), and about 320 with
+no owner at all: trap entry and exit, the decode, 33 loads, 33 stores when
+saved, and a walk over the process table checking that no process but the
+new owner runs with FS on (the kernel panics if one does). A switch between a float program and any other costs nothing;
 only two float programs taking turns pay, once per turn. In the float session
 on the emulator, fpcheck claims 69 times, fpmate (all three runs) 71 and mandel once;
 62 of the claims found a Clean owner and skipped the save. Sessions without a
@@ -1101,13 +1102,13 @@ Their PASS words are unchanged: console `8b4402e5`, jobs `408a6738`, menu
   the kernel kills it (cause 2) rather than claiming again.
 - The float session ([float.session](../programs/rv32/os/float.session):
   `fpcheck`, `fpmate bad`, `mandel 4`) gives `PASS ce2c91dd` on QEMU `virt`,
-  the emulator and Verilator with a stall per request (244,282,368 cycles, 3½ minutes, 22,405 timer interrupts),
+  the emulator and Verilator with a stall per request (244,780,912 cycles, 3½ minutes, 22,453 timer interrupts),
   results-identical with mandel's frame pinned, and identical disks.
 - **It can fail.** Each of these kernel changes makes fpcheck report failures:
   - taking the save out of `claim_fpu()`: the quotients, flags, held registers
     and fpmate's checks;
   - leaving `fpu_load` without f8: the held registers, and `fpmate fresh`;
-  - not clearing a new process's state in `map_process()`: `fpmate fresh`;
+  - not clearing a new process's state in `spawn()`: `fpmate fresh`;
   - leaving `fpu_owner` set when its process exits: `fpmate fresh`.
 
   Saving on every claim, Clean or not, still passes fpcheck, being correct but

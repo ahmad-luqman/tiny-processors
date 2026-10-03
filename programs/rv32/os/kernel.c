@@ -519,7 +519,8 @@ extern void fpu_load(const struct fstate *s);
  * the same tables with the last one's leaves cleared, rather than from 16 KiB cleared again; a
  * table is cleared once, when it is first taken. The layout is kept here, not read from the
  * proc: spawn() has overwritten the proc's base, span and flags by the time the old leaves are
- * cleared. */
+ * cleared. Issue #33 keeps each entry's floating state here too, being per process and, unlike
+ * struct proc, free to grow. */
 static struct address_space {
     uint32_t tables; /* the entry's tables in use, the root first; 0 before its first process */
     uint32_t base, span, guard; /* guard: the stack's lowest page, never mapped (Track 3) */
@@ -602,7 +603,6 @@ static void map_process(const struct proc *p, uint32_t stack)
     space->span = p->span;
     space->guard = p->base + p->span - stack;
     space->drives_engines = !!(p->flags & PROGRAM_ACCELERATORS);
-    memset(&space->fp, 0, sizeof space->fp); /* a new process's floating state: zeros, as at reset */
     lay_out(entry, PTE_R | PTE_W | PTE_X);
 }
 
@@ -678,6 +678,7 @@ static struct proc *spawn(const char *name, const char *args, uint32_t parent)
     p->f.x[10] = (uint32_t)(uintptr_t)copy;      /* a0: the arguments */
     p->f.pc = program->entry;
     p->f.mstatus = MSTATUS_MPIE; /* MPP 0: mret enters user mode (O5); FS Off (issue #33) */
+    memset(&spaces[p - procs].fp, 0, sizeof spaces[p - procs].fp); /* its floating state: zeros, as at reset */
     p->brk = (program->load + program->memory_size + 15u) & ~15u;
     p->pid = next_pid++;
     p->parent = parent;
@@ -1245,6 +1246,11 @@ static int claim_fpu(struct proc *p, uint32_t word)
     fpu_load(&spaces[p - procs].fp);
     p->f.mstatus |= MSTATUS_FS_CLEAN;
     fpu_owner = p;
+    for (uint32_t i = 0; i < MAX_PROCS; i++) { /* only the owner runs with FS on */
+        if (alive(&procs[i]) && &procs[i] != p && (procs[i].f.mstatus & MSTATUS_FS)) {
+            panic("fpu: a second process with FS on");
+        }
+    }
     return 1;
 }
 

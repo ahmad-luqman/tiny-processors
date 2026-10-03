@@ -29,6 +29,18 @@ SPANS = {"menu": 3, "lua": 6}  # slots; every other program takes one
 STACKS = {"lua": 0x28000}  # bytes (Track 3); every other program has the default
 
 
+def slot_of(pc):
+    """The program slot an address lies in, or None below the slots (the kernel)."""
+    return (pc - rv32_ramdisk.SLOT_BASE) // rv32_ramdisk.SLOT_SIZE if pc >= rv32_ramdisk.SLOT_BASE else None
+
+
+def slot_named(name):
+    """A program's first slot, as the Makefile assigns it."""
+    out = subprocess.run(["make", "-s", "--no-print-directory", f"print-rv32-os-slot-{name}"], cwd=ROOT,
+                         capture_output=True, text=True, check=True).stdout
+    return int(out.split()[0])
+
+
 def elfs(*names):
     paths = [OS / f"{name}.elf" for name in names]
     missing = [p for p in paths if not p.exists()]
@@ -349,8 +361,8 @@ class KernelTest(unittest.TestCase):
         image = OS / "kernel.bin"
         if not image.exists():
             self.skipTest("run make check-rv32-os-image")
-        slot = lambda pc: (pc - 0x80100000) // 0x20000 if pc >= 0x80100000 else None  # noqa: E731
-        bars, life = 12, 13
+        slot = slot_of
+        bars, life = slot_named("bars"), slot_named("life")
         with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
             disk, fifo = Path(directory) / "jobs.disk", Path(directory) / "trace"
             shutil.copy(OS / "disk.img", disk)
@@ -386,8 +398,8 @@ class KernelTest(unittest.TestCase):
         if not image.exists() or not disk_image.exists():
             self.skipTest("run make check-rv32-os-image build/rv32/os/apps.disk")
         fpu_save = f"{parse_elf(elf.read_bytes()).symbols['fpu_save']:08x}"
-        slot = lambda pc: (pc - 0x80100000) // 0x20000 if pc >= 0x80100000 else None  # noqa: E731
-        fpcheck, fpmate = 24, 25  # the Makefile's RV32_OS_SLOT_fpcheck and _fpmate
+        slot = slot_of
+        fpcheck, fpmate = slot_named("fpcheck"), slot_named("fpmate")
         with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
             disk, fifo, out = Path(directory) / "float.disk", Path(directory) / "trace", Path(directory) / "console"
             shutil.copy(disk_image, disk)

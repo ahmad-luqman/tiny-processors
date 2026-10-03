@@ -1444,15 +1444,22 @@ RV32_COMPILER_RT_CFLAGS := $(RV32_ARCH) -std=c11 -O2 -g -w -ffreestanding -fno-b
 RV32_LIBC_OBJS_libc := $(patsubst %,build/rv32/libc/picolibc/%.o,$(shell cat $(RV32_PICOLIBC)/SOURCES))
 RV32_LIBC_OBJS_builtins := $(patsubst %,build/rv32/libc/compiler-rt/%.o,$(shell cat $(RV32_COMPILER_RT)/SOURCES))
 RV32_LIBC_ARCHIVES := build/rv32/libc/libc.a build/rv32/libc/builtins.a
-$(RV32_LIBC_OBJS_libc): build/rv32/libc/picolibc/%.o: $(RV32_PICOLIBC)/%
-	@mkdir -p $(@D)
-	$(RV32_CC) $(RV32_PICOLIBC_CFLAGS) -MMD -c -o $@ $<
-$(RV32_LIBC_OBJS_builtins): build/rv32/libc/compiler-rt/%.o: $(RV32_COMPILER_RT)/%
-	@mkdir -p $(@D)
-	$(RV32_CC) $(RV32_COMPILER_RT_CFLAGS) -MMD -c -o $@ $<
-$(RV32_LIBC_ARCHIVES): build/rv32/libc/%.a: $$(RV32_LIBC_OBJS_$$*)
-	rm -f $@
-	$(RV32_AR) rcs $@ $^
+# The two archives' rules: $(1) the build directory, $(2) the prefix of its _OBJS_libc,
+# _OBJS_builtins and _ARCHIVES variables, $(3) the function that makes its flags from the soft
+# ones (issue #33 builds them twice: rv32_soft here, rv32_hf for hard float below).
+define rv32_libc_rules
+$$($(2)_OBJS_libc): $(1)/picolibc/%.o: $$(RV32_PICOLIBC)/%
+	@mkdir -p $$(@D)
+	$$(RV32_CC) $$(call $(3),$$(RV32_PICOLIBC_CFLAGS)) -MMD -c -o $$@ $$<
+$$($(2)_OBJS_builtins): $(1)/compiler-rt/%.o: $$(RV32_COMPILER_RT)/%
+	@mkdir -p $$(@D)
+	$$(RV32_CC) $$(call $(3),$$(RV32_COMPILER_RT_CFLAGS)) -MMD -c -o $$@ $$<
+$$($(2)_ARCHIVES): $(1)/%.a: $$$$($(2)_OBJS_$$$$*)
+	rm -f $$@
+	$$(RV32_AR) rcs $$@ $$^
+endef
+rv32_soft = $(1)
+$(eval $(call rv32_libc_rules,build/rv32/libc,RV32_LIBC,rv32_soft))
 
 # The programs' side: crt0 and crt.c (argv), the POSIX calls on the kernel's system calls, and the
 # console's line discipline (programs/rv32/os/libc) on the shell's line editor (line.c). crt.c is
@@ -1518,15 +1525,7 @@ RV32_LIBC_HF_ARCHIVES := build/rv32/libc-hf/libc.a build/rv32/libc-hf/builtins.a
 # undefined, which the image check refuses, so stdin is always linked (lld has no
 # --require-defined; the image check names it if it ever goes missing).
 RV32_LIBC_HF_GROUP := -Wl,--undefined=stdin -Wl,--start-group $(RV32_LIBC_HF_ARCHIVES) -Wl,--end-group
-$(RV32_LIBC_HF_OBJS_libc): build/rv32/libc-hf/picolibc/%.o: $(RV32_PICOLIBC)/%
-	@mkdir -p $(@D)
-	$(RV32_CC) $(call rv32_hf,$(RV32_PICOLIBC_CFLAGS)) -MMD -c -o $@ $<
-$(RV32_LIBC_HF_OBJS_builtins): build/rv32/libc-hf/compiler-rt/%.o: $(RV32_COMPILER_RT)/%
-	@mkdir -p $(@D)
-	$(RV32_CC) $(call rv32_hf,$(RV32_COMPILER_RT_CFLAGS)) -MMD -c -o $@ $<
-$(RV32_LIBC_HF_ARCHIVES): build/rv32/libc-hf/%.a: $$(RV32_LIBC_HF_OBJS_$$*)
-	rm -f $@
-	$(RV32_AR) rcs $@ $^
+$(eval $(call rv32_libc_rules,build/rv32/libc-hf,RV32_LIBC_HF,rv32_hf))
 RV32_OS_LIBC_HF_GLUE := build/rv32/os/libc-hf/libc/crt0.o build/rv32/os/libc-hf/libc/syscalls.o build/rv32/os/libc-hf/libc/tty.o \
 	build/rv32/os/libc-hf/libc/line.o
 RV32_OS_HF_MAIN_OBJS := $(foreach p,$(RV32_OS_HF_PROGRAMS),build/rv32/os/libc-hf/libc/$(p).o)

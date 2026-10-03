@@ -284,6 +284,23 @@ class FloatingStateTest(unittest.TestCase):
             (self.set_fs(1) + [CSRRCI(0, 2, 0)] + read, 'x9=00002000'),  # rs1 = 0: a read, not a write
         ])
 
+    def test_traps_and_mret_leave_fs_alone_and_sd_is_read_only(self):
+        handler_at = RAM + 0x200
+        words = LI(5, handler_at) + [CSRRW(0, MTVEC, 5)] + self.set_fs(2) + [ECALL(), CSRRS(9, MSTATUS, 0)]
+        words += self.set_fs(0) + LI(6, 0x80000000) + [CSRRS(0, MSTATUS, 6), CSRRS(12, MSTATUS, 0)] + FINISH()
+        words += [0] * ((handler_at - RAM) // 4 - len(words))
+        words += [CSRRS(10, MSTATUS, 0), CSRRS(11, MEPC, 0), ADDI(11, 11, 4), CSRRW(0, MEPC, 11), MRET()]
+        emu, _ = self.assert_same_pass(words)
+        read = {}  # the last value each register read: x10 in the handler, x9 after mret, x12 at the end
+        for line in emu.trace:
+            effect = integer_tests.effects(line)
+            if effect[:4] in ("x10=", "x12=") or effect[:3] == "x9=":
+                name, value = effect.split("=")
+                read[name] = int(value, 16)
+        self.assertEqual((read["x10"] >> 13) & 3, 2, "Clean in the handler: the trap kept FS")
+        self.assertEqual((read["x9"] >> 13) & 3, 2, "and after mret")
+        self.assertEqual(read["x12"] & 0x80006000, 0, "writing SD with FS Off sets nothing")
+
     def test_off_preserves_the_registers(self):
         """Off hides the floating state; turning it back on finds it as it was."""
         self.check_reads([

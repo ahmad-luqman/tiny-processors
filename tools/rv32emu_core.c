@@ -1083,6 +1083,17 @@ static bool fs_off(const machine *m)
     return (m->mstatus & MSTATUS_FS) == 0;
 }
 
+/* Issue #33: an F instruction (FLW, FSW, the arithmetic opcodes) or a CSR instruction on fflags, frm
+ * or fcsr: what FS Off makes illegal. The RTL's fs_illegal, the kernel's floating_instruction() and
+ * tools/rv32_rtl.py's floating_word() make the same test. An invalid encoding among them is illegal
+ * anyway, with the same cause and value. */
+static bool floating_instruction(uint32_t word)
+{
+    uint32_t opcode = word & 0x7fu, funct3 = (word >> 12) & 7u, csr = word >> 20;
+    return opcode == 0x07u || opcode == 0x27u || opcode == 0x43u || opcode == 0x47u || opcode == 0x4bu ||
+           opcode == 0x4fu || opcode == 0x53u || (opcode == 0x73u && (funct3 & 3u) && csr >= 1u && csr <= 3u);
+}
+
 static bool csr_read(const machine *m, uint32_t number, uint32_t *value)
 {
     switch (number) {
@@ -1341,6 +1352,9 @@ static void step(machine *m)
     bool writes_rd = false, writes_fd = false;
     mem_access status;
 
+    if (fs_off(m) && floating_instruction(word)) {
+        goto illegal; /* before any address is formed: it outranks an FLW's or FSW's memory faults */
+    }
     switch (opcode) {
     case 0x37: /* LUI */
         result = word & 0xfffff000u;
@@ -1385,7 +1399,7 @@ static void step(machine *m)
     }
     case 0x07: /* FLW */
     case 0x03: { /* loads */
-        if ((opcode == 0x07 && (funct3 != 2 || fs_off(m))) || funct3 == 3 || funct3 > 5) {
+        if ((opcode == 0x07 && funct3 != 2) || funct3 == 3 || funct3 > 5) {
             goto illegal;
         }
         int width = width_of(funct3);
@@ -1412,7 +1426,7 @@ static void step(machine *m)
     }
     case 0x27: /* FSW */
     case 0x23: { /* stores */
-        if ((opcode == 0x27 && (funct3 != 2 || fs_off(m))) || funct3 > 2) {
+        if ((opcode == 0x27 && funct3 != 2) || funct3 > 2) {
             goto illegal;
         }
         int width = width_of(funct3);
@@ -1488,9 +1502,6 @@ static void step(machine *m)
         }
         break;
     case 0x43: case 0x47: case 0x4b: case 0x4f: case 0x53: {
-        if (fs_off(m)) {
-            goto illegal;
-        }
         uint32_t fa = m->f[rs1], fb = m->f[rs2], fc = m->f[word >> 27];
         unsigned op = OP_ADD, rm = 0;
         bool arithmetic = true, rounded = false;
@@ -1598,8 +1609,7 @@ static void step(machine *m)
         }
         uint32_t number = word >> 20, old, operand = (funct3 & 4u) ? rs1 : a;
         bool writes = (funct3 & 3u) == 1 || rs1 != 0; /* csrrs/csrrc with a zero field only read */
-        if (!csr_read(m, number, &old) || (writes && csr_read_only(number)) || !csr_allowed(m, number) ||
-            (number >= CSR_FFLAGS && number <= CSR_FCSR && fs_off(m))) {
+        if (!csr_read(m, number, &old) || (writes && csr_read_only(number)) || !csr_allowed(m, number)) {
             goto illegal;
         }
         switch (funct3 & 3u) {

@@ -144,6 +144,18 @@ class PmpTest(StepTicksCase):
         expected.append((8, 0, USER + 4 * len(user) - 4, MSTATUS_U | 0x80))
         self.assertEqual(self.log(rtl.trace), expected)
 
+    def test_floating_state_off_in_user_mode(self):
+        """Issue #33: with mstatus.FS Off, user mode's F instructions and floating CSRs are illegal too,
+        each taken to machine mode with the word in mtval, and FS stays Off through the traps."""
+        from tools.rv32_f_asm import arithmetic, flw, fp
+        refused = [CSRRS(9, FCSR, 0), fp(0x70, 9, 4), arithmetic(0, 0), flw(1, 0)]
+        machine = set_pmp(ALL) + LI(5, 0x6000) + [CSRRC(0, MSTATUS, 5)] + enter_user()
+        emulator, rtl = self.assert_same(program(machine, refused + [ECALL()]))
+        mstatus = (MSTATUS_U & ~0x80006000) | 0x80  # FS Off, so no SD; MPIE from the mret
+        expected = [(2, word, USER + 4 * i, mstatus) for i, word in enumerate(refused)]
+        expected.append((8, 0, USER + 4 * len(refused), mstatus))
+        self.assertEqual(self.log(rtl.trace), expected)
+
     def test_pmp_grants_and_refuses_user_accesses(self):
         entries = {
             0: (NA4 | R, DATA >> 2),                          # one read-only word: beats entry 2

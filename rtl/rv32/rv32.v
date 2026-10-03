@@ -460,6 +460,7 @@ module rv32 #(
                                     (is_sfence && (priv == PRIV_U || mstatus_tvm)));
     // Issue #33: with FS Off, an F instruction (FLW and FSW too) or any access to fflags, frm or fcsr
     // is illegal, in every mode; decided in DECODE, so it outranks the faults an FLW or FSW would take.
+    // The emulator's floating_instruction(), the kernel's and tools/rv32_rtl.py's floating_word() match it.
     wire fs_illegal = mstatus_fs == 2'd0 &&
                       (fp_valid || fp_load || fp_store || (is_csr && csr_addr >= CSR_FFLAGS && csr_addr <= CSR_FCSR));
 
