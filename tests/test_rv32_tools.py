@@ -12,10 +12,11 @@ import unittest
 from tools.rv32_asm import (ADDI, BOOTROM, CLINT, CONSOLE, CSRRC, CSRRS, CSRRWI, DISPLAY, DONE, FB, INPUT, LW, MSTATUS,
                             PLIC, RAM, VIRTIO, i_type)
 from tools.rv32_f_asm import arithmetic, flw, fsw
+from tools import rv32_asm
 from tools.rv32_rtl import floating_word, trap_records_by_region
 from tools.rv32_devices import (DIAG_EXPECTED_VALUES, EVENT_PRESS, EVENT_VALID, FB_SIZE, KEYS, QUEUE_SIZE, diag_checksum,
                                 event_word, frame_hash, is_decimal, key_code, parse_input_script, render_diag_frame)
-from tools.rv32_image import (ImageError, check_image, check_listing, check_m_build, flatten, parse_elf,
+from tools.rv32_image import (ImageError, check_a_build, check_image, check_listing, check_m_build, flatten, parse_elf,
                               to_hex_words)
 from tools.rv32_run_qemu import classify, qemu_command
 from tools import rv32_vendor_libc
@@ -271,6 +272,44 @@ class ImageCheckerTests(unittest.TestCase):
             with self.subTest(write=write):
                 self.assertEqual(len(check_listing(base + write, allow_counters=True)), 1, "counters are read-only")
 
+    def test_a_gate_admits_exactly_the_valid_atomic_words(self):
+        """Issue #34: an opcode-0x2f word needs allow_a and a valid encoding, whatever objdump calls it."""
+        base = "80000000: 00040117     \tauipc\tsp, 0x40\n"
+        def line(word, text="amo"):
+            return f"{base}80000004: {word:08x}     \t{text}"
+        valid = [rv32_asm.LR_W(10, 11), rv32_asm.LR_W(10, 11, aq=1, rl=1), rv32_asm.SC_W(10, 12, 11),
+                 *(op(10, 12, 11) for op in rv32_asm.AMO_OPS), rv32_asm.AMOADD_W(0, 12, 11, aq=1)]
+        for word in valid:
+            with self.subTest(word=f"{word:08x}"):
+                self.assertEqual(len(check_listing(line(word))), 1, "RV32I listings reject A")
+                self.assertEqual(check_listing(line(word), allow_a=True), [])
+        invalid = [rv32_asm.LR_W(10, 11) | (5 << 20),          # LR.W with rs2 != 0
+                   rv32_asm.AMOADD_W(10, 12, 11) ^ (1 << 12),  # funct3 3: a doubleword
+                   rv32_asm.r_type(0x2F, 10, 2, 11, 12, 0b00101 << 2),  # an undefined funct5 (AMOCAS.W is Zacas)
+                   rv32_asm.AMOADD_W(10, 12, 11) ^ (2 << 12)]  # funct3 0
+        for word in invalid:
+            with self.subTest(word=f"{word:08x}"):
+                self.assertEqual(len(check_listing(line(word), allow_a=True)), 1)
+        self.assertEqual(check_a_build(line(rv32_asm.SC_W(10, 12, 11))), [])
+        self.assertEqual(check_a_build(base), ["RV32A image has no A-extension instruction"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            elf, listing, plain = path / "a.elf", path / "a.lst", path / "plain.lst"
+            elf.write_bytes(build_elf())
+            listing.write_text(line(rv32_asm.AMOSWAP_W(10, 12, 11)) + "\n")
+            plain.write_text(base)
+
+            def check(*options):
+                return subprocess.run([sys.executable, str(ROOT / "tools/rv32_image.py"), str(elf), *options],
+                                      capture_output=True, text=True)
+            self.assertEqual(check("--listing", str(listing)).returncode, 1, "without a flag the AMO is refused")
+            self.assertEqual(check("--listing", str(listing), "--allow-a").returncode, 0)
+            self.assertEqual(check("--listing", str(listing), "--require-a").returncode, 0, "--require-a implies --allow-a")
+            result = check("--listing", str(plain), "--require-a")
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("no A-extension instruction", result.stderr)
+            self.assertEqual(check("--allow-a").returncode, 2, "--allow-a needs a listing")
+
     def test_require_m_needs_hardware_multiply_and_no_software_routines(self):
         with_m = "80000000: 00040117     \tauipc\tsp, 0x40\n80000004: 02b50533     \tmul\ta0, a0, a1\n"
         without_m = "80000000: 00040117     \tauipc\tsp, 0x40\n80000004: 00b50533     \tadd\ta0, a0, a1\n"
@@ -303,7 +342,7 @@ class ImageCheckerTests(unittest.TestCase):
             self.assertEqual(check(good, "--listing", str(listing)).returncode, 1, "without either flag mul is refused")
             result = check(good, "--require-m")
             self.assertEqual(result.returncode, 2, "--require-m needs a listing to inspect")
-            self.assertIn("--allow-m, --allow-counters, --allow-privileged, --allow-system and --allow-user require --listing", result.stderr)
+            self.assertIn("--allow-m, --allow-a, --allow-counters, --allow-privileged, --allow-system and --allow-user ", result.stderr)
 
     def test_selfcheck_expected_checksum_matches_source_and_makefile(self):
         checksum = 2166136261

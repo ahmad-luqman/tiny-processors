@@ -973,6 +973,68 @@ static mem_access store(machine *m, uint32_t va, int width, uint32_t value)
     return r->store(m, addr - r->base, width, value);
 }
 
+/* The A extension (issue #34): funct5 of opcode 0x2f, whose funct3 is 2 (a word). */
+enum amo_op {
+    AMO_ADD = 0x00, AMO_SWAP = 0x01, AMO_LR = 0x02, AMO_SC = 0x03, AMO_XOR = 0x04, AMO_OR = 0x08,
+    AMO_AND = 0x0c, AMO_MIN = 0x10, AMO_MAX = 0x14, AMO_MINU = 0x18, AMO_MAXU = 0x1c,
+};
+
+/* Whether funct5 (and rs2, which LR.W requires to be 0) name an instruction. */
+static bool amo_valid(uint32_t funct5, uint32_t rs2)
+{
+    switch (funct5) {
+    case AMO_LR: return rs2 == 0;
+    case AMO_ADD: case AMO_SWAP: case AMO_SC: case AMO_XOR: case AMO_OR: case AMO_AND:
+    case AMO_MIN: case AMO_MAX: case AMO_MINU: case AMO_MAXU: return true;
+    default: return false;
+    }
+}
+
+/* The value an AMO writes, from the word it read and rs2. */
+static uint32_t amo_value(uint32_t funct5, uint32_t old, uint32_t operand)
+{
+    switch (funct5) {
+    case AMO_SWAP: return operand;
+    case AMO_ADD: return old + operand;
+    case AMO_XOR: return old ^ operand;
+    case AMO_AND: return old & operand;
+    case AMO_OR: return old | operand;
+    case AMO_MIN: return (int32_t)old < (int32_t)operand ? old : operand;
+    case AMO_MAX: return (int32_t)old > (int32_t)operand ? old : operand;
+    case AMO_MINU: return old < operand ? old : operand;
+    default: return old > operand ? old : operand; /* AMO_MAXU */
+    }
+}
+
+/* An AMO's read and write of one aligned word. Misalignment, the walk (a store's, so W and D) and
+ * PMP (read and write) are checked first. Then the region sees a read and a write in turn, as the
+ * RTL's bus does: a window that refuses the read (or has none) is an access fault with no write; one
+ * that refuses the write (or is read-only) is an access fault after the read and its side effects. */
+static mem_access amo(machine *m, uint32_t va, uint32_t funct5, uint32_t operand, uint32_t *old, uint32_t *value)
+{
+    uint32_t priv = data_priv(m), addr;
+    if (va % 4u) {
+        return ACC_MISALIGNED;
+    }
+    mem_access status = translate(m, va, WALK_STORE, priv, &addr);
+    if (status != ACC_OK) {
+        return status;
+    }
+    if (!pmp_allows(priv, m, addr, PMP_R | PMP_W)) {
+        return ACC_FAULT;
+    }
+    const region *r = find_region(addr, 4);
+    if (!r || !r->load) {
+        return ACC_FAULT;
+    }
+    status = r->load(m, addr - r->base, 4, old);
+    if (status != ACC_OK) {
+        return status;
+    }
+    *value = amo_value(funct5, *old, operand);
+    return r->store ? r->store(m, addr - r->base, 4, *value) : ACC_FAULT;
+}
+
 static void trace_effects(const machine *m)
 {
     if (!m->trace) {
@@ -984,10 +1046,10 @@ static void trace_effects(const machine *m)
     if (m->wr_freg >= 0) fprintf(m->trace, " f%d=%08" PRIx32, m->wr_freg, m->f[m->wr_freg]);
     if (m->wr_fcsr) fprintf(m->trace, " fcsr=%02x", m->fcsr);
     if (m->mem_write) {
-        fprintf(m->trace, " mem[%08" PRIx32 "]<-%08" PRIx32 "/%d", m->mem_addr, m->mem_value, m->mem_width);
+        fprintf(m->trace, " mem[%08" PRIx32 "]<-%08" PRIx32 "/%d", m->mem_addr, m->mem_write_value, m->mem_width);
     }
     if (m->mem_read) {
-        fprintf(m->trace, " mem[%08" PRIx32 "]->%08" PRIx32 "/%d", m->mem_addr, m->mem_value, m->mem_width);
+        fprintf(m->trace, " mem[%08" PRIx32 "]->%08" PRIx32 "/%d", m->mem_addr, m->mem_read_value, m->mem_width);
     }
 }
 
@@ -995,9 +1057,10 @@ static void trace_effects(const machine *m)
  * MIE and MIE clears, MPP takes the privilege mode and the machine enters machine mode (O5). Since
  * issue #20 a trap from S or U mode whose cause medeleg (an exception) or mideleg (an interrupt)
  * delegates goes to S mode instead, through the supervisor's copies: sepc, scause, stval, SPIE and
- * SIE, SPP, stvec. */
+ * SIE, SPP, stvec. Since issue #34 every trap also clears LR.W's reservation. */
 static void enter_handler(machine *m, uint32_t cause, uint32_t tval)
 {
+    m->reserved = false; /* issue #34: a trap ends any reservation */
     uint32_t delegated = (cause & INTERRUPT) ? m->mideleg : m->medeleg;
     if (m->priv != PRIV_M && ((delegated >> (cause & 31u)) & 1u)) {
         m->sepc = m->pc;
@@ -1412,7 +1475,7 @@ static void step(machine *m)
         }
         m->mem_read = true;
         m->mem_addr = addr;
-        m->mem_value = value;
+        m->mem_read_value = value;
         m->mem_width = width;
         if (funct3 == 0) {
             value = (uint32_t)(int32_t)(int8_t)value;
@@ -1441,8 +1504,65 @@ static void step(machine *m)
         }
         m->mem_write = true;
         m->mem_addr = addr;
-        m->mem_value = value;
+        m->mem_write_value = value;
         m->mem_width = width;
+        break;
+    }
+    case 0x2f: { /* the A extension (issue #34): LR.W, SC.W and the AMOs; aq and rl change nothing on one hart */
+        uint32_t funct5 = funct7 >> 2, addr = a, value, old;
+        if (funct3 != 2 || !amo_valid(funct5, rs2)) {
+            goto illegal;
+        }
+        if (funct5 == AMO_LR) {
+            status = load(m, addr, 4, &value);
+            if (status != ACC_OK) {
+                trap(m, word, status == ACC_MISALIGNED ? CAUSE_LOAD_MISALIGNED :
+                              status == ACC_PAGE_FAULT ? CAUSE_LOAD_PAGE_FAULT : CAUSE_LOAD_FAULT, addr);
+                return;
+            }
+            m->mem_read = true;
+            m->mem_addr = addr;
+            m->mem_read_value = value;
+            m->mem_width = 4;
+            m->reserved = true;
+            m->reservation = addr;
+            result = value;
+        } else if (funct5 == AMO_SC) {
+            /* Alignment is checked first, reservation or not (QEMU agrees); without the reservation
+             * the SC fails with no access, so no translation, PMP or bus fault either. */
+            bool held = m->reserved && m->reservation == addr;
+            if (addr % 4u) {
+                trap(m, word, CAUSE_STORE_MISALIGNED, addr);
+                return;
+            }
+            if (held) {
+                status = store(m, addr, 4, b);
+                if (status != ACC_OK) {
+                    trap(m, word, status == ACC_PAGE_FAULT ? CAUSE_STORE_PAGE_FAULT : CAUSE_STORE_FAULT, addr);
+                    return;
+                }
+                m->mem_write = true;
+                m->mem_addr = addr;
+                m->mem_write_value = b;
+                m->mem_width = 4;
+            }
+            m->reserved = false;
+            result = held ? 0u : 1u;
+        } else {
+            status = amo(m, addr, funct5, b, &old, &value);
+            if (status != ACC_OK) {
+                trap(m, word, status == ACC_MISALIGNED ? CAUSE_STORE_MISALIGNED :
+                              status == ACC_PAGE_FAULT ? CAUSE_STORE_PAGE_FAULT : CAUSE_STORE_FAULT, addr);
+                return;
+            }
+            m->mem_read = m->mem_write = true;
+            m->mem_addr = addr;
+            m->mem_read_value = old;
+            m->mem_write_value = value;
+            m->mem_width = 4;
+            result = old;
+        }
+        writes_rd = true;
         break;
     }
     case 0x13: { /* OP-IMM */
@@ -1577,6 +1697,7 @@ static void step(machine *m)
             if (word == 0x30200073u && m->priv == PRIV_M) {
                 /* MRET: MIE from MPIE, MPIE set, the mode from MPP, MPP to user (O5) */
                 m->mstatus = (m->mstatus & ~MSTATUS_MIE) | MSTATUS_MPIE | ((m->mstatus & MSTATUS_MPIE) ? MSTATUS_MIE : 0u);
+                m->reserved = false; /* issue #34: as QEMU does; the spec allows it */
                 m->priv = m->mpp;
                 m->mpp = PRIV_U;
                 if (m->priv != PRIV_M) {
@@ -1588,6 +1709,7 @@ static void step(machine *m)
             if (word == 0x10200073u && supervisor_allows(m, MSTATUS_TSR)) {
                 /* SRET (issue #20): SIE from SPIE, SPIE set, the mode from SPP, SPP to user */
                 m->priv = (m->mstatus & MSTATUS_SPP) ? PRIV_S : PRIV_U;
+                m->reserved = false;
                 m->mstatus = (m->mstatus & ~(MSTATUS_SIE | MSTATUS_SPP | MSTATUS_MPRV)) | MSTATUS_SPIE |
                              ((m->mstatus & MSTATUS_SPIE) ? MSTATUS_SIE : 0u);
                 next = m->sepc;

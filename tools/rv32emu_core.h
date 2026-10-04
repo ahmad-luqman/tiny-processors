@@ -131,6 +131,8 @@ typedef struct {
     uint64_t limit;
     FILE *trace;
     bool in_trap;     /* trap taken and no instruction of the handler has retired yet */
+    bool reserved;        /* issue #34: LR.W's reservation, cleared by every SC.W, trap and xRET */
+    uint32_t reservation; /* the reserved word's virtual address */
     enum halt halt;
     uint32_t done_word;
     uint32_t second_cause, second_tval; /* the trap that could not be delivered */
@@ -157,8 +159,8 @@ typedef struct {
     int wr_reg, wr_freg;
     bool wr_fcsr;
     uint32_t wr_value;
-    bool mem_read, mem_write;
-    uint32_t mem_addr, mem_value;
+    bool mem_read, mem_write; /* both for an AMO (issue #34): one address, the old and the new value */
+    uint32_t mem_addr, mem_read_value, mem_write_value;
     int mem_width;
 } machine;
 

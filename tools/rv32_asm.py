@@ -208,6 +208,21 @@ def DIVU(rd, a, b): return r_type(0x33, rd, 5, a, b, 1)
 def REM(rd, a, b): return r_type(0x33, rd, 6, a, b, 1)
 def REMU(rd, a, b): return r_type(0x33, rd, 7, a, b, 1)
 M_OPS = (MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU)
+# The A extension (issue #34): opcode 0x2f, funct3 2 (a word), the operation in funct5 above aq and rl.
+# The address is rs1 with no offset; the AMOs and SC.W take their operand from rs2.
+def _amo(funct5, rd, rs1, rs2, aq=0, rl=0): return r_type(0x2F, rd, 2, rs1, rs2, (funct5 << 2) | (aq << 1) | rl)
+def LR_W(rd, rs1, aq=0, rl=0): return _amo(0b00010, rd, rs1, 0, aq, rl)
+def SC_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b00011, rd, rs1, rs2, aq, rl)
+def AMOSWAP_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b00001, rd, rs1, rs2, aq, rl)
+def AMOADD_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b00000, rd, rs1, rs2, aq, rl)
+def AMOXOR_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b00100, rd, rs1, rs2, aq, rl)
+def AMOAND_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b01100, rd, rs1, rs2, aq, rl)
+def AMOOR_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b01000, rd, rs1, rs2, aq, rl)
+def AMOMIN_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b10000, rd, rs1, rs2, aq, rl)
+def AMOMAX_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b10100, rd, rs1, rs2, aq, rl)
+def AMOMINU_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b11000, rd, rs1, rs2, aq, rl)
+def AMOMAXU_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b11100, rd, rs1, rs2, aq, rl)
+AMO_OPS = (AMOSWAP_W, AMOADD_W, AMOXOR_W, AMOAND_W, AMOOR_W, AMOMIN_W, AMOMAX_W, AMOMINU_W, AMOMAXU_W)
 def FENCE(): return i_type(0x0F, 0, 0, 0, 0x0FF)
 def ECALL(): return 0x00000073
 def EBREAK(): return 0x00100073

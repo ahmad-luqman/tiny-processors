@@ -459,19 +459,19 @@ def first_checkpoint_difference(observed, expected):
 
 
 def cycle_relation(rtl):
-    """Relate the testbench's cycle count to the trace: 4 cycles per instruction without a data
-    access, 5 with one, plus the stalls. With Sv32 on, the walk's cycles are one per TLB miss and
-    one per page-table read (issue #24: a hit costs none). Returns (text, holds); `holds` is None
-    when a trap line makes the formula inapplicable (a trap costs the cycles up to the state that
-    raised it)."""
+    """Relate the testbench's cycle count to the trace: 4 cycles per instruction plus one per data
+    access (a load or store has one, an AMO two since issue #34, a failed SC.W none), plus the
+    stalls. With Sv32 on, the walk's cycles are one per TLB miss and one per page-table read (issue
+    #24: a hit costs none). Returns (text, holds); `holds` is None when a trap line makes the
+    formula inapplicable (a trap costs the cycles up to the state that raised it)."""
     steps = len(rtl.trace)
-    memory = sum("mem[" in line for line in rtl.trace)
+    memory = sum(line.count("mem[") for line in rtl.trace)
     traps = sum(" trap " in line or " interrupt " in line for line in rtl.trace)
     halt = rtl.halt
-    expected = (4 * (steps - memory) + 5 * memory + halt["stalls"] + halt.get("fp_waits", 0) + halt.get("md_waits", 0) +
+    expected = (4 * steps + memory + halt["stalls"] + halt.get("fp_waits", 0) + halt.get("md_waits", 0) +
                 halt.get("ptw_waits", 0))
     walks = halt.get("walks", 0)
-    text = (f"cycles {halt['cycles']} = 4 x {steps - memory} + 5 x {memory} + {halt['stalls']} stalls; "
+    text = (f"cycles {halt['cycles']} = 4 x {steps} + {memory} data + {halt['stalls']} stalls; "
             f"transfers {halt['transfers']} = {steps} fetches + {memory} data")
     if halt.get("fp_waits", 0):
         text += f"; plus {halt['fp_waits']} FPU issue/wait cycles"
