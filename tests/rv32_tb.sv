@@ -338,6 +338,12 @@ module rv32_tb;
             if (dut.core.ptw_cycle) ptw_waits = ptw_waits + 1;
             if (dut.core.tlb_hit_seen) tlb_hits = tlb_hits + 1;
             if (dut.core.tlb_miss_seen) tlb_misses = tlb_misses + 1;
+            // Issue #34: nothing a device writes may land inside an atomic access, and an SC.W's
+            // store is accepted only while its reservation still holds (a device write ends it).
+            if (dut.ram_device_write && dut.mem_lock)
+                $fatal(1, "A device wrote RAM during an SC or AMO access at cycle %0d (state %0d sc %0d amo %0d held %0d)", cycles, state, dut.core.is_sc, dut.core.is_amo, dut.gpu_grant_held);
+            if (mem_valid && mem_ready && mem_we && state == dut.core.MEM && dut.core.is_sc && !dut.core.reserved)
+                $fatal(1, "An SC stored after its reservation ended at cycle %0d", cycles);
             // The M unit restarts on a start while busy (rtl/rv32/rv32_muldiv.v);
             // the core must never ask it to.
             if (dut.core.muldiv.start && dut.core.muldiv.busy)

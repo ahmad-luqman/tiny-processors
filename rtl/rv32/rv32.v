@@ -28,6 +28,13 @@ module rv32 #(
     // to LR.W's reserved physical word ends the reservation.
     input  wire        ram_snoop_write,
     input  wire [31:0] ram_snoop_addr,
+    // An engine holds a RAM grant that has not been accepted yet: an SC.W or AMO waits for it
+    // before it presents its access (an SC rechecks its reservation then).
+    input  wire        ram_engine_held,
+    // This core presents an SC.W or an AMO's read or write: the SoC grants no device the RAM port
+    // until it is accepted, so nothing lands between the reservation check and the store, or
+    // between an AMO's read and its write.
+    output wire        mem_lock,
     // Memory port (docs/rv32.md, "Memory transaction contract").
     output wire        mem_valid,
     output wire [31:0] mem_addr,
@@ -103,6 +110,7 @@ module rv32 #(
     reg [2:0] mie_bits; // {MEIE, MTIE, MSIE}
     reg [31:0] mscratch;
     reg fetch_waiting;  // this FETCH has presented its request, so it can no longer be replaced
+    reg data_waiting;   // issue #34: this MEM has presented its request, so an SC.W is committed to it
     // Protection (O5): the privilege mode and mstatus.MPP (3 machine, 1 supervisor since issue #20,
     // 0 user), the counters user mode may read, and eight PMP entries.
     reg [1:0] priv, mpp;
@@ -369,6 +377,13 @@ module rv32 #(
     // (funct5 is ir[31:27]; bit 1 is set only for LR and SC, which are not AMOs, so the ALU never
     // looks at it).
     wire sc_skip = is_sc && !(reserved && reservation == alu_result[31:2]);
+    // EXECUTE's decision is rechecked as MEM first presents the store: a device's write during the
+    // walk ends the reservation, and the SC then fails there with no access. An SC or AMO is not
+    // presented while an engine holds a RAM grant, so once presented (mem_lock) no device write
+    // can land before it is accepted, nor between an AMO's read and its write.
+    wire lock_first = (state == MEM) && (is_sc || is_amo) && !data_waiting;
+    wire sc_abort = lock_first && is_sc && !reserved;
+    wire lock_wait = lock_first && !sc_abort && ram_engine_held;
     wire amo_minmax = ir[31], amo_unsigned = ir[30], amo_max = ir[29], amo_swap = ir[27];
     wire [1:0] amo_logic = ir[30:29];
     wire amo_less = amo_unsigned ? mdr < b : $signed(mdr) < $signed(b);
@@ -537,11 +552,12 @@ module rv32 #(
     wire unused_ok = &{1'b0, ptw_cycle, tlb_miss_seen, tlb_hit_seen, pmp_addr[1:0], ram_snoop_addr[1:0]};
 
     assign mem_valid = !reset && ((state == FETCH && !irq_take && !fetch_deny && !fetch_walk && !fetch_page_fault) ||
-                                  (state == MEM) || (state == AMO_WRITE) ||
+                                  (state == MEM && !sc_abort && !lock_wait) || (state == AMO_WRITE) ||
                                   (state == WALK && !walk_deny));
     assign mem_fetch = mem_valid && (state == FETCH);
     assign mem_ptw = mem_valid && (state == WALK);
     assign mem_addr = mem_fetch ? access_addr : mem_ptw ? pte_addr[31:0] : xlate_ok ? phys : alu_out;
+    assign mem_lock = mem_valid && (state == MEM || state == AMO_WRITE) && (is_sc || is_amo);
     // An AMO reads in MEM and writes in AMO_WRITE; any other access writes in MEM if it writes.
     assign mem_we = mem_valid && ((state == MEM && mem_writes && !mem_reads) || state == AMO_WRITE);
     assign mem_strb = !mem_valid ? 4'b0000 : (mem_fetch || mem_ptw) ? 4'b1111 : strb;
@@ -630,6 +646,7 @@ module rv32 #(
             end
             mscratch <= 32'd0;
             fetch_waiting <= 1'b0;
+            data_waiting <= 1'b0;
             trap_interrupt <= 1'b0;
             cycle_count <= 64'd0;
             instret_count <= 64'd0;
@@ -653,6 +670,7 @@ module rv32 #(
             // In step-tick mode a tick is the pulse of the step completed in the previous cycle.
             cycle_count <= cycle_count + (step_ticks ? {63'd0, retire || trap} : 64'd1);
             fetch_waiting <= (state == FETCH) && mem_valid && !mem_ready;
+            data_waiting <= (state == MEM) && mem_valid && !mem_ready;
             // Issue #34: a device wrote LR.W's reserved word. It cannot coincide with this core's
             // own access (the RAM has one port), so no later assignment this cycle competes.
             if (ram_snoop_write && ram_snoop_addr[31:2] == reservation_pa) reserved <= 1'b0;
@@ -788,7 +806,10 @@ module rv32 #(
                     alu_out <= md_result;
                     state <= WRITEBACK;
                 end
-                MEM: if (mem_ready) begin
+                MEM: if (sc_abort) begin
+                    sc_held <= 1'b0; // issue #34: a device wrote the word since EXECUTE
+                    state <= WRITEBACK;
+                end else if (mem_ready) begin
                     mdr <= mem_rdata;
                     if (mem_error)
                         take_trap(1'b0, is_load ? CAUSE_LOAD_FAULT : CAUSE_STORE_FAULT, alu_out, ir_pc);

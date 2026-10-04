@@ -50,7 +50,8 @@ class StepTicksCase(unittest.TestCase):
     setUpClass = classmethod(integer_tests.RtlTest.setUpClass.__func__)
     tearDownClass = classmethod(integer_tests.RtlTest.tearDownClass.__func__)
 
-    def run_both(self, words, ticks="steps", stall=None, seed=None, input_script=None, limit=200000, halt="done"):
+    def run_both(self, words, ticks="steps", stall=None, seed=None, input_script=None, limit=200000, halt="done",
+                 gpu_seed=None):
         with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
             hex_path, bin_path = write_image(words, directory, "image")
             script = None
@@ -59,7 +60,7 @@ class StepTicksCase(unittest.TestCase):
                 script.write_text(input_script)
             emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace", limit=limit, input_script=script)
             rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", stall=stall, seed=seed,
-                          input_script=script, ticks=ticks, max_cycles=4000000)
+                          input_script=script, ticks=ticks, max_cycles=4000000, gpu_seed=gpu_seed)
         report = f"\n--- simulator ---\n{rtl.noise}--- console ---\n{rtl.console}--- stderr ---\n{rtl.stderr}{emulator.stderr}"
         self.assertEqual(rtl.status, 0, report)
         self.assertEqual(rtl.noise, "", report)

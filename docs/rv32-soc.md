@@ -200,7 +200,10 @@ complete pixel checks and the new synthesis baseline.
 Since issue #34 the SoC also reports to the core every RAM write it accepts from
 a device, the graphics engines or virtio-blk's DMA (`ram_snoop_write`,
 `ram_snoop_addr`). A write to the word an `lr.w` reserved ends the reservation,
-so the `sc.w` after it fails ([A record](rv32-a.md#the-reservation)).
+so the `sc.w` after it fails ([A record](rv32-a.md#the-reservation)). While the
+core presents an `sc.w` or an AMO access (`mem_lock`), the arbiter grants the
+engines nothing new, and the core waits for any grant an engine already holds
+(`ram_engine_held`), so no device write lands inside an atomic access.
 
 ## Accelerator overlap
 

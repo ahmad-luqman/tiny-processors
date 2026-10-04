@@ -218,6 +218,32 @@ class AtomicTest(StepTicksCase):
                     self.assertEqual(stored(run.trace, SAVE + 0x44), 0xFFFFFFFF if outcome else 0,
                                      "the clear's word survives the failed SC")
 
+    def test_no_engine_write_lands_inside_an_atomic_access(self):
+        """Codex P1, second round: G2 clears its depth buffer, with seeded waits on its RAM port and
+        on the CPU's, while the CPU runs LR/SC pairs on depth words near the clear and AMOs on a
+        word outside it. While G2 runs, an SC there must fail or take a store fault, never succeed,
+        whether the clear's write lands before EXECUTE, during the walk to MEM (the SC then fails in
+        MEM with no access) or would land while the store waits (the core's lock keeps it out). The
+        testbench enforces the rest on every cycle: no device write while the core presents an SC
+        or an AMO access, and no SC store after its reservation ended."""
+        zbase = RAM + 0x100000
+        body = LI(8, G3D_BASE) + LI(9, zbase) + [SW(9, 8, G3D_ZBASE), ADDI(9, 0, G3D_CLEAR_Z), SW(9, 8, G3D_COMMAND)]
+        body += LI(7, zbase) + LI(21, DATA) + [ADDI(20, 0, 0), ADDI(22, 0, 1)] + LI(23, 200)
+        loop = [ADDI(11, 0, 2), LR_W(5, 7), SC_W(11, 0, 7),          # x11 stays 2 if the SC traps
+                BNE(11, 0, 8), ADDI(20, 20, 1),                      # count successes
+                AMOADD_W(0, 22, 21), ADDI(7, 7, 32), ADDI(23, 23, -1), BNE(23, 0, -32)]
+        body += loop + [LW(24, 8, G3D_STATUS)] + LI(28, SAVE) + [LW(25, 28, 8), LW(26, 21, 0)] + dump(20, 24, 25, 26)
+        for gpu_seed in (3, 11):
+            with self.subTest(gpu_seed=gpu_seed):
+                emulator, rtl = self.run_both(at_handler(body, skip_and_return()), ticks="cycles", seed=gpu_seed + 1,
+                                              gpu_seed=gpu_seed, limit=400000)
+                for run in (emulator, rtl):
+                    self.assertEqual(run.halt["outcome"], "pass")
+                    self.assertEqual(stored(run.trace, SAVE + 0x40), 0, "no SC succeeded while G2 ran")
+                    self.assertEqual(stored(run.trace, SAVE + 0x44) & G3D_BUSY, G3D_BUSY, "G2 outlasted the loop")
+                    self.assertEqual(stored(run.trace, SAVE + 0x4C), 200, "every AMO landed")
+                self.assertGreater(stored(rtl.trace, SAVE + 0x48), 0, "some SCs faulted on the locked buffer")
+
     def test_every_funct5(self):
         """All 32 funct5 values under opcode 0x2f (funct3 2, rs2 x6, and LR.W with rs2 x0 too): the
         backends trap exactly on the words valid_a_word refuses, and those are exactly the ones
