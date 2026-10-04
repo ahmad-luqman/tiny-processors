@@ -28,6 +28,10 @@ module rv32 #(
     // to LR.W's reserved physical word ends the reservation.
     input  wire        ram_snoop_write,
     input  wire [31:0] ram_snoop_addr,
+    // The same for an engine's write to the framebuffer, which is memory LR.W can reserve too. It
+    // may land in the cycle a DMA write to RAM does, so it has a port of its own.
+    input  wire        fb_snoop_write,
+    input  wire [31:0] fb_snoop_addr,
     // An engine holds a RAM grant that has not been accepted yet: an SC.W or AMO waits for it
     // before it presents its access (an SC rechecks its reservation then).
     input  wire        ram_engine_held,
@@ -549,7 +553,7 @@ module rv32 #(
     wire tlb_hit_seen = (fetch_translating && tlb_hit && !irq_take && (fetch_page_fault || fetch_deny || mem_ready)) ||
                         (data_translating && tlb_hit);
     // The testbench reads ptw_cycle and the TLB pulses; PMP and the reservation compare whole words.
-    wire unused_ok = &{1'b0, ptw_cycle, tlb_miss_seen, tlb_hit_seen, pmp_addr[1:0], ram_snoop_addr[1:0]};
+    wire unused_ok = &{1'b0, ptw_cycle, tlb_miss_seen, tlb_hit_seen, pmp_addr[1:0], ram_snoop_addr[1:0], fb_snoop_addr[1:0]};
 
     assign mem_valid = !reset && ((state == FETCH && !irq_take && !fetch_deny && !fetch_walk && !fetch_page_fault) ||
                                   (state == MEM && !sc_abort && !lock_wait) || (state == AMO_WRITE) ||
@@ -673,7 +677,8 @@ module rv32 #(
             data_waiting <= (state == MEM) && mem_valid && !mem_ready;
             // Issue #34: a device wrote LR.W's reserved word. It cannot coincide with this core's
             // own access (the RAM has one port), so no later assignment this cycle competes.
-            if (ram_snoop_write && ram_snoop_addr[31:2] == reservation_pa) reserved <= 1'b0;
+            if ((ram_snoop_write && ram_snoop_addr[31:2] == reservation_pa) ||
+                (fb_snoop_write && fb_snoop_addr[31:2] == reservation_pa)) reserved <= 1'b0;
             case (state)
                 FETCH: if (irq_take) begin
                     retire_pc <= pc;

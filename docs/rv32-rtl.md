@@ -89,6 +89,7 @@ The core drives the port from the [memory transaction contract](rv32.md#memory-t
 | `mem_error` | in | The access was refused: the core raises cause 1, 5, or 7 and issues nothing further for that instruction. |
 | `mem_fetch` | out | Part of the contract since M5: 1 while the presented request is an instruction fetch. The bus decoder refuses fetches outside RAM with `error`; the testbench uses it to attribute data transactions to the retiring instruction. |
 | `ram_snoop_write`, `ram_snoop_addr[31:0]` | in | Issue #34: a device (G2, virtio-blk) wrote RAM at this address in this cycle; a write to LR.W's reserved physical word ends the reservation. |
+| `fb_snoop_write`, `fb_snoop_addr[31:0]` | in | Issue #34: the same for an engine's framebuffer write, which may coincide with a DMA write to RAM. |
 | `ram_engine_held` | in | Issue #34: a graphics engine holds a RAM grant not yet accepted; an `sc.w` or AMO waits in `MEM` without presenting. |
 | `mem_lock` | out | Issue #34: the presented request is an `sc.w`'s store or an AMO's read or write; the SoC grants no engine the RAM port meanwhile. |
 | `mem_ptw` | out | Issue #20: 1 while the presented request is a page-table read. The SoC hands the bus decoder `mem_fetch \|\| mem_ptw`, so only RAM answers it, and the testbench counts it as a walk read rather than an instruction's data. |

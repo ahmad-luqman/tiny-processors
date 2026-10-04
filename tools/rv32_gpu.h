@@ -11,6 +11,9 @@ typedef struct {
     int32_t x,y,lo,top,hi,bottom,step,dx,dy,sy,err;
     int32_t ax,ay,bx,by,cx,cy;
     gpu_phase phase; uint8_t pixel;
+    /* Issue #34: the framebuffer offset this tick wrote, for the CPU's LR.W reservation; the
+     * machine reads and resets it after each tick. */
+    bool fb_written; uint32_t fb_written_at;
     /* START/RESET consumes its store tick; SETUP begins on the next tick. */
     bool command_tick;
 } gpu_device;

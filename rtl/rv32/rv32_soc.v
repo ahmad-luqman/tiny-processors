@@ -87,6 +87,8 @@ module rv32_soc #(
     wire ram_device_write;           // issue #34: declared before the core, which snoops them
     wire [31:0] ram_physical_addr;
     wire mem_lock;                   // issue #34: the core presents an SC.W or an AMO access
+    wire fb_device_write;            // issue #34: an engine's framebuffer write, for the reservation
+    wire [31:0] fb_device_addr;
     reg prefer_gpu, gpu_grant_held;  // the RAM arbiter's state, below
     wire [31:0] ram_rdata;
     wire con_valid, con_ready, con_error;
@@ -129,7 +131,8 @@ module rv32_soc #(
         .mtvec(mtvec), .mepc(mepc), .mcause(mcause), .mtval(mtval), .time_now(mtime),
         .irq_software(msip_level), .irq_timer(mtip), .irq_external(meip), .step_ticks(step_ticks),
         .trap_interrupt(trap_interrupt), .ram_snoop_write(ram_device_write), .ram_snoop_addr(ram_physical_addr),
-        .ram_engine_held(gpu_grant_held), .mem_lock(mem_lock)
+        .ram_engine_held(gpu_grant_held), .mem_lock(mem_lock),
+        .fb_snoop_write(fb_device_write), .fb_snoop_addr(fb_device_addr)
     );
 
     rv32_bus #(.RAM_WORDS(RAM_WORDS), .FB_WORDS(FB_WORDS)) bus (
@@ -314,6 +317,8 @@ module rv32_soc #(
     wire fb_physical_ready, fb_physical_error;
     wire [31:0] fb_physical_rdata;
     wire fb_engine_accept=gm_fb && !gpu_memory_hold;
+    assign fb_device_write=engine_busy && fb_engine_accept && em_we && fb_physical_ready;
+    assign fb_device_addr=em_addr;
     assign fb_ready=fb_valid && (engine_busy || fb_physical_ready);
     assign fb_error=engine_busy || fb_physical_error;
     assign fb_rdata=fb_physical_rdata;

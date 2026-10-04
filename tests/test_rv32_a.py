@@ -218,6 +218,26 @@ class AtomicTest(StepTicksCase):
                     self.assertEqual(stored(run.trace, SAVE + 0x44), 0xFFFFFFFF if outcome else 0,
                                      "the clear's word survives the failed SC")
 
+    def test_an_engine_framebuffer_write_ends_the_reservation(self):
+        """Codex P1, third round: the framebuffer is memory LR.W can reserve while the engines are
+        idle. A G1 fill over the reserved pixel word fails the SC once it has run; a word the fill
+        does not touch keeps its reservation. G1, like G2, runs on clock time, so only results are
+        compared."""
+        params = lambda index: GPU_BASE + GPU_PARAMS + 4 * index  # noqa: E731
+        for target, outcome in ((FB, 1), (FB + 0x40, 0)):
+            with self.subTest(target=hex(target)):
+                body = LI(7, target) + [LR_W(5, 7)]
+                for index, value in ((0, GPU_FILL), (1, 0x5A), (2, 0), (3, 0), (8, 4), (9, 1)):  # OP COLOR X0 Y0 W H
+                    body += LI(1, params(index)) + LI(2, value) + [SW(2, 1, 0)]
+                body += LI(1, GPU_BASE + GPU_COMMAND) + [ADDI(2, 0, GPU_START), SW(2, 1, 0)]
+                body += poll_until_idle(GPU_BASE, GPU_STATUS, GPU_BUSY) + [SC_W(11, 0, 7), LW(12, 7, 0)]
+                emulator, rtl = self.run_both(body + dump(11, 12))
+                for run in (emulator, rtl):
+                    self.assertEqual(run.halt["outcome"], "pass")
+                    self.assertEqual(stored(run.trace, SAVE + 0x40), outcome)
+                    self.assertEqual(stored(run.trace, SAVE + 0x44), 0x5A5A5A5A if outcome else 0,
+                                     "the fill's pixels survive the failed SC")
+
     def test_no_engine_write_lands_inside_an_atomic_access(self):
         """Codex P1, second round: G2 clears its depth buffer, with seeded waits on its RAM port and
         on the CPU's, while the CPU runs LR/SC pairs on depth words near the clear and AMOs on a

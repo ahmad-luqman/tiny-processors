@@ -393,9 +393,10 @@ static bool dma_read16(machine *m, uint32_t addr, uint16_t *value)
     return true;
 }
 
-/* Issue #34: a write by something other than the hart (a device's DMA) to the word LR.W reserved
- * ends the reservation, so a later SC.W fails rather than overwrite what the device wrote. */
-static void snoop_ram_write(machine *m, uint32_t addr)
+/* Issue #34: a write by something other than the hart (a device's DMA to RAM, an engine's to RAM or
+ * the framebuffer) to the word LR.W reserved ends the reservation, so a later SC.W fails rather
+ * than overwrite what the device wrote. `addr` is physical. */
+static void snoop_device_write(machine *m, uint32_t addr)
 {
     if (m->reserved && addr >> 2 == m->reservation_pa) {
         m->reserved = false;
@@ -409,7 +410,7 @@ static bool dma_write(machine *m, uint32_t addr, uint32_t value, uint32_t strobe
         return false;
     }
     uint8_t *p = m->ram + ((addr & ~3u) - RAM_BASE);
-    snoop_ram_write(m, addr);
+    snoop_device_write(m, addr);
     for (int i = 0; i < 4; i++) {
         if (strobe & (1u << i)) {
             p[i] = (uint8_t)(value >> (8 * i));
@@ -1123,9 +1124,17 @@ static void tick_accelerators(machine *m)
     simd_tick(&m->simd, false);
     gpu_tick(&m->gpu, m->ram, RAM_SIZE, m->fb, false, m->dma_start, m->dma_end);
     g3d_tick(&m->g3d, m->ram, RAM_SIZE, m->fb, false, m->dma_start, m->dma_end);
-    if (m->g3d.ram_written) {  /* G2's depth buffer is in RAM; G1 writes only the framebuffer */
-        snoop_ram_write(m, RAM_BASE + m->g3d.ram_written_at);
+    if (m->g3d.ram_written) {  /* G2's depth buffer is in RAM */
+        snoop_device_write(m, RAM_BASE + m->g3d.ram_written_at);
         m->g3d.ram_written = false;
+    }
+    if (m->g3d.fb_written) {   /* and both engines draw into the framebuffer */
+        snoop_device_write(m, FB_BASE + m->g3d.fb_written_at);
+        m->g3d.fb_written = false;
+    }
+    if (m->gpu.fb_written) {
+        snoop_device_write(m, FB_BASE + m->gpu.fb_written_at);
+        m->gpu.fb_written = false;
     }
 }
 
