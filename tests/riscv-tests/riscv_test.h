@@ -7,7 +7,9 @@
  * - The test starts at the reset PC (rvtest_entry_point, first in .text.init), installs a trap
  *   handler, and runs in machine mode with TESTNUM (gp) zero.
  * - Pass prints "PASS" on the console and writes the pass word to the done register.
- * - Fail prints "FAIL" and writes a fail word whose number is the failing TESTNUM.
+ * - Fail prints "FAIL" and writes a fail word whose number is the failing TESTNUM; a failure
+ *   with TESTNUM still 0 (before any case) uses number 1, since a fail word numbered 0 would read
+ *   as a pass on QEMU's test device.
  * - No selected test traps, so any trap prints "TRAP" and fails with number 1, which no test case
  *   uses (riscv-tests numbers them from 2).
  *
@@ -63,7 +65,10 @@ rv32_test_start:
 #define RVTEST_FAIL \
     fence; \
     RV32_PUTS4('F', 'A', 'I', 'L') \
-    slli t2, TESTNUM, 16; \
+    mv t2, TESTNUM; \
+    bnez t2, 7782f; \
+    li t2, 1; \
+7782: slli t2, t2, 16; \
     li t1, 0x3333; \
     or t2, t2, t1; \
     RV32_DONE(t2)

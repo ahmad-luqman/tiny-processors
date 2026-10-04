@@ -15,7 +15,9 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tools.rv32_asm import CYCLE, CYCLEH, INSTRET, INSTRETH, TIME, TIMEH  # noqa: E402
+from tools.rv32_asm import (CYCLE, CYCLEH, FUNCT5_ADD, FUNCT5_AND, FUNCT5_LR, FUNCT5_MAX, FUNCT5_MAXU,  # noqa: E402
+                            FUNCT5_MIN, FUNCT5_MINU, FUNCT5_OR, FUNCT5_SC, FUNCT5_SWAP, FUNCT5_XOR, INSTRET,
+                            INSTRETH, TIME, TIMEH)
 
 RAM_BASE = 0x80000000
 RAM_SLICE_SIZE = 0x00040000
@@ -53,7 +55,8 @@ UNIMP = 0xC0001073  # `unimp`: csrrw x0, cycle, x0, illegal everywhere since cyc
 # What an RV32IM image may use in addition (Track 0): exactly the eight M-extension instructions.
 M_MNEMONIC = re.compile(r"\A(mul|mulh|mulhsu|mulhu|div|divu|rem|remu)\Z")
 # The A extension's funct5 values (issue #34): LR.W, SC.W and the nine AMOs, all on opcode 0x2f.
-A_FUNCT5 = (0b00010, 0b00011, 0b00001, 0b00000, 0b00100, 0b01100, 0b01000, 0b10000, 0b10100, 0b11000, 0b11100)
+A_FUNCT5 = frozenset((FUNCT5_LR, FUNCT5_SC, FUNCT5_SWAP, FUNCT5_ADD, FUNCT5_XOR, FUNCT5_AND, FUNCT5_OR,
+                      FUNCT5_MIN, FUNCT5_MAX, FUNCT5_MINU, FUNCT5_MAXU))
 # The Zicntr counters (cycle, time, instret and their high halves). Only reads exist; objdump
 # prints them as rdcycle/rdtime/rdinstret, which no csr* pattern would catch, so the check is
 # on the instruction word.
@@ -147,8 +150,12 @@ def listing_word(encoded):
 def valid_a_word(word):
     """Whether `word` is an A-extension instruction both backends execute (issue #34): opcode 0x2f,
     funct3 2 (a word), a defined funct5, and rs2 0 for LR.W. aq and rl may take any value."""
-    funct5 = word >> 27
-    return word & 127 == 0x2F and (word >> 12) & 7 == 2 and funct5 in A_FUNCT5 and (funct5 != 0b00010 or (word >> 20) & 31 == 0)
+    opcode, funct3, funct5, rs2 = word & 127, (word >> 12) & 7, word >> 27, (word >> 20) & 31
+    if opcode != 0x2F or funct3 != 2:
+        return False
+    if funct5 == FUNCT5_LR:
+        return rs2 == 0
+    return funct5 in A_FUNCT5
 
 
 FUNCTION_LABEL = re.compile(r"^[0-9a-f]+ <([^>]+)>:\s*$")  # objdump's "80000298 <fpu_save>:"
@@ -239,11 +246,9 @@ def check_m_build(elf, listing):
 
 def check_a_build(listing):
     """An RV32IMA build really uses the A extension: the listing has at least one valid A word."""
-    for line in listing.splitlines():
-        match = LISTING_LINE.match(line)
-        word = listing_word(match.group(2)) if match else None
-        if word is not None and valid_a_word(word):
-            return []
+    if any((match := LISTING_LINE.match(line)) and (word := listing_word(match.group(2))) is not None
+           and valid_a_word(word) for line in listing.splitlines()):
+        return []
     return ["RV32A image has no A-extension instruction"]
 
 

@@ -100,6 +100,22 @@ class AtomicTest(StepTicksCase):
                 self.assertEqual(rtl.halt["transfers"], steps + data)
                 self.assertEqual(rtl.halt["cycles"], 4 * steps + data + stall * (steps + data))
 
+    def test_amos_stay_whole_under_interrupts_and_stalls(self):
+        """Cycle ticks with a stalled bus: the timer interrupts a loop of 300 AMOs many times on
+        clock time, yet it is taken only between instructions, never between an AMO's read and
+        its write, so every increment lands; the testbench checks each AMO's pair of accesses."""
+        handler = LI(28, SAVE) + [LW(29, 28, 12), ADDI(29, 29, 1), SW(29, 28, 12)]
+        handler += LI(27, MTIME) + [LW(26, 27, 0), ADDI(26, 26, 97)] + LI(27, MTIMECMP) + [SW(26, 27, 0), MRET()]
+        body = LI(7, DATA) + [SW(0, 7, 0), ADDI(6, 0, 1)] + set_timer(150) + LI(1, 1 << 7) + [CSRRW(0, MIE_CSR, 1)]
+        body += LI(9, 300) + [CSRRSI(0, MSTATUS, 8), AMOADD_W(0, 6, 7), ADDI(9, 9, -1), BNE(9, 0, -8)]
+        body += [CSRRCI(0, MSTATUS, 8), LW(10, 7, 0)] + LI(28, SAVE) + [LW(11, 28, 12)] + dump(10, 11)
+        emulator, rtl = self.run_both(at_handler(body, handler), ticks="cycles", stall=3)
+        for run in (emulator, rtl):
+            self.assertEqual(run.halt["outcome"], "pass")
+            self.assertEqual(stored(run.trace, SAVE + 0x40), 300)
+        self.assertGreaterEqual(rtl.halt["interrupts"], 10, "the RTL's timer interrupted the loop")
+        self.assertEqual(stored(rtl.trace, SAVE + 0x44), rtl.halt["interrupts"])
+
     def test_lr_and_sc(self):
         a, b = DATA, DATA + 4
         words = LI(7, a) + LI(8, b) + LI(5, 0x1234) + [SW(5, 7, 0)]

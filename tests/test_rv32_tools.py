@@ -9,10 +9,9 @@ import sys
 import tempfile
 import unittest
 
-from tools.rv32_asm import (ADDI, BOOTROM, CLINT, CONSOLE, CSRRC, CSRRS, CSRRWI, DISPLAY, DONE, FB, INPUT, LW, MSTATUS,
-                            PLIC, RAM, VIRTIO, i_type)
+from tools.rv32_asm import (ADDI, AMO_OPS, AMOADD_W, AMOSWAP_W, BOOTROM, CLINT, CONSOLE, CSRRC, CSRRS, CSRRWI, DISPLAY,
+                            DONE, FB, INPUT, LR_W, LW, MSTATUS, PLIC, RAM, SC_W, VIRTIO, i_type, r_type)
 from tools.rv32_f_asm import arithmetic, flw, fsw
-from tools import rv32_asm
 from tools.rv32_rtl import floating_word, trap_records_by_region
 from tools.rv32_devices import (DIAG_EXPECTED_VALUES, EVENT_PRESS, EVENT_VALID, FB_SIZE, KEYS, QUEUE_SIZE, diag_checksum,
                                 event_word, frame_hash, is_decimal, key_code, parse_input_script, render_diag_frame)
@@ -277,26 +276,26 @@ class ImageCheckerTests(unittest.TestCase):
         base = "80000000: 00040117     \tauipc\tsp, 0x40\n"
         def line(word, text="amo"):
             return f"{base}80000004: {word:08x}     \t{text}"
-        valid = [rv32_asm.LR_W(10, 11), rv32_asm.LR_W(10, 11, aq=1, rl=1), rv32_asm.SC_W(10, 12, 11),
-                 *(op(10, 12, 11) for op in rv32_asm.AMO_OPS), rv32_asm.AMOADD_W(0, 12, 11, aq=1)]
+        valid = [LR_W(10, 11), LR_W(10, 11, aq=1, rl=1), SC_W(10, 12, 11),
+                 *(op(10, 12, 11) for op in AMO_OPS), AMOADD_W(0, 12, 11, aq=1)]
         for word in valid:
             with self.subTest(word=f"{word:08x}"):
                 self.assertEqual(len(check_listing(line(word))), 1, "RV32I listings reject A")
                 self.assertEqual(check_listing(line(word), allow_a=True), [])
-        invalid = [rv32_asm.LR_W(10, 11) | (5 << 20),          # LR.W with rs2 != 0
-                   rv32_asm.AMOADD_W(10, 12, 11) ^ (1 << 12),  # funct3 3: a doubleword
-                   rv32_asm.r_type(0x2F, 10, 2, 11, 12, 0b00101 << 2),  # an undefined funct5 (AMOCAS.W is Zacas)
-                   rv32_asm.AMOADD_W(10, 12, 11) ^ (2 << 12)]  # funct3 0
+        invalid = [LR_W(10, 11) | (5 << 20),          # LR.W with rs2 != 0
+                   AMOADD_W(10, 12, 11) ^ (1 << 12),  # funct3 3: a doubleword
+                   r_type(0x2F, 10, 2, 11, 12, 0b00101 << 2),  # an undefined funct5 (AMOCAS.W is Zacas)
+                   AMOADD_W(10, 12, 11) ^ (2 << 12)]  # funct3 0
         for word in invalid:
             with self.subTest(word=f"{word:08x}"):
                 self.assertEqual(len(check_listing(line(word), allow_a=True)), 1)
-        self.assertEqual(check_a_build(line(rv32_asm.SC_W(10, 12, 11))), [])
+        self.assertEqual(check_a_build(line(SC_W(10, 12, 11))), [])
         self.assertEqual(check_a_build(base), ["RV32A image has no A-extension instruction"])
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             elf, listing, plain = path / "a.elf", path / "a.lst", path / "plain.lst"
             elf.write_bytes(build_elf())
-            listing.write_text(line(rv32_asm.AMOSWAP_W(10, 12, 11)) + "\n")
+            listing.write_text(line(AMOSWAP_W(10, 12, 11)) + "\n")
             plain.write_text(base)
 
             def check(*options):

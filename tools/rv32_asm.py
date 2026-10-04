@@ -209,19 +209,23 @@ def REM(rd, a, b): return r_type(0x33, rd, 6, a, b, 1)
 def REMU(rd, a, b): return r_type(0x33, rd, 7, a, b, 1)
 M_OPS = (MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU)
 # The A extension (issue #34): opcode 0x2f, funct3 2 (a word), the operation in funct5 above aq and rl.
-# The address is rs1 with no offset; the AMOs and SC.W take their operand from rs2.
+# The address is rs1 with no offset. Operands are in assembly order: LR_W(rd, rs1), and SC_W and the
+# AMOs (rd, rs2, rs1), as `sc.w rd, rs2, (rs1)` reads.
+FUNCT5_LR, FUNCT5_SC, FUNCT5_SWAP, FUNCT5_ADD = 0b00010, 0b00011, 0b00001, 0b00000
+FUNCT5_XOR, FUNCT5_AND, FUNCT5_OR = 0b00100, 0b01100, 0b01000
+FUNCT5_MIN, FUNCT5_MAX, FUNCT5_MINU, FUNCT5_MAXU = 0b10000, 0b10100, 0b11000, 0b11100
 def _amo(funct5, rd, rs1, rs2, aq=0, rl=0): return r_type(0x2F, rd, 2, rs1, rs2, (funct5 << 2) | (aq << 1) | rl)
-def LR_W(rd, rs1, aq=0, rl=0): return _amo(0b00010, rd, rs1, 0, aq, rl)
-def SC_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b00011, rd, rs1, rs2, aq, rl)
-def AMOSWAP_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b00001, rd, rs1, rs2, aq, rl)
-def AMOADD_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b00000, rd, rs1, rs2, aq, rl)
-def AMOXOR_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b00100, rd, rs1, rs2, aq, rl)
-def AMOAND_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b01100, rd, rs1, rs2, aq, rl)
-def AMOOR_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b01000, rd, rs1, rs2, aq, rl)
-def AMOMIN_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b10000, rd, rs1, rs2, aq, rl)
-def AMOMAX_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b10100, rd, rs1, rs2, aq, rl)
-def AMOMINU_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b11000, rd, rs1, rs2, aq, rl)
-def AMOMAXU_W(rd, rs2, rs1, aq=0, rl=0): return _amo(0b11100, rd, rs1, rs2, aq, rl)
+def LR_W(rd, rs1, aq=0, rl=0): return _amo(FUNCT5_LR, rd, rs1, 0, aq, rl)
+def SC_W(rd, rs2, rs1, aq=0, rl=0): return _amo(FUNCT5_SC, rd, rs1, rs2, aq, rl)
+def AMOSWAP_W(rd, rs2, rs1, aq=0, rl=0): return _amo(FUNCT5_SWAP, rd, rs1, rs2, aq, rl)
+def AMOADD_W(rd, rs2, rs1, aq=0, rl=0): return _amo(FUNCT5_ADD, rd, rs1, rs2, aq, rl)
+def AMOXOR_W(rd, rs2, rs1, aq=0, rl=0): return _amo(FUNCT5_XOR, rd, rs1, rs2, aq, rl)
+def AMOAND_W(rd, rs2, rs1, aq=0, rl=0): return _amo(FUNCT5_AND, rd, rs1, rs2, aq, rl)
+def AMOOR_W(rd, rs2, rs1, aq=0, rl=0): return _amo(FUNCT5_OR, rd, rs1, rs2, aq, rl)
+def AMOMIN_W(rd, rs2, rs1, aq=0, rl=0): return _amo(FUNCT5_MIN, rd, rs1, rs2, aq, rl)
+def AMOMAX_W(rd, rs2, rs1, aq=0, rl=0): return _amo(FUNCT5_MAX, rd, rs1, rs2, aq, rl)
+def AMOMINU_W(rd, rs2, rs1, aq=0, rl=0): return _amo(FUNCT5_MINU, rd, rs1, rs2, aq, rl)
+def AMOMAXU_W(rd, rs2, rs1, aq=0, rl=0): return _amo(FUNCT5_MAXU, rd, rs1, rs2, aq, rl)
 AMO_OPS = (AMOSWAP_W, AMOADD_W, AMOXOR_W, AMOAND_W, AMOOR_W, AMOMIN_W, AMOMAX_W, AMOMINU_W, AMOMAXU_W)
 def FENCE(): return i_type(0x0F, 0, 0, 0, 0x0FF)
 def ECALL(): return 0x00000073

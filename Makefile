@@ -1179,7 +1179,7 @@ test-rv32: test-rv32-arch-model test-rv32-arch test-rv32-arch-verilator
 # fast tier; test-rv32-arch-icarus above stays the long manual measurement of every suite.
 .PHONY: test-rv32-arch-a-icarus
 test-rv32-arch-a-icarus: toolchain-rv32 fetch-rv32-arch-test $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_arch_test.py $(RV32_ARCH_ARGS) --suite A --backend qemu --backend icarus --icarus $(RV32_TB_VVP) --out build/rv32/arch/a-icarus
+	$(PYTHON) tools/rv32_arch_test.py $(RV32_ARCH_ARGS) --suite A --backend icarus --icarus $(RV32_TB_VVP) --out build/rv32/arch/a-icarus
 test-rv32: test-rv32-arch-a-icarus
 
 # Issue #34: the A extension (docs/rv32-a.md). riscv-tests' rv32ua (lrsc.S and the AMOs) against
@@ -1188,13 +1188,12 @@ test-rv32: test-rv32-arch-a-icarus
 # atomics the compiler lowers to AMOs and LR/SC loops, on QEMU, the emulator and the RTL.
 .PHONY: fetch-rv32-riscv-tests test-rv32-ua test-rv32-ua-icarus test-rv32-a test-rv32-a-verilator
 .PHONY: firmware-rv32a check-rv32a-image check-rv32af-flags run-rv32-atom-qemu run-rv32-atom-emu run-rv32-atom-rtl run-rv32-atom-rtl-verilator
-RV32_UA_ARGS = --cc $(RV32_CC) --ld $(RV32_LD) --qemu $(QEMU_RV32) --qemu-cpu $(RV32_ARCH_QEMU_CPU) --emulator $(RV32EMU) --jobs $(RV32_ARCH_JOBS)
 fetch-rv32-riscv-tests:
 	$(PYTHON) tools/rv32_riscv_tests.py --fetch
 test-rv32-ua: toolchain-rv32 fetch-rv32-riscv-tests $(RV32EMU) $(RV32_TB_VERILATOR)
-	$(PYTHON) tools/rv32_riscv_tests.py $(RV32_UA_ARGS) --backend qemu --backend verilator --verilator $(RV32_TB_VERILATOR) --out build/rv32/riscv-tests/verilator
+	$(PYTHON) tools/rv32_riscv_tests.py $(RV32_ARCH_ARGS) --backend qemu --backend verilator --verilator $(RV32_TB_VERILATOR) --out build/rv32/riscv-tests/verilator
 test-rv32-ua-icarus: toolchain-rv32 fetch-rv32-riscv-tests $(RV32EMU) $(RV32_TB_VVP)
-	$(PYTHON) tools/rv32_riscv_tests.py $(RV32_UA_ARGS) --backend qemu --backend icarus --icarus $(RV32_TB_VVP) --out build/rv32/riscv-tests/icarus
+	$(PYTHON) tools/rv32_riscv_tests.py $(RV32_ARCH_ARGS) --backend icarus --icarus $(RV32_TB_VVP) --out build/rv32/riscv-tests/icarus
 test-rv32-a: $(RV32EMU)
 	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_a.py' -v
 test-rv32-a-verilator: $(RV32EMU) $(RV32_TB_VERILATOR)
@@ -1206,7 +1205,14 @@ RV32A_LDFLAGS := $(subst -march=rv32i ,-march=rv32ima ,$(RV32_LDFLAGS))
 RV32A_MARCH_CHECK = $(if $(and $(filter -march=rv32ima,$(RV32A_CFLAGS)),$(filter -march=rv32ima,$(RV32A_LDFLAGS))),,\
 	$(error RV32A_CFLAGS/RV32A_LDFLAGS did not get -march=rv32ima; check -march=rv32i in RV32_ARCH))
 # With F as well, for the single-float ABI (issue #33): compiled only, to show the flags combine.
+# A substitution that missed would leave rv32ima with clang's default ABI, which still holds an
+# amoadd.w, so the recipe also checks the flags and the object's float ABI.
 RV32AF_CFLAGS := $(subst -march=rv32ima ,-march=rv32imaf_zicsr -mabi=ilp32f ,$(filter-out -mabi=ilp32,$(RV32A_CFLAGS)))
+RV32AF_MARCH_CHECK = $(if $(and $(filter -march=rv32imaf_zicsr,$(RV32AF_CFLAGS)),$(filter -mabi=ilp32f,$(RV32AF_CFLAGS))),,\
+	$(error RV32AF_CFLAGS did not get -march=rv32imaf_zicsr -mabi=ilp32f; check RV32A_CFLAGS))
+# atomcheck must keep exercising every A instruction: a compiler that lowered one of them to an
+# LR/SC loop would otherwise shrink its coverage without failing --require-a.
+RV32A_MNEMONICS := lr.w sc.w amoswap.w amoadd.w amoxor.w amoand.w amoor.w amomin.w amomax.w amominu.w amomaxu.w
 RV32_ATOMCHECK_OBJS := build/rv32a/atomcheck.o build/rv32a/start.o build/rv32a/console.o
 RV32_ATOMCHECK_HEX := 40a0b037
 RV32_ATOM_ARGS := --image build/rv32a/atomcheck.bin --expect-last-line "PASS $(RV32_ATOMCHECK_HEX)" --expect-console-file programs/rv32/atomcheck.expected
@@ -1227,10 +1233,14 @@ firmware-rv32a: toolchain-rv32 build/rv32a/atomcheck.elf build/rv32a/atomcheck.b
 # --require-a: the listing holds A instructions; with --allow-m, since rv32ima also has M.
 check-rv32a-image: firmware-rv32a
 	$(PYTHON) tools/rv32_image.py build/rv32a/atomcheck.elf --listing build/rv32a/atomcheck.lst --bin build/rv32a/atomcheck.bin --hex build/rv32a/atomcheck.hex --allow-m --require-a
+	@for mnemonic in $(RV32A_MNEMONICS); do \
+		grep -Eq "[[:space:]]$$mnemonic(\.aq|\.rl|\.aqrl)?[[:space:]]" build/rv32a/atomcheck.lst || { echo "atomcheck has no $$mnemonic"; exit 1; }; \
+	done
 check-rv32af-flags: toolchain-rv32 | build/rv32a
-	$(RV32_CC) $(RV32AF_CFLAGS) -c -o build/rv32a/atomcheck-f.o programs/rv32/atomcheck.c
+	$(RV32AF_MARCH_CHECK)$(RV32_CC) $(RV32AF_CFLAGS) -c -o build/rv32a/atomcheck-f.o programs/rv32/atomcheck.c
 	$(RV32_OBJDUMP) -d build/rv32a/atomcheck-f.o > build/rv32a/atomcheck-f.lst
 	grep -q 'amoadd\.w' build/rv32a/atomcheck-f.lst
+	$(RV32_READELF) -h build/rv32a/atomcheck-f.o | grep -q 'single-float ABI'
 run-rv32-atom-qemu: check-rv32a-image
 	$(PYTHON) tools/rv32_run_qemu.py build/rv32a/atomcheck.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --last-line --timeout 20 --expect-hex $(RV32_ATOMCHECK_HEX) --transcript build/rv32a/atomcheck.qemu.transcript
 	diff -u programs/rv32/atomcheck.expected build/rv32a/atomcheck.qemu.transcript
