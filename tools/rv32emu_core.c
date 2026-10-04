@@ -10,6 +10,7 @@
 #include "rv32_fp.h"
 #include "rv32_dtb.h"
 
+#include <assert.h>
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -392,6 +393,16 @@ static bool dma_read16(machine *m, uint32_t addr, uint16_t *value)
     return true;
 }
 
+/* Issue #34: a write by something other than the hart (a device's DMA to RAM, an engine's to RAM or
+ * the framebuffer) to the word LR.W reserved ends the reservation, so a later SC.W fails rather
+ * than overwrite what the device wrote. `addr` is physical. */
+static void snoop_device_write(machine *m, uint32_t addr)
+{
+    if (m->reserved && addr >> 2 == m->reservation_pa) {
+        m->reserved = false;
+    }
+}
+
 /* A DMA write of the strobed bytes of the word holding `addr`. */
 static bool dma_write(machine *m, uint32_t addr, uint32_t value, uint32_t strobe)
 {
@@ -399,6 +410,7 @@ static bool dma_write(machine *m, uint32_t addr, uint32_t value, uint32_t strobe
         return false;
     }
     uint8_t *p = m->ram + ((addr & ~3u) - RAM_BASE);
+    snoop_device_write(m, addr);
     for (int i = 0; i < 4; i++) {
         if (strobe & (1u << i)) {
             p[i] = (uint8_t)(value >> (8 * i));
@@ -933,7 +945,7 @@ static mem_access translate(const machine *m, uint32_t va, enum walk_kind kind, 
 
 /* Data load. Misalignment is checked on the virtual address, then it is translated, and PMP
  * checks the physical address before the bus. */
-static mem_access load(machine *m, uint32_t va, int width, uint32_t *value)
+static mem_access load(machine *m, uint32_t va, int width, uint32_t *value, uint32_t *pa)
 {
     uint32_t priv = data_priv(m), addr;
     if (va % (uint32_t)width) {
@@ -949,6 +961,9 @@ static mem_access load(machine *m, uint32_t va, int width, uint32_t *value)
     const region *r = find_region(addr, width);
     if (!r || !r->load) {
         return ACC_FAULT; /* unmapped, or a write-only window such as the done register */
+    }
+    if (pa) {
+        *pa = addr;
     }
     return r->load(m, addr - r->base, width, value);
 }
@@ -973,6 +988,89 @@ static mem_access store(machine *m, uint32_t va, int width, uint32_t value)
     return r->store(m, addr - r->base, width, value);
 }
 
+/* The trap cause a refused data access raises: a load's (LR.W's too), or a store's (SC.W's and the
+ * AMOs' too). */
+static uint32_t load_cause(mem_access status)
+{
+    switch (status) {
+    case ACC_MISALIGNED: return CAUSE_LOAD_MISALIGNED;
+    case ACC_PAGE_FAULT: return CAUSE_LOAD_PAGE_FAULT;
+    default: return CAUSE_LOAD_FAULT;
+    }
+}
+
+static uint32_t store_cause(mem_access status)
+{
+    switch (status) {
+    case ACC_MISALIGNED: return CAUSE_STORE_MISALIGNED;
+    case ACC_PAGE_FAULT: return CAUSE_STORE_PAGE_FAULT;
+    default: return CAUSE_STORE_FAULT;
+    }
+}
+
+/* The A extension (issue #34): funct5 of opcode 0x2f, whose funct3 is 2 (a word). */
+enum amo_op {
+    AMO_ADD = 0x00, AMO_SWAP = 0x01, AMO_LR = 0x02, AMO_SC = 0x03, AMO_XOR = 0x04, AMO_OR = 0x08,
+    AMO_AND = 0x0c, AMO_MIN = 0x10, AMO_MAX = 0x14, AMO_MINU = 0x18, AMO_MAXU = 0x1c,
+};
+
+/* Whether funct5 (and rs2, which LR.W requires to be 0) name an instruction. */
+static bool amo_valid(uint32_t funct5, uint32_t rs2)
+{
+    switch (funct5) {
+    case AMO_LR: return rs2 == 0;
+    case AMO_ADD: case AMO_SWAP: case AMO_SC: case AMO_XOR: case AMO_OR: case AMO_AND:
+    case AMO_MIN: case AMO_MAX: case AMO_MINU: case AMO_MAXU: return true;
+    default: return false;
+    }
+}
+
+/* The value an AMO writes, from the word it read and rs2. */
+static uint32_t amo_value(uint32_t funct5, uint32_t old, uint32_t operand)
+{
+    switch (funct5) {
+    case AMO_SWAP: return operand;
+    case AMO_ADD: return old + operand;
+    case AMO_XOR: return old ^ operand;
+    case AMO_AND: return old & operand;
+    case AMO_OR: return old | operand;
+    case AMO_MIN: return (int32_t)old < (int32_t)operand ? old : operand;
+    case AMO_MAX: return (int32_t)old > (int32_t)operand ? old : operand;
+    case AMO_MINU: return old < operand ? old : operand;
+    case AMO_MAXU: return old > operand ? old : operand;
+    default: abort(); /* amo_valid admitted no other funct5, and LR and SC are not AMOs */
+    }
+}
+
+/* An AMO's read and write of one aligned word. Misalignment, the walk (a store's, so W and D) and
+ * PMP (read and write) are checked first. Then the region sees a read and a write in turn, as the
+ * RTL's bus does: a window that refuses the read (or has none) is an access fault with no write; one
+ * that refuses the write (or is read-only) is an access fault after the read and its side effects. */
+static mem_access amo(machine *m, uint32_t va, uint32_t funct5, uint32_t operand, uint32_t *old, uint32_t *value)
+{
+    uint32_t priv = data_priv(m), addr;
+    if (va % 4u) {
+        return ACC_MISALIGNED;
+    }
+    mem_access status = translate(m, va, WALK_STORE, priv, &addr);
+    if (status != ACC_OK) {
+        return status;
+    }
+    if (!pmp_allows(priv, m, addr, PMP_R | PMP_W)) {
+        return ACC_FAULT;
+    }
+    const region *r = find_region(addr, 4);
+    if (!r || !r->load) {
+        return ACC_FAULT;
+    }
+    status = r->load(m, addr - r->base, 4, old);
+    if (status != ACC_OK) {
+        return status;
+    }
+    *value = amo_value(funct5, *old, operand);
+    return r->store ? r->store(m, addr - r->base, 4, *value) : ACC_FAULT;
+}
+
 static void trace_effects(const machine *m)
 {
     if (!m->trace) {
@@ -984,10 +1082,10 @@ static void trace_effects(const machine *m)
     if (m->wr_freg >= 0) fprintf(m->trace, " f%d=%08" PRIx32, m->wr_freg, m->f[m->wr_freg]);
     if (m->wr_fcsr) fprintf(m->trace, " fcsr=%02x", m->fcsr);
     if (m->mem_write) {
-        fprintf(m->trace, " mem[%08" PRIx32 "]<-%08" PRIx32 "/%d", m->mem_addr, m->mem_value, m->mem_width);
+        fprintf(m->trace, " mem[%08" PRIx32 "]<-%08" PRIx32 "/%d", m->mem_addr, m->mem_write_value, m->mem_width);
     }
     if (m->mem_read) {
-        fprintf(m->trace, " mem[%08" PRIx32 "]->%08" PRIx32 "/%d", m->mem_addr, m->mem_value, m->mem_width);
+        fprintf(m->trace, " mem[%08" PRIx32 "]->%08" PRIx32 "/%d", m->mem_addr, m->mem_read_value, m->mem_width);
     }
 }
 
@@ -995,9 +1093,10 @@ static void trace_effects(const machine *m)
  * MIE and MIE clears, MPP takes the privilege mode and the machine enters machine mode (O5). Since
  * issue #20 a trap from S or U mode whose cause medeleg (an exception) or mideleg (an interrupt)
  * delegates goes to S mode instead, through the supervisor's copies: sepc, scause, stval, SPIE and
- * SIE, SPP, stvec. */
+ * SIE, SPP, stvec. Since issue #34 every trap also clears LR.W's reservation. */
 static void enter_handler(machine *m, uint32_t cause, uint32_t tval)
 {
+    m->reserved = false;
     uint32_t delegated = (cause & INTERRUPT) ? m->mideleg : m->medeleg;
     if (m->priv != PRIV_M && ((delegated >> (cause & 31u)) & 1u)) {
         m->sepc = m->pc;
@@ -1025,6 +1124,18 @@ static void tick_accelerators(machine *m)
     simd_tick(&m->simd, false);
     gpu_tick(&m->gpu, m->ram, RAM_SIZE, m->fb, false, m->dma_start, m->dma_end);
     g3d_tick(&m->g3d, m->ram, RAM_SIZE, m->fb, false, m->dma_start, m->dma_end);
+    if (m->g3d.ram_written) {  /* G2's depth buffer is in RAM */
+        snoop_device_write(m, RAM_BASE + m->g3d.ram_written_at);
+        m->g3d.ram_written = false;
+    }
+    if (m->g3d.fb_written) {   /* and both engines draw into the framebuffer */
+        snoop_device_write(m, FB_BASE + m->g3d.fb_written_at);
+        m->g3d.fb_written = false;
+    }
+    if (m->gpu.fb_written) {
+        snoop_device_write(m, FB_BASE + m->gpu.fb_written_at);
+        m->gpu.fb_written = false;
+    }
 }
 
 /* Deliver a trap for the instruction at m->pc. The instruction does not
@@ -1180,7 +1291,10 @@ static void csr_write(machine *m, uint32_t number, uint32_t value)
     case CSR_SEPC: m->sepc = value & ~3u; break;
     case CSR_SCAUSE: m->scause = value; break;
     case CSR_STVAL: m->stval = value; break;
-    case CSR_SATP: m->satp = value & (SATP_MODE | SATP_PPN); break; /* ASID is 0 bits wide */
+    case CSR_SATP: /* ASID is 0 bits wide; a new translation ends LR.W's reservation (issue #34) */
+        m->satp = value & (SATP_MODE | SATP_PPN);
+        m->reserved = false;
+        break;
     case CSR_MCOUNTEREN: m->mcounteren = value & 7u; break;
     case CSR_PMPCFG0: case CSR_PMPCFG1:
         for (uint32_t k = 0; k < 4; k++) {
@@ -1404,15 +1518,14 @@ static void step(machine *m)
         }
         int width = width_of(funct3);
         uint32_t addr = a + (uint32_t)imm_i, value;
-        status = load(m, addr, width, &value);
+        status = load(m, addr, width, &value, NULL);
         if (status != ACC_OK) {
-            trap(m, word, status == ACC_MISALIGNED ? CAUSE_LOAD_MISALIGNED :
-                          status == ACC_PAGE_FAULT ? CAUSE_LOAD_PAGE_FAULT : CAUSE_LOAD_FAULT, addr);
+            trap(m, word, load_cause(status), addr);
             return;
         }
         m->mem_read = true;
         m->mem_addr = addr;
-        m->mem_value = value;
+        m->mem_read_value = value;
         m->mem_width = width;
         if (funct3 == 0) {
             value = (uint32_t)(int32_t)(int8_t)value;
@@ -1435,14 +1548,84 @@ static void step(machine *m)
         uint32_t value = width == 4 ? b : b & ((1u << (8 * width)) - 1u);
         status = store(m, addr, width, value);
         if (status != ACC_OK) {
-            trap(m, word, status == ACC_MISALIGNED ? CAUSE_STORE_MISALIGNED :
-                          status == ACC_PAGE_FAULT ? CAUSE_STORE_PAGE_FAULT : CAUSE_STORE_FAULT, addr);
+            trap(m, word, store_cause(status), addr);
             return;
         }
         m->mem_write = true;
         m->mem_addr = addr;
-        m->mem_value = value;
+        m->mem_write_value = value;
         m->mem_width = width;
+        break;
+    }
+    case 0x2f: { /* the A extension (issue #34): LR.W, SC.W and the AMOs; aq and rl change nothing on one hart */
+        uint32_t funct5 = funct7 >> 2, addr = a, value, old, physical;
+        if (funct3 != 2 || !amo_valid(funct5, rs2)) {
+            goto illegal;
+        }
+        if (funct5 == AMO_LR) {
+            status = load(m, addr, 4, &value, &physical);
+            if (status != ACC_OK) {
+                trap(m, word, load_cause(status), addr);
+                return;
+            }
+            m->mem_read = true;
+            m->mem_addr = addr;
+            m->mem_read_value = value;
+            m->mem_width = 4;
+            m->reserved = true;
+            m->reservation = addr >> 2;
+            m->reservation_pa = physical >> 2;
+            result = value;
+        } else if (funct5 == AMO_SC) {
+            /* Alignment is checked first, reservation or not (QEMU agrees); without the reservation
+             * the SC fails with no access, so no translation, PMP or bus fault either. */
+            bool held = m->reserved && m->reservation == addr >> 2;
+            if (addr % 4u) {
+                trap(m, word, CAUSE_STORE_MISALIGNED, addr);
+                return;
+            }
+            if (held) {
+                /* The translated word must also be the one LR read: an mstatus write (MPRV, MPP)
+                 * can change what the same virtual word names. Translation and PMP faults come
+                 * first, as on the RTL, then a different physical word fails the SC unaccessed. */
+                uint32_t priv = data_priv(m), physical;
+                status = translate(m, addr, WALK_STORE, priv, &physical);
+                if (status == ACC_OK && !pmp_allows(priv, m, physical, PMP_W)) {
+                    status = ACC_FAULT;
+                }
+                if (status != ACC_OK) {
+                    trap(m, word, store_cause(status), addr);
+                    return;
+                }
+                held = physical >> 2 == m->reservation_pa;
+            }
+            if (held) {
+                status = store(m, addr, 4, b);
+                if (status != ACC_OK) {
+                    trap(m, word, store_cause(status), addr);
+                    return;
+                }
+                m->mem_write = true;
+                m->mem_addr = addr;
+                m->mem_write_value = b;
+                m->mem_width = 4;
+            }
+            m->reserved = false;
+            result = held ? 0u : 1u;
+        } else {
+            status = amo(m, addr, funct5, b, &old, &value);
+            if (status != ACC_OK) {
+                trap(m, word, store_cause(status), addr);
+                return;
+            }
+            m->mem_read = m->mem_write = true;
+            m->mem_addr = addr;
+            m->mem_read_value = old;
+            m->mem_write_value = value;
+            m->mem_width = 4;
+            result = old;
+        }
+        writes_rd = true;
         break;
     }
     case 0x13: { /* OP-IMM */
@@ -1577,6 +1760,7 @@ static void step(machine *m)
             if (word == 0x30200073u && m->priv == PRIV_M) {
                 /* MRET: MIE from MPIE, MPIE set, the mode from MPP, MPP to user (O5) */
                 m->mstatus = (m->mstatus & ~MSTATUS_MIE) | MSTATUS_MPIE | ((m->mstatus & MSTATUS_MPIE) ? MSTATUS_MIE : 0u);
+                m->reserved = false; /* issue #34: as QEMU does; the spec allows it */
                 m->priv = m->mpp;
                 m->mpp = PRIV_U;
                 if (m->priv != PRIV_M) {
@@ -1588,6 +1772,7 @@ static void step(machine *m)
             if (word == 0x10200073u && supervisor_allows(m, MSTATUS_TSR)) {
                 /* SRET (issue #20): SIE from SPIE, SPIE set, the mode from SPP, SPP to user */
                 m->priv = (m->mstatus & MSTATUS_SPP) ? PRIV_S : PRIV_U;
+                m->reserved = false;
                 m->mstatus = (m->mstatus & ~(MSTATUS_SIE | MSTATUS_SPP | MSTATUS_MPRV)) | MSTATUS_SPIE |
                              ((m->mstatus & MSTATUS_SPIE) ? MSTATUS_SIE : 0u);
                 next = m->sepc;
@@ -1600,6 +1785,7 @@ static void step(machine *m)
             /* SFENCE.VMA (issue #20): the emulator keeps no translations, so nothing to flush;
              * illegal in user mode, and in supervisor mode with TVM */
             if ((word & 0xfe007fffu) == 0x12000073u && supervisor_allows(m, MSTATUS_TVM)) {
+                m->reserved = false; /* issue #34: as a satp write, it ends LR.W's reservation */
                 break;
             }
             goto illegal;
@@ -1634,6 +1820,7 @@ static void step(machine *m)
         m->wr_reg = (int)rd;
         m->wr_value = result;
     }
+    assert(!(m->mem_read && m->mem_write) || opcode == 0x2f); /* only an AMO both reads and writes */
     tick_accelerators(m);
     m->steps++;
     m->retired++;

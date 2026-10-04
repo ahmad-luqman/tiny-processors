@@ -15,7 +15,9 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tools.rv32_asm import CYCLE, CYCLEH, INSTRET, INSTRETH, TIME, TIMEH  # noqa: E402
+from tools.rv32_asm import (CYCLE, CYCLEH, FUNCT5_ADD, FUNCT5_AND, FUNCT5_LR, FUNCT5_MAX, FUNCT5_MAXU,  # noqa: E402
+                            FUNCT5_MIN, FUNCT5_MINU, FUNCT5_OR, FUNCT5_SC, FUNCT5_SWAP, FUNCT5_XOR, INSTRET,
+                            INSTRETH, TIME, TIMEH)
 
 RAM_BASE = 0x80000000
 RAM_SLICE_SIZE = 0x00040000
@@ -52,6 +54,9 @@ SYSTEM_MNEMONIC = re.compile(r"\A(wfi|ecall|sret|sfence\.vma)\Z")
 UNIMP = 0xC0001073  # `unimp`: csrrw x0, cycle, x0, illegal everywhere since cycle is read-only
 # What an RV32IM image may use in addition (Track 0): exactly the eight M-extension instructions.
 M_MNEMONIC = re.compile(r"\A(mul|mulh|mulhsu|mulhu|div|divu|rem|remu)\Z")
+# The A extension's funct5 values (issue #34): LR.W, SC.W and the nine AMOs, all on opcode 0x2f.
+A_FUNCT5 = frozenset((FUNCT5_LR, FUNCT5_SC, FUNCT5_SWAP, FUNCT5_ADD, FUNCT5_XOR, FUNCT5_AND, FUNCT5_OR,
+                      FUNCT5_MIN, FUNCT5_MAX, FUNCT5_MINU, FUNCT5_MAXU))
 # The Zicntr counters (cycle, time, instret and their high halves). Only reads exist; objdump
 # prints them as rdcycle/rdtime/rdinstret, which no csr* pattern would catch, so the check is
 # on the instruction word.
@@ -142,11 +147,22 @@ def listing_word(encoded):
     return int(encoded, 16) if len(encoded) == 8 else None
 
 
+def valid_a_word(word):
+    """Whether `word` is an A-extension instruction both backends execute (issue #34): opcode 0x2f,
+    funct3 2 (a word), a defined funct5, and rs2 0 for LR.W. aq and rl may take any value."""
+    opcode, funct3, funct5, rs2 = word & 127, (word >> 12) & 7, word >> 27, (word >> 20) & 31
+    if opcode != 0x2F or funct3 != 2:
+        return False
+    if funct5 == FUNCT5_LR:
+        return rs2 == 0
+    return funct5 in A_FUNCT5
+
+
 FUNCTION_LABEL = re.compile(r"^[0-9a-f]+ <([^>]+)>:\s*$")  # objdump's "80000298 <fpu_save>:"
 
 
 def check_listing(text, allow_privileged=False, allow_f=False, allow_m=False, allow_counters=False, allow_system=False,
-                  allow_user=False, f_functions=None):
+                  allow_user=False, f_functions=None, allow_a=False):
     """Return problems found in an objdump disassembly listing; `allow_privileged` admits the CSR
     instructions and mret that a trap handler needs; `allow_f` admits only valid RV32F
     encodings and floating CSR accesses; `allow_m` admits the M extension's eight instructions;
@@ -154,7 +170,8 @@ def check_listing(text, allow_privileged=False, allow_f=False, allow_m=False, al
     `allow_privileged`) admits the interrupt CSRs, wfi and ecall of Track 2; `allow_user` (which implies
     `allow_counters`) admits what a user-mode program may run (O5): ecall and `unimp`, and no machine
     CSR, mret or wfi. Every gate requires a listing to inspect. `f_functions` (issue #33), a set of
-    function names, admits F only inside those functions, as `allow_f` does everywhere."""
+    function names, admits F only inside those functions, as `allow_f` does everywhere. `allow_a`
+    (issue #34) admits only valid A-extension encodings; without it any opcode-0x2f word is refused."""
     allow_privileged = allow_privileged or allow_system
     function = None
     allow_counters = allow_counters or allow_user
@@ -172,6 +189,10 @@ def check_listing(text, allow_privileged=False, allow_f=False, allow_m=False, al
         match = LISTING_LINE.match(line)
         instructions += bool(match)
         word = listing_word(match.group(2)) if match else None
+        if word is not None and word & 127 == 0x2F:
+            if not allow_a or not valid_a_word(word):
+                problems.append(f"listing line {number}: atomic instruction outside selected ISA: {line.strip()}")
+            continue
         if word is not None and word & 127 in F_OPCODES:
             if not f_here or not valid_f_word(word):
                 problems.append(f"listing line {number}: floating instruction outside selected ISA: {line.strip()}")
@@ -223,9 +244,17 @@ def check_m_build(elf, listing):
     return problems
 
 
+def check_a_build(listing):
+    """An RV32IMA build really uses the A extension: the listing has at least one valid A word."""
+    if any((match := LISTING_LINE.match(line)) and (word := listing_word(match.group(2))) is not None
+           and valid_a_word(word) for line in listing.splitlines()):
+        return []
+    return ["RV32A image has no A-extension instruction"]
+
+
 def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, entry=None, allow_privileged=False, allow_f=False,
                 allow_m=False, allow_counters=False, allow_system=False, allow_user=False, page_tables=False,
-                hard_float=False, f_functions=None):
+                hard_float=False, f_functions=None, allow_a=False):
     """Return a list of contract violations; an empty list means the image is acceptable. `hard_float`
     expects the single-float ABI (ilp32f, e_flags 0x2) in place of soft float (issue #33)."""
     entry = ram_base if entry is None else entry
@@ -302,7 +331,7 @@ def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, e
         problems.append("undefined symbols: " + ", ".join(sorted(elf.undefined)))
     if listing is not None:
         problems.extend(check_listing(listing, allow_privileged, allow_f, allow_m, allow_counters, allow_system, allow_user,
-                                      f_functions))
+                                      f_functions, allow_a))
     return problems
 
 
@@ -375,6 +404,9 @@ def main():
     parser.add_argument("--hard-float", action="store_true",
                         help="expect the single-float ABI, ilp32f (issue #33); requires --allow-f")
     parser.add_argument("--allow-m", action="store_true", help="admit the M extension's multiply and divide instructions")
+    parser.add_argument("--allow-a", action="store_true", help="admit the A extension's LR.W, SC.W and AMOs (issue #34)")
+    parser.add_argument("--require-a", action="store_true",
+                        help="implies --allow-a: the listing must use the A extension (an RV32IMA build)")
     parser.add_argument("--allow-counters", action="store_true", help="admit reads of the Zicntr counters (cycle, time, instret)")
     parser.add_argument("--allow-system", action="store_true",
                         help="implies --allow-privileged: also the interrupt CSRs (mstatus, mie, mip, mscratch), "
@@ -389,20 +421,24 @@ def main():
                              "software multiply/divide routines (an RV32IM build that really retired rt/muldiv.c)")
     args = parser.parse_args()
     args.allow_m = args.allow_m or args.require_m
+    args.allow_a = args.allow_a or args.require_a
     if args.hard_float and not args.allow_f:
         parser.error("--hard-float requires --allow-f")
-    if (args.allow_f or args.allow_f_in or args.allow_privileged or args.allow_m or args.allow_counters or args.allow_system
-            or args.allow_user) and args.listing is None:
-        parser.error("--allow-f, --allow-m, --allow-counters, --allow-privileged, --allow-system and --allow-user require --listing")
+    if (args.allow_f or args.allow_f_in or args.allow_privileged or args.allow_m or args.allow_a or args.allow_counters
+            or args.allow_system or args.allow_user) and args.listing is None:
+        parser.error("--allow-f, --allow-m, --allow-a, --allow-counters, --allow-privileged, --allow-system and --allow-user "
+                     "require --listing")
     try:
         elf = parse_elf(args.elf.read_bytes())
         listing = args.listing.read_text() if args.listing else None
         problems = check_image(elf, listing, args.ram_base, args.ram_size, allow_privileged=args.allow_privileged, allow_f=args.allow_f,
                                allow_m=args.allow_m, allow_counters=args.allow_counters, allow_system=args.allow_system,
                                allow_user=args.allow_user, page_tables=args.page_tables, hard_float=args.hard_float,
-                               f_functions=set(args.allow_f_in) if args.allow_f_in else None)
+                               f_functions=set(args.allow_f_in) if args.allow_f_in else None, allow_a=args.allow_a)
         if args.require_m:
             problems.extend(check_m_build(elf, listing))
+        if args.require_a:
+            problems.extend(check_a_build(listing))
         image = flatten(elf, args.ram_base)
         if args.bin and args.bin.read_bytes() != image:
             problems.append(f"{args.bin} differs from the flattened PT_LOAD contents ({len(image)} bytes)")

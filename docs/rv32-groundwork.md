@@ -179,11 +179,12 @@ its corner cases and stores results into a *signature* region; an
 implementation passes when its signature equals the reference model's.
 
 **Selection.** Release 3.9.1 (commit `eb66181d`), `rv32i_m`: the I suite (39
-tests), M (8) and F (142), 189 tests. `make fetch-rv32-arch-test` checks out
+tests), M (8) and F (142), 189 tests; issue #34 added A (9 AMO tests, no LR/SC;
+riscv-tests' rv32ua covers those, [A record](rv32-a.md#tests)), 198 in all. `make fetch-rv32-arch-test` checks out
 only those, the headers and the licences at the pinned commit into
 `third_party/riscv-arch-test` (ignored by git; the whole suite is over 500 MB,
 D and Zfh being most of it). Every other suite is excluded with a reason in
-[`tools/rv32_arch_test.py`](../tools/rv32_arch_test.py): A, B, C, D, K, Zfh,
+[`tools/rv32_arch_test.py`](../tools/rv32_arch_test.py): B, C, D, K, Zacas, Zfh,
 Zicond and the rest are not in our ISA; Zifencei is excluded because `fence.i`
 is an illegal instruction in our contract; the privilege suite needs
 `mstatus`, `mscratch` and the suite's full trap harness, which arrive with O1.
@@ -225,7 +226,8 @@ for any other trap, and code 3 for a wrong asserted value.
 Commands: `make test-rv32-arch` (emulator and QEMU, about ten seconds for I and
 M and three minutes with F on four cores), `make test-rv32-arch-verilator` (adds
 Verilator, three minutes), `make test-rv32-arch-icarus` (adds Icarus; the F
-suite retires 19.5 million instructions, so about an hour). `--suite`, `--test
+suite retires 19.5 million instructions, so about an hour; `make
+test-rv32-arch-a-icarus` runs only A on Icarus, in seconds). `--suite`, `--test
 GLOB` and `--keep` narrow a run and keep its traces under `build/rv32/arch/`.
 `RV32_ARCH_QEMU_CPU` overrides the QEMU CPU string.
 

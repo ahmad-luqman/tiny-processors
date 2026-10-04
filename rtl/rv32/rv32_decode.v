@@ -4,6 +4,11 @@
 // handled here select a class, except FENCE, which retires without effects.
 // F compute words are decoded separately by rv32_fdecode; the core traps only
 // when this decoder reports illegal and that decoder reports !fp_valid.
+// The A extension (issue #34) is decoded here: LR.W is a load and SC.W and the
+// AMOs are stores, each with its own flag as well, and their immediate is zero.
+// OP_AMO is legal only with funct3 2, the same field value as lw and sw, which is
+// what makes the core's width, strobe and load_value paths treat all of them as
+// word accesses with no change.
 module rv32_decode (
     input  wire [31:0] insn,
     output wire [4:0]  rd,
@@ -17,8 +22,11 @@ module rv32_decode (
     output wire        is_alu_reg,   // add sub sll slt sltu xor srl sra or and
     output wire        is_muldiv,    // mul mulh mulhsu mulhu div divu rem remu (funct7 1)
     output wire        alu_alt,      // funct7[5] where it selects sub or sra
-    output wire        is_load,      // lb lh lw lbu lhu
-    output wire        is_store,     // sb sh sw
+    output wire        is_load,      // lb lh lw lbu lhu, flw, lr.w
+    output wire        is_store,     // sb sh sw, fsw, sc.w and the AMOs
+    output wire        is_lr,        // issue #34: lr.w
+    output wire        is_sc,        // sc.w
+    output wire        is_amo,       // amoswap amoadd amoxor amoand amoor amomin amomax amominu amomaxu (.w)
     output wire        is_branch,    // beq bne blt bge bltu bgeu
     output wire        is_jal,
     output wire        is_jalr,
@@ -34,11 +42,18 @@ module rv32_decode (
 );
     localparam [6:0] OP_LUI = 7'h37, OP_AUIPC = 7'h17, OP_JAL = 7'h6F, OP_JALR = 7'h67,
                      OP_BRANCH = 7'h63, OP_LOAD = 7'h03, OP_STORE = 7'h23,
-                     OP_IMM = 7'h13, OP_REG = 7'h33, OP_FENCE = 7'h0F, OP_SYSTEM = 7'h73;
+                     OP_IMM = 7'h13, OP_REG = 7'h33, OP_FENCE = 7'h0F, OP_SYSTEM = 7'h73,
+                     OP_AMO = 7'h2F;
+    // funct5 of OP_AMO (funct3 2, a word); aq and rl below it change nothing on one hart.
+    localparam [4:0] A_LR = 5'b00010, A_SC = 5'b00011;
 
     wire [6:0] opcode = insn[6:0];
     wire [6:0] funct7 = insn[31:25];
     wire [11:0] csr = insn[31:20];
+    wire [4:0] funct5 = insn[31:27];
+    wire amo_funct5 = funct5 == 5'b00000 || funct5 == 5'b00001 || funct5 == 5'b00100 || funct5 == 5'b01100 ||
+                      funct5 == 5'b01000 || funct5 == 5'b10000 || funct5 == 5'b10100 || funct5 == 5'b11000 ||
+                      funct5 == 5'b11100;
 
     assign rd = insn[11:7];
     assign rs1 = insn[19:15];
@@ -68,8 +83,11 @@ module rv32_decode (
     assign is_muldiv = (opcode == OP_REG) && (funct7 == 7'd1);
     assign is_alu_reg = (opcode == OP_REG) && !illegal && !is_muldiv;
     assign alu_alt = funct7[5] && (is_alu_reg || (is_alu_imm && funct3 == 3'd5));
-    assign is_load = (opcode == OP_LOAD || opcode == 7'h07) && !illegal;
-    assign is_store = (opcode == OP_STORE || opcode == 7'h27) && !illegal;
+    assign is_lr = (opcode == OP_AMO) && (funct5 == A_LR) && !illegal;
+    assign is_sc = (opcode == OP_AMO) && (funct5 == A_SC) && !illegal;
+    assign is_amo = (opcode == OP_AMO) && amo_funct5 && !illegal;
+    assign is_load = ((opcode == OP_LOAD || opcode == 7'h07) && !illegal) || is_lr;
+    assign is_store = ((opcode == OP_STORE || opcode == 7'h27) && !illegal) || is_sc || is_amo;
     assign is_branch = (opcode == OP_BRANCH) && !illegal;
     assign is_jal = (opcode == OP_JAL);
     assign is_jalr = (opcode == OP_JALR) && !illegal;
@@ -79,7 +97,8 @@ module rv32_decode (
     assign is_wfi = (insn == 32'h10500073);
     assign is_sret = (insn == 32'h10200073);
     assign is_sfence = (insn & 32'hfe007fff) == 32'h12000073;
-    assign writes_rd = is_lui || is_auipc || is_alu_imm || is_alu_reg || is_muldiv || (is_load && opcode == OP_LOAD) || is_jal || is_jalr || is_csr;
+    assign writes_rd = is_lui || is_auipc || is_alu_imm || is_alu_reg || is_muldiv || (is_load && opcode == OP_LOAD) || is_jal || is_jalr || is_csr ||
+                       is_lr || is_sc || is_amo;
 
     // Immediates: each format places the sign bit at insn[31], so every
     // extension replicates that one bit (RV32I chapter 2.3).
@@ -89,6 +108,7 @@ module rv32_decode (
             OP_JAL: imm = {{12{insn[31]}}, insn[19:12], insn[20], insn[30:21], 1'b0};
             OP_BRANCH: imm = {{20{insn[31]}}, insn[7], insn[30:25], insn[11:8], 1'b0};
             OP_STORE, 7'h27: imm = {{21{insn[31]}}, insn[30:25], insn[11:7]};
+            OP_AMO: imm = 32'd0; // the address is rs1 alone
             default: imm = {{21{insn[31]}}, insn[30:20]}; // I-type: loads, OP-IMM, jalr, system
         endcase
     end
@@ -108,6 +128,8 @@ module rv32_decode (
             OP_REG: illegal = !(funct7 == 7'd0 || funct7 == 7'd1 ||                      // funct7 1 is the M extension
                                 (funct7 == 7'h20 && (funct3 == 3'd0 || funct3 == 3'd5)));
             OP_FENCE: illegal = (funct3 != 3'd0);                                      // fence.i and the rest
+            OP_AMO: illegal = funct3 != 3'd2 || !(amo_funct5 || funct5 == A_SC ||       // words only, and
+                                                  (funct5 == A_LR && rs2 == 5'd0));    // lr.w with rs2 0
             OP_SYSTEM: illegal = (funct3 == 3'd0) ? !(is_ecall || is_ebreak || is_mret || is_wfi || is_sret || is_sfence)
                                                    : (funct3 == 3'd4 || !csr_exists ||  // CSR ops on missing CSRs
                                                       csr_write_to_read_only);          // and writes to the counters

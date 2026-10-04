@@ -84,6 +84,12 @@ module rv32_soc #(
     wire simd_valid, simd_ready, simd_error;
     wire [31:0] simd_rdata;
     wire ram_valid, ram_ready, ram_error;
+    wire ram_device_write;           // issue #34: declared before the core, which snoops them
+    wire [31:0] ram_physical_addr;
+    wire mem_lock;                   // issue #34: the core presents an SC.W or an AMO access
+    wire fb_device_write;            // issue #34: an engine's framebuffer write, for the reservation
+    wire [31:0] fb_device_addr;
+    reg prefer_gpu, gpu_grant_held;  // the RAM arbiter's state, below
     wire [31:0] ram_rdata;
     wire con_valid, con_ready, con_error;
     wire [31:0] con_rdata;
@@ -124,7 +130,9 @@ module rv32_soc #(
         .trap_value(trap_value), .halted(halted), .state(state), .pc(pc),
         .mtvec(mtvec), .mepc(mepc), .mcause(mcause), .mtval(mtval), .time_now(mtime),
         .irq_software(msip_level), .irq_timer(mtip), .irq_external(meip), .step_ticks(step_ticks),
-        .trap_interrupt(trap_interrupt)
+        .trap_interrupt(trap_interrupt), .ram_snoop_write(ram_device_write), .ram_snoop_addr(ram_physical_addr),
+        .ram_engine_held(gpu_grant_held), .mem_lock(mem_lock),
+        .fb_snoop_write(fb_device_write), .fb_snoop_addr(fb_device_addr)
     );
 
     rv32_bus #(.RAM_WORDS(RAM_WORDS), .FB_WORDS(FB_WORDS)) bus (
@@ -202,7 +210,6 @@ module rv32_soc #(
     wire gm_fb=em_valid && em_addr>=FB_BASE && em_addr<FB_END;
     // RAM is immediate once granted. A held graphics request retains its grant;
     // after an acceptance simultaneous requests alternate, so neither starves.
-    reg prefer_gpu, gpu_grant_held;
     // The CPU's side of the RAM port: the CPU's own requests, or virtio-blk's DMA while it serves
     // a notify, since the CPU is then stalled on that store and presents nothing to RAM (O3).
     wire side_valid = virtio_busy ? vio_valid : ram_valid;
@@ -210,7 +217,9 @@ module rv32_soc #(
     wire [31:0] side_addr = virtio_busy ? vio_addr : mem_addr;
     wire [3:0] side_strb = virtio_busy ? vio_strb : mem_strb;
     wire [31:0] side_wdata = virtio_busy ? vio_wdata : mem_wdata;
-    wire grant_gpu=gm_ram && (gpu_grant_held || !side_valid || prefer_gpu);
+    // Issue #34: while the core presents an SC.W or an AMO access (mem_lock), even one the host is
+    // stalling, an engine gets no new grant, so no device write lands inside the atomic access.
+    wire grant_gpu=gm_ram && (gpu_grant_held || (!mem_lock && (!side_valid || prefer_gpu)));
     // CPU writes fault inside G1's blit source or G2's depth buffer while that engine runs.
     wire [31:0] lock_begin = g3d_busy ? g3d_zbase : gpu_source_begin;
     wire [31:0] lock_end = g3d_busy ? g3d_zbase + 32'd153600 : gpu_source_end;
@@ -225,6 +234,10 @@ module rv32_soc #(
     wire ram_physical_valid=grant_gpu ? !gpu_memory_hold : side_valid && !ram_cpu_fault;
     wire ram_physical_ready, ram_physical_error;
     wire [31:0] ram_physical_rdata;
+    assign ram_physical_addr = grant_gpu ? em_addr : side_addr;
+    // Issue #34: a write a device made to RAM this cycle (G2's depth buffer, virtio-blk's DMA), which
+    // ends the core's LR.W reservation of that word.
+    assign ram_device_write = ram_physical_valid && ram_physical_ready && (grant_gpu ? em_we : (virtio_busy && side_we));
     wire vio_ready = virtio_busy && vio_valid && !grant_gpu && ram_physical_ready;
     assign ram_ready=ram_valid && (ram_cpu_fault || (!grant_gpu && ram_physical_ready));
     assign ram_error=ram_cpu_fault || ram_physical_error;
@@ -241,7 +254,7 @@ module rv32_soc #(
     // Memory BASE values repeat the bus decode; cross-language tests pin both.
     rv32_ram #(.WORDS(RAM_WORDS), .BASE(RAM_BASE)) ram (
         .clk(clk), .reset(reset), .valid(ram_physical_valid), .we(grant_gpu ? em_we : side_we),
-        .addr(grant_gpu?em_addr:side_addr), .strb(grant_gpu?em_strb:side_strb), .wdata(grant_gpu?em_wdata:side_wdata),
+        .addr(ram_physical_addr), .strb(grant_gpu?em_strb:side_strb), .wdata(grant_gpu?em_wdata:side_wdata),
         .rdata(ram_physical_rdata), .ready(ram_physical_ready), .error(ram_physical_error)
     );
 
@@ -304,6 +317,8 @@ module rv32_soc #(
     wire fb_physical_ready, fb_physical_error;
     wire [31:0] fb_physical_rdata;
     wire fb_engine_accept=gm_fb && !gpu_memory_hold;
+    assign fb_device_write=engine_busy && fb_engine_accept && em_we && fb_physical_ready;
+    assign fb_device_addr=em_addr;
     assign fb_ready=fb_valid && (engine_busy || fb_physical_ready);
     assign fb_error=engine_busy || fb_physical_error;
     assign fb_rdata=fb_physical_rdata;

@@ -102,7 +102,8 @@ void gpu_tick(gpu_device *g,uint8_t *ram,uint32_t ram_size,uint8_t *fb,bool hold
             uint32_t off=(uint32_t)((int32_t)p[GP_SY]+g->y-g->ay)*p[GP_STRIDE]+(uint32_t)((int32_t)p[GP_SX]+g->x-g->ax);
             g->pixel=p[GP_SRC]==0x12000000u?fb[off]:ram[p[GP_SRC]-0x80000000u+off];
             g->reads++;g->phase=WRITE;
-        }else{fb[g->y*320+g->x]=g->pixel;g->writes++;g->phase=ADVANCE;}
+        }else{fb[g->y*320+g->x]=g->pixel;g->fb_written=true;g->fb_written_at=(uint32_t)(g->y*320+g->x);
+            g->writes++;g->phase=ADVANCE;}
     }else if(g->phase==ADVANCE){
         bool done=false;
         if(op==GPU_LINE){

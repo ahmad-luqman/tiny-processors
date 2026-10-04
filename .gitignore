@@ -9,3 +9,6 @@ __pycache__/
 
 # Fetched at a pinned commit by make fetch-rv32-arch-test
 third_party/riscv-arch-test/
+
+# Fetched at a pinned commit by make fetch-rv32-riscv-tests (issue #34)
+third_party/riscv-tests/

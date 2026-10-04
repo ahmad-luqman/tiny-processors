@@ -67,6 +67,7 @@ device class and the privilege modes, each in seconds:
 | `run-rv32-virtio-rtl` | The virtio-blk device and its DMA |
 | `test-rv32-dma-window-icarus` | The DMA window in front of G1 and G2 |
 | `test-rv32-gfx` | The G1 device alone (`rv32_gpu.v`), and the SoC contracts |
+| `test-rv32-a`, `test-rv32-arch-a-icarus`, `test-rv32-ua-icarus`, `run-rv32-atom-rtl` | The A extension (issue #34): `AMO_WRITE`, the reservation, and the testbench's read-then-write check |
 
 `test-rv32-slow` holds the rest. Each target there has a Verilator twin in
 `test-rv32` that runs the same image or the same tests:

@@ -354,12 +354,14 @@ void g3d_tick(g3d_device *d, uint8_t *ram, uint32_t ram_size, uint8_t *fb, bool 
     case G3D_PH_ZWRITE:
         if (hold) { d->stalls++; break; }
         ram[zoff]=(uint8_t)d->z; ram[zoff+1]=(uint8_t)(d->z>>8);
+        d->ram_written=true; d->ram_written_at=zoff;
         d->transfers++; d->phase=G3D_PH_PWRITE;
         break;
     case G3D_PH_PWRITE: {
         if (hold) { d->stalls++; break; }
         static const uint8_t bayer[16]={0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5};
         int32_t t=bayer[(d->y&3)*4+(d->x&3)], r=d->r+2*t, g=d->g+2*t, b=d->b+4*t;
+        d->fb_written=true; d->fb_written_at=(uint32_t)d->y*320u+(uint32_t)d->x;
         fb[(uint32_t)d->y*320u+(uint32_t)d->x]=(uint8_t)(((r>255?255:r)&0xe0)|((g>255?255:g)>>3&0x1c)|(b>255?255:b)>>6);
         d->transfers++; d->pixels++;
         next_pixel(d);
@@ -368,6 +370,7 @@ void g3d_tick(g3d_device *d, uint8_t *ram, uint32_t ram_size, uint8_t *fb, bool 
     case G3D_PH_CLEAR:
         if (hold) { d->stalls++; break; }
         memset(ram+d->zbase-RAM_ORIGIN+4u*d->index,0xff,4);
+        d->ram_written=true; d->ram_written_at=d->zbase-RAM_ORIGIN+4u*d->index;
         d->transfers++;
         if (++d->index==Z_BYTES/4) d->phase=G3D_PH_FINISH;
         break;

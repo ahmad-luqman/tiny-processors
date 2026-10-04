@@ -1343,7 +1343,7 @@ class HelperTest(unittest.TestCase):
         halt = {"cycles": 4 * 3 + 5 * 2 + 7, "stalls": 7, "transfers": 5 + 2}
         run = Run(0, "", "", "", ["1 a b x1=1", "2 a b mem[x]<-1/4", "3 a b", "4 a b x2=2 mem[y]->0/1", "5 a b"], halt)
         relation, holds = cycle_relation(run)
-        self.assertEqual(relation, "cycles 29 = 4 x 3 + 5 x 2 + 7 stalls; transfers 7 = 5 fetches + 2 data")
+        self.assertEqual(relation, "cycles 29 = 4 x 5 + 2 data + 7 stalls; transfers 7 = 5 fetches + 2 data")
         self.assertTrue(holds)
         self.assertEqual(cycle_relation(run._replace(halt=dict(halt, cycles=30)))[1], False)
         self.assertEqual(cycle_relation(run._replace(halt=dict(halt, transfers=8)))[1], False)

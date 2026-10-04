@@ -37,19 +37,21 @@ MODEL = ROOT / "tests" / "arch"
 
 class Suite(NamedTuple):
     """How a suite is assembled: exactly its own ISA, so a test cannot use an instruction outside
-    it, and whether RVMODEL_ASSERT checks the expected values written into the sources."""
+    it, and whether RVMODEL_ASSERT checks the expected values written into the sources; and how
+    many tests the pinned commit has, so a checkout missing one is refused, not run short."""
     march: str
     asserts: bool
+    tests: int
 
 
 SUITES = {
-    "I": Suite("rv32i_zicsr", asserts=True),
-    "M": Suite("rv32im_zicsr", asserts=True),
-    "F": Suite("rv32if_zicsr", asserts=False),
+    "I": Suite("rv32i_zicsr", asserts=True, tests=39),
+    "M": Suite("rv32im_zicsr", asserts=True, tests=8),
+    "F": Suite("rv32if_zicsr", asserts=False, tests=142),
+    "A": Suite("rv32ia_zicsr", asserts=False, tests=9),  # issue #34: the nine AMOs; LR/SC in tools/rv32_riscv_tests.py
 }
 # Suites in rv32i_m that are not selected, and why (docs/rv32-groundwork.md).
 EXCLUDED = {
-    "A": "no A extension",
     "B": "no bit-manipulation extensions",
     "C": "no compressed instructions",
     "CMO": "no cache-management operations",
@@ -59,7 +61,7 @@ EXCLUDED = {
     "K": "no scalar cryptography",
     "P_unratified": "no packed SIMD",
     "Svadu": "Sv32 sets no A or D bits in hardware: a clear one faults (Svade, issue #20)",
-    "Zacas": "no A extension",
+    "Zacas": "no Zacas (atomic compare-and-swap)",
     "Zcmop": "no compressed instructions",
     "Zfh": "no half precision",
     "Zicond": "no Zicond",
@@ -85,16 +87,26 @@ def link_flags(march, ld):
             "-static", f"--ld-path={ld}", f"-Wl,-T,{MODEL / 'link.ld'}", f"-I{MODEL}"]
 
 
+def compile_test(cc, flags, source, elf):
+    """Assemble and link one test source into `elf`, then pack it (pack_image)."""
+    result = subprocess.run([cc, *flags, "-o", str(elf), str(source)], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise TestFailure(f"assembly failed:\n{result.stderr}")
+    return (elf, *pack_image(elf))
+
+
 def assemble(test, suite, work, arch_test, cc, ld):
     """Assemble and link one test; returns (elf, bin, hex) paths."""
-    elf = work / f"{test.stem}.elf"
     flags = [*link_flags(SUITES[suite].march, ld), "-DXLEN=32", "-DFLEN=32", "-DTEST_CASE_1=True",
              f"-I{arch_test / 'riscv-test-suite' / 'env'}"]
     if SUITES[suite].asserts:
         flags.append("-DRVMODEL_ASSERT")
-    result = subprocess.run([cc, *flags, "-o", str(elf), str(test)], capture_output=True, text=True)
-    if result.returncode != 0:
-        raise TestFailure(f"assembly failed:\n{result.stderr}")
+    return compile_test(cc, flags, test, work / f"{test.stem}.elf")
+
+
+def pack_image(elf):
+    """Check a linked test (its entry at the reset PC, its image below QEMU's device tree) and
+    write the flat .bin and the .hex beside it; returns (bin, hex) paths."""
     parsed = parse_elf(elf.read_bytes())
     entry = parsed.symbols.get("rvtest_entry_point")
     if entry != RAM_BASE:
@@ -105,7 +117,7 @@ def assemble(test, suite, work, arch_test, cc, ld):
     bin_path, hex_path = elf.with_suffix(".bin"), elf.with_suffix(".hex")
     bin_path.write_bytes(image)
     write_hex(hex_path, image)
-    return elf, bin_path, hex_path
+    return bin_path, hex_path
 
 
 def signature_lines(console):
@@ -134,7 +146,6 @@ def run_one(test, suite, args):
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
     elf, bin_path, hex_path = assemble(test, suite, work, args.arch_test, args.cc, args.ld)
-    rtl_backends = [backend for backend in ("icarus", "verilator") if backend in args.backends]
     emulator_trace = work / "emu.trace"
     emulator = run_emulator(args.emulator, bin_path, emulator_trace, limit=args.limit, timeout=args.timeout)
     check_passed(emulator, "emulator")
@@ -145,67 +156,97 @@ def run_one(test, suite, args):
             difference = next((i for i, (a, b) in enumerate(zip(reference.splitlines(), signature)) if a != b), None)
             raise TestFailure(f"signature differs from QEMU's at word {difference} "
                               f"({len(reference.splitlines())} vs {len(signature)} words)")
-    for backend in rtl_backends:
+    compare_rtl(args, hex_path, work, emulator)
+    return name, len(signature), emulator.halt["steps"], time.monotonic() - started
+
+
+def compare_rtl(args, hex_path, work, emulator):
+    """Run each simulator asked for; its console and whole trace must equal the emulator's. Then
+    drop the traces, unless --keep."""
+    for backend in ("icarus", "verilator"):
+        if backend not in args.backends:
+            continue
         simulator = args.icarus if backend == "icarus" else args.verilator
         # Generous: a floating-point instruction costs up to ~40 cycles, an M instruction 37.
         max_cycles = min(60 * emulator.halt["steps"] + 10000, 2147483647)
         rtl = run_rtl(simulator, hex_path, work / f"{backend}.trace", max_cycles=max_cycles, timeout=args.timeout)
         check_passed(rtl, backend)
         if rtl.console != emulator.console:
-            raise TestFailure(f"{backend} signature differs from the emulator's")
+            raise TestFailure(f"{backend} console differs from the emulator's")
         difference = diff_traces(rtl.trace, emulator.trace)
         if difference:
             raise TestFailure(f"{backend} trace differs from the emulator's: {difference}")
     if not args.keep:
         for trace in work.glob("*.trace*"):
             trace.unlink()
-    return name, len(signature), emulator.halt["steps"], time.monotonic() - started
 
 
-def checkout_commit(arch_test):
-    """The commit a riscv-arch-test checkout is at, or "" when it has none."""
-    return subprocess.run(["git", "-C", str(arch_test), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+def checkout_commit(path):
+    """The commit a checkout is at, or "" when it has none."""
+    return subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+
+def sparse_checkout(path, url, commit, patterns):
+    """Replace `path` with a shallow checkout of `commit` from `url` holding only `patterns`."""
+    def git(*command):
+        subprocess.run(["git", "-C", str(path), *command], check=True)
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True)
+    git("init", "-q")
+    git("remote", "add", "origin", url)
+    git("sparse-checkout", "set", "--no-cone", *patterns)
+    git("fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", commit)
+    git("checkout", "-q", "FETCH_HEAD")
 
 
 def fetch(arch_test):
     """Check out the pinned commit, only the files the selected suites need (the whole suite,
-    D and Zfh included, is over 500 MB): the model headers, the licences, and I, M and F."""
-    def git(*command):
-        subprocess.run(["git", "-C", str(arch_test), *command], check=True)
-    if (arch_test / ".git").exists():
-        if checkout_commit(arch_test) == ARCH_TEST_COMMIT:
-            print(f"{arch_test} is at the pinned {ARCH_TEST_COMMIT}")
-            return
-    shutil.rmtree(arch_test, ignore_errors=True)
-    arch_test.mkdir(parents=True)
-    git("init", "-q")
-    git("remote", "add", "origin", ARCH_TEST_URL)
-    git("sparse-checkout", "set", "--no-cone", "/COPYING.*", "/README.md", "/riscv-test-suite/env/",
-        *(f"/riscv-test-suite/rv32i_m/{suite}/" for suite in SUITES))
-    git("fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", ARCH_TEST_COMMIT)
-    git("checkout", "-q", "FETCH_HEAD")
+    D and Zfh included, is over 500 MB): the model headers, the licences, and I, M, F and A. A
+    checkout at the pinned commit that lacks a selected suite's tests (one made before A was added,
+    issue #34) is fetched again."""
+    if (arch_test / ".git").exists() and checkout_commit(arch_test) == ARCH_TEST_COMMIT and all(
+            len(suite_sources(arch_test, suite)) == SUITES[suite].tests for suite in SUITES):
+        print(f"{arch_test} is at the pinned {ARCH_TEST_COMMIT}")
+        return
+    sparse_checkout(arch_test, ARCH_TEST_URL, ARCH_TEST_COMMIT,
+                    ["/COPYING.*", "/README.md", "/riscv-test-suite/env/",
+                     *(f"/riscv-test-suite/rv32i_m/{suite}/" for suite in SUITES)])
     print(f"fetched riscv-arch-test {ARCH_TEST_COMMIT} into {arch_test}")
 
 
+def suite_sources(arch_test, suite):
+    return sorted((arch_test / "riscv-test-suite" / "rv32i_m" / suite / "src").glob("*.S"))
+
+
+def matching(tests, patterns, name):
+    """The tests whose `name` matches a pattern (all without one); a pattern that matches none of
+    them is an error rather than a smaller run."""
+    for pattern in patterns:
+        if not any(fnmatch.fnmatch(name(test), pattern) for test in tests):
+            sys.exit(f"--test {pattern} matches no test")
+    return [test for test in tests if not patterns or any(fnmatch.fnmatch(name(test), pattern) for pattern in patterns)]
+
+
 def select_tests(arch_test, suites, patterns):
+    """The selected suites' tests, each suite whole as the pinned commit has it, then narrowed by
+    the --test patterns."""
     tests = []
     for suite in suites:
-        source = arch_test / "riscv-test-suite" / "rv32i_m" / suite / "src"
-        found = sorted(source.glob("*.S"))
-        if not found:
-            sys.exit(f"no tests in {source}; run make fetch-rv32-arch-test")
-        tests += [(test, suite) for test in found
-                  if not patterns or any(fnmatch.fnmatch(test.stem, pattern) for pattern in patterns)]
-    return tests
+        found = suite_sources(arch_test, suite)
+        if len(found) != SUITES[suite].tests:
+            sys.exit(f"suite {suite} has {len(found)} tests, not the pinned commit's {SUITES[suite].tests}; "
+                     "run make fetch-rv32-arch-test")
+        tests += [(test, suite) for test in found]
+    return matching(tests, patterns, lambda item: item[0].stem)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--suite", action="append", choices=sorted(SUITES), help="suite to run (repeatable; default all)")
+def add_runner_arguments(parser, out, limit, timeout):
+    """The options this runner and tools/rv32_riscv_tests.py share: the selection, the backends
+    and their binaries, the toolchain, and each run's limits."""
     parser.add_argument("--test", action="append", default=[], metavar="GLOB", help="only tests whose name matches (repeatable)")
     parser.add_argument("--backend", action="append", choices=BACKENDS, dest="backends",
                         help="backends to compare (repeatable; default emulator and qemu); the emulator always runs")
-    parser.add_argument("--arch-test", type=Path, default=DEFAULT_ARCH_TEST, help="the fetched riscv-arch-test checkout")
     parser.add_argument("--emulator", default=str(ROOT / "build/rv32/rv32emu"))
     parser.add_argument("--icarus", default=str(ROOT / "build/rv32/rv32_tb.vvp"), help="compiled Icarus testbench")
     parser.add_argument("--verilator", default=str(ROOT / "build/verilator-rv32/rv32_sim"), help="Verilator testbench binary")
@@ -213,58 +254,78 @@ def main():
     parser.add_argument("--qemu-cpu", default=DEFAULT_QEMU_CPU)
     parser.add_argument("--cc", default=os.environ.get("RV32_CC", "clang"))
     parser.add_argument("--ld", default=os.environ.get("RV32_LD", "ld.lld"))
-    parser.add_argument("--out", type=Path, default=ROOT / "build/rv32/arch")
+    parser.add_argument("--out", type=Path, default=out)
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 1)
-    parser.add_argument("--limit", type=int, default=50_000_000, help="emulator instruction limit per test")
-    parser.add_argument("--timeout", type=float, default=7200.0, help="seconds each backend may run one test")
+    parser.add_argument("--limit", type=int, default=limit, help="emulator instruction limit per test")
+    parser.add_argument("--timeout", type=float, default=timeout, help="seconds each backend may run one test")
     parser.add_argument("--keep", action="store_true", help="keep the traces of passing tests")
+
+
+def check_runner_arguments(parser, args):
+    """Normalise the backends (the emulator always runs) and refuse a run that could not start."""
+    args.backends = sorted(set(args.backends or ["emulator", "qemu"]) | {"emulator"}, key=BACKENDS.index)
+    if args.jobs < 1:
+        parser.error("--jobs must be at least 1")
+    for backend, path in (("icarus", args.icarus), ("verilator", args.verilator)):
+        if backend in args.backends and not Path(path).exists():
+            parser.error(f"{path} does not exist; build the {backend} testbench first")
+
+
+def run_all(items, run, name, jobs):
+    """Run `run(item)` for each item on `jobs` threads, printing PASS with its text, or FAIL with
+    the reason, as each finishes. `run` returns (text, emulator steps). Returns (passed, steps,
+    failed names)."""
+    def attempt(item):
+        try:
+            return run(item), None
+        except (TestFailure, SystemExit) as error:  # check_passed and the shared runners exit
+            return None, str(error)
+
+    passed, steps, failed = 0, 0, []
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        for item, (result, failure) in zip(items, pool.map(attempt, items)):
+            if failure is not None:
+                failed.append(name(item))
+                print(f"FAIL {name(item)}: {failure}", flush=True)
+            else:
+                text, count = result
+                passed += 1
+                steps += count
+                print(f"PASS {name(item)}: {text}", flush=True)
+    return passed, steps, failed
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--suite", action="append", choices=sorted(SUITES), help="suite to run (repeatable; default all)")
+    parser.add_argument("--arch-test", type=Path, default=DEFAULT_ARCH_TEST, help="the fetched riscv-arch-test checkout")
     parser.add_argument("--fetch", action="store_true", help="check out the pinned suite into --arch-test and exit")
+    add_runner_arguments(parser, ROOT / "build/rv32/arch", limit=50_000_000, timeout=7200.0)
     args = parser.parse_args()
     if args.fetch:
         fetch(args.arch_test)
         return
-    args.backends = sorted(set(args.backends or ["emulator", "qemu"]) | {"emulator"}, key=BACKENDS.index)
-    if args.jobs < 1:
-        parser.error("--jobs must be at least 1")
+    check_runner_arguments(parser, args)
     if not (args.arch_test / ".git").exists():
         parser.error(f"{args.arch_test} is not a checkout; run make fetch-rv32-arch-test")
     commit = checkout_commit(args.arch_test)
     if commit != ARCH_TEST_COMMIT:
         parser.error(f"{args.arch_test} is at {commit or 'no commit'}, not the pinned {ARCH_TEST_COMMIT}")
-    for backend, path in (("icarus", args.icarus), ("verilator", args.verilator)):
-        if backend in args.backends and not Path(path).exists():
-            parser.error(f"{path} does not exist; build the {backend} testbench first")
     tests = select_tests(args.arch_test, args.suite or sorted(SUITES), args.test)
-    if not tests:
-        parser.error("no test matches")
     print(f"riscv-arch-test {ARCH_TEST_COMMIT[:12]}: {len(tests)} test(s) on {', '.join(args.backends)}", flush=True)
 
-    failures, passed, steps = [], 0, 0
-
-    def attempt(item):
-        test, suite = item
-        try:
-            return run_one(test, suite, args), None
-        except (TestFailure, SystemExit) as error:  # check_passed and the shared runners exit
-            return None, (f"{suite}/{test.stem}", str(error))
+    def run(item):
+        _, words, count, seconds = run_one(*item, args)
+        return f"{words} signature words, {count} instructions, {seconds:.1f} s", count
 
     started = time.monotonic()
-    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        for result, failure in pool.map(attempt, tests):
-            if failure:
-                failures.append(failure)
-                print(f"FAIL {failure[0]}: {failure[1]}", flush=True)
-            else:
-                name, words, count, seconds = result
-                passed += 1
-                steps += count
-                print(f"PASS {name}: {words} signature words, {count} instructions, {seconds:.1f} s", flush=True)
+    passed, steps, failed = run_all(tests, run, lambda item: f"{item[1]}/{item[0].stem}", args.jobs)
     by_suite = Counter(suite for _, suite in tests)
     summary = ", ".join(f"{suite} {count}" for suite, count in sorted(by_suite.items()))
     print(f"{passed}/{len(tests)} passed ({summary}); {steps} instructions on the emulator; "
           f"{time.monotonic() - started:.0f} s on {', '.join(args.backends)}")
-    if failures:
-        sys.exit(f"{len(failures)} test(s) failed: {', '.join(name for name, _ in failures)}")
+    if failed:
+        sys.exit(f"{len(failed)} test(s) failed: {', '.join(failed)}")
 
 
 if __name__ == "__main__":

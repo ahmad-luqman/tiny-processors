@@ -1,6 +1,6 @@
 # Tiny Processors
 
-Learning Verilog by building small CPUs, parallel compute hardware, and an end-to-end computer. Our RV32IMF CPU and native Mac emulator run C, a small OS/runtime, Pong, and Tetris; complete CPU floating-point integration is verified; GPU/NPU integration also follows the playable machine. See [the roadmap](PLAN.md) and the [detailed full-stack plan](docs/planning/roadmap.md).
+Learning Verilog by building small CPUs, parallel compute hardware, and an end-to-end computer. Our RV32IMAF CPU and native Mac emulator run C, a small OS/runtime, Pong, and Tetris; complete CPU floating-point integration is verified; GPU/NPU integration also follows the playable machine. See [the roadmap](PLAN.md) and the [detailed full-stack plan](docs/planning/roadmap.md).
 
 ## Play the complete computer (M7)
 
@@ -49,6 +49,19 @@ ILP32; existing games remain RV32I. The same C arithmetic workload takes 6,037
 unstalled RTL cycles with F and 80,924 with guest software floating point.
 See [the F2 contract, coverage, ABI walkthrough and gates](docs/rv32-f.md).
 `make test-rv32` includes these checks.
+
+The A extension (issue #34) runs on both backends:
+
+```sh
+make test-rv32-a test-rv32-a-verilator  # LR/SC, every AMO, the reservation, faults
+make test-rv32-ua test-rv32-ua-icarus   # riscv-tests rv32ua (lrsc.S) against QEMU
+make run-rv32-atom-qemu run-rv32-atom-rtl  # C atomics built -march=rv32ima
+```
+
+`lr.w`, `sc.w` and the nine AMOs follow QEMU on faults and on when the
+reservation clears, apart from the two differences the A record lists (a word
+AMO on the UART, and QEMU's value-comparing SC). riscv-arch-test's A suite and riscv-tests' rv32ua pass on
+the emulator, Icarus and Verilator. See [the A record](docs/rv32-a.md).
 
 ## CPU-commanded accelerator (A2)
 
