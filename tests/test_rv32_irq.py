@@ -47,16 +47,17 @@ class InterruptTest(StepTicksCase):
 
     def test_the_interrupt_csrs(self):
         words = [CSRRS(1, MSTATUS, 0)]                     # reset value
-        # MIE and MPIE are writable, and since issue #20 SIE, SPIE, SPP, MPRV, SUM, MXR, TVM, TW, TSR
+        # MIE and MPIE are writable, since issue #20 SIE, SPIE, SPP, MPRV, SUM, MXR, TVM, TW, TSR, and
+        # since issue #33 FS (SD follows it)
         words += LI(2, 0xFFFFFFFF) + [CSRRW(0, MSTATUS, 2), CSRRS(3, MSTATUS, 0)]
-        words += [CSRRW(0, MSTATUS, 0), CSRRS(4, MSTATUS, 0)]  # MPP = 0 is user mode (O5)
+        words += [CSRRW(0, MSTATUS, 0), CSRRS(4, MSTATUS, 0)]  # MPP = 0 is user mode (O5); FS Off, so no SD
         words += [CSRRW(0, MIE_CSR, 2), CSRRS(5, MIE_CSR, 0), CSRRW(0, MIE_CSR, 0)]  # the M and S enables
         # mip: the devices' bits are read-only and nothing is pending; software raises SSIP, STIP, SEIP
         words += [CSRRW(0, MIP_CSR, 2), CSRRS(6, MIP_CSR, 0), CSRRW(0, MIP_CSR, 0)]
         words += LI(7, 0x12345678) + [CSRRW(8, MSCRATCH, 7), CSRRS(9, MSCRATCH, 0)]
         emulator, rtl = self.assert_same(words + dump(1, 3, 4, 5, 6, 8, 9))
         got = [stored(rtl.trace, SAVE + 0x40 + 4 * i) for i in range(7)]
-        self.assertEqual(got, [MSTATUS_RESET, MSTATUS_RESET | 0x7E01AA, MSTATUS_RESET & ~MSTATUS_MPP, 0xAAA, 0x222, 0,
+        self.assertEqual(got, [MSTATUS_RESET, MSTATUS_RESET | 0x7E01AA, 0, 0xAAA, 0x222, 0,
                                0x12345678])
 
     def test_a_timer_interrupt_is_taken_at_the_next_boundary_and_mret_restores_mie(self):

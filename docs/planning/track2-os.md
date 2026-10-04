@@ -11,7 +11,7 @@ own commit with its own evidence; the record is
 from it, the [record](../rv32-os.md) and [docs/rv32.md](../rv32.md) are the
 contract:
 
-- Slots are 128 KiB, 24 of them from `0x8010_0000`, and a program may span
+- Slots are 128 KiB, 24 of them from `0x8010_0000` (56 since issue #33's 8 MiB), and a program may span
   several (O4); they were 256 KiB in O2, as planned.
 - The shell runs a program by its name (`NAME [ARGS]`, `NAME &`), not
   `run NAME`, and gained `wait` (O4) and file programs (`cat`, `write`,
@@ -64,7 +64,8 @@ PLIC, as the privileged specification defines them for M-mode only.
 
 1. **CSRs.** `mstatus` (0x300): MIE (bit 3), MPIE (bit 7) writable; MPP
    (12:11) reads 3 (M) until O5; FS (14:13) reads 3 and SD (31) reads 1,
-   because floating state is always on ([F2](../rv32-f.md)); every other bit
+   because floating state is always on ([F2](../rv32-f.md); writable since
+   issue #33); every other bit
    reads 0. `mie` (0x304): MSIE, MTIE, MEIE (bits 3, 7, 11) writable, the rest
    0. `mip` (0x344): MSIP, MTIP, MEIP read-only, the live levels from the
    CLINT and the PLIC; a write is legal and changes nothing. `mscratch`

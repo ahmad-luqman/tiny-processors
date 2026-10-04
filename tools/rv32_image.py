@@ -27,6 +27,7 @@ SHT_SYMTAB = 2
 SHF_ALLOC = 0x2
 EF_RISCV_RVC = 0x1
 EF_RISCV_FLOAT_ABI = 0x6
+EF_RISCV_FLOAT_ABI_SINGLE = 0x2  # ilp32f (issue #33)
 EF_RISCV_RVE = 0x8
 EF_RISCV_TSO = 0x10
 REQUIRED_SECTIONS = (".text", ".rodata", ".data", ".bss")
@@ -141,16 +142,21 @@ def listing_word(encoded):
     return int(encoded, 16) if len(encoded) == 8 else None
 
 
+FUNCTION_LABEL = re.compile(r"^[0-9a-f]+ <([^>]+)>:\s*$")  # objdump's "80000298 <fpu_save>:"
+
+
 def check_listing(text, allow_privileged=False, allow_f=False, allow_m=False, allow_counters=False, allow_system=False,
-                  allow_user=False):
+                  allow_user=False, f_functions=None):
     """Return problems found in an objdump disassembly listing; `allow_privileged` admits the CSR
     instructions and mret that a trap handler needs; `allow_f` admits only valid RV32F
     encodings and floating CSR accesses; `allow_m` admits the M extension's eight instructions;
     `allow_counters` admits reads (never writes) of the Zicntr counters; `allow_system` (which implies
     `allow_privileged`) admits the interrupt CSRs, wfi and ecall of Track 2; `allow_user` (which implies
     `allow_counters`) admits what a user-mode program may run (O5): ecall and `unimp`, and no machine
-    CSR, mret or wfi. Every gate requires a listing to inspect."""
+    CSR, mret or wfi. Every gate requires a listing to inspect. `f_functions` (issue #33), a set of
+    function names, admits F only inside those functions, as `allow_f` does everywhere."""
     allow_privileged = allow_privileged or allow_system
+    function = None
     allow_counters = allow_counters or allow_user
     problems = []
     instructions = 0
@@ -159,11 +165,15 @@ def check_listing(text, allow_privileged=False, allow_f=False, allow_m=False, al
             problems.append(f"listing line {number}: undecodable instruction: {line.strip()}")
             instructions += 1
             continue
+        label = FUNCTION_LABEL.match(line)
+        if label:
+            function = label.group(1)
+        f_here = allow_f or (f_functions is not None and function in f_functions)
         match = LISTING_LINE.match(line)
         instructions += bool(match)
         word = listing_word(match.group(2)) if match else None
         if word is not None and word & 127 in F_OPCODES:
-            if not allow_f or not valid_f_word(word):
+            if not f_here or not valid_f_word(word):
                 problems.append(f"listing line {number}: floating instruction outside selected ISA: {line.strip()}")
             continue
         if (allow_system or allow_user) and word == UNIMP:
@@ -171,7 +181,7 @@ def check_listing(text, allow_privileged=False, allow_f=False, allow_m=False, al
         if word is not None and word & 127 == 0x73 and (word >> 12) & 7:
             csr = word >> 20
             if csr in (1, 2, 3):
-                if not allow_f or (word >> 12) & 7 == 4:
+                if not f_here or (word >> 12) & 7 == 4:
                     problems.append(f"listing line {number}: floating CSR outside selected ISA: {line.strip()}")
                 continue
             if csr in COUNTER_CSRS:
@@ -214,8 +224,10 @@ def check_m_build(elf, listing):
 
 
 def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, entry=None, allow_privileged=False, allow_f=False,
-                allow_m=False, allow_counters=False, allow_system=False, allow_user=False, page_tables=False):
-    """Return a list of contract violations; an empty list means the image is acceptable."""
+                allow_m=False, allow_counters=False, allow_system=False, allow_user=False, page_tables=False,
+                hard_float=False, f_functions=None):
+    """Return a list of contract violations; an empty list means the image is acceptable. `hard_float`
+    expects the single-float ABI (ilp32f, e_flags 0x2) in place of soft float (issue #33)."""
     entry = ram_base if entry is None else entry
     ram_end = ram_base + ram_size
     problems = []
@@ -223,17 +235,21 @@ def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, e
         problems.append(f"e_type is {elf.etype}, expected ET_EXEC (2)")
     if elf.machine != EM_RISCV:
         problems.append(f"e_machine is {elf.machine}, expected EM_RISCV (243)")
-    if elf.flags != 0:
+    if hard_float and not allow_f:
+        problems.append("the single-float ABI needs F: hard_float without allow_f")
+    expected_flags = EF_RISCV_FLOAT_ABI_SINGLE if hard_float else 0
+    if elf.flags != expected_flags:
         described = []
         if elf.flags & EF_RISCV_RVC:
             described.append("RVC (compressed instructions)")
-        if elf.flags & EF_RISCV_FLOAT_ABI:
-            described.append(f"float ABI {elf.flags & EF_RISCV_FLOAT_ABI:#x} (expected soft float)")
+        if elf.flags & EF_RISCV_FLOAT_ABI != expected_flags & EF_RISCV_FLOAT_ABI:
+            described.append(f"float ABI {elf.flags & EF_RISCV_FLOAT_ABI:#x} (expected "
+                             f"{'single float' if hard_float else 'soft float'})")
         if elf.flags & EF_RISCV_RVE:
             described.append("RVE")
         if elf.flags & EF_RISCV_TSO:
             described.append("TSO")
-        problems.append(f"e_flags is {elf.flags:#x}, expected 0: " + ", ".join(described or ["unknown bits"]))
+        problems.append(f"e_flags is {elf.flags:#x}, expected {expected_flags:#x}: " + ", ".join(described or ["unknown bits"]))
     if elf.entry != entry:
         problems.append(f"entry point is {elf.entry:#010x}, expected {entry:#010x}")
     for name in REQUIRED_SYMBOLS:
@@ -285,7 +301,8 @@ def check_image(elf, listing=None, ram_base=RAM_BASE, ram_size=RAM_SLICE_SIZE, e
     if elf.undefined:
         problems.append("undefined symbols: " + ", ".join(sorted(elf.undefined)))
     if listing is not None:
-        problems.extend(check_listing(listing, allow_privileged, allow_f, allow_m, allow_counters, allow_system, allow_user))
+        problems.extend(check_listing(listing, allow_privileged, allow_f, allow_m, allow_counters, allow_system, allow_user,
+                                      f_functions))
     return problems
 
 
@@ -353,6 +370,10 @@ def main():
     parser.add_argument("--allow-privileged", action="store_true",
                         help="admit csr* and mret in the listing (an image with a trap handler)")
     parser.add_argument("--allow-f", action="store_true", help="admit RV32F and floating CSRs, retaining ILP32")
+    parser.add_argument("--allow-f-in", action="append", metavar="FUNCTION",
+                        help="admit RV32F only inside this function (repeatable): the kernel's FPU save and load (issue #33)")
+    parser.add_argument("--hard-float", action="store_true",
+                        help="expect the single-float ABI, ilp32f (issue #33); requires --allow-f")
     parser.add_argument("--allow-m", action="store_true", help="admit the M extension's multiply and divide instructions")
     parser.add_argument("--allow-counters", action="store_true", help="admit reads of the Zicntr counters (cycle, time, instret)")
     parser.add_argument("--allow-system", action="store_true",
@@ -368,15 +389,18 @@ def main():
                              "software multiply/divide routines (an RV32IM build that really retired rt/muldiv.c)")
     args = parser.parse_args()
     args.allow_m = args.allow_m or args.require_m
-    if (args.allow_f or args.allow_privileged or args.allow_m or args.allow_counters or args.allow_system or args.allow_user) \
-            and args.listing is None:
+    if args.hard_float and not args.allow_f:
+        parser.error("--hard-float requires --allow-f")
+    if (args.allow_f or args.allow_f_in or args.allow_privileged or args.allow_m or args.allow_counters or args.allow_system
+            or args.allow_user) and args.listing is None:
         parser.error("--allow-f, --allow-m, --allow-counters, --allow-privileged, --allow-system and --allow-user require --listing")
     try:
         elf = parse_elf(args.elf.read_bytes())
         listing = args.listing.read_text() if args.listing else None
         problems = check_image(elf, listing, args.ram_base, args.ram_size, allow_privileged=args.allow_privileged, allow_f=args.allow_f,
                                allow_m=args.allow_m, allow_counters=args.allow_counters, allow_system=args.allow_system,
-                               allow_user=args.allow_user, page_tables=args.page_tables)
+                               allow_user=args.allow_user, page_tables=args.page_tables, hard_float=args.hard_float,
+                               f_functions=set(args.allow_f_in) if args.allow_f_in else None)
         if args.require_m:
             problems.extend(check_m_build(elf, listing))
         image = flatten(elf, args.ram_base)

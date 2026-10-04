@@ -3,7 +3,8 @@
 F2 integrates the F1 unit into the existing machine. The ISA is RV32IF with
 Zicsr and the existing four trap CSRs/MRET, not a full privileged platform.
 F is always enabled; FS, context switching, D, compressed instructions and
-accelerators are outside this milestone. Existing RV32I firmware remains valid.
+accelerators are outside this milestone. (Issue #33 later made `mstatus.FS`
+real, Dirty from reset so this contract holds unchanged: [rv32.md](rv32.md#floating-state-issue-33).) Existing RV32I firmware remains valid.
 
 ## State and instructions
 

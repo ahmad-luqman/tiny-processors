@@ -160,7 +160,7 @@ Yosys 0.33.
 | Range | What |
 | --- | --- |
 | `0x8000_0000`–`0x800F_FFFF` | The kernel: code, data, the RAM disk, a 16 KiB stack at the top ([kernel.ld](../programs/rv32/os/kernel.ld)) |
-| `0x8010_0000 + 0x2_0000 × n`, n = 0..23 | Program slot n of 128 KiB (256 KiB, 12 slots, until O4); a program spans one or more: code, data and `.bss` from the bottom, the heap above them, a 32 KiB stack at the top ([user.ld](../programs/rv32/os/user.ld)); since Track 3 a program may ask for a larger stack, and its lowest page is an unmapped guard ([record](rv32-libc.md#the-stack-a-size-per-program-and-a-guard-page)) |
+| `0x8010_0000 + 0x2_0000 × n`, n = 0..55 | Program slot n of 128 KiB (256 KiB, 12 slots, until O4; 24 slots until issue #33 made RAM 8 MiB); a program spans one or more: code, data and `.bss` from the bottom, the heap above them, a 32 KiB stack at the top ([user.ld](../programs/rv32/os/user.ld)); since Track 3 a program may ask for a larger stack, and its lowest page is an unmapped guard ([record](rv32-libc.md#the-stack-a-size-per-program-and-a-guard-page)) |
 
 Each program is linked for its own slot (`--defsym SLOT_BASE=...`), so any
 set of programs can be resident at once with no relocation and no MMU; the
@@ -276,8 +276,9 @@ and demo sources link unchanged.
 The kernel finds its devices only through the tree: the console
 (`tiny-processors,console`, else `ns16550a`), the done register
 (`sifive,test0`), the CLINT and PLIC, and our input, display and engines where
-listed. QEMU puts its tree at `0x8020_0000`, inside slot 8 (slot 4 of O2's
-256 KiB slots, where `tetris` was linked then), so the kernel reads
+listed. QEMU puts its tree 2 MiB below the end of RAM: at `0x8020_0000` with 4 MiB,
+inside slot 8 (slot 4 of O2's 256 KiB slots, where `tetris` was linked then), and
+at `0x8060_0000` (slot 40) since issue #33's 8 MiB, so the kernel reads
 everything it needs (including the model string) before loading the first
 program. The same `kernel.elf` then ran O2's console session on QEMU `virt`
 (the addresses and the count have moved with later steps; the pinned
@@ -311,7 +312,7 @@ the disk, since the session writes to it:
 ```sh
 make check-rv32-os-image
 cp build/rv32/os/disk.img build/rv32/os/my.disk
-qemu-system-riscv32 -M virt -cpu rv32 -bios none -m 4M \
+qemu-system-riscv32 -M virt -cpu rv32 -bios none -m 8M \
   -kernel build/rv32/os/kernel.elf -nographic -no-reboot \
   -icount shift=3,sleep=off -global virtio-mmio.force-legacy=false \
   -drive file=build/rv32/os/my.disk,if=none,format=raw,id=disk0 \
@@ -503,7 +504,10 @@ fast it passes.
 ### Slots
 
 Twelve 256 KiB slots were all taken by the end of O3. Slots are now 128 KiB
-(24 of them), and a program may span several: its link script's
+(24 of them, 56 since issue #33 made RAM 8 MiB, though the RAM disk,
+linked into the kernel's 1 MiB, still bounds the programs' bytes: the kernel
+with its 580 KB RAM disk, 609 KB, then its page tables (160 KiB) and stack
+(16 KiB) leave 244 KiB), and a program may span several: its link script's
 `SLOT_SPAN`, recorded in the RAM disk entry, sets where its stack starts. The
 menu, the only program larger than 96 KiB, spans three since issue #20 gave it
 its own depth buffer (two before). `spawn` refuses a
@@ -836,13 +840,14 @@ questions (exercise 1).
 
 Every leaf also has V, U, A and D set. Our hart never sets A or D (Svade), and
 a leaf that has them already behaves the same on QEMU, whatever it does about
-them. A process table entry owns four tables, its root and a level-0 table for
-each 4 MiB region it touches: the slots (all 24 lie in `0x8000_0000`'s
-megapage), the framebuffer and the accelerators. The kernel checks at boot that
+them. A process table entry owns five tables, its root and a level-0 table for
+each 4 MiB region it touches: the slots (the 56 of 8 MiB RAM lie in two
+megapages, `0x8000_0000`'s and `0x8040_0000`'s; four tables sufficed for 24),
+the framebuffer and the accelerators. The kernel checks at boot that
 the most any process could touch (every slot, the framebuffer and every engine
 window in the tree) fits, and panics if not, rather than at the first spawn of
-the program that would need a fifth table; `test-rv32-os` checks the same on
-our tree. Eight entries make 128 KiB, in a page-aligned NOBITS section of
+the program that would need a sixth table; `test-rv32-os` checks the same on
+our tree. Eight entries make 160 KiB (128 KiB with four tables), in a page-aligned NOBITS section of
 [kernel.ld](../programs/rv32/os/kernel.ld), `.pagetables`, which startup does
 not clear. [rv32_image.py](../tools/rv32_image.py) admits that section only
 when asked (`--page-tables`, which only the kernel's check passes), and then
@@ -1006,6 +1011,121 @@ so their "before" runs are the sessions without them.
   both transcripts fail; with `PAGE_TABLES` at 3 the kernel stops at boot with
   `panic: page tables: more 4 MiB regions than an entry has tables`.
 
+## Floating state (issue #33)
+
+Programs may now use the F extension: [fpcheck](../programs/rv32/os/fpcheck.c)
+and [fpmate](../programs/rv32/os/fpmate.c) on the bare user library (rv32if,
+ILP32), [mandel](../programs/rv32/os/libc/mandel.c) on the C library with the
+single-float ABI ([docs/rv32-libc.md](rv32-libc.md#hard-float-issue-33)). A
+process's floating state, `f0`–`f31` and `fcsr`, must then survive another
+process running in between, as its integer registers do.
+
+### Lazy, through mstatus.FS
+
+Saving the 33 words on every switch would cost every process, though only a
+few use the FPU. The kernel switches it lazily instead, which needs
+`mstatus.FS`: the hardware had it fixed at Dirty, so the same change made it
+real on the emulator and the RTL ([the contract](rv32.md#floating-state-issue-33)).
+
+- **One owner.** `fpu_owner` is the process whose state the FPU holds. It runs
+  with FS on; every other process runs with FS Off, and a new process starts
+  so (its frame's `mstatus` no longer sets FS Initial).
+- **A claim.** A process with FS Off that runs an F instruction, or touches
+  `fflags`, `frm` or `fcsr`, takes an illegal-instruction trap. `kernel_trap`
+  reads the instruction (`mtval` holds it on our hart and on QEMU; else it is
+  read at the pc), and if it is one of those, `claim_fpu()` hands the FPU over:
+  the owner's state is saved if its FS says Dirty (Clean means the saved
+  copy is still current); the owner's frame gets FS Off; the claimer's state
+  is loaded, its frame gets FS Clean, and the instruction runs again. Any
+  other illegal instruction kills the process as before, and so does an
+  invalid F instruction from the owner, whose FS is on (`fpmate bad`).
+- **Flags make it Dirty.** An operation that writes no f register but
+  accrues a flag (a comparison with a signaling NaN raising NV) changes
+  `fcsr`, and the specification makes that Dirty too. Our hart does so, and
+  so does QEMU 11.1.2 (checked with a bare-metal probe), so Clean really does
+  mean that the whole saved state, `fcsr` included, is current.
+- **Where the state lives.** `struct fstate` (132 bytes) is in
+  `struct address_space`, beside the page-table bookkeeping, one per process
+  table entry: `struct proc` stays 256 bytes. `spawn()` clears it beside
+  setting FS Off, so a new process starts with zeros, as at reset. An owner
+  that exits gives the FPU up unsaved.
+- **The kernel's own F code** is [kfpu.S](../programs/rv32/os/kfpu.S),
+  assembled rv32if; the kernel's C stays RV32I. Each routine first sets
+  `mstatus.FS`: the kernel runs with the trapped process's `mstatus`, whose
+  FS is Off, so its own `fsw` would otherwise trap with `mscratch` 0.
+  `kernel_resume` writes the frame's `mstatus` back before `mret`.
+
+The trace comparison leaves the claims out with the retried ecalls
+(`--compare-traps faults`): where a claim lands depends on device time.
+
+### Costs
+
+A claim costs 376 to 391 instructions when the owner was Dirty and is saved,
+326 to 341 when it was Clean and is not (the spread is the decode: a CSR
+instruction is recognised later than an arithmetic one), and about 320 with
+no owner at all: trap entry and exit, the decode, 33 loads, 33 stores when
+saved, and a walk over the process table checking that no process but the
+new owner runs with FS on (the kernel panics if one does). A switch between a float program and any other costs nothing;
+only two float programs taking turns pay, once per turn. In the float session
+on the emulator, fpcheck claims 69 times, fpmate (all three runs) 71 and mandel once;
+62 of the claims found a Clean owner and skipped the save. Sessions without a
+float program never take the path; their step counts grew only by the
+bookkeeping: three more programs to look through and list, and 132 bytes
+cleared at each spawn.
+
+| Session | Emulator steps before | After |
+| --- | --- | --- |
+| Console | 1,420,784 | 1,435,909 (+1.06%, of which `ls` lists three more names) |
+| Jobs | 1,859,596 | 1,862,646 (+0.16%) |
+| Pong | 1,006,024 | 1,009,281 (+0.32%) |
+| Menu | 20,390,125 | 20,393,869 (+0.02%) |
+| libc | 2,503,067 | 2,507,545 (+0.18%) |
+| Lua | 13,858,528 | 13,882,991 (+0.18%) |
+
+Their PASS words are unchanged: console `8b4402e5`, jobs `408a6738`, menu
+`b1f2b253`, Pong `814f72be`, libc `121b845d`, Lua `dacf0fc5`.
+
+### Evidence (issue #33)
+
+- **fpcheck** starts fpmate and both do float work for 6,000 rounds while the
+  timer switches them: fpcheck divides rounding down (frm RDN) and raises NX
+  and DZ, fpmate rounds to nearest and raises NX and, by signaling-NaN
+  comparisons that write no f register, NV. Every round each checks its
+  quotient, its `frm` and that `fflags` holds exactly its own flags. Then each
+  holds its own values in f8 and f9 for 60,000 rounds, writing neither f
+  registers nor `fcsr`, and checks them every round: the claims there find a
+  Clean owner. Each first checks that a new process sees zeros, and fpcheck
+  last runs `fpmate fresh` in the process table entry fpmate left. Both must
+  have been preempted at least twice.
+- **An invalid F instruction from the owner is killed:** `fpmate bad` takes the
+  FPU, sets `frm` to the reserved 5 and adds with the dynamic rounding mode;
+  the kernel kills it (cause 2) rather than claiming again.
+- The float session ([float.session](../programs/rv32/os/float.session):
+  `fpcheck`, `fpmate bad`, `mandel 4`) gives `PASS ce2c91dd` on QEMU `virt`,
+  the emulator and Verilator with a stall per request (244,780,912 cycles, 3½ minutes, 22,453 timer interrupts),
+  results-identical with mandel's frame pinned, and identical disks.
+- **It can fail.** Each of these kernel changes makes fpcheck report failures:
+  - taking the save out of `claim_fpu()`: the quotients, flags, held registers
+    and fpmate's checks;
+  - leaving `fpu_load` without f8: the held registers, and `fpmate fresh`;
+  - not clearing a new process's state in `spawn()`: `fpmate fresh`;
+  - leaving `fpu_owner` set when its process exits: `fpmate fresh`.
+
+  Saving on every claim, Clean or not, still passes fpcheck, being correct but
+  slower; `test-rv32-os` fails it.
+- **The claims alternate:** `test-rv32-os` reads the emulator's trace of the
+  float session and checks that fpcheck claims first, that claims alternate
+  between the two while both run (a process keeps the FPU until the other
+  claims), that every claiming instruction runs again, that the only F trap
+  not run again is `fpmate bad`'s, and that more than ten claims saved the
+  previous owner and more than ten did not.
+- **The image check** admits F instructions in the kernel only inside
+  `fpu_save` and `fpu_load` (`rv32_image.py --allow-f-in`).
+- **mandel**'s default picture ([mandel.session](../programs/rv32/os/mandel.session))
+  gives `PASS beaf4610` and frame `c7e54ac5` on QEMU and the emulator, and on
+  Verilator with a stall per request in `test-rv32-slow`: 893,507,223 cycles,
+  712 M of them waiting on the FPU, in 12 minutes, results-identical.
+
 ## Exercises (issue #25)
 
 1. **Two shells.** Link every program at `0x0001_0000` and map its slots there.
@@ -1054,8 +1174,9 @@ so their "before" runs are the sessions without them.
 1. **Blocking by retry.** Run the console session with `--trace` and find a
    `read` ecall that executes more than once. What changed between the two
    executions, and which function made the process ready again?
-2. **Where the tree is.** Swap the slots of `sh` and `fault` (so the shell,
-   the first program spawned, is linked at slot 8) and move the kernel's
+2. **Where the tree is.** Link the shell, the first program spawned, at
+   slot 40, where QEMU puts its tree since issue #33's 8 MiB (slot 8 before),
+   and move the kernel's
    `discover()` after that first `spawn`. Run the session on QEMU and on the
    emulator. How does the QEMU run end, what does the done register say, and
    why does the emulator not notice?

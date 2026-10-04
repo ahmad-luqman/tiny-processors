@@ -10,7 +10,7 @@
 // the testbench zero-fills and loads the image through the hierarchy, and
 // synthesis sees no initial block.
 module rv32_ram #(
-    parameter integer WORDS = 1048576,       // the contract's 4 MiB
+    parameter integer WORDS = 2097152,       // the contract's 8 MiB
     parameter [31:0] BASE = 32'h8000_0000    // must equal the bus's window base for this instance
 ) (
     input  wire        clk,

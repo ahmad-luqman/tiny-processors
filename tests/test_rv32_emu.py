@@ -293,9 +293,9 @@ class EmulatorTest(unittest.TestCase):
             ([SH(1, 2, 1)], RAM, 6, RAM + 1),               # misaligned halfword store
             ([SW(1, 2, 2)], RAM, 6, RAM + 2),               # misaligned word store
             ([LW(1, 2, 0)], 0, 5, 0),                       # unmapped: address zero
-            ([LBU(1, 2, 0)], RAM + 0x400000, 5, RAM + 0x400000),  # first byte past RAM
-            ([LW(1, 2, 0)], RAM + 0x3FFFFE, 4, RAM + 0x3FFFFE),   # misaligned before bounds
-            ([LH(1, 2, 0)], RAM + 0x3FFFFF, 4, RAM + 0x3FFFFF),
+            ([LBU(1, 2, 0)], RAM + 0x800000, 5, RAM + 0x800000),  # first byte past RAM
+            ([LW(1, 2, 0)], RAM + 0x7FFFFE, 4, RAM + 0x7FFFFE),   # misaligned before bounds
+            ([LH(1, 2, 0)], RAM + 0x7FFFFF, 4, RAM + 0x7FFFFF),
             ([SW(1, 2, 0)], UNMAPPED, 7, UNMAPPED),     # unmapped store
             ([SB(1, 2, 0)], 0x7FFFFFFF, 7, 0x7FFFFFFF),     # one byte below RAM
             ([SW(1, 2, 0)], 0xFFFFFFFC, 7, 0xFFFFFFFC),     # top of the address space
@@ -351,16 +351,16 @@ class EmulatorTest(unittest.TestCase):
             with self.subTest(body=body, base=hex(base)):
                 result = self.run_trapping(LI(2, base) + LI(1, 0x5555) + body)
                 self.assertEqual((result.state.x[10], result.state.x[11]), (cause, tval))
-        result = self.run_trapping(LI(2, RAM + 0x3FFFFC) + [LW(1, 2, 0), LH(1, 2, 2), LBU(1, 2, 3), SW(1, 2, 0),
+        result = self.run_trapping(LI(2, RAM + 0x7FFFFC) + [LW(1, 2, 0), LH(1, 2, 2), LBU(1, 2, 3), SW(1, 2, 0),
                                                             SH(1, 2, 2), SB(1, 2, 3), LW(1, 2, 4)])
-        self.assertEqual((result.state.x[10], result.state.x[11]), (5, RAM + 0x400000), "only the last access faults")
+        self.assertEqual((result.state.x[10], result.state.x[11]), (5, RAM + 0x800000), "only the last access faults")
         self.assertEqual(result.state.retired, 2 + 1 + 2 + 6 + 3 + 5, "the six in-bounds accesses retired")
         # The last two framebuffer bytes as a halfword, then the byte past them.
         result = self.run_trapping(LI(2, FB + FB_SIZE - 2) + LI(1, 0xBEEF) + [SH(1, 2, 0), LHU(1, 2, 0), LW(1, 2, 2)])
         self.assertEqual((result.state.x[1], result.state.x[10], result.state.x[11]), (0xBEEF, 5, FB + FB_SIZE))
         # A fetch from the first word past RAM is a fetch fault, like one from below it.
-        result = self.run_trapping(LI(2, RAM + 0x400000) + [JALR(0, 2, 0)])
-        self.assertEqual((result.state.x[10], result.state.x[11]), (1, RAM + 0x400000))
+        result = self.run_trapping(LI(2, RAM + 0x800000) + [JALR(0, 2, 0)])
+        self.assertEqual((result.state.x[10], result.state.x[11]), (1, RAM + 0x800000))
 
     def test_double_fault_halts_with_report(self):
         result = self.run_words([ECALL()] + FINISH())

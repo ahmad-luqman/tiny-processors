@@ -23,7 +23,7 @@
 /* Machine contract constants; keep in step with programs/rv32/board.h;
  * the graphics contract is imported from programs/rv32/gpu.h. */
 #define RAM_BASE 0x80000000u
-#define RAM_SIZE 0x00400000u
+#define RAM_SIZE 0x00800000u
 #define CONSOLE_BASE 0x10000000u
 #define CONSOLE_TX 0x0u      /* write: transmit; read: RBR, the next received byte (O2) */
 #define CONSOLE_STATUS 0x5u
@@ -108,8 +108,8 @@ typedef struct {
     uint8_t fcsr;
     uint32_t pc;
     uint32_t mtvec, mepc, mcause, mtval;
-    uint32_t mstatus;  /* the writable bits (SIE, MIE, SPIE, MPIE, SPP, MPRV, SUM, MXR, TVM, TW, TSR); FS and SD read
-                        * as constants (O1), MPP is mpp (O5) */
+    uint32_t mstatus;  /* the writable bits (SIE, MIE, SPIE, MPIE, SPP, MPRV, SUM, MXR, TVM, TW, TSR, and FS since
+                        * issue #33); SD is derived from FS, MPP is mpp (O5) */
     uint32_t mie, mscratch;
     uint8_t priv, mpp;   /* O5: the privilege mode (3 machine, 1 supervisor since issue #20, 0 user) and mstatus.MPP */
     /* S-mode and Sv32 (issue #20): delegation, the supervisor's trap CSRs, and address translation. */

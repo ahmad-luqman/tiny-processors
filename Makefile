@@ -1172,7 +1172,7 @@ test-rv32: test-rv32-arch-model test-rv32-arch test-rv32-arch-verilator
 .PHONY: check-rv32-dtb check-rv32-virt-map check-rv32-platcheck-image test-rv32-platform
 .PHONY: run-rv32-platform-qemu run-rv32-platform-emu run-rv32-platform-rtl run-rv32-platform-rtl-verilator
 RV32_PLATCHECK_OBJS := build/rv32/platcheck.o build/rv32/fdt.o $(RV32_COMMON_OBJS)
-RV32_PLATCHECK_HEX := b8a59113
+RV32_PLATCHECK_HEX := 91659113
 # QEMU 8.2 has no bare `rv32i` model; the generic CPU runs the RV32I image as is.
 RV32_PLATFORM_QEMU_CPU ?= rv32
 RV32_PLATFORM_ARGS := --image build/rv32/platcheck.bin --compare results --expect-last-line "PASS $(RV32_PLATCHECK_HEX)" --expect-console-file programs/rv32/platcheck.expected
@@ -1308,7 +1308,11 @@ RV32_OS_HEADERS := $(RV32_OS)/sys.h $(RV32_OS)/ulib.h $(RV32_OS)/line.h $(RV32_O
 # Track 3 (docs/rv32-libc.md): libccheck and lua are built with the C library (picolibc), the rest
 # on the bare user library; both kinds go into the RAM disk alike.
 RV32_OS_LIBC_PROGRAMS := libccheck lua
-RV32_OS_PROGRAMS := sh hello primes pong tetris menu syscheck fault cat write files bars life fill dmaprobe $(RV32_OS_LIBC_PROGRAMS)
+# Issue #33: fpcheck and fpmate use the F extension (rv32if, ILP32) on the bare user library.
+RV32_OS_FLOAT_PROGRAMS := fpcheck fpmate
+# Issue #33: C library programs built for the single-float ABI (the hard-float block below).
+RV32_OS_HF_PROGRAMS := mandel
+RV32_OS_PROGRAMS := sh hello primes pong tetris menu syscheck fault cat write files bars life fill dmaprobe $(RV32_OS_LIBC_PROGRAMS) $(RV32_OS_FLOAT_PROGRAMS) $(RV32_OS_HF_PROGRAMS)
 # Slots of 128 KiB from 0x8010_0000 (programs/rv32/os/sys.h and tools/rv32_ramdisk.py, which
 # test-rv32-os holds to these values); a program's span is 1 slot unless given.
 RV32_OS_SLOT_BASE := 0x80100000
@@ -1331,11 +1335,16 @@ RV32_OS_SLOT_files := 11
 RV32_OS_SLOT_bars := 12
 RV32_OS_SLOT_life := 13
 RV32_OS_SLOT_fill := 14
-# Track 3: libccheck in the slot the menu left; Lua's 370 KB image, its heap and stack in the six at the top.
+# Track 3: libccheck in the slot the menu left; Lua's 370 KB image, its heap and stack in the six
+# that were the top of 4 MiB RAM (issue #33 made it 8 MiB: slots 24 to 55 are new).
 RV32_OS_SLOT_libccheck := 6
 RV32_OS_SLOT_lua := 18
 RV32_OS_SPAN_lua := 6
 RV32_OS_STACK_lua := 0x28000
+# Issue #33: the slots 8 MiB added, from 24 on.
+RV32_OS_SLOT_fpcheck := 24
+RV32_OS_SLOT_fpmate := 25
+RV32_OS_SLOT_mandel := 26
 rv32_os_span = $(or $(RV32_OS_SPAN_$(1)),1)
 # A program's load address and span in bytes: the one place the slot formula is written here.
 rv32_os_base = $$(printf '0x%x' $$(($(RV32_OS_SLOT_BASE) + $(RV32_OS_SLOT_$(1)) * $(RV32_OS_SLOT_SIZE))))
@@ -1346,6 +1355,7 @@ rv32_os_stack = $(or $(RV32_OS_STACK_$(1)),0x8000)
 # reads mstatus on purpose, to be killed for it.
 rv32_os_gate = $(or $(RV32_OS_GATE_$(1)),--allow-user)
 RV32_OS_GATE_fault := --allow-system
+$(foreach p,$(RV32_OS_FLOAT_PROGRAMS),$(eval RV32_OS_GATE_$(p) := --allow-user --allow-f))
 RV32_OS_USER := build/rv32/os/ustart.o build/rv32/os/ulib.o build/rv32/os/udecimal.o build/rv32/os/mem.o build/rv32/muldiv.o
 RV32_OS_OBJS_sh := build/rv32/os/sh.o build/rv32/os/line.o
 RV32_OS_OBJS_hello := build/rv32/os/hello.o
@@ -1359,12 +1369,17 @@ RV32_OS_OBJS_bars := build/rv32/os/bars.o build/rv32/os/report.o
 RV32_OS_OBJS_life := build/rv32/os/life.o build/rv32/os/report.o
 RV32_OS_OBJS_fill := build/rv32/os/fill.o
 RV32_OS_OBJS_dmaprobe := build/rv32/os/dmaprobe.o
+RV32_OS_OBJS_fpcheck := build/rv32/os/fpcheck.o
+RV32_OS_OBJS_fpmate := build/rv32/os/fpmate.o
+# Their objects alone are rv32if; the user library they link stays RV32I (both ILP32).
+$(foreach p,$(RV32_OS_FLOAT_PROGRAMS),build/rv32/os/$(p).o): RV32_OS_CFLAGS := $(filter-out -march=rv32i,$(RV32_OS_CFLAGS)) -march=rv32if_zicsr -ffp-contract=off
+$(foreach p,$(RV32_OS_FLOAT_PROGRAMS),build/rv32/os/$(p).o): $(RV32_OS)/ufloat.h
 RV32_OS_OBJS_pong := build/rv32/os/pong.o build/rv32/os/score.o build/rv32/pong_game.o build/rv32/gfx.o
 RV32_OS_OBJS_tetris := build/rv32/os/tetris.o build/rv32/os/score.o build/rv32/tetris_game.o build/rv32/gfx.o build/rv32/gfx_text.o
 RV32_OS_OBJS_menu := build/rv32/os/menu.o $(filter-out build/rv32/capstone.o $(RV32_COMMON_OBJS),$(RV32_CAPSTONE_OBJS))
 RV32_OS_ELFS := $(foreach p,$(RV32_OS_PROGRAMS),build/rv32/os/$(p).elf)
-RV32_OS_BARE_ELFS := $(foreach p,$(filter-out $(RV32_OS_LIBC_PROGRAMS),$(RV32_OS_PROGRAMS)),build/rv32/os/$(p).elf)
-RV32_OS_KERNEL_OBJS := build/rv32/os/kentry.o build/rv32/os/kernel.o build/rv32/os/mem.o build/rv32/os/virtio.o build/rv32/os/fs.o build/rv32/fdt.o build/rv32/muldiv.o
+RV32_OS_BARE_ELFS := $(foreach p,$(filter-out $(RV32_OS_LIBC_PROGRAMS) $(RV32_OS_HF_PROGRAMS),$(RV32_OS_PROGRAMS)),build/rv32/os/$(p).elf)
+RV32_OS_KERNEL_OBJS := build/rv32/os/kentry.o build/rv32/os/kfpu.o build/rv32/os/kernel.o build/rv32/os/mem.o build/rv32/os/virtio.o build/rv32/os/fs.o build/rv32/fdt.o build/rv32/muldiv.o
 RV32_OS_DISK := build/rv32/os/disk.img
 RV32_OS_ARGS := --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/session.txt --disk $(RV32_OS_DISK) --compare results --compare-traps faults --expect-console-file $(RV32_OS)/session.expected
 RV32_OS_PONG_ARGS := --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/pong.session --input $(RV32_PONG_INPUT) --disk $(RV32_OS_DISK) \
@@ -1382,7 +1397,7 @@ build/rv32/os/ustart.o: $(RV32_OS)/ustart.S $(RV32_OS)/sys.h | build/rv32/os
 	$(RV32_CC) $(RV32_OS_CFLAGS) -c -o $@ $<
 .SECONDEXPANSION:
 # Link program $* for its slots and stack from the objects and libraries $(1), in order.
-rv32_os_link = $(RV32_CC) $(RV32_ARCH) -nostdlib -static --ld-path=$(RV32_LD) -Wl,-T,$(RV32_OS)/user.ld \
+rv32_os_link = $(RV32_CC) $(or $(RV32_OS_LINK_ARCH),$(RV32_ARCH)) -nostdlib -static --ld-path=$(RV32_LD) -Wl,-T,$(RV32_OS)/user.ld \
 	-Wl,--defsym=SLOT_BASE=$(call rv32_os_base,$*) -Wl,--defsym=SLOT_SPAN=$(call rv32_os_size,$*) \
 	-Wl,--defsym=STACK_SIZE=$(call rv32_os_stack,$*) -Wl,-Map,$(@:.elf=.map) -o $@ $(1)
 $(RV32_OS_BARE_ELFS): build/rv32/os/%.elf: $$(RV32_OS_OBJS_$$*) $(RV32_OS_USER) $(RV32_OS)/user.ld
@@ -1395,6 +1410,10 @@ build/rv32/os/ramdisk.img: $(RV32_OS_ELFS) tools/rv32_ramdisk.py
 	$(PYTHON) tools/rv32_ramdisk.py --out $@ --accelerators menu --accelerators dmaprobe $(RV32_OS_ELFS)
 build/rv32/os/kentry.o: $(RV32_OS)/kentry.S build/rv32/os/ramdisk.img programs/rv32/board.h | build/rv32/os
 	$(RV32_CC) $(RV32_OS_CFLAGS) -DRAMDISK_IMAGE='"build/rv32/os/ramdisk.img"' -c -o $@ $<
+# Issue #33: the kernel's only F instructions, the FPU's save and load for the lazy switch. Its
+# rv32if attribute goes into kernel.elf, so the listing the image check reads decodes them.
+build/rv32/os/kfpu.o: $(RV32_OS)/kfpu.S | build/rv32/os
+	$(RV32_CC) $(filter-out -march=rv32i,$(RV32_OS_CFLAGS)) -march=rv32if_zicsr -c -o $@ $<
 build/rv32/os/kernel.elf: $(RV32_OS_KERNEL_OBJS) $(RV32_OS)/kernel.ld
 	$(RV32_CC) $(RV32_ARCH) -nostdlib -static --ld-path=$(RV32_LD) -Wl,-T,$(RV32_OS)/kernel.ld -Wl,-Map,$(@:.elf=.map) -o $@ $(RV32_OS_KERNEL_OBJS)
 .SECONDARY: $(RV32_OS_ELFS) build/rv32/os/kernel.elf $(RV32_OS_USER) $(RV32_OS_KERNEL_OBJS) \
@@ -1425,15 +1444,22 @@ RV32_COMPILER_RT_CFLAGS := $(RV32_ARCH) -std=c11 -O2 -g -w -ffreestanding -fno-b
 RV32_LIBC_OBJS_libc := $(patsubst %,build/rv32/libc/picolibc/%.o,$(shell cat $(RV32_PICOLIBC)/SOURCES))
 RV32_LIBC_OBJS_builtins := $(patsubst %,build/rv32/libc/compiler-rt/%.o,$(shell cat $(RV32_COMPILER_RT)/SOURCES))
 RV32_LIBC_ARCHIVES := build/rv32/libc/libc.a build/rv32/libc/builtins.a
-$(RV32_LIBC_OBJS_libc): build/rv32/libc/picolibc/%.o: $(RV32_PICOLIBC)/%
-	@mkdir -p $(@D)
-	$(RV32_CC) $(RV32_PICOLIBC_CFLAGS) -MMD -c -o $@ $<
-$(RV32_LIBC_OBJS_builtins): build/rv32/libc/compiler-rt/%.o: $(RV32_COMPILER_RT)/%
-	@mkdir -p $(@D)
-	$(RV32_CC) $(RV32_COMPILER_RT_CFLAGS) -MMD -c -o $@ $<
-$(RV32_LIBC_ARCHIVES): build/rv32/libc/%.a: $$(RV32_LIBC_OBJS_$$*)
-	rm -f $@
-	$(RV32_AR) rcs $@ $^
+# The two archives' rules: $(1) the build directory, $(2) the prefix of its _OBJS_libc,
+# _OBJS_builtins and _ARCHIVES variables, $(3) the function that makes its flags from the soft
+# ones (issue #33 builds them twice: rv32_soft here, rv32_hf for hard float below).
+define rv32_libc_rules
+$$($(2)_OBJS_libc): $(1)/picolibc/%.o: $$(RV32_PICOLIBC)/%
+	@mkdir -p $$(@D)
+	$$(RV32_CC) $$(call $(3),$$(RV32_PICOLIBC_CFLAGS)) -MMD -c -o $$@ $$<
+$$($(2)_OBJS_builtins): $(1)/compiler-rt/%.o: $$(RV32_COMPILER_RT)/%
+	@mkdir -p $$(@D)
+	$$(RV32_CC) $$(call $(3),$$(RV32_COMPILER_RT_CFLAGS)) -MMD -c -o $$@ $$<
+$$($(2)_ARCHIVES): $(1)/%.a: $$$$($(2)_OBJS_$$$$*)
+	rm -f $$@
+	$$(RV32_AR) rcs $$@ $$^
+endef
+rv32_soft = $(1)
+$(eval $(call rv32_libc_rules,build/rv32/libc,RV32_LIBC,rv32_soft))
 
 # The programs' side: crt0 and crt.c (argv), the POSIX calls on the kernel's system calls, and the
 # console's line discipline (programs/rv32/os/libc) on the shell's line editor (line.c). crt.c is
@@ -1481,6 +1507,55 @@ $(RV32_OS_LIBC_ELFS): build/rv32/os/%.elf: build/rv32/os/libc/crt-%.o $$(RV32_OS
 	$(call rv32_os_link,$(RV32_OS_LIBC_LDFLAGS) $(filter %.o,$^) $(RV32_LIBC_GROUP))
 .SECONDARY: $(RV32_LIBC_OBJS_libc) $(RV32_LIBC_OBJS_builtins) $(RV32_OS_LIBC_GLUE) $(foreach p,$(RV32_OS_LIBC_PROGRAMS),build/rv32/os/libc/crt-$(p).o)
 
+# Issue #33: hard float (docs/rv32-libc.md). A program in RV32_OS_HF_PROGRAMS is built for rv32imf with
+# the single-float ABI (ilp32f), so its floats travel in f registers. lld will not link ilp32f objects
+# with ilp32 ones, so it gets the same C library built again, from the same SOURCES, and its own glue,
+# all under build/rv32/libc-hf and build/rv32/os/libc-hf; everything else stays RV32I soft float.
+RV32_ARCH_HF := $(subst -march=rv32i -mabi=ilp32,-march=rv32imf_zicsr -mabi=ilp32f,$(RV32_ARCH))
+ifeq ($(RV32_ARCH_HF),$(RV32_ARCH))
+$(error RV32_ARCH_HF: RV32_ARCH no longer reads -march=rv32i -mabi=ilp32)
+endif
+rv32_hf = $(subst $(RV32_ARCH),$(RV32_ARCH_HF) -ffp-contract=off,$(1))
+$(foreach v,RV32_PICOLIBC_CFLAGS RV32_COMPILER_RT_CFLAGS RV32_OS_LIBC_CFLAGS RV32_OS_CFLAGS,\
+	$(if $(findstring $(RV32_ARCH),$($(v))),,$(error rv32_hf: $(v) no longer holds RV32_ARCH)))
+RV32_LIBC_HF_OBJS_libc := $(patsubst build/rv32/libc/%,build/rv32/libc-hf/%,$(RV32_LIBC_OBJS_libc))
+RV32_LIBC_HF_OBJS_builtins := $(patsubst build/rv32/libc/%,build/rv32/libc-hf/%,$(RV32_LIBC_OBJS_builtins))
+RV32_LIBC_HF_ARCHIVES := build/rv32/libc-hf/libc.a build/rv32/libc-hf/builtins.a
+# picolibc's bufio.c refers to stdin weakly; a program that never reads it would leave the symbol
+# undefined, which the image check refuses, so stdin is always linked (lld has no
+# --require-defined; the image check names it if it ever goes missing).
+RV32_LIBC_HF_GROUP := -Wl,--undefined=stdin -Wl,--start-group $(RV32_LIBC_HF_ARCHIVES) -Wl,--end-group
+$(eval $(call rv32_libc_rules,build/rv32/libc-hf,RV32_LIBC_HF,rv32_hf))
+RV32_OS_LIBC_HF_GLUE := build/rv32/os/libc-hf/libc/crt0.o build/rv32/os/libc-hf/libc/syscalls.o build/rv32/os/libc-hf/libc/tty.o \
+	build/rv32/os/libc-hf/libc/line.o
+RV32_OS_HF_MAIN_OBJS := $(foreach p,$(RV32_OS_HF_PROGRAMS),build/rv32/os/libc-hf/libc/$(p).o)
+build/rv32/os/libc-hf/libc/syscalls.o build/rv32/os/libc-hf/libc/tty.o $(RV32_OS_HF_MAIN_OBJS): build/rv32/os/libc-hf/libc/%.o: $(RV32_OS_LIBC)/%.c
+	@mkdir -p $(@D)
+	$(RV32_CC) $(call rv32_hf,$(RV32_OS_LIBC_CFLAGS)) -MD -MP -c -o $@ $<
+build/rv32/os/libc-hf/libc/line.o: $(RV32_OS)/line.c
+	@mkdir -p $(@D)
+	$(RV32_CC) $(call rv32_hf,$(RV32_OS_CFLAGS)) -MD -MP -c -o $@ $<
+build/rv32/os/libc-hf/libc/crt0.o: $(RV32_OS_LIBC)/crt0.S
+	@mkdir -p $(@D)
+	$(RV32_CC) $(RV32_ARCH_HF) -c -o $@ $<
+build/rv32/os/libc-hf/libc/crt-%.o: $(RV32_OS_LIBC)/crt.c
+	@mkdir -p $(@D)
+	$(RV32_CC) $(call rv32_hf,$(RV32_OS_LIBC_CFLAGS)) -DLIBC_PROGRAM='"$*"' -MD -MP -c -o $@ $<
+RV32_LIBC_HF_DEPS := $(patsubst %.o,%.d,$(RV32_LIBC_HF_OBJS_libc) $(RV32_LIBC_HF_OBJS_builtins) \
+	$(filter-out %/crt0.o,$(RV32_OS_LIBC_HF_GLUE)) $(RV32_OS_HF_MAIN_OBJS) \
+	$(foreach p,$(RV32_OS_HF_PROGRAMS),build/rv32/os/libc-hf/libc/crt-$(p).o))
+-include $(RV32_LIBC_HF_DEPS)
+$(RV32_LIBC_HF_DEPS): ;
+$(foreach p,$(RV32_OS_HF_PROGRAMS),$(eval RV32_OS_OBJS_$(p) := build/rv32/os/libc-hf/libc/$(p).o))
+RV32_OS_HF_ELFS := $(foreach p,$(RV32_OS_HF_PROGRAMS),build/rv32/os/$(p).elf)
+$(RV32_OS_HF_ELFS): RV32_OS_LINK_ARCH := $(RV32_ARCH_HF)
+$(RV32_OS_HF_ELFS): build/rv32/os/%.elf: build/rv32/os/libc-hf/libc/crt-%.o $$(RV32_OS_OBJS_$$*) $(RV32_OS_LIBC_HF_GLUE) \
+		$(RV32_LIBC_HF_ARCHIVES) $(RV32_OS)/user.ld
+	$(call rv32_os_link,$(RV32_OS_LIBC_LDFLAGS) $(filter %.o,$^) $(RV32_LIBC_HF_GROUP))
+$(foreach p,$(RV32_OS_HF_PROGRAMS),$(eval RV32_OS_GATE_$(p) := --allow-user --allow-f --allow-m --hard-float))
+.SECONDARY: $(RV32_LIBC_HF_OBJS_libc) $(RV32_LIBC_HF_OBJS_builtins) $(RV32_OS_LIBC_HF_GLUE) \
+	$(foreach p,$(RV32_OS_HF_PROGRAMS),build/rv32/os/libc-hf/libc/crt-$(p).o) $(RV32_OS_HF_MAIN_OBJS)
+
 firmware-rv32-os: build/rv32/os/kernel.elf build/rv32/os/kernel.bin build/rv32/os/kernel.lst $(RV32_OS_ELFS:.elf=.lst)
 
 # Every program is checked against its slots, the kernel against its 1 MiB.
@@ -1493,7 +1568,7 @@ check-rv32-os-image: firmware-rv32-os $(RV32_OS_DISK)
 		$(PYTHON) tools/rv32_image.py build/rv32/os/$(p).elf --listing build/rv32/os/$(p).lst --ram-base $(call rv32_os_base,$(p)) \
 			--ram-size $(call rv32_os_size,$(p)) $(call rv32_os_gate,$(p)) > /dev/null; \
 		echo "build/rv32/os/$(p).elf: slot at $(call rv32_os_base,$(p))";)
-	$(PYTHON) tools/rv32_image.py build/rv32/os/kernel.elf --listing build/rv32/os/kernel.lst --bin build/rv32/os/kernel.bin --hex build/rv32/os/kernel.hex --ram-size 0x100000 --allow-system --page-tables
+	$(PYTHON) tools/rv32_image.py build/rv32/os/kernel.elf --listing build/rv32/os/kernel.lst --bin build/rv32/os/kernel.bin --hex build/rv32/os/kernel.hex --ram-size 0x100000 --allow-system --allow-f-in fpu_save --allow-f-in fpu_load --page-tables
 	$(PYTHON) tools/rv32_ramdisk.py --list build/rv32/os/ramdisk.img
 print-rv32-os-slot-%:
 	@echo $(RV32_OS_SLOT_$*) $(call rv32_os_span,$*)
@@ -1581,24 +1656,38 @@ test-rv32: run-rv32-os-qemu run-rv32-os-qemu-reboot run-rv32-os-qemu-enter run-r
 # L1: libccheck checks picolibc on the kernel's system calls, and `fault stack` the guard page
 # below every program's stack. L2: the Lua REPL and three scripts from the disk. Each runs on QEMU
 # virt (transcript pinned), the emulator and Verilator, results-identical with identical disks.
-.PHONY: run-rv32-libc-qemu run-rv32-libc-emu run-rv32-libc-rtl-verilator run-rv32-lua-qemu run-rv32-lua-emu run-rv32-lua-rtl-verilator
+.PHONY: run-rv32-libc-qemu run-rv32-libc-emu run-rv32-libc-rtl-verilator run-rv32-lua-qemu run-rv32-lua-emu run-rv32-lua-rtl-verilator run-rv32-float-qemu run-rv32-float-emu run-rv32-float-rtl-verilator run-rv32-mandel-qemu run-rv32-mandel-emu run-rv32-mandel-rtl-verilator
 RV32_OS_LUA_SCRIPTS := $(wildcard $(RV32_OS)/lua/*.lua)
 RV32_OS_APPS_DISK := build/rv32/os/apps.disk
 $(RV32_OS_APPS_DISK): tools/rv32_mkfs.py $(RV32_OS)/welcome.txt $(RV32_OS_LUA_SCRIPTS) | build/rv32/os
 	$(PYTHON) tools/rv32_mkfs.py --new --add welcome=$(RV32_OS)/welcome.txt $(foreach f,$(RV32_OS_LUA_SCRIPTS),--add $(notdir $(f))=$(f)) $@
 rv32_os_apps_args = --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/$(1).session --disk $(RV32_OS_APPS_DISK) \
-	--compare results --compare-traps faults --expect-console-file $(RV32_OS)/$(1).session.expected --timeout 1800
+	--compare results --compare-traps faults --expect-console-file $(RV32_OS)/$(1).session.expected \
+	--timeout $(or $(RV32_OS_APPS_TIMEOUT_$(1)),1800) \
+	$(RV32_OS_APPS_ARGS_$(1))
+# Issue #33: mandel's frames, which it also prints (QEMU has no display): 4x4 blocks in the float
+# session, its default 2x2 in the mandel session.
+RV32_OS_APPS_ARGS_float := --expect-checkpoint "frame 1 4ee3d585"
+RV32_OS_APPS_ARGS_mandel := --expect-checkpoint "frame 1 c7e54ac5"
+# Verilator's cycle budget; mandel's 2x2 picture takes about 900 M (an add or multiply waits ~540-560).
+rv32_os_apps_cycles = $(or $(RV32_OS_APPS_CYCLES_$(1)),400000000)
+RV32_OS_APPS_CYCLES_mandel := 1500000000
+RV32_OS_APPS_TIMEOUT_mandel := 3600
 # QEMU's disk ends byte for byte the emulator's.
-run-rv32-libc-qemu run-rv32-lua-qemu: run-rv32-%-qemu: check-rv32-os-image $(RV32_OS_APPS_DISK) run-rv32-%-emu
+run-rv32-libc-qemu run-rv32-lua-qemu run-rv32-float-qemu run-rv32-mandel-qemu: run-rv32-%-qemu: check-rv32-os-image $(RV32_OS_APPS_DISK) run-rv32-%-emu
 	cp $(RV32_OS_APPS_DISK) build/rv32/os/$*.qemu.disk
 	$(RV32_OS_QEMU) --stdin $(RV32_OS)/$*.session --drive build/rv32/os/$*.qemu.disk --timeout 120 --transcript build/rv32/os/$*.qemu.transcript
 	diff -u $(RV32_OS)/$*.session.qemu.expected build/rv32/os/$*.qemu.transcript
 	cmp build/rv32/os/$*-emu/kernel.emu.disk build/rv32/os/$*.qemu.disk
-run-rv32-libc-emu run-rv32-lua-emu: run-rv32-%-emu: check-rv32-os-image $(RV32_OS_APPS_DISK) $(RV32EMU)
+run-rv32-libc-emu run-rv32-lua-emu run-rv32-float-emu run-rv32-mandel-emu: run-rv32-%-emu: check-rv32-os-image $(RV32_OS_APPS_DISK) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(call rv32_os_apps_args,$*) --backend emulator --emulator $(RV32EMU) --out build/rv32/os/$*-emu
-run-rv32-libc-rtl-verilator run-rv32-lua-rtl-verilator: run-rv32-%-rtl-verilator: check-rv32-os-image $(RV32_OS_APPS_DISK) $(RV32EMU) $(RV32_TB_VERILATOR)
-	$(PYTHON) -m tools.rv32_rtl $(call rv32_os_apps_args,$*) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --max-cycles 400000000 --out build/rv32/os/$*-verilator
+run-rv32-libc-rtl-verilator run-rv32-lua-rtl-verilator run-rv32-float-rtl-verilator run-rv32-mandel-rtl-verilator: run-rv32-%-rtl-verilator: check-rv32-os-image $(RV32_OS_APPS_DISK) $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) -m tools.rv32_rtl $(call rv32_os_apps_args,$*) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --max-cycles $(call rv32_os_apps_cycles,$*) --out build/rv32/os/$*-verilator
 test-rv32: run-rv32-libc-qemu run-rv32-libc-emu run-rv32-libc-rtl-verilator run-rv32-lua-qemu run-rv32-lua-emu run-rv32-lua-rtl-verilator
+# Issue #33: fpcheck and fpmate keep their floating state apart across preemption; mandel draws, in
+# 4x4 blocks there and in its 2x2 in its own session, whose Verilator run (~12 minutes) is slow.
+test-rv32: run-rv32-float-qemu run-rv32-float-emu run-rv32-float-rtl-verilator run-rv32-mandel-qemu run-rv32-mandel-emu
+test-rv32-slow: run-rv32-mandel-rtl-verilator
 
 # O3: storage. virtiocheck drives the virtio-blk device directly on QEMU virt (a 128 KiB drive on
 # virtio-mmio-bus.0), the emulator (--disk) and the RTL (+disk); the runner compares the disks the

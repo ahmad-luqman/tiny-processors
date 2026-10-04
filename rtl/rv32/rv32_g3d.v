@@ -5,7 +5,7 @@
 // schedule; tools/rv32_g3d.c is the same machine in C and both must reproduce
 // the oracle's CYCLES exactly, plus STALLS here.
 module rv32_g3d #(
-    parameter integer RAM_WORDS = 1048576
+    parameter integer RAM_WORDS = 2097152
 ) (
     input  wire        clk,
     input  wire        reset,

@@ -53,7 +53,7 @@ SECTIONS
     } > RAM :ram
 
     /* Issue #25: the processes' page tables, page-aligned and outside .bss,
-     * so startup does not spend 128 KiB of stores clearing them (the kernel
+     * so startup does not spend 160 KiB of stores clearing them (the kernel
      * clears a table when it first takes it). PMP lets the hart's page-table
      * walks read exactly this range. */
     .pagetables (NOLOAD) : ALIGN(4096) {
