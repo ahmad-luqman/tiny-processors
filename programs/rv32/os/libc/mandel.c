@@ -7,9 +7,9 @@
  * h = h*33 ^ word over the little-endian words, from 5381). It needs no frame of its own, so with
  * no display (QEMU) it computes the same image and prints the same hash.
  *
- * Our FPU is a serial baseline (docs/fp32.md): an add or a multiply waits some 540-560 cycles, so on
- * the RTL the picture costs hundreds of millions of cycles. `mandel [BLOCK]` therefore samples one
- * point per BLOCK x BLOCK pixels (1, 2, 4 or 8; 2 unless given) and draws it as a block.
+ * `mandel [BLOCK]` samples one point per BLOCK x BLOCK pixels (1, 2, 4 or 8; 2 unless given) and
+ * draws it as a block. That kept the RTL's picture affordable while our FPU's add or multiply waited
+ * some 540-560 cycles; it now waits up to 8 (docs/fp32.md), and the default picture takes 44 M.
  */
 #include <stdint.h>
 #include <stdio.h>

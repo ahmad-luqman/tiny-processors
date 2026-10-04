@@ -360,11 +360,11 @@ Every other program keeps the soft-float ABI (ILP32); all but fpcheck and fpmate
 `mandel [BLOCK]` draws the set in 320×240 RGB332, sampling one point per
 BLOCK×BLOCK pixels (1, 2, 4 or 8; 2 unless given), and prints the frame's
 checkpoint hash, which it folds itself, so QEMU, which has no display, pins
-the same picture as a hash. The F1 unit is a serial baseline
-([docs/fp32.md](fp32.md)): one add, multiply or fused multiply-add of ordinary
-operands waits 560, 537 and 558 cycles on Verilator (a divide 33), so the picture
-costs the RTL hundreds of millions of cycles, which is why the block size is
-an argument. It tests 8 iterations before asking whether a point lies in the
+the same picture as a hash. The block size became an argument while the F1
+unit was a serial baseline, when one add, multiply or fused multiply-add waited
+560, 537 and 558 cycles and the picture cost the RTL hundreds of millions of
+cycles. Since its [narrow datapath](fp32.md#narrow-datapath-2026-10-03) they wait
+7 or 8 (a divide up to 33), and the default picture takes 43.7 M cycles. It tests 8 iterations before asking whether a point lies in the
 main cardioid or the period-2 bulb: most points have escaped by then, so the
 test costs only the points it saves.
 

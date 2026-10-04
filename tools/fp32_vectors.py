@@ -77,7 +77,17 @@ ANCHORS = (
     (11,0,0x4effffff,0,0,0x7fffff80,0,0),
     (12,0,0x4f7fffff,0,0,0xffffff00,0,0),
     (11,0,0xcf000001,0,0,0x80000000,16,0),
+    # Product 1.5000005 is a round-to-nearest-even tie with an even kept bit,
+    # so z decides the result only through the jammed sticky bit: gap 79
+    # (adding and borrowing) and gap 100 (the full-window clamp).
+    (3,0,0x3f800003,0x3fc00000,0x18000000,0x3fc00005,1,0),
+    (3,0,0x3f800003,0x3fc00000,0x98000000,0x3fc00004,1,0),
+    (3,0,0x3f800003,0x3fc00000,0x0d800000,0x3fc00005,1,0),
+    (3,0,0x3f800003,0x3fc00000,0x8d800000,0x3fc00004,1,0),
 )
+# Worst-case cycles from request acceptance to response, per operation code;
+# docs/fp32.md has the same table. Undefined operations finish in DECODE.
+LATENCY_BOUNDS = {**{op: 8 for op in range(7)}, 7: 33, 8: 31, 9: 5, 10: 5, 11: 3, 12: 3}
 
 ANCHOR_REQUESTS = [row[:5] for row in ANCHORS]
 ANCHOR_ANSWERS = [row[5:] for row in ANCHORS]
@@ -200,7 +210,6 @@ def main():
     p.add_argument('--wave',type=Path)
     p.add_argument('--anchors-only',action='store_true')
     p.add_argument('--cancellation',type=int,default=100)
-    p.add_argument('--stats',action='store_true')
     p.add_argument('--protocol',action='store_true')
     p.add_argument('--check-reference',action='store_true')
     args=p.parse_args()
@@ -230,7 +239,7 @@ def main():
         path=args.work/f'vectors-{args.seed}.txt'
         path.write_text(vector_text(rows,answers))
         command=simulator_command(args.simulator or ROOT/'build/fp32/fp32.vvp')+[f'+vectors={path.resolve()}']
-        if args.stats: command.append('+stats')
+        command.append('+stats')
         if args.wave: command.append(f'+wave={args.wave.resolve()}')
         run=run_process(command,timeout=600)
         print(run.stdout,end=''); print(run.stderr,end='',file=sys.stderr)
@@ -242,6 +251,12 @@ def main():
                     failure.write_text(vector_text(rows[idx:idx+1],answers[idx:idx+1]))
                     print(f'Isolated failing transaction: {failure}',file=sys.stderr)
             raise ValueError(f'RTL failed; seed={args.seed}, vectors={path}')
+        worst=re.findall(r'^LATENCY op=(\d+) samples=\d+ min=\d+ max=(\d+)$',run.stdout,re.M)
+        slow=[(int(op),int(cycles)) for op,cycles in worst if int(cycles) > LATENCY_BOUNDS.get(int(op),1)]
+        if not worst:
+            raise ValueError('simulator reported no per-operation latency')
+        if slow:
+            raise ValueError(f'latency above bound (op, cycles): {slow}; seed={args.seed}')
         (args.work/f'failure-{args.seed}.txt').unlink(missing_ok=True)
         print(f'Exact result/flag/error agreement; seed={args.seed}, operations={ops}')
     except (ValueError,OSError,subprocess.SubprocessError) as exc:

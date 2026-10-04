@@ -1102,7 +1102,8 @@ Their PASS words are unchanged: console `8b4402e5`, jobs `408a6738`, menu
   the kernel kills it (cause 2) rather than claiming again.
 - The float session ([float.session](../programs/rv32/os/float.session):
   `fpcheck`, `fpmate bad`, `mandel 4`) gives `PASS ce2c91dd` on QEMU `virt`,
-  the emulator and Verilator with a stall per request (244,780,912 cycles, 3½ minutes, 22,453 timer interrupts),
+  the emulator and Verilator with a stall per request (31,216,255 cycles, 2,782 timer interrupts, about a minute;
+  244,780,912 cycles and 22,453 interrupts before the FPU's narrow datapath),
   results-identical with mandel's frame pinned, and identical disks.
 - **It can fail.** Each of these kernel changes makes fpcheck report failures:
   - taking the save out of `claim_fpu()`: the quotients, flags, held registers
@@ -1123,8 +1124,10 @@ Their PASS words are unchanged: console `8b4402e5`, jobs `408a6738`, menu
   `fpu_save` and `fpu_load` (`rv32_image.py --allow-f-in`).
 - **mandel**'s default picture ([mandel.session](../programs/rv32/os/mandel.session))
   gives `PASS beaf4610` and frame `c7e54ac5` on QEMU and the emulator, and on
-  Verilator with a stall per request in `test-rv32-slow`: 893,507,223 cycles,
-  712 M of them waiting on the FPU, in 12 minutes, results-identical.
+  Verilator with a stall per request in `test-rv32`: 43,743,760 cycles, 12.7 M
+  of them waiting on the FPU, in under a minute, results-identical. (Before the
+  FPU's [narrow datapath](fp32.md#narrow-datapath-2026-10-03) it took 893,507,223
+  cycles, 712 M of them waiting, and 12 minutes in `test-rv32-slow`.)
 
 ## Exercises (issue #25)
 
