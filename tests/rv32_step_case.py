@@ -1,13 +1,16 @@
 """A base for directed programs that run on the emulator and the RTL in step-tick mode and are
-compared trace for trace (Track 2: O1's interrupts, O5's protection), with helpers they share.
-Not a test module itself: discovery looks for test_*.py."""
+compared trace for trace (Track 2: O1's interrupts, O5's protection; issue #34's atomics), with
+helpers they share. Not a test module itself: discovery looks for test_*.py."""
 import tempfile
 import unittest
 from pathlib import Path
 
 import test_rv32_rtl as integer_tests
-from tools.rv32_asm import LI, MSIP, MTIMECMP, ADDI, SW
-from tools.rv32_rtl import diff_traces, run_emulator, run_rtl, write_image
+from tools.rv32_asm import ADDI, CSRRW, FINISH, LI, MSIP, MTIMECMP, MTVEC, RAM, SW
+from tools.rv32_rtl import cycle_relation, diff_traces, run_emulator, run_rtl, write_image
+
+HANDLER = RAM + 0x400  # handlers live here; bodies must stay below
+SAVE = RAM + 0x2000    # where handlers store what they saw
 
 DISARM_TIMER = LI(27, MTIMECMP) + [ADDI(26, 0, -1), SW(26, 27, 0), SW(26, 27, 4)]
 DISARM_SOFTWARE = LI(27, MSIP) + [SW(0, 27, 0)]
@@ -25,6 +28,21 @@ def stored(trace, address):
         if f"mem[{address:08x}]<-" in line:
             value = int(line.split(f"mem[{address:08x}]<-")[1].split("/")[0], 16)
     return value
+
+
+def at_handler(body, handler):
+    """`body`, padded to HANDLER, then `handler`; mtvec is set by the body's first words."""
+    words = LI(5, HANDLER) + [CSRRW(0, MTVEC, 5)] + list(body)
+    assert len(words) <= (HANDLER - RAM) // 4, "the body overlaps the handler"
+    return words + [0] * ((HANDLER - RAM) // 4 - len(words)) + list(handler)
+
+
+def dump(*regs):
+    """Store registers at SAVE + 0x40 onwards, then finish: the trace shows each store's value."""
+    words = LI(28, SAVE + 0x40)
+    for i, reg in enumerate(regs):
+        words.append(SW(reg, 28, 4 * i))
+    return words + FINISH()
 
 
 class StepTicksCase(unittest.TestCase):
@@ -56,3 +74,8 @@ class StepTicksCase(unittest.TestCase):
         self.assertEqual((emulator.halt["outcome"], rtl.halt["outcome"]), ("pass", "pass"), emulator.stderr + rtl.stderr)
         self.assertEqual(rtl.halt["steps"], len(rtl.trace))
         return emulator, rtl
+
+    def assert_relation(self, rtl):
+        """The testbench's cycle and transfer counts follow the trace (a trap-free run)."""
+        text, holds = cycle_relation(rtl)
+        self.assertTrue(holds, text)

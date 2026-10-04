@@ -131,8 +131,11 @@ typedef struct {
     uint64_t limit;
     FILE *trace;
     bool in_trap;     /* trap taken and no instruction of the handler has retired yet */
-    bool reserved;        /* issue #34: LR.W's reservation, cleared by every SC.W, trap and xRET */
-    uint32_t reservation; /* the reserved word's virtual address */
+    /* Issue #34: LR.W's reservation. SC.W compares the virtual word; a device's write to the physical
+     * word clears it, as do every SC.W, trap, xRET, satp write and sfence.vma. Both are word indices
+     * (address >> 2). */
+    bool reserved;
+    uint32_t reservation, reservation_pa;
     enum halt halt;
     uint32_t done_word;
     uint32_t second_cause, second_tval; /* the trap that could not be delivered */

@@ -1,10 +1,11 @@
 `timescale 1ns/1ps
 
-// Multicycle RV32IMAF core: the integer path plus FP_ISSUE/FP_WAIT, the
-// M extension's MD_WAIT and (issue #34) the A extension's AMO_WRITE. One ready/valid memory port, the machine and (issue
-// #20) supervisor trap CSRs with an Sv32 page-table walker and (issue #24) a
-// 4-entry TLB, floating CSRs, the Zicntr counters, and atomic register/flag retirement in WRITEBACK. See
-// docs/rv32-f.md and docs/rv32-groundwork.md. A trap vectors to mtvec, or to
+// Multicycle RV32IMAF core: the integer path plus FP_ISSUE/FP_WAIT, the M
+// extension's MD_WAIT and (issue #34) the A extension's AMO_WRITE. One
+// ready/valid memory port, the machine and (issue #20) supervisor trap CSRs
+// with an Sv32 page-table walker and (issue #24) a 4-entry TLB, floating
+// CSRs, the Zicntr counters, and atomic register/flag retirement in
+// WRITEBACK. See docs/rv32-f.md, docs/rv32-groundwork.md and docs/rv32-a.md. A trap vectors to mtvec, or to
 // stvec when delegated; a second trap before the handler retires an instruction halts the core
 // (the emulator's double-fault rule). The contract is docs/rv32-rtl.md;
 // the datapath and controller are explained in docs/rv32-to-gates.md.
@@ -23,6 +24,10 @@ module rv32 #(
     input  wire        irq_external,
     // Deterministic tick mode (O1): `cycle` counts steps, not clock cycles, and wfi never waits.
     input  wire        step_ticks,
+    // Issue #34: a write to RAM by a device (DMA), not by this core, accepted this cycle; a write
+    // to LR.W's reserved physical word ends the reservation.
+    input  wire        ram_snoop_write,
+    input  wire [31:0] ram_snoop_addr,
     // Memory port (docs/rv32.md, "Memory transaction contract").
     output wire        mem_valid,
     output wire [31:0] mem_addr,
@@ -136,10 +141,11 @@ module rv32 #(
     reg [1:0] tlb_next;
     reg [7:0] pmpcfg [0:7];
     reg [31:0] pmpaddr [0:7];
-    // The A extension (issue #34): LR.W's reservation, a word's virtual address. SC.W, any trap, mret
-    // and sret clear it. sc_held is the SC's outcome, decided in EXECUTE.
+    // The A extension (issue #34): LR.W's reservation. SC.W compares the virtual word, so a failing
+    // SC needs no translation; a device's write to the physical word ends it, as do SC.W, any trap,
+    // mret, sret, a satp write and sfence.vma. sc_held is the SC's outcome, decided in EXECUTE.
     reg reserved, sc_held;
-    reg [29:0] reservation;
+    reg [29:0] reservation, reservation_pa;
 
     // Decoded fields, combinational from ir.
     wire [4:0] rd, rs1, rs2;
@@ -350,14 +356,19 @@ module rv32 #(
                              ((width == 2'd2 && alu_result[1:0] != 2'b00) ||
                               (width == 2'd1 && alu_result[0]));
     wire target_misaligned = (is_jal || is_jalr || branch_taken) && execute_out[1];
+    // What a data access does to memory (issue #34): LR.W reads like a load, SC.W writes like a
+    // store, an AMO reads and then writes. PMP, the bus and the walk's kind follow these; the
+    // walk and the fault causes take `is_store`, which is mem_writes.
+    wire mem_reads = is_load || is_amo;
+    wire mem_writes = is_store;
 
     // The A extension (issue #34). SC.W without the reservation of its word skips every access,
     // translation and PMP included, and fails; its alignment is still checked first, as on QEMU.
     // An AMO's write value comes from the word MEM read (mdr) and rs2: funct5 bit 4 selects min or
     // max, bit 3 unsigned, bit 2 max; below that, bit 0 is swap and bits 3:2 add, xor, or, and
-    // (funct5 is ir[31:27]).
+    // (funct5 is ir[31:27]; bit 1 is set only for LR and SC, which are not AMOs, so the ALU never
+    // looks at it).
     wire sc_skip = is_sc && !(reserved && reservation == alu_result[31:2]);
-    // (Bit 1 of funct5 only tells LR and SC apart, which are not AMOs.)
     wire amo_minmax = ir[31], amo_unsigned = ir[30], amo_max = ir[29], amo_swap = ir[27];
     wire [1:0] amo_logic = ir[30:29];
     wire amo_less = amo_unsigned ? mdr < b : $signed(mdr) < $signed(b);
@@ -368,9 +379,8 @@ module rv32 #(
                             amo_logic == 2'd2 ? mdr | b : mdr & b;
 
     // Memory port: a fetch in FETCH (at the TLB's translation on a hit, at `phys` after a walk), a
-    // page-table read in WALK, a
-    // data access in MEM, nothing otherwise
-    // and nothing while reset is asserted (the state register already says
+    // page-table read in WALK, a data access in MEM, an AMO's write in AMO_WRITE (issue #34),
+    // nothing otherwise and nothing while reset is asserted (the state register already says
     // FETCH then, so the gate is explicit).
     // Sv32 (issue #20): translation applies to fetches below machine mode, and to loads and stores
     // below it at their effective privilege, which MPRV makes MPP's in machine mode.
@@ -444,8 +454,8 @@ module rv32 #(
     wire [31:0] pmp_addr = state == WALK ? pte_addr[31:0] : access_addr;
     wire [31:0] pmp_word = {2'b00, pmp_addr[31:2]};
     wire [1:0] pmp_priv = pmp_fetch ? priv : state == WALK ? PRIV_S : data_priv;
-    // X, W, R; an AMO needs both R and W (issue #34)
-    wire [2:0] pmp_need = pmp_fetch ? 3'b100 : state == WALK ? 3'b001 : is_amo ? 3'b011 : is_store ? 3'b010 : 3'b001;
+    // X, W, R: a data access needs W if it writes and R if it reads, an AMO both (issue #34)
+    wire [2:0] pmp_need = pmp_fetch ? 3'b100 : state == WALK ? 3'b001 : {1'b0, mem_writes, mem_reads};
     reg pmp_ok, pmp_found, pmp_match;
     reg [31:0] pmp_low, pmp_ones;
     integer entry;
@@ -523,8 +533,8 @@ module rv32 #(
     wire tlb_miss_seen = (fetch_walk && !irq_take) || (data_translating && !tlb_hit);
     wire tlb_hit_seen = (fetch_translating && tlb_hit && !irq_take && (fetch_page_fault || fetch_deny || mem_ready)) ||
                         (data_translating && tlb_hit);
-    // The testbench reads ptw_cycle and the TLB pulses; PMP compares whole words.
-    wire unused_ok = &{1'b0, ptw_cycle, tlb_miss_seen, tlb_hit_seen, pmp_addr[1:0]};
+    // The testbench reads ptw_cycle and the TLB pulses; PMP and the reservation compare whole words.
+    wire unused_ok = &{1'b0, ptw_cycle, tlb_miss_seen, tlb_hit_seen, pmp_addr[1:0], ram_snoop_addr[1:0]};
 
     assign mem_valid = !reset && ((state == FETCH && !irq_take && !fetch_deny && !fetch_walk && !fetch_page_fault) ||
                                   (state == MEM) || (state == AMO_WRITE) ||
@@ -532,7 +542,8 @@ module rv32 #(
     assign mem_fetch = mem_valid && (state == FETCH);
     assign mem_ptw = mem_valid && (state == WALK);
     assign mem_addr = mem_fetch ? access_addr : mem_ptw ? pte_addr[31:0] : xlate_ok ? phys : alu_out;
-    assign mem_we = mem_valid && ((state == MEM && is_store && !is_amo) || state == AMO_WRITE);
+    // An AMO reads in MEM and writes in AMO_WRITE; any other access writes in MEM if it writes.
+    assign mem_we = mem_valid && ((state == MEM && mem_writes && !mem_reads) || state == AMO_WRITE);
     assign mem_strb = !mem_valid ? 4'b0000 : (mem_fetch || mem_ptw) ? 4'b1111 : strb;
     // Sub-word store data is replicated across the lanes so the strobe alone selects it.
     assign mem_wdata = (state == AMO_WRITE) ? amo_value : (width == 2'd0) ? {4{b[7:0]}} : (width == 2'd1) ? {2{b[15:0]}} : b;
@@ -612,7 +623,7 @@ module rv32 #(
             satp_mode <= 1'b0; satp_ppn <= 22'd0;
             xlate_ok <= 1'b0; walk_level <= 1'b0; walk_kind <= WALK_FETCH; phys <= 32'd0; pte_addr <= 34'd0;
             tlb_valid <= 4'd0; tlb_next <= 2'd0; // the entries themselves need no reset
-            reserved <= 1'b0; sc_held <= 1'b0; reservation <= 30'd0;
+            reserved <= 1'b0; sc_held <= 1'b0; reservation <= 30'd0; reservation_pa <= 30'd0;
             for (entry = 0; entry < 8; entry = entry + 1) begin
                 pmpcfg[entry] <= 8'd0;
                 pmpaddr[entry] <= 32'd0;
@@ -642,6 +653,9 @@ module rv32 #(
             // In step-tick mode a tick is the pulse of the step completed in the previous cycle.
             cycle_count <= cycle_count + (step_ticks ? {63'd0, retire || trap} : 64'd1);
             fetch_waiting <= (state == FETCH) && mem_valid && !mem_ready;
+            // Issue #34: a device wrote LR.W's reserved word. It cannot coincide with this core's
+            // own access (the RAM has one port), so no later assignment this cycle competes.
+            if (ram_snoop_write && ram_snoop_addr[31:2] == reservation_pa) reserved <= 1'b0;
             case (state)
                 FETCH: if (irq_take) begin
                     retire_pc <= pc;
@@ -778,11 +792,20 @@ module rv32 #(
                     mdr <= mem_rdata;
                     if (mem_error)
                         take_trap(1'b0, is_load ? CAUSE_LOAD_FAULT : CAUSE_STORE_FAULT, alu_out, ir_pc);
-                    else
+                    else begin
                         state <= is_amo ? AMO_WRITE : WRITEBACK;
+                        // Issue #34: LR.W reserves its word as the read is accepted, so a device's
+                        // write from the next cycle on ends the reservation.
+                        if (is_lr) begin
+                            reserved <= 1'b1;
+                            reservation <= alu_out[31:2];
+                            reservation_pa <= mem_addr[31:2];
+                        end
+                    end
                 end
                 // Issue #34: the AMO writes its result to the word MEM read, at the same address
-                // (`phys` and xlate_ok still hold a translation). A refused write is an access fault.
+                // (when translated, `phys` and xlate_ok still hold the read's translation). A refused
+                // write is an access fault.
                 AMO_WRITE: if (mem_ready) begin
                     if (mem_error)
                         take_trap(1'b0, CAUSE_STORE_FAULT, alu_out, ir_pc);
@@ -881,12 +904,10 @@ module rv32 #(
                         mstatus_spp <= 1'b0;
                         mstatus_mprv <= 1'b0;
                     end
-                    // Issue #34: LR.W reserves its word; SC.W, mret and sret end any reservation (QEMU
-                    // clears it on xRET too, which the privileged specification allows).
-                    if (is_lr) begin
-                        reserved <= 1'b1;
-                        reservation <= alu_out[31:2];
-                    end else if (is_sc || is_mret || is_sret)
+                    // Issue #34: SC.W, mret and sret end any reservation (QEMU clears it on xRET too,
+                    // which the privileged specification allows), and so does a new translation: a
+                    // satp write or sfence.vma, after which the virtual word may name another page.
+                    if (is_sc || is_mret || is_sret || is_sfence || (csr_we && csr_addr == CSR_SATP))
                         reserved <= 1'b0;
                     if (is_sfence || (csr_we && csr_addr == CSR_SATP)) begin // issue #24: flush every entry
                         tlb_valid <= 4'd0;

@@ -151,6 +151,12 @@ def tlb_model(trace, translated):
     return hits, misses, reads
 
 
+def trap_log(trace):
+    """What handler() logged: (mcause, mtval, mepc, mstatus) per trap, in order."""
+    count = stored(trace, LOG) or 0
+    return [tuple(stored(trace, LOG + 16 * (n + 1) + 4 * k) for k in range(4)) for n in range(count)]
+
+
 def supervisor_line(line):
     return int(line.split()[1], 16) >= SUPER
 
@@ -158,8 +164,7 @@ def supervisor_line(line):
 class MmuTest(StepTicksCase):
 
     def log(self, trace):
-        count = stored(trace, LOG) or 0
-        return [tuple(stored(trace, LOG + 16 * (n + 1) + 4 * k) for k in range(4)) for n in range(count)]
+        return trap_log(trace)
 
     def test_translated_loads_stores_and_fetches_keep_the_cycle_formula(self):
         """No trap anywhere, so the testbench's cycle identity must hold with the walks: 4 cycles a

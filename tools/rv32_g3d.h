@@ -19,6 +19,9 @@ typedef struct {
     uint32_t consts[G3D_CONSTS], program[G3D_PROGRAM_WORDS], inputs[G3D_VMAX][G3D_SLOTS], tris[G3D_TMAX];
     /* Engine. */
     g3d_phase phase; bool clearing, command_tick;
+    /* Issue #34: the RAM word this tick wrote (a depth write or a clear), for the CPU's LR.W
+     * reservation; the machine reads and resets it after each tick. */
+    bool ram_written; uint32_t ram_written_at;
     uint32_t index;                         /* triangle during INDEX/FETCH/scan; word during CLEAR */
     uint32_t batch, lane, pc, count, mask, pred, depth;
     struct { uint8_t loop, parent, taken; } stack[G3D_DEPTH];

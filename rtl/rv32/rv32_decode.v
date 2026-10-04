@@ -6,6 +6,9 @@
 // when this decoder reports illegal and that decoder reports !fp_valid.
 // The A extension (issue #34) is decoded here: LR.W is a load and SC.W and the
 // AMOs are stores, each with its own flag as well, and their immediate is zero.
+// OP_AMO is legal only with funct3 2, the same field value as lw and sw, which is
+// what makes the core's width, strobe and load_value paths treat all of them as
+// word accesses with no change.
 module rv32_decode (
     input  wire [31:0] insn,
     output wire [4:0]  rd,

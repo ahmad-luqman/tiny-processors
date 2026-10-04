@@ -354,6 +354,7 @@ void g3d_tick(g3d_device *d, uint8_t *ram, uint32_t ram_size, uint8_t *fb, bool 
     case G3D_PH_ZWRITE:
         if (hold) { d->stalls++; break; }
         ram[zoff]=(uint8_t)d->z; ram[zoff+1]=(uint8_t)(d->z>>8);
+        d->ram_written=true; d->ram_written_at=zoff;
         d->transfers++; d->phase=G3D_PH_PWRITE;
         break;
     case G3D_PH_PWRITE: {
@@ -368,6 +369,7 @@ void g3d_tick(g3d_device *d, uint8_t *ram, uint32_t ram_size, uint8_t *fb, bool 
     case G3D_PH_CLEAR:
         if (hold) { d->stalls++; break; }
         memset(ram+d->zbase-RAM_ORIGIN+4u*d->index,0xff,4);
+        d->ram_written=true; d->ram_written_at=d->zbase-RAM_ORIGIN+4u*d->index;
         d->transfers++;
         if (++d->index==Z_BYTES/4) d->phase=G3D_PH_FINISH;
         break;

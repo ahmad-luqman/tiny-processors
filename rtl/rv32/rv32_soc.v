@@ -84,6 +84,8 @@ module rv32_soc #(
     wire simd_valid, simd_ready, simd_error;
     wire [31:0] simd_rdata;
     wire ram_valid, ram_ready, ram_error;
+    wire ram_device_write;           // issue #34: declared before the core, which snoops them
+    wire [31:0] ram_physical_addr;
     wire [31:0] ram_rdata;
     wire con_valid, con_ready, con_error;
     wire [31:0] con_rdata;
@@ -124,7 +126,7 @@ module rv32_soc #(
         .trap_value(trap_value), .halted(halted), .state(state), .pc(pc),
         .mtvec(mtvec), .mepc(mepc), .mcause(mcause), .mtval(mtval), .time_now(mtime),
         .irq_software(msip_level), .irq_timer(mtip), .irq_external(meip), .step_ticks(step_ticks),
-        .trap_interrupt(trap_interrupt)
+        .trap_interrupt(trap_interrupt), .ram_snoop_write(ram_device_write), .ram_snoop_addr(ram_physical_addr)
     );
 
     rv32_bus #(.RAM_WORDS(RAM_WORDS), .FB_WORDS(FB_WORDS)) bus (
@@ -225,6 +227,10 @@ module rv32_soc #(
     wire ram_physical_valid=grant_gpu ? !gpu_memory_hold : side_valid && !ram_cpu_fault;
     wire ram_physical_ready, ram_physical_error;
     wire [31:0] ram_physical_rdata;
+    assign ram_physical_addr = grant_gpu ? em_addr : side_addr;
+    // Issue #34: a write a device made to RAM this cycle (G2's depth buffer, virtio-blk's DMA), which
+    // ends the core's LR.W reservation of that word.
+    assign ram_device_write = ram_physical_valid && ram_physical_ready && (grant_gpu ? em_we : (virtio_busy && side_we));
     wire vio_ready = virtio_busy && vio_valid && !grant_gpu && ram_physical_ready;
     assign ram_ready=ram_valid && (ram_cpu_fault || (!grant_gpu && ram_physical_ready));
     assign ram_error=ram_cpu_fault || ram_physical_error;
@@ -241,7 +247,7 @@ module rv32_soc #(
     // Memory BASE values repeat the bus decode; cross-language tests pin both.
     rv32_ram #(.WORDS(RAM_WORDS), .BASE(RAM_BASE)) ram (
         .clk(clk), .reset(reset), .valid(ram_physical_valid), .we(grant_gpu ? em_we : side_we),
-        .addr(grant_gpu?em_addr:side_addr), .strb(grant_gpu?em_strb:side_strb), .wdata(grant_gpu?em_wdata:side_wdata),
+        .addr(ram_physical_addr), .strb(grant_gpu?em_strb:side_strb), .wdata(grant_gpu?em_wdata:side_wdata),
         .rdata(ram_physical_rdata), .ready(ram_physical_ready), .error(ram_physical_error)
     );
 

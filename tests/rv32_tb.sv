@@ -151,12 +151,18 @@ module rv32_tb;
     integer reset_at = 0;       // +reset-at=N: assert reset again after counted cycle N
     reg reset_done = 0;         // that second reset happened
 
-    // The last accepted data transaction, printed at the next retirement.
-    // A data access waiting for its instruction's retirement: one read or one write, or, for an AMO
-    // (issue #34), a read and then a write of the same word.
-    reg pending = 0, pending_read = 0, pending_write = 0, pending_error = 0;
-    reg [31:0] pending_addr, pending_read_value, pending_write_value;
+    // The data access waiting for its instruction's retirement, printed then: one read or one write,
+    // or, for an AMO (issue #34), a read and then a write of the same bus word with the same strobe.
+    reg pending_read = 0, pending_write = 0, pending_read_error = 0, pending_write_error = 0;
+    reg [31:0] pending_addr, pending_bus_addr, pending_read_value, pending_write_value;
+    reg [3:0] pending_strb;
     integer pending_width;
+    task clear_pending;
+        begin
+            pending_read = 0;
+            pending_write = 0;
+        end
+    endtask
     reg done_pending = 0;
     reg [31:0] done_word;
 
@@ -367,13 +373,19 @@ module rv32_tb;
                     if (dut.core.mem_ptw) begin
                         walks = walks + 1; // a page-table read belongs to no instruction's trace line
                     end else if (!mem_fetch) begin
-                        // Only an AMO's write may follow a data access before its retirement, and only
-                        // after its read: AMO_WRITE is entered from MEM, at the same address.
-                        if (pending && !(state == dut.core.AMO_WRITE && pending_read && !pending_write && mem_we))
+                        // Only an AMO's write may follow a data access before its retirement: in
+                        // AMO_WRITE, after its read was accepted without error, to the bus word the
+                        // read used (the physical one, when translated) with the same strobe.
+                        if (state == dut.core.AMO_WRITE) begin
+                            if (!pending_read || pending_write || !mem_we)
+                                $fatal(1, "An AMO's write without its read at cycle %0d", cycles);
+                            if (pending_read_error)
+                                $fatal(1, "An AMO's write after its read was refused at cycle %0d", cycles);
+                            if (mem_addr != pending_bus_addr || mem_strb != pending_strb || mem_strb != 4'b1111)
+                                $fatal(1, "An AMO wrote %h/%b after reading %h/%b at cycle %0d",
+                                       mem_addr, mem_strb, pending_bus_addr, pending_strb, cycles);
+                        end else if (pending_read || pending_write)
                             $fatal(1, "Two data transactions without a retirement between them");
-                        if (state == dut.core.AMO_WRITE && !pending)
-                            $fatal(1, "An AMO's write without its read at cycle %0d", cycles);
-                        pending = 1;
                         // The trace shows the virtual address, as the emulator's does (issue #20);
                         // untranslated, it must be the bus address.
                         if (!dut.core.xlate_ok && mem_addr != dut.core.alu_out)
@@ -384,10 +396,13 @@ module rv32_tb;
                         // bytes, a load's raw bytes before the core extends them.
                         if (mem_we) begin
                             pending_write = 1;
-                            pending_error = mem_error;
+                            pending_write_error = mem_error;
                             pending_write_value = narrowed(mem_strb, mem_wdata);
                         end else begin
                             pending_read = 1;
+                            pending_read_error = mem_error;
+                            pending_bus_addr = mem_addr;
+                            pending_strb = mem_strb;
                             pending_read_value = narrowed(mem_strb, mem_rdata);
                         end
                         pending_width = width_of(mem_strb);
@@ -414,15 +429,13 @@ module rv32_tb;
                     if (retire_rd_we) $fwrite(trace_fd, " x%0d=%h", retire_rd, retire_rd_value);
                     if (retire_fd_we) $fwrite(trace_fd, " f%0d=%h", retire_fd, retire_fd_value);
                     if (retire_fcsr_we) $fwrite(trace_fd, " fcsr=%h", retire_fcsr);
-                    if (pending && pending_write)
+                    if (pending_write)
                         $fwrite(trace_fd, " mem[%h]<-%h/%0d", pending_addr, pending_write_value, pending_width);
-                    if (pending && pending_read)
+                    if (pending_read)
                         $fwrite(trace_fd, " mem[%h]->%h/%0d", pending_addr, pending_read_value, pending_width);
                     $fwrite(trace_fd, "\n");
                 end
-                pending = 0;
-                pending_read = 0;
-                pending_write = 0;
+                clear_pending;
             end
             if (trap && trap_interrupt) begin
                 steps = steps + 1; // an interrupt entry is a step, as in the emulator
@@ -437,11 +450,9 @@ module rv32_tb;
                 // the trap line replaces its effect, so nothing carries over. A
                 // write that was accepted without error has taken effect, and the
                 // contract says a trapping instruction has none: that is a core bug.
-                if (pending && pending_write && !pending_error)
+                if (pending_write && !pending_write_error)
                     $fatal(1, "Trap after an accepted write at cycle %0d", cycles);
-                pending = 0;
-                pending_read = 0;
-                pending_write = 0;
+                clear_pending;
             end
             // One outcome per run: a terminal outcome on the edge that also
             // reaches the cycle limit is reported as that outcome, not as a limit.
@@ -730,9 +741,7 @@ module rv32_tb;
             wait (cycles == reset_at);
             #2; // after this edge's trace processing, before the falling edge
             reset = 1;
-            pending = 0;
-            pending_read = 0;
-            pending_write = 0;
+            clear_pending;
             stalled_request = 0;
             request_age = 0;
             done_pending = 0;

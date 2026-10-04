@@ -9,19 +9,9 @@ against the other.
 """
 import unittest
 
-from rv32_step_case import DISARM_SOFTWARE, DISARM_TIMER, StepTicksCase, set_timer, stored
+from rv32_step_case import DISARM_SOFTWARE, DISARM_TIMER, HANDLER, SAVE, StepTicksCase, at_handler, dump, set_timer, stored
 from tools.rv32_asm import *  # noqa: F401,F403
 from tools.rv32_rtl import diff_traces, trap_records
-
-HANDLER = RAM + 0x400  # handlers live here; bodies must stay below
-SAVE = RAM + 0x2000    # where handlers store what they saw
-
-
-def at_handler(body, handler):
-    """`body`, padded to HANDLER, then `handler`; mtvec is set by the body's first words."""
-    words = LI(5, HANDLER) + [CSRRW(0, MTVEC, 5)] + list(body)
-    assert len(words) <= (HANDLER - RAM) // 4, "the body overlaps the handler"
-    return words + [0] * ((HANDLER - RAM) // 4 - len(words)) + list(handler)
 
 
 def record_and_return(disarm):
@@ -33,14 +23,6 @@ def record_and_return(disarm):
         CSRRS(29, MSTATUS, 0), SW(29, 28, 8),
         LW(29, 28, 12), ADDI(29, 29, 1), SW(29, 28, 12),
     ] + list(disarm) + [MRET()]
-
-
-def dump(*regs):
-    """Store registers at SAVE + 0x40 onwards, then finish: the trace shows each store's value."""
-    words = LI(28, SAVE + 0x40)
-    for i, reg in enumerate(regs):
-        words.append(SW(reg, 28, 4 * i))
-    return words + FINISH()
 
 
 class InterruptTest(StepTicksCase):

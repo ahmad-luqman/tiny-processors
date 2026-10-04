@@ -1,26 +1,21 @@
 """Issue #34: the A extension (LR.W, SC.W and the nine AMOs) on both backends.
 
-Every program runs on the emulator and the RTL and must retire identical traces, in step-tick
-mode where an interrupt is part of the program. Results are also asserted against a Python
-reference of the AMOs and hand-written expectations of the reservation (docs/rv32-a.md), so
+Every program runs on the emulator and the RTL in step-tick mode, so interrupts and devices land
+on the same instruction, and must retire identical traces. Results are also asserted against a
+Python reference of the AMOs and hand-written expectations of the reservation (docs/rv32-a.md), so
 neither backend is checked only against the other.
 """
 import unittest
 
 import test_rv32_mmu as mmu
-from rv32_step_case import DISARM_TIMER, StepTicksCase, set_timer, stored
+from rv32_step_case import DISARM_TIMER, SAVE, StepTicksCase, at_handler, dump, set_timer, stored
+from test_rv32_m import signed
 from test_rv32_rtl import effects
 from tools.rv32_asm import *  # noqa: F401,F403
-from tools.rv32_rtl import cycle_relation, diff_traces
+from tools.rv32_image import valid_a_word
 
 MASK = 0xFFFFFFFF
 DATA = RAM + 0x1000   # scratch words past every image here
-HANDLER = RAM + 0x400  # trap handlers; bodies stay below
-SAVE = RAM + 0x2000
-
-
-def signed(value):
-    return value - (1 << 32) if value & 0x80000000 else value
 
 
 def amo_reference(op, old, operand):
@@ -41,36 +36,26 @@ def amo_reference(op, old, operand):
 EDGES = (0, 1, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0x55555555, 0xAAAAAAAA, 0x00010000)
 
 
-def at_handler(body, handler):
-    words = LI(5, HANDLER) + [CSRRW(0, MTVEC, 5)] + list(body)
-    assert len(words) <= (HANDLER - RAM) // 4, "the body overlaps the handler"
-    return words + [0] * ((HANDLER - RAM) // 4 - len(words)) + list(handler)
-
-
 def skip_and_return():
-    """A handler that stores mcause and mtval at SAVE, counts at SAVE + 8, and returns past the
-    trapping instruction; an interrupt (mcause negative) disarms the timer and returns to it."""
+    """A machine-mode handler that stores mcause and mtval at SAVE and counts at SAVE + 8, then
+    returns with a jump, not mret, so a reservation that ends was ended by the trap itself: past
+    the trapping instruction after an exception, to the interrupted one after an interrupt (with
+    the timer disarmed). The jump leaves MIE clear, which no body here relies on."""
     return LI(28, SAVE) + [
         CSRRS(29, MCAUSE, 0), SW(29, 28, 0),
         CSRRS(29, MTVAL, 0), SW(29, 28, 4),
         LW(29, 28, 8), ADDI(29, 29, 1), SW(29, 28, 8),
-        CSRRS(29, MCAUSE, 0), BLT(29, 0, 4 * 5),
-        CSRRS(29, MEPC, 0), ADDI(29, 29, 4), CSRRW(0, MEPC, 29), MRET(),
-    ] + DISARM_TIMER + [MRET()]
+        CSRRS(30, MEPC, 0), CSRRS(29, MCAUSE, 0), BLT(29, 0, 4 * 3),
+        ADDI(30, 30, 4), JALR(0, 30, 0),
+    ] + DISARM_TIMER + [JALR(0, 30, 0)]
 
 
-def dump(*regs):
-    words = LI(28, SAVE + 0x40)
-    for i, reg in enumerate(regs):
-        words.append(SW(reg, 28, 4 * i))
-    return words + FINISH()
+def poll_until_idle(base, status, busy):
+    """Spin until the device's status word at base + status has the busy bit clear (x8-x10)."""
+    return LI(8, base) + [LW(10, 8, status), ANDI(10, 10, busy), BNE(10, 0, -8)]
 
 
 class AtomicTest(StepTicksCase):
-
-    def assert_relation(self, rtl):
-        text, holds = cycle_relation(rtl)
-        self.assertTrue(holds, text)
 
     def test_every_amo_against_the_reference(self):
         """Each AMO on each pair of edge values: rd gets the old word, memory the reference's value,
@@ -89,21 +74,21 @@ class AtomicTest(StepTicksCase):
                 checks.append((len(words) - 1, f"x{rd}={old:08x} mem[{address:08x}]<-{new:08x}/4 mem[{address:08x}]->{old:08x}/4",
                                (op.__name__, hex(old), hex(operand))))
                 index += 1
-        words += [AMOADD_W(0, 6, 7)]  # rd = x0: memory still changes, no register effect
-        checks.append((len(words) - 1, None, "rd=x0"))
+        last = new
+        words += LI(6, 0x10) + [AMOADD_W(0, 6, 7)]  # rd = x0: memory still changes, no register effect
+        checks.append((len(words) - 1, f"mem[{address:08x}]<-{(last + 0x10) & MASK:08x}/4 mem[{address:08x}]->{last:08x}/4",
+                       "rd=x0"))
         alias = DATA + 0x40  # rd = rs1: the address is read before rd is written
         words += LI(9, alias) + LI(6, 0x30) + [SW(6, 9, 0)] + LI(6, 0x12) + [AMOADD_W(9, 6, 9)]
         checks.append((len(words) - 1, f"x9=00000030 mem[{alias:08x}]<-00000042/4 mem[{alias:08x}]->00000030/4", "rd=rs1"))
         emulator, rtl = self.assert_same(words + FINISH())
         for line, expected, case in checks:
-            if expected is None:
-                self.assertTrue(effects(rtl.trace[line]).startswith("mem["), rtl.trace[line])
-            else:
-                self.assertEqual(effects(rtl.trace[line]), expected, case)
+            self.assertEqual(effects(rtl.trace[line]), expected, case)
         self.assert_relation(rtl)
 
     def test_cycles_and_transfers_with_stalls(self):
-        """An AMO costs 4 cycles, 2 data accesses and their 2 transfers; a failed SC 4 and none."""
+        """An AMO costs 4 + 2 cycles (one per data access) and 3 transfers (its fetch, read and
+        write); a failed SC 4 cycles and its fetch alone."""
         words = LI(7, DATA) + [AMOSWAP_W(5, 7, 7), LR_W(6, 7), SC_W(8, 0, 7), SC_W(9, 0, 7)] + FINISH()
         for stall in (0, 2):
             with self.subTest(stall=stall):
@@ -127,7 +112,8 @@ class AtomicTest(StepTicksCase):
         emulator, rtl = self.assert_same(words + dump(10, 11, 12, 13, 14, 15, 16, 17, 18, 20))
         got = [stored(rtl.trace, SAVE + 0x40 + 4 * i) for i in range(10)]
         self.assertEqual(got, [0x1234, 0, 1, 0x1234, 1, 1, 0, 0, 0x1234, 1])
-        sc_lines = [line for line in rtl.trace if int(line.split()[2], 16) & 0xF800707F == 0x1800202F]
+        sc_lines = [line for line in rtl.trace if int(line.split()[2], 16) & 0x7F == 0x2F
+                    and int(line.split()[2], 16) >> 27 == SC_W(0, 0, 0) >> 27]
         self.assertEqual([effects(line) for line in sc_lines],
                          [f"x11=00000000 mem[{a:08x}]<-00001234/4", "x12=00000001", "x14=00000001", "x15=00000001",
                           f"x17=00000000 mem[{b:08x}]<-00001234/4", "x20=00000001"],
@@ -135,8 +121,8 @@ class AtomicTest(StepTicksCase):
         self.assert_relation(rtl)
 
     def test_a_trap_or_an_xret_between_lr_and_sc_fails_it(self):
-        """The reservation ends at any trap (an ecall, an illegal instruction) and at mret, as on QEMU;
-        a plain branch between LR and SC keeps it."""
+        """The reservation ends at a trap (an ecall, an illegal instruction), whose handler returns
+        with a jump, and at a bare mret, as on QEMU; a plain jump between LR and SC keeps it."""
         body = LI(7, DATA)
         body += [LR_W(5, 7), ECALL(), SC_W(10, 0, 7)]                       # x10=1
         body += [LR_W(5, 7), 0, SC_W(11, 0, 7)]                             # x11=1: illegal word 0
@@ -160,8 +146,77 @@ class AtomicTest(StepTicksCase):
         sc = next(line for line in rtl.trace if line.split()[2] == f"{SC_W(10, 0, 7):08x}")
         self.assertEqual(effects(sc), "x10=00000001")
 
+    def test_a_translation_change_ends_the_reservation(self):
+        """A satp write or sfence.vma between LR and SC fails the SC: after either, the virtual word
+        may name another page. Machine mode may do both, and satp's MODE stays Bare here."""
+        body = LI(7, DATA)
+        body += [LR_W(5, 7), CSRRW(0, SATP, 0), SC_W(10, 0, 7)]
+        body += [LR_W(5, 7), SFENCE_VMA(), SC_W(11, 0, 7)]
+        body += [LR_W(5, 7), CSRRS(0, SATP, 0), SC_W(12, 0, 7)]  # a read of satp writes nothing
+        emulator, rtl = self.assert_same(body + dump(10, 11, 12))
+        self.assertEqual([stored(rtl.trace, SAVE + 0x40 + 4 * i) for i in range(3)], [1, 1, 0])
+
+    def test_a_device_write_ends_the_reservation(self):
+        """Codex P1: a device's write to the reserved word fails the SC. virtio-blk reads sector 0
+        into `data` during the notify store (O3); an LR on a word it writes fails, one on a word it
+        does not touch succeeds. The notify itself is a plain store, which keeps a reservation."""
+        ring = RAM + 0x3000
+        desc, avail, used, header, data, status = ring, ring + 0x100, ring + 0x200, ring + 0x300, ring + 0x400, ring + 0x600
+        for target, outcome in ((data + 8, 1), (ring + 0x800, 0)):
+            with self.subTest(target=hex(target)):
+                words = []
+
+                def put(address, value):
+                    words.extend(LI(1, address) + LI(2, value) + [SW(2, 1, 0)])
+
+                for i, (address, length, flags) in enumerate(((header, 16, 1 | 1 << 16), (data, 512, 3 | 2 << 16),
+                                                              (status, 1, 2))):
+                    put(desc + 16 * i, address)
+                    put(desc + 16 * i + 8, length)
+                    put(desc + 16 * i + 12, flags)
+                put(avail, 1 << 16)
+                for offset, value in ((0x070, 0), (0x070, 1), (0x070, 3), (0x070, 11), (0x030, 0), (0x038, 8),
+                                      (0x080, desc), (0x090, avail), (0x0A0, used), (0x044, 1), (0x070, 15)):
+                    put(VIRTIO + offset, value)
+                words += LI(7, target) + [LR_W(5, 7)]
+                put(VIRTIO + 0x050, 0)                    # notify: the DMA runs before this store retires
+                words += [SC_W(10, 0, 7)]
+                emulator, rtl = self.assert_same(words + dump(10))
+                self.assertEqual(stored(rtl.trace, SAVE + 0x40), outcome)
+
+    def test_an_engine_write_ends_the_reservation(self):
+        """The same for G2: CLEAR_Z writes every word of the depth buffer, so an LR on one of them
+        fails its SC once the clear has run; an LR outside the buffer succeeds. G2 runs on clock
+        time in the RTL even with step ticks, so the polling loop's length differs between the
+        backends and only the results are compared."""
+        zbase = RAM + 0x100000
+        for target, outcome in ((zbase + 0x40, 1), (DATA, 0)):
+            with self.subTest(target=hex(target)):
+                body = LI(7, target) + [LR_W(5, 7)]
+                body += LI(8, G3D_BASE) + LI(9, zbase) + [SW(9, 8, G3D_ZBASE), ADDI(9, 0, G3D_CLEAR_Z), SW(9, 8, G3D_COMMAND)]
+                body += poll_until_idle(G3D_BASE, G3D_STATUS, G3D_BUSY) + [SC_W(11, 0, 7), LW(12, 7, 0)]
+                emulator, rtl = self.run_both(body + dump(11, 12), limit=400000)
+                for run in (emulator, rtl):
+                    self.assertEqual(run.halt["outcome"], "pass")
+                    self.assertEqual(stored(run.trace, SAVE + 0x40), outcome)
+                    self.assertEqual(stored(run.trace, SAVE + 0x44), 0xFFFFFFFF if outcome else 0,
+                                     "the clear's word survives the failed SC")
+
+    def test_every_funct5(self):
+        """All 32 funct5 values under opcode 0x2f (funct3 2, rs2 x6, and LR.W with rs2 x0 too): the
+        backends trap exactly on the words valid_a_word refuses, and those are exactly the ones
+        the assembler cannot encode. With the reservation never held, SC.W fails without a fault."""
+        words = [r_type(0x2F, 5, 2, 7, 6, funct5 << 2) for funct5 in range(32)] + [LR_W(5, 7)]
+        body = LI(7, DATA) + LI(6, 3) + words + FINISH()
+        emulator, rtl = self.assert_same(at_handler(body, skip_and_return()))
+        trapped = {int(line.split()[2], 16) for line in rtl.trace if line.endswith(f" trap 2 {line.split()[2]}")}
+        self.assertEqual(trapped, {word for word in words if not valid_a_word(word)})
+        encodable = {op(5, 6, 7) for op in AMO_OPS} | {SC_W(5, 6, 7), LR_W(5, 7)}
+        self.assertEqual({word for word in words if valid_a_word(word)}, encodable)
+        self.assertEqual(len(encodable), 11)
+
     def test_faults(self):
-        """Misaligned: LR is a load (4), SC and the AMOs stores/AMOs (6), SC even without a
+        """Misaligned: LR is a load (4), SC and the AMOs are stores (6), SC even without a
         reservation. Unmapped: LR 5, an AMO 7; a failing SC there has no access and so no fault.
         Each trap reports the address in mtval."""
         cases = [
@@ -237,10 +292,63 @@ class AtomicTest(StepTicksCase):
         supervisor += LI(10, mmu.TEST_VA) + [AMOADD_W(17, 10, 10)]  # a writable page: works
         supervisor += LI(16, mmu.DUMP) + [SW(11, 16, 0), SW(14, 16, 4), SW(17, 16, 8), SW(13, 16, 12)] + FINISH()
         emulator, rtl = self.assert_same(mmu.program(mmu.pmp(), supervisor))
-        log = [entry[:2] for entry in mmu.MmuTest.log(self, rtl.trace)]
+        log = [entry[:2] for entry in mmu.trap_log(rtl.trace)]
         self.assertEqual(log, [(15, read_only), (15, clean), (15, clean)])
         self.assertEqual([stored(rtl.trace, mmu.DUMP + 4 * i) for i in range(4)], [mmu.pte(mmu.PAGE_S, PTE_V | PTE_R | PTE_A), 0x5000, 0x5000, 1],
                          "LR reads the guarded page's entries and PAGE_S, the AMO returns its old word, the SC failed")
+
+    def test_sv32_lr_sc_and_amo_succeed(self):
+        """Under Sv32, where the virtual and physical words differ: an LR/SC pair stores, an AMO
+        that walks (a TLB miss, through a second virtual page of the same physical page) and one
+        that hits each update the word, and loads through the physical address see every write.
+        Trap-free, so the cycle relation holds, with and without stalls."""
+        word = mmu.TEST_VA + 0x20                 # PAGE_S + 0x20, which holds 0x5008
+        other = mmu.TEST_VA + 0x5000 + 0x24       # PAGE_S + 0x24 again, 0x5009, through level0[5]
+        supervisor = LI(10, word) + [LR_W(11, 10)] + LI(12, 0x1111) + [SC_W(13, 12, 10)]
+        supervisor += LI(14, other) + [AMOADD_W(15, 12, 14), AMOADD_W(16, 12, 14)]
+        supervisor += LI(17, mmu.PAGE_S + 0x20) + [LW(18, 17, 0), LW(19, 17, 4)]
+        supervisor += LI(20, mmu.DUMP) + [SW(reg, 20, 4 * i) for i, reg in enumerate((11, 13, 15, 16, 18, 19))] + FINISH()
+        for stall in (0, 2):
+            with self.subTest(stall=stall):
+                emulator, rtl = self.assert_same(mmu.program(mmu.pmp(), supervisor), stall=stall)
+                self.assertEqual([stored(rtl.trace, mmu.DUMP + 4 * i) for i in range(6)],
+                                 [0x5008, 0, 0x5009, 0x611A, 0x1111, 0x722B])
+                self.assertEqual(mmu.trap_log(rtl.trace), [])
+                self.assert_relation(rtl)
+
+    def test_sv32_faults(self):
+        """An AMO that is the first access to a page without W, or with D clear, faults (15) on the
+        walk, as a store; LR on an invalid page is a load page fault (13); a misaligned SC or AMO
+        there is misaligned (6) before any translation; an SC without the reservation does not
+        translate, so it fails there with no fault."""
+        read_only, clean, invalid = mmu.TEST_VA + 0x4000, mmu.TEST_VA + 0x9000, mmu.TEST_VA + 0x2000
+        supervisor = LI(10, read_only) + [AMOADD_W(11, 0, 10)]
+        supervisor += LI(10, clean) + [AMOSWAP_W(11, 0, 10)]
+        supervisor += LI(10, invalid) + [LR_W(11, 10)]
+        supervisor += LI(10, invalid + 2) + [AMOOR_W(11, 0, 10)]
+        supervisor += LI(10, invalid + 1) + [SC_W(11, 0, 10)]
+        supervisor += LI(10, invalid) + [SC_W(12, 0, 10)]
+        supervisor += LI(16, mmu.DUMP) + [SW(12, 16, 0)] + FINISH()
+        emulator, rtl = self.assert_same(mmu.program(mmu.pmp(), supervisor))
+        self.assertEqual([entry[:2] for entry in mmu.trap_log(rtl.trace)],
+                         [(15, read_only), (15, clean), (13, invalid), (6, invalid + 2), (6, invalid + 1)])
+        self.assertEqual(stored(rtl.trace, mmu.DUMP), 1)
+
+    def test_sret_ends_the_reservation(self):
+        """LR in S mode, then sret to U mode: the SC there fails on the same virtual word, so a
+        reservation cannot pass from one privilege mode to another. The S-mode pair before it, on a
+        user page with SUM set, succeeds."""
+        va = mmu.ALIAS + 0x1800                   # RAM + 0x1800 through the user alias
+        supervisor = LI(6, MSTATUS_SUM) + [CSRRS(0, SSTATUS, 6)]
+        supervisor += LI(10, va) + [LR_W(11, 10), SC_W(12, 0, 10)]
+        supervisor += LI(16, mmu.DUMP) + [SW(12, 16, 4), LR_W(11, 10)]
+        supervisor += LI(5, mmu.ALIAS + (mmu.USER_CODE - RAM)) + [CSRRW(0, SEPC, 5)]
+        supervisor += LI(6, MSTATUS_SPP) + [CSRRC(0, SSTATUS, 6), SRET()]
+        user = LI(10, va) + [SC_W(13, 0, 10)] + LI(14, mmu.ALIAS + (mmu.DUMP - RAM)) + [SW(13, 14, 0), ECALL()]
+        emulator, rtl = self.assert_same(mmu.program(mmu.pmp(), supervisor, user))
+        # The trace shows the virtual address of each store: the user's through the alias.
+        self.assertEqual([stored(rtl.trace, mmu.ALIAS + (mmu.DUMP - RAM)), stored(rtl.trace, mmu.DUMP + 4)], [1, 0])
+        self.assertEqual([entry[:2] for entry in mmu.trap_log(rtl.trace)], [(8, 0)])
 
 
 if __name__ == "__main__":
