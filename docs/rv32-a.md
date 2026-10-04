@@ -38,6 +38,9 @@ any value and change nothing, since there is one hart and no cache.
 | Bus | one read | one write if it succeeds, none if it fails | a read, then a write to the same address |
 | `rd` | the word read | 0 if it stored, 1 if it failed | the word read |
 
+PMP has no W-only encoding (W without R is stored as neither), so an AMO's
+"R and W" acts as W.
+
 An AMO writes `rs2`, or the word combined with `rs2`. `min` and `max` compare as
 signed, `minu` and `maxu` as unsigned. With `rd` equal to `rs2`, the AMO uses
 `rs2`'s old value and then writes `rd`.
@@ -193,7 +196,7 @@ All of these are in `make test-rv32`:
 
 | Target | What |
 | --- | --- |
-| `test-rv32-a`, `test-rv32-a-verilator` | [`tests/test_rv32_a.py`](../tests/test_rv32_a.py), on Icarus and Verilator, trace for trace, in step-tick mode. It covers:<ul><li>every AMO on edge values against a Python reference, with `rd` = `rs2` and `rd` = `x0`;</li><li>the cycle formula, stalled and not;</li><li>LR/SC outcomes;</li><li>an `ecall`, an illegal word and `mret` between LR and SC;</li><li>the issue's directed test: a timer interrupt between LR and SC;</li><li>every fault in the tables above, and illegal encodings;</li><li>an AMO on `mtimecmp` and on the input queue;</li><li>Sv32 store permission (a page without W, one with D clear).</li></ul> |
+| `test-rv32-a`, `test-rv32-a-verilator` | [`tests/test_rv32_a.py`](../tests/test_rv32_a.py), on Icarus and Verilator, trace for trace, in step-tick mode. It covers:<ul><li>every AMO on edge values against a Python reference, with `rd` = `rs2`, `rd` = `rs1` and `rd` = `x0`;</li><li>the cycle formula, stalled and not;</li><li>LR/SC outcomes;</li><li>an `ecall`, an illegal word and `mret` between LR and SC;</li><li>the issue's directed test: a timer interrupt between LR and SC;</li><li>every fault in the tables above, and illegal encodings;</li><li>an AMO on `mtimecmp` and on the input queue;</li><li>Sv32 store permission (a page without W, one with D clear);</li><li>PMP, through locked entries: on an R-only word, LR reads while an AMO and a reserved SC fault.</li></ul> |
 | `test-rv32-arch`, `test-rv32-arch-verilator`, `test-rv32-arch-a-icarus` | riscv-arch-test 3.9.1's `rv32i_m/A`: nine AMO tests, each 140 signature words equal to QEMU's, and traces equal to the emulator's. It has no LR/SC test. |
 | `test-rv32-ua`, `test-rv32-ua-icarus` | riscv-tests' `rv32ua` (10 tests; `amocas_w` and `amocas_d` are Zacas), `lrsc.S` among them. See below. |
 | `test-rv32-arch-model` | Our riscv-tests environment on its own: PASS, FAIL with the case's number, and TRAP, on the emulator and QEMU. |
