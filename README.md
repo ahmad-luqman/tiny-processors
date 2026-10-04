@@ -59,7 +59,8 @@ make run-rv32-atom-qemu run-rv32-atom-rtl  # C atomics built -march=rv32ima
 ```
 
 `lr.w`, `sc.w` and the nine AMOs follow QEMU on faults and on when the
-reservation clears. riscv-arch-test's A suite and riscv-tests' rv32ua pass on
+reservation clears, apart from the two differences the A record lists (a word
+AMO on the UART, and QEMU's value-comparing SC). riscv-arch-test's A suite and riscv-tests' rv32ua pass on
 the emulator, Icarus and Verilator. See [the A record](docs/rv32-a.md).
 
 ## CPU-commanded accelerator (A2)

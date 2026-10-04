@@ -3,7 +3,7 @@
 [Issue #34](https://github.com/ahmad-luqman/tiny-processors/issues/34) is Track 3
 stream B's second step ([plan](planning/track3-apps.md#stream-b-bigger-programs)).
 It adds RV32A to both backends: `LR.W`, `SC.W` and the nine AMOs (`.W`). Linux
-needs them (#36), and the kernel can now use real atomics. Like F1 and F2 it is
+needs them (#36), and the kernel could use real atomics. Like F1 and F2 it is
 a hardware milestone. The OS build is unchanged.
 
 The contract below was settled by probing QEMU 11.1.2 (`-M virt -cpu
@@ -51,9 +51,11 @@ has always trapped on one.
 
 ## The reservation
 
-The reservation is a valid bit and a word's virtual address.
+The reservation is a valid bit and a word, held twice: as its virtual address,
+which SC.W compares, and as its physical address, which device writes are
+checked against.
 
-- **LR.W** sets it after its read succeeds.
+- **LR.W** sets it as its read is accepted.
 - **SC.W** checks alignment first, whether or not a reservation is held (QEMU
   does the same).
   - If the reservation holds the same word, the SC is a store.
@@ -61,13 +63,21 @@ The reservation is a valid bit and a word's virtual address.
     request, so it raises no page or access fault. An SC with no reservation to
     an unmapped address simply returns 1, on QEMU as here.
   - Every SC clears the reservation, whether it succeeded or failed.
-- **Any trap clears it.** That covers exceptions and interrupts alike. A context
-  switch always goes through a trap, so comparing virtual addresses is safe.
+- **Any trap clears it.** That covers exceptions and interrupts alike. The tests
+  return from their handler with a jump, so trap entry alone is shown to end it.
 - **`mret` and `sret` clear it too.** QEMU does this, and the privileged spec
-  allows it. Matching QEMU lets the trap cases be compared with QEMU.
-- **A plain store or a DMA write** to the reserved word does not clear it.
-  That is legal on one hart. Linux (#36) must not rely on a device write
-  breaking a CPU's LR/SC loop.
+  allows it. Matching QEMU lets these cases be compared with QEMU.
+- **A new translation clears it:** a `satp` write or `sfence.vma`, after which
+  the same virtual word may name another page. With traps and xRET clearing it
+  as well, comparing virtual addresses in SC is safe.
+- **A device's write to the reserved word clears it.** The A extension requires
+  an SC to fail when another agent wrote the bytes its LR read. G2's depth
+  buffer writes and virtio-blk's DMA are the devices that write RAM (G1 writes
+  only the framebuffer). The SoC tells the core of each such write
+  (`ram_snoop_write`, `ram_snoop_addr`); the emulator checks in its DMA write
+  and after each G2 tick.
+- **This hart's own plain store** to the reserved word does not clear it, which
+  is legal: only another agent's write must.
 
 What QEMU showed, and where we differ:
 
@@ -105,6 +115,14 @@ AMO on the input queue's EVENT register pops an event and then faults. The
 emulator reads first, as the bus does, rather than checking the window's
 direction before it reads.
 
+An AMO is atomic against the devices that write RAM, though nothing locks the
+port between its read and its write. A G1 or G2 engine can take the RAM port
+in between, but it writes only its own region (G2's depth buffer, G1's
+framebuffer), and a CPU write there faults while the engine runs, so the AMO's
+write faults too. virtio-blk's DMA runs only while the CPU is stalled on its
+notify store. Linux (#36) should keep it that way: a device that wrote
+CPU-writable RAM on its own would need the port locked across an AMO.
+
 ## The trace
 
 An AMO line carries both memory effects, in the order the grammar already had:
@@ -115,19 +133,27 @@ the write, then the read.
 ```
 
 A failed SC has no `mem[` field, only `x<rd>=00000001`. A successful SC looks
-like `sw`, and LR like `lw`. Every line without an A instruction is
-byte-identical to before. The emulator keeps a read value and a write value
-for the one address. The testbench admits exactly one read, then one write to
-the same address, before an AMO retires, and fails the run on any other second
-data transaction.
+like `sw` with `x<rd>=00000000` before it, and LR like `lw`. Every line without
+an A instruction is byte-identical to before. The emulator keeps a read value
+and a write value for the one address. Before an AMO retires, the testbench
+admits exactly one read and then, in `AMO_WRITE`, one write. The write must use
+the read's bus word (the physical one, when translated) and strobe `1111`, after
+a read that was not refused. Any other second data transaction fails the run.
 
 ## The RTL
 
 [`rv32_decode.v`](../rtl/rv32/rv32_decode.v) decodes `0x2F`.
 - LR folds into `is_load`, and SC and the AMOs into `is_store`, so every
-  existing `is_load ? load-cause : store-cause` choice was already right.
+  existing `is_load ? load-cause : store-cause` choice and the walk's kind were
+  already right.
 - Each also has its own flag (`is_lr`, `is_sc`, `is_amo`).
 - The immediate is zero.
+- `OP_AMO` is legal only with funct3 2, the same field value as `lw` and `sw`, so
+  the width, strobe and load-extension paths treat all of them as words.
+
+The core derives `mem_reads` (`is_load || is_amo`) and `mem_writes`
+(`is_store`) from these. PMP's need is `{mem_writes, mem_reads}` and `MEM` writes
+only for an access that writes and does not read.
 
 [`rv32.v`](../rtl/rv32/rv32.v) adds:
 - **`AMO_WRITE` (state 12).** An AMO reads in `MEM`, then writes its result in
@@ -141,9 +167,13 @@ data transaction.
 - **`sc_skip`.** In `EXECUTE`, after the alignment check, an SC whose word is
   not reserved goes straight to `WRITEBACK`. `data_translating` is gated by it,
   so a failed SC makes no TLB lookup either.
-- **The reservation registers** `reserved` and `reservation[29:0]`, plus
-  `sc_held`, the SC's outcome from `EXECUTE`. `take_trap`, reset, every SC,
-  `mret` and `sret` clear the reservation; LR sets it in `WRITEBACK`.
+- **The reservation registers** `reserved`, `reservation[29:0]` (virtual) and
+  `reservation_pa[29:0]` (physical), plus `sc_held`, the SC's outcome from
+  `EXECUTE`. LR sets the reservation in `MEM`, as its read is accepted. These
+  clear it:
+  - `take_trap` and reset;
+  - every SC, `mret`, `sret`, `sfence.vma` and a `satp` write, in `WRITEBACK`;
+  - a snooped device write to the physical word, in any cycle.
 
 **Cycles.** The formula is now:
 
@@ -161,12 +191,13 @@ fields, not the lines.
 | LR, successful SC | 5 + 2N | like a load or store |
 | failed SC | 4 + N | the fetch only |
 
-**Cost.** `make synth-rv32` (Yosys 0.69) puts the `rv32` module at 15,254 cells
-and 1,744 flip-flops. On the same Yosys, main before this change (3756518) is
-14,012 cells and 1,712 flip-flops: 1,242 cells and 32 flip-flops more. The
-flip-flops are exactly the reservation (1 + 30) and `sc_held`. Most of the
-cells are the AMO ALU's adder, comparators and mux. The 14,162 recorded for
-issue #33 came from an earlier Yosys.
+**Cost.** `make synth-rv32` (Yosys 0.69) puts the `rv32` module at 15,493 cells
+and 1,774 flip-flops. On the same Yosys, main before this change (3756518) is
+14,012 cells and 1,712 flip-flops: 1,481 cells and 62 flip-flops more. The
+flip-flops are exactly the reservation (a valid bit and two 30-bit words) and
+`sc_held`. Most of the cells are the AMO ALU's adder, comparators and mux, and
+the two word comparators. The 14,162 recorded for issue #33 came from an
+earlier Yosys.
 
 ## Tools and the toolchain flag
 
@@ -180,11 +211,15 @@ issue #33 came from an earlier Yosys.
 - **Compiler flags.** `-march=rv32ima` is `RV32A_CFLAGS` / `RV32A_LDFLAGS`, with
   a guard like RV32M's.
 - **atomcheck.** [`programs/rv32/atomcheck.c`](../programs/rv32/atomcheck.c)
-  uses the `__atomic` builtins. clang lowers them to all nine AMOs (with every
-  `aq`/`rl` combination) and to `lr.w`/`sc.w` loops for compare-and-swap. It
-  prints `PASS 40a0b037` on QEMU, the emulator, Icarus and Verilator.
+  uses the `__atomic` builtins. clang lowers them to all nine AMOs and to
+  `lr.w`/`sc.w` loops for compare-and-swap, with `.aq`, `.rl` and `.aqrl` but
+  never neither; the directed tests cover all four. `check-rv32a-image` requires
+  every A mnemonic in its listing. It prints `PASS 40a0b037` on QEMU, the
+  emulator, Icarus and Verilator.
 - **With F.** `make check-rv32af-flags` compiles atomcheck with
-  `-march=rv32imaf_zicsr -mabi=ilp32f`, to show the flags combine.
+  `-march=rv32imaf_zicsr -mabi=ilp32f`, to show the flags combine. A guard
+  checks the substitution, and `llvm-readelf` checks the object's single-float
+  ABI.
 - **The OS.** Its flags do not change.
 - **The device tree.** It still says `rv32imf_zicsr_zicntr`. Adding `a` would
   change the tree's bytes, and with them the platcheck and irqcheck PASS words.
@@ -196,10 +231,10 @@ All of these are in `make test-rv32`:
 
 | Target | What |
 | --- | --- |
-| `test-rv32-a`, `test-rv32-a-verilator` | [`tests/test_rv32_a.py`](../tests/test_rv32_a.py), on Icarus and Verilator, trace for trace, in step-tick mode. It covers:<ul><li>every AMO on edge values against a Python reference, with `rd` = `rs2`, `rd` = `rs1` and `rd` = `x0`;</li><li>the cycle formula, stalled and not;</li><li>LR/SC outcomes;</li><li>an `ecall`, an illegal word and `mret` between LR and SC;</li><li>the issue's directed test: a timer interrupt between LR and SC;</li><li>every fault in the tables above, and illegal encodings;</li><li>an AMO on `mtimecmp` and on the input queue;</li><li>Sv32 store permission (a page without W, one with D clear);</li><li>PMP, through locked entries: on an R-only word, LR reads while an AMO and a reserved SC fault.</li></ul> |
+| `test-rv32-a`, `test-rv32-a-verilator` | [`tests/test_rv32_a.py`](../tests/test_rv32_a.py), on Icarus and Verilator, trace for trace, in step-tick mode. It covers:<ul><li>every AMO on edge values against a Python reference, with `rd` = `rs2`, `rd` = `rs1` and `rd` = `x0`;</li><li>the cycle formula, stalled and not;</li><li>LR/SC outcomes;</li><li>an `ecall` and an illegal word between LR and SC, the handler returning with a jump, and a bare `mret`;</li><li>the issue's directed test: a timer interrupt between LR and SC;</li><li>a `satp` write and `sfence.vma` between LR and SC;</li><li>a device's write: a virtio-blk read and a G2 depth clear over the reserved word (results only for G2, whose busy time differs between the backends);</li><li>every fault in the tables above, and every one of the 32 funct5 values against `valid_a_word`;</li><li>an AMO on `mtimecmp` and on the input queue;</li><li>Sv32: LR/SC and AMOs that succeed (a TLB miss and a hit, stalled and not, read back through the physical page), an AMO's store page fault on a first touch and on a TLB hit, LR's page fault, misalignment before translation, and an `sret` from S to U ending the reservation;</li><li>PMP, through locked entries: on an R-only word, LR reads while an AMO and a reserved SC fault;</li><li>300 AMOs under timer interrupts on clock time with a stalled bus, every increment landing.</li></ul> |
 | `test-rv32-arch`, `test-rv32-arch-verilator`, `test-rv32-arch-a-icarus` | riscv-arch-test 3.9.1's `rv32i_m/A`: nine AMO tests, each 140 signature words equal to QEMU's, and traces equal to the emulator's. It has no LR/SC test. |
-| `test-rv32-ua`, `test-rv32-ua-icarus` | riscv-tests' `rv32ua` (10 tests; `amocas_w` and `amocas_d` are Zacas), `lrsc.S` among them. See below. |
-| `test-rv32-arch-model` | Our riscv-tests environment on its own: PASS, FAIL with the case's number, and TRAP, on the emulator and QEMU. |
+| `test-rv32-ua`, `test-rv32-ua-icarus` | riscv-tests' `rv32ua` (10 tests run; `amocas_w` and `amocas_d`, which are Zacas, are excluded), `lrsc.S` among them. See below. |
+| `test-rv32-arch-model` | Our riscv-tests environment on its own: PASS, FAIL with the case's number (1 before any case), and TRAP, on the emulator and QEMU. Four rows of the QEMU table run there on both (unmapped SC, `mret`, the next word, misaligned SC). The runner's failure paths and both suites' completeness checks run on stubs. |
 | `run-rv32-atom-{qemu,emu,rtl,rtl-verilator}` | atomcheck, pinned, trace for trace on both simulators. |
 | `check-rv32a-image`, `check-rv32af-flags` | The image gate and the flags. |
 | `test-rv32-tools` | The A gate in `rv32_image.py`. |
@@ -215,6 +250,9 @@ All of these are in `make test-rv32`:
   a bare M-mode environment.
 - A test must print `PASS` on every backend, and each simulator's trace must
   equal the emulator's.
+- The selection is the Makefrag's `rv32ua_sc_tests` less the exclusions. A
+  missing test, or an exclusion naming no listed test, stops the run, as a
+  short arch suite does (each pins its test count).
 
 ## Next
 

@@ -57,7 +57,8 @@ static void fetch_ops(void)
     check("xor new", cell, 0x7dcff98eu);
     check("swap old", __atomic_exchange_n(&cell, 0xdeadbeefu, __ATOMIC_SEQ_CST), 0x7dcff98eu);
     check("swap new", cell, 0xdeadbeefu);
-    /* Unsigned: 0xdeadbeef is large; signed below, it is negative. */
+    /* Unsigned here: 0xdeadbeef is large (it would be negative as signed; the signed cases below
+     * use signed_cell). */
     check("minu old", __atomic_fetch_min(&cell, 0x10u, __ATOMIC_SEQ_CST), 0xdeadbeefu);
     check("minu new", cell, 0x10u);
     check("maxu old", __atomic_fetch_max(&cell, 0x80000000u, __ATOMIC_SEQ_CST), 0x10u);
