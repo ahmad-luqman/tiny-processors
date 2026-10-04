@@ -96,6 +96,7 @@ FP32_VERILATOR := build/verilator-fp32/fp32_sim
 FP32_RUN = $(PYTHON) tools/fp32_vectors.py
 FP32_SEED ?= 20260921
 FP32_RANDOM ?= 100
+FP32_CANCELLATION ?= 100
 RV32_FP_OBJ := build/fp32/rv32_fp.o $(SOFTFLOAT_OBJ)
 RV32EMU := build/rv32/rv32emu
 RV32EMU_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
@@ -508,7 +509,7 @@ test-rv32-capstone-sanitize: build/rv32/digit_shape.h build/rv32/digit_weights.h
 	build/rv32/host/capstone-sanitize
 
 # F1: standalone floating-point hardware with the pinned host oracle.
-.PHONY: test-fp32-tools-verilator test-fp32 test-fp32-verilator test-fp32-tools lint-fp32 synth-fp32 waves-fp32 bench-fp32
+.PHONY: test-fp32-tools-verilator test-fp32 test-fp32-verilator test-fp32-tools lint-fp32 synth-fp32 waves-fp32 bench-fp32 stress-fp32
 
 build/fp32:
 	mkdir -p $@
@@ -543,11 +544,11 @@ test-fp32-tools-verilator: $(FP32_REF) $(FP32_VERILATOR)
 	FP32_TEST_SIM=$(FP32_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_fp32.py' -v
 
 test-fp32: $(FP32_REF) build/fp32/fp32.vvp build/fp32/protocol.vvp test-fp32-tools
-	$(FP32_RUN) --seed $(FP32_SEED) --random $(FP32_RANDOM)
+	$(FP32_RUN) --seed $(FP32_SEED) --random $(FP32_RANDOM) --cancellation $(FP32_CANCELLATION)
 	$(FP32_RUN) --protocol
 
 test-fp32-verilator: test-fp32-tools-verilator $(FP32_REF) $(FP32_VERILATOR) build/verilator-fp32-protocol/protocol_sim
-	$(FP32_RUN) --simulator $(FP32_VERILATOR) --work build/fp32/verilator --seed $(FP32_SEED) --random $(FP32_RANDOM)
+	$(FP32_RUN) --simulator $(FP32_VERILATOR) --work build/fp32/verilator --seed $(FP32_SEED) --random $(FP32_RANDOM) --cancellation $(FP32_CANCELLATION)
 	$(FP32_RUN) --protocol --simulator build/verilator-fp32-protocol/protocol_sim
 
 lint-fp32:
@@ -561,7 +562,15 @@ waves-fp32: $(FP32_REF) build/fp32/fp32.vvp build/fp32/protocol.vvp
 	$(FP32_RUN) --protocol --wave build/fp32/protocol.vcd
 
 bench-fp32: $(FP32_REF) $(FP32_VERILATOR)
-	$(FP32_RUN) --simulator $(FP32_VERILATOR) --anchors-only --stats --work build/fp32/bench
+	$(FP32_RUN) --simulator $(FP32_VERILATOR) --anchors-only --work build/fp32/bench
+
+# The stress corpora behind docs/fp32.md's narrow-datapath record (about
+# 3.1 million requests; Verilator, several minutes).
+stress-fp32: $(FP32_REF) $(FP32_VERILATOR)
+	for seed in 424242 7 99; do \
+		$(FP32_RUN) --simulator $(FP32_VERILATOR) --work build/fp32/stress --seed $$seed --random 2000 --cancellation 1000 || exit 1; \
+	done
+	$(FP32_RUN) --simulator $(FP32_VERILATOR) --work build/fp32/stress --seed 31337 --random 20000 --cancellation 20000
 
 build/fp32/rv32_fp.o: tools/rv32_fp.c tools/rv32_fp.h $(FP32_REF_HEADERS) | build/fp32
 	$(HOST_CC) $(FP32_REF_FLAGS) -c $< -o $@
@@ -623,12 +632,12 @@ run-rv32-f-emu: check-rv32-f-image $(RV32EMU)
 
 run-rv32-f-rtl: check-rv32-f-image $(RV32EMU) $(RV32_TB_VVP)
 	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatcheck.bin --expect-fp-waits 179 --expect-last-line "PASS $(RV32_FLOAT_HEX)" --out build/rv32/f-rtl
-	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatconvert.bin --expect-fp-waits 25 --expect-last-line "PASS $(RV32_CONVERT_HEX)" --out build/rv32/f-rtl
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatconvert.bin --expect-fp-waits 23 --expect-last-line "PASS $(RV32_CONVERT_HEX)" --out build/rv32/f-rtl
 	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatsoft.bin --expect-fp-waits 0 --expect-last-line "PASS $(RV32_FLOAT_HEX)" --out build/rv32/f-rtl
 
 run-rv32-f-rtl-verilator: check-rv32-f-image $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatcheck.bin --expect-fp-waits 179 --expect-last-line "PASS $(RV32_FLOAT_HEX)" --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
-	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatconvert.bin --expect-fp-waits 25 --expect-last-line "PASS $(RV32_CONVERT_HEX)" --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
+	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatconvert.bin --expect-fp-waits 23 --expect-last-line "PASS $(RV32_CONVERT_HEX)" --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
 	$(PYTHON) tools/rv32_rtl.py --image build/rv32/floatsoft.bin --expect-fp-waits 0 --expect-last-line "PASS $(RV32_FLOAT_HEX)" --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32/f-verilator
 
 .PHONY: test-rv32-f-tools
@@ -1669,10 +1678,10 @@ rv32_os_apps_args = --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/
 # session, its default 2x2 in the mandel session.
 RV32_OS_APPS_ARGS_float := --expect-checkpoint "frame 1 4ee3d585"
 RV32_OS_APPS_ARGS_mandel := --expect-checkpoint "frame 1 c7e54ac5"
-# Verilator's cycle budget; mandel's 2x2 picture takes about 900 M (an add or multiply waits ~540-560).
+# Verilator's cycle budget. mandel's 2x2 picture takes about 44 M (an add or multiply waits up to 8);
+# its budget is about twice that, so a slower FPU fails here rather than passing unnoticed.
 rv32_os_apps_cycles = $(or $(RV32_OS_APPS_CYCLES_$(1)),400000000)
-RV32_OS_APPS_CYCLES_mandel := 1500000000
-RV32_OS_APPS_TIMEOUT_mandel := 3600
+RV32_OS_APPS_CYCLES_mandel := 100000000
 # QEMU's disk ends byte for byte the emulator's.
 run-rv32-libc-qemu run-rv32-lua-qemu run-rv32-float-qemu run-rv32-mandel-qemu: run-rv32-%-qemu: check-rv32-os-image $(RV32_OS_APPS_DISK) run-rv32-%-emu
 	cp $(RV32_OS_APPS_DISK) build/rv32/os/$*.qemu.disk
@@ -1685,9 +1694,8 @@ run-rv32-libc-rtl-verilator run-rv32-lua-rtl-verilator run-rv32-float-rtl-verila
 	$(PYTHON) -m tools.rv32_rtl $(call rv32_os_apps_args,$*) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --max-cycles $(call rv32_os_apps_cycles,$*) --out build/rv32/os/$*-verilator
 test-rv32: run-rv32-libc-qemu run-rv32-libc-emu run-rv32-libc-rtl-verilator run-rv32-lua-qemu run-rv32-lua-emu run-rv32-lua-rtl-verilator
 # Issue #33: fpcheck and fpmate keep their floating state apart across preemption; mandel draws, in
-# 4x4 blocks there and in its 2x2 in its own session, whose Verilator run (~12 minutes) is slow.
-test-rv32: run-rv32-float-qemu run-rv32-float-emu run-rv32-float-rtl-verilator run-rv32-mandel-qemu run-rv32-mandel-emu
-test-rv32-slow: run-rv32-mandel-rtl-verilator
+# 4x4 blocks there and in its 2x2 in its own session.
+test-rv32: run-rv32-float-qemu run-rv32-float-emu run-rv32-float-rtl-verilator run-rv32-mandel-qemu run-rv32-mandel-emu run-rv32-mandel-rtl-verilator
 
 # O3: storage. virtiocheck drives the virtio-blk device directly on QEMU virt (a 128 KiB drive on
 # virtio-mmio-bus.0), the emulator (--disk) and the RTL (+disk); the runner compares the disks the
