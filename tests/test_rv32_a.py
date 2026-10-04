@@ -91,6 +91,9 @@ class AtomicTest(StepTicksCase):
                 index += 1
         words += [AMOADD_W(0, 6, 7)]  # rd = x0: memory still changes, no register effect
         checks.append((len(words) - 1, None, "rd=x0"))
+        alias = DATA + 0x40  # rd = rs1: the address is read before rd is written
+        words += LI(9, alias) + LI(6, 0x30) + [SW(6, 9, 0)] + LI(6, 0x12) + [AMOADD_W(9, 6, 9)]
+        checks.append((len(words) - 1, f"x9=00000030 mem[{alias:08x}]<-00000042/4 mem[{alias:08x}]->00000030/4", "rd=rs1"))
         emulator, rtl = self.assert_same(words + FINISH())
         for line, expected, case in checks:
             if expected is None:
@@ -179,6 +182,27 @@ class AtomicTest(StepTicksCase):
                 self.assertEqual([stored(rtl.trace, SAVE), stored(rtl.trace, SAVE + 4)], [cause, value])
         emulator, rtl = self.assert_same(LI(7, 0x00200000) + [SC_W(5, 0, 7)] + dump(5))
         self.assertEqual(stored(rtl.trace, SAVE + 0x40), 1, "no reservation: no access, no fault")
+
+    def test_pmp_asks_an_amo_for_read_and_write(self):
+        """Locked PMP entries bind machine mode too: on a word PMP grants only R, LR reads, while an
+        AMO and a reserved SC are store access faults (7) before any bus access; on a word that
+        grants R and W both work. An AMO checked as a load (R only) would pass on the first word. W
+        without R is a reserved encoding PMP stores as neither, so no entry grants W alone and R and
+        W together are, in effect, W: the R half has no case to test."""
+        read_only, read_write = DATA, DATA + 4
+        locked_na4 = 0x80 | 0x10
+        body = LI(5, read_only >> 2) + [CSRRW(0, PMPADDR0, 5)]
+        body += LI(5, read_write >> 2) + [CSRRW(0, PMPADDR0 + 1, 5)]
+        body += LI(5, (locked_na4 | 0x3) << 8 | (locked_na4 | 0x1)) + [CSRRW(0, PMPCFG0, 5)]
+        body += LI(7, read_only) + [LR_W(10, 7), AMOADD_W(11, 7, 7), LR_W(10, 7), SC_W(12, 0, 7)]
+        body += LI(7, read_write) + [AMOSWAP_W(13, 7, 7), LR_W(14, 7), SC_W(15, 0, 7), LW(16, 7, 0)]
+        emulator, rtl = self.assert_same(at_handler(body + dump(13, 15, 16), skip_and_return()))
+        traps = [line.split()[-2:] for line in rtl.trace if " trap " in line]
+        self.assertEqual(traps, [["7", f"{read_only:08x}"], ["7", f"{read_only:08x}"]], "the AMO and the SC")
+        self.assertEqual([stored(rtl.trace, SAVE + 0x40 + 4 * i) for i in range(3)], [0, 0, 0],
+                         "the AMO read 0 and stored the address, then the SC stored 0")
+        swap = next(line for line in rtl.trace if line.split()[2] == f"{AMOSWAP_W(13, 7, 7):08x}")
+        self.assertEqual(effects(swap), f"x13=00000000 mem[{read_write:08x}]<-{read_write:08x}/4 mem[{read_write:08x}]->00000000/4")
 
     def test_illegal_encodings(self):
         for word in (LR_W(5, 7) | 3 << 20,                 # LR.W with rs2 != 0
