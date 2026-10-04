@@ -378,6 +378,23 @@ class AtomicTest(StepTicksCase):
                 self.assertEqual(mmu.trap_log(rtl.trace), [])
                 self.assert_relation(rtl)
 
+    def test_an_mprv_change_between_lr_and_sc_fails_it(self):
+        """Codex P2, fourth round: machine mode with MPRV and MPP = S reserves a word through Sv32
+        (TEST_VA + 0x20, PAGE_S + 0x20); with MPRV cleared the same virtual address is untranslated
+        and names another word (the console's), so the SC compares physical words and fails without
+        an access. The control, with MPRV still set, stores."""
+        word = mmu.TEST_VA + 0x20
+        mprv_s = MSTATUS_MPRV | 0x800                # MPRV, MPP = S
+        machine = mmu.pmp() + LI(5, SATP_SV32 | mmu.ROOT >> 12) + [CSRRW(0, SATP, 5), SFENCE_VMA()]
+        machine += LI(6, 0x1800) + [CSRRC(0, MSTATUS, 6)] + LI(6, mprv_s) + [CSRRS(0, MSTATUS, 6)]
+        machine += LI(10, word) + LI(12, 0x77) + [LR_W(11, 10), SC_W(13, 12, 10)]      # translated: stores
+        machine += [LR_W(11, 10)] + LI(6, MSTATUS_MPRV) + [CSRRC(0, MSTATUS, 6), SC_W(14, 12, 10)]
+        machine += LI(16, mmu.PAGE_S + 0x20) + [LW(15, 16, 0)] + dump(13, 14, 15)
+        emulator, rtl = self.assert_same(mmu.program(machine, []))
+        self.assertEqual([stored(rtl.trace, SAVE + 0x40 + 4 * i) for i in range(3)], [0, 1, 0x77])
+        sc = [line for line in rtl.trace if line.split()[2] == f"{SC_W(14, 12, 10):08x}"]
+        self.assertEqual([effects(line) for line in sc], ["x14=00000001"], "no access at the console")
+
     def test_sv32_faults(self):
         """An AMO that is the first access to a page without W, or with D clear, faults (15) on the
         walk, as a store; LR on an invalid page is a load page fault (13); a misaligned SC or AMO

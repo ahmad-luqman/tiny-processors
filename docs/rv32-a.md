@@ -51,14 +51,19 @@ has always trapped on one.
 
 ## The reservation
 
-The reservation is a valid bit and a word, held twice: as its virtual address,
-which SC.W compares, and as its physical address, which device writes are
-checked against.
+The reservation is a valid bit and a word, held twice: as its virtual address
+and as its physical address. SC.W compares the virtual word first. Only if that
+matches does it translate, and the physical word must then match too. Device
+writes are checked against the physical word.
 
 - **LR.W** sets it as its read is accepted.
 - **SC.W** checks alignment first, whether or not a reservation is held (QEMU
   does the same).
-  - If the reservation holds the same word, the SC is a store.
+  - If the reservation holds the same virtual word, the SC translates as a store
+    would, page and PMP faults included. It stores only if the physical word is
+    also the reserved one. An `mstatus` write (MPRV, MPP) can change what a
+    virtual word names without a trap, so the two can differ; the SC then fails
+    with no access.
   - Otherwise it fails with no access at all: no translation, no PMP and no bus
     request, so it raises no page or access fault. An SC with no reservation to
     an unmapped address simply returns 1, on QEMU as here.
@@ -69,7 +74,8 @@ checked against.
   allows it. Matching QEMU lets these cases be compared with QEMU.
 - **A new translation clears it:** a `satp` write or `sfence.vma`, after which
   the same virtual word may name another page. With traps and xRET clearing it
-  as well, comparing virtual addresses in SC is safe.
+  as well, and the physical comparison behind every virtual match, an SC stores
+  only to the word its LR read.
 - **A device's write to the reserved word clears it.** The A extension requires
   an SC to fail when another agent wrote the bytes its LR read. The devices that
   write memory LR can reserve:
@@ -183,8 +189,9 @@ only for an access that writes and does not read.
   not reserved goes straight to `WRITEBACK`. `data_translating` is gated by it,
   so a failed SC makes no TLB lookup either.
 - **`sc_abort`, `lock_wait`, `mem_lock`.** `MEM` rechecks the reservation before
-  first presenting an SC; if a device write ended it since `EXECUTE`, the SC
-  fails there with no access. It does not present an SC or AMO while
+  first presenting an SC. If a device write ended it since `EXECUTE`, or the
+  translated word (`data_phys`) is not `reservation_pa`, the SC fails there with
+  no access. It does not present an SC or AMO while
   `ram_engine_held` is set. While it presents one, `mem_lock` tells the SoC's
   arbiter to grant no engine.
 - **The reservation registers** `reserved`, `reservation[29:0]` (virtual) and
@@ -216,9 +223,9 @@ costs its walk and the `MEM` cycle with no access. An SC or AMO that waits for a
 held engine grant costs those cycles too. Both need a device writing RAM, and the
 formula does not cover them.
 
-**Cost.** `make synth-rv32` (Yosys 0.69) puts the `rv32` module at 15,555 cells
+**Cost.** `make synth-rv32` (Yosys 0.69) puts the `rv32` module at 15,645 cells
 and 1,775 flip-flops. On the same Yosys, main before this change (3756518) is
-14,012 cells and 1,712 flip-flops: 1,543 cells and 63 flip-flops more. The
+14,012 cells and 1,712 flip-flops: 1,633 cells and 63 flip-flops more. The
 flip-flops are exactly the reservation (a valid bit and two 30-bit words),
 `sc_held` and `data_waiting`. Most of the cells are the AMO ALU's adder, comparators and mux, and
 the two word comparators. The 14,162 recorded for issue #33 came from an
@@ -256,7 +263,7 @@ All of these are in `make test-rv32`:
 
 | Target | What |
 | --- | --- |
-| `test-rv32-a`, `test-rv32-a-verilator` | [`tests/test_rv32_a.py`](../tests/test_rv32_a.py), on Icarus and Verilator, trace for trace, in step-tick mode. It covers:<ul><li>every AMO on edge values against a Python reference, with `rd` = `rs2`, `rd` = `rs1` and `rd` = `x0`;</li><li>the cycle formula, stalled and not;</li><li>LR/SC outcomes;</li><li>an `ecall` and an illegal word between LR and SC, the handler returning with a jump, and a bare `mret`;</li><li>the issue's directed test: a timer interrupt between LR and SC;</li><li>a `satp` write and `sfence.vma` between LR and SC;</li><li>a device's write: a virtio-blk read, a G2 depth clear and a G1 framebuffer fill over the reserved word (results only for the engines, whose busy time differs between the backends);</li><li>every fault in the tables above, and every one of the 32 funct5 values against `valid_a_word`;</li><li>an AMO on `mtimecmp` and on the input queue;</li><li>Sv32: LR/SC and AMOs that succeed (a TLB miss and a hit, stalled and not, read back through the physical page), an AMO's store page fault on a first touch and on a TLB hit, LR's page fault, misalignment before translation, and an `sret` from S to U ending the reservation;</li><li>PMP, through locked entries: on an R-only word, LR reads while an AMO and a reserved SC fault;</li><li>300 AMOs under timer interrupts on clock time with a stalled bus, every increment landing;</li><li>LR/SC pairs on depth words while G2 clears them, with seeded waits on both RAM ports: no SC succeeds while G2 runs, and the testbench sees no device write inside an atomic access.</li></ul> |
+| `test-rv32-a`, `test-rv32-a-verilator` | [`tests/test_rv32_a.py`](../tests/test_rv32_a.py), on Icarus and Verilator, trace for trace, in step-tick mode. It covers:<ul><li>every AMO on edge values against a Python reference, with `rd` = `rs2`, `rd` = `rs1` and `rd` = `x0`;</li><li>the cycle formula, stalled and not;</li><li>LR/SC outcomes;</li><li>an `ecall` and an illegal word between LR and SC, the handler returning with a jump, and a bare `mret`;</li><li>the issue's directed test: a timer interrupt between LR and SC;</li><li>a `satp` write and `sfence.vma` between LR and SC, and an MPRV change between them that makes the same virtual word name another physical word;</li><li>a device's write: a virtio-blk read, a G2 depth clear and a G1 framebuffer fill over the reserved word (results only for the engines, whose busy time differs between the backends);</li><li>every fault in the tables above, and every one of the 32 funct5 values against `valid_a_word`;</li><li>an AMO on `mtimecmp` and on the input queue;</li><li>Sv32: LR/SC and AMOs that succeed (a TLB miss and a hit, stalled and not, read back through the physical page), an AMO's store page fault on a first touch and on a TLB hit, LR's page fault, misalignment before translation, and an `sret` from S to U ending the reservation;</li><li>PMP, through locked entries: on an R-only word, LR reads while an AMO and a reserved SC fault;</li><li>300 AMOs under timer interrupts on clock time with a stalled bus, every increment landing;</li><li>LR/SC pairs on depth words while G2 clears them, with seeded waits on both RAM ports: no SC succeeds while G2 runs, and the testbench sees no device write inside an atomic access.</li></ul> |
 | `test-rv32-arch`, `test-rv32-arch-verilator`, `test-rv32-arch-a-icarus` | riscv-arch-test 3.9.1's `rv32i_m/A`: nine AMO tests, each 140 signature words equal to QEMU's, and traces equal to the emulator's. It has no LR/SC test. |
 | `test-rv32-ua`, `test-rv32-ua-icarus` | riscv-tests' `rv32ua` (10 tests run; `amocas_w` and `amocas_d`, which are Zacas, are excluded), `lrsc.S` among them. See below. |
 | `test-rv32-arch-model` | Our riscv-tests environment on its own: PASS, FAIL with the case's number (1 before any case), and TRAP, on the emulator and QEMU. Four rows of the QEMU table run there on both (unmapped SC, `mret`, the next word, misaligned SC). The runner's failure paths and both suites' completeness checks run on stubs. |

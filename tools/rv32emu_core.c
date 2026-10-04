@@ -1585,6 +1585,21 @@ static void step(machine *m)
                 return;
             }
             if (held) {
+                /* The translated word must also be the one LR read: an mstatus write (MPRV, MPP)
+                 * can change what the same virtual word names. Translation and PMP faults come
+                 * first, as on the RTL, then a different physical word fails the SC unaccessed. */
+                uint32_t priv = data_priv(m), physical;
+                status = translate(m, addr, WALK_STORE, priv, &physical);
+                if (status == ACC_OK && !pmp_allows(priv, m, physical, PMP_W)) {
+                    status = ACC_FAULT;
+                }
+                if (status != ACC_OK) {
+                    trap(m, word, store_cause(status), addr);
+                    return;
+                }
+                held = physical >> 2 == m->reservation_pa;
+            }
+            if (held) {
                 status = store(m, addr, 4, b);
                 if (status != ACC_OK) {
                     trap(m, word, store_cause(status), addr);

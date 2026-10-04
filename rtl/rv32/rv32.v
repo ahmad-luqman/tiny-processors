@@ -382,11 +382,16 @@ module rv32 #(
     // looks at it).
     wire sc_skip = is_sc && !(reserved && reservation == alu_result[31:2]);
     // EXECUTE's decision is rechecked as MEM first presents the store: a device's write during the
-    // walk ends the reservation, and the SC then fails there with no access. An SC or AMO is not
+    // walk ends the reservation, or the translated word is not the reserved one, and the SC then
+    // fails there with no access. An SC or AMO is not
     // presented while an engine holds a RAM grant, so once presented (mem_lock) no device write
     // can land before it is accepted, nor between an AMO's read and its write.
+    // The SC's translated word must also be the one LR read: an mstatus write (MPRV, MPP) can
+    // change what the same virtual word names without a trap, satp write or sfence.vma, so the
+    // physical word is compared too, here where translation and PMP have already passed.
     wire lock_first = (state == MEM) && (is_sc || is_amo) && !data_waiting;
-    wire sc_abort = lock_first && is_sc && !reserved;
+    wire [31:0] data_phys = xlate_ok ? phys : alu_out;
+    wire sc_abort = lock_first && is_sc && !(reserved && reservation_pa == data_phys[31:2]);
     wire lock_wait = lock_first && !sc_abort && ram_engine_held;
     wire amo_minmax = ir[31], amo_unsigned = ir[30], amo_max = ir[29], amo_swap = ir[27];
     wire [1:0] amo_logic = ir[30:29];
@@ -553,7 +558,7 @@ module rv32 #(
     wire tlb_hit_seen = (fetch_translating && tlb_hit && !irq_take && (fetch_page_fault || fetch_deny || mem_ready)) ||
                         (data_translating && tlb_hit);
     // The testbench reads ptw_cycle and the TLB pulses; PMP and the reservation compare whole words.
-    wire unused_ok = &{1'b0, ptw_cycle, tlb_miss_seen, tlb_hit_seen, pmp_addr[1:0], ram_snoop_addr[1:0], fb_snoop_addr[1:0]};
+    wire unused_ok = &{1'b0, ptw_cycle, tlb_miss_seen, tlb_hit_seen, pmp_addr[1:0], ram_snoop_addr[1:0], fb_snoop_addr[1:0], data_phys[1:0]};
 
     assign mem_valid = !reset && ((state == FETCH && !irq_take && !fetch_deny && !fetch_walk && !fetch_page_fault) ||
                                   (state == MEM && !sc_abort && !lock_wait) || (state == AMO_WRITE) ||
