@@ -46,10 +46,10 @@ SUITES = {
     "I": Suite("rv32i_zicsr", asserts=True),
     "M": Suite("rv32im_zicsr", asserts=True),
     "F": Suite("rv32if_zicsr", asserts=False),
+    "A": Suite("rv32ia_zicsr", asserts=False),  # issue #34: the nine AMOs; LR/SC in tools/rv32_riscv_tests.py
 }
 # Suites in rv32i_m that are not selected, and why (docs/rv32-groundwork.md).
 EXCLUDED = {
-    "A": "no A extension",
     "B": "no bit-manipulation extensions",
     "C": "no compressed instructions",
     "CMO": "no cache-management operations",
@@ -59,7 +59,7 @@ EXCLUDED = {
     "K": "no scalar cryptography",
     "P_unratified": "no packed SIMD",
     "Svadu": "Sv32 sets no A or D bits in hardware: a clear one faults (Svade, issue #20)",
-    "Zacas": "no A extension",
+    "Zacas": "no Zacas (atomic compare-and-swap)",
     "Zcmop": "no compressed instructions",
     "Zfh": "no half precision",
     "Zicond": "no Zicond",
@@ -169,11 +169,14 @@ def checkout_commit(arch_test):
 
 def fetch(arch_test):
     """Check out the pinned commit, only the files the selected suites need (the whole suite,
-    D and Zfh included, is over 500 MB): the model headers, the licences, and I, M and F."""
+    D and Zfh included, is over 500 MB): the model headers, the licences, and I, M, F and A. A
+    checkout at the pinned commit that lacks a selected suite (one made before A was added, issue
+    #34) is fetched again."""
     def git(*command):
         subprocess.run(["git", "-C", str(arch_test), *command], check=True)
     if (arch_test / ".git").exists():
-        if checkout_commit(arch_test) == ARCH_TEST_COMMIT:
+        suites_present = all((arch_test / "riscv-test-suite" / "rv32i_m" / suite).is_dir() for suite in SUITES)
+        if checkout_commit(arch_test) == ARCH_TEST_COMMIT and suites_present:
             print(f"{arch_test} is at the pinned {ARCH_TEST_COMMIT}")
             return
     shutil.rmtree(arch_test, ignore_errors=True)

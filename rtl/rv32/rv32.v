@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 
-// Multicycle RV32IMF core: the integer path plus FP_ISSUE/FP_WAIT and the
-// M extension's MD_WAIT. One ready/valid memory port, the machine and (issue
+// Multicycle RV32IMAF core: the integer path plus FP_ISSUE/FP_WAIT, the
+// M extension's MD_WAIT and (issue #34) the A extension's AMO_WRITE. One ready/valid memory port, the machine and (issue
 // #20) supervisor trap CSRs with an Sv32 page-table walker and (issue #24) a
 // 4-entry TLB, floating CSRs, the Zicntr counters, and atomic register/flag retirement in WRITEBACK. See
 // docs/rv32-f.md and docs/rv32-groundwork.md. A trap vectors to mtvec, or to
@@ -61,7 +61,8 @@ module rv32 #(
     localparam [3:0] FETCH = 4'd0, DECODE = 4'd1, EXECUTE = 4'd2,
                      MEM = 4'd3, WRITEBACK = 4'd4, HALT = 4'd5, FP_ISSUE = 4'd6, FP_WAIT = 4'd7,
                      MD_WAIT = 4'd8, WFI_WAIT = 4'd9,
-                     WALK = 4'd10, XLATE = 4'd11; // issue #20: a page-table read; PMP on a translated data address
+                     WALK = 4'd10, XLATE = 4'd11, // issue #20: a page-table read; PMP on a translated data address
+                     AMO_WRITE = 4'd12;           // issue #34: an AMO's write, after its read in MEM
     localparam [3:0] CAUSE_TARGET_MISALIGNED = 4'd0, CAUSE_FETCH_FAULT = 4'd1,
                      CAUSE_ILLEGAL = 4'd2, CAUSE_BREAKPOINT = 4'd3,
                      CAUSE_LOAD_MISALIGNED = 4'd4, CAUSE_LOAD_FAULT = 4'd5,
@@ -135,18 +136,23 @@ module rv32 #(
     reg [1:0] tlb_next;
     reg [7:0] pmpcfg [0:7];
     reg [31:0] pmpaddr [0:7];
+    // The A extension (issue #34): LR.W's reservation, a word's virtual address. SC.W, any trap, mret
+    // and sret clear it. sc_held is the SC's outcome, decided in EXECUTE.
+    reg reserved, sc_held;
+    reg [29:0] reservation;
 
     // Decoded fields, combinational from ir.
     wire [4:0] rd, rs1, rs2;
     wire [2:0] funct3;
     wire [31:0] imm;
-    wire is_lui, is_auipc, is_alu_imm, is_alu_reg, is_muldiv, alu_alt, is_load, is_store;
+    wire is_lui, is_auipc, is_alu_imm, is_alu_reg, is_muldiv, alu_alt, is_load, is_store, is_lr, is_sc, is_amo;
     wire is_branch, is_jal, is_jalr, is_csr, is_mret, is_ecall, is_ebreak, is_wfi, is_sret, is_sfence, writes_rd, illegal;
 
     rv32_decode decode (
         .insn(ir), .rd(rd), .rs1(rs1), .rs2(rs2), .funct3(funct3), .imm(imm),
         .is_lui(is_lui), .is_auipc(is_auipc), .is_alu_imm(is_alu_imm), .is_alu_reg(is_alu_reg), .is_muldiv(is_muldiv),
-        .alu_alt(alu_alt), .is_load(is_load), .is_store(is_store), .is_branch(is_branch),
+        .alu_alt(alu_alt), .is_load(is_load), .is_store(is_store), .is_lr(is_lr), .is_sc(is_sc), .is_amo(is_amo),
+        .is_branch(is_branch),
         .is_jal(is_jal), .is_jalr(is_jalr), .is_csr(is_csr), .is_mret(is_mret),
         .is_ecall(is_ecall), .is_ebreak(is_ebreak), .is_wfi(is_wfi), .is_sret(is_sret), .is_sfence(is_sfence),
         .writes_rd(writes_rd), .illegal(illegal));
@@ -307,7 +313,9 @@ module rv32 #(
     wire [31:0] rs1_value, rs2_value;
     wire rd_written = (writes_rd || (fp_valid && fp_to_integer)) && (rd != 5'd0); // one x0 test for the write and the trace
     wire rf_we = (state == WRITEBACK) && rd_written;
-    wire [31:0] rd_value = is_load ? load_value : (is_jal || is_jalr) ? ir_pc + 32'd4 : alu_out;
+    // An AMO returns the word it read; SC.W returns 0 when it stored, 1 when it failed.
+    wire [31:0] rd_value = is_load ? load_value : is_amo ? mdr : is_sc ? {31'd0, !sc_held} :
+                           (is_jal || is_jalr) ? ir_pc + 32'd4 : alu_out;
 
     rv32_regfile #(.RESET_A1(BOOT_A1)) regfile (
         .clk(clk), .reset(reset), .we(rf_we), .waddr(rd), .wdata(rd_value),
@@ -342,6 +350,22 @@ module rv32 #(
                              ((width == 2'd2 && alu_result[1:0] != 2'b00) ||
                               (width == 2'd1 && alu_result[0]));
     wire target_misaligned = (is_jal || is_jalr || branch_taken) && execute_out[1];
+
+    // The A extension (issue #34). SC.W without the reservation of its word skips every access,
+    // translation and PMP included, and fails; its alignment is still checked first, as on QEMU.
+    // An AMO's write value comes from the word MEM read (mdr) and rs2: funct5 bit 4 selects min or
+    // max, bit 3 unsigned, bit 2 max; below that, bit 0 is swap and bits 3:2 add, xor, or, and
+    // (funct5 is ir[31:27]).
+    wire sc_skip = is_sc && !(reserved && reservation == alu_result[31:2]);
+    // (Bit 1 of funct5 only tells LR and SC apart, which are not AMOs.)
+    wire amo_minmax = ir[31], amo_unsigned = ir[30], amo_max = ir[29], amo_swap = ir[27];
+    wire [1:0] amo_logic = ir[30:29];
+    wire amo_less = amo_unsigned ? mdr < b : $signed(mdr) < $signed(b);
+    wire [31:0] amo_value = amo_minmax ? ((amo_less ^ amo_max) ? mdr : b) :
+                            amo_swap ? b :
+                            amo_logic == 2'd0 ? mdr + b :
+                            amo_logic == 2'd1 ? mdr ^ b :
+                            amo_logic == 2'd2 ? mdr | b : mdr & b;
 
     // Memory port: a fetch in FETCH (at the TLB's translation on a hit, at `phys` after a walk), a
     // page-table read in WALK, a
@@ -401,7 +425,7 @@ module rv32 #(
     wire fetch_page_fault = fetch_translating && tlb_hit && leaf_denies(tlb_bits, WALK_FETCH, priv, mstatus_sum, mstatus_mxr);
     // A translated load or store looks its address up in EXECUTE: a hit goes on to PMP and MEM in
     // the same cycle (or page-faults there), and a miss walks, then checks PMP in XLATE.
-    wire data_translating = (state == EXECUTE) && (is_load || is_store) && translate_data && !access_misaligned;
+    wire data_translating = (state == EXECUTE) && (is_load || is_store) && !sc_skip && translate_data && !access_misaligned;
     wire data_page_fault = data_translating && tlb_hit &&
                            leaf_denies(tlb_bits, is_store ? WALK_STORE : WALK_LOAD, data_priv, mstatus_sum, mstatus_mxr);
     // The address a fetch presents and PMP checks: `phys` after a walk (XLATE included), the TLB's
@@ -420,7 +444,8 @@ module rv32 #(
     wire [31:0] pmp_addr = state == WALK ? pte_addr[31:0] : access_addr;
     wire [31:0] pmp_word = {2'b00, pmp_addr[31:2]};
     wire [1:0] pmp_priv = pmp_fetch ? priv : state == WALK ? PRIV_S : data_priv;
-    wire [2:0] pmp_need = pmp_fetch ? 3'b100 : (state != WALK && is_store) ? 3'b010 : 3'b001; // X, W, R
+    // X, W, R; an AMO needs both R and W (issue #34)
+    wire [2:0] pmp_need = pmp_fetch ? 3'b100 : state == WALK ? 3'b001 : is_amo ? 3'b011 : is_store ? 3'b010 : 3'b001;
     reg pmp_ok, pmp_found, pmp_match;
     reg [31:0] pmp_low, pmp_ones;
     integer entry;
@@ -502,15 +527,15 @@ module rv32 #(
     wire unused_ok = &{1'b0, ptw_cycle, tlb_miss_seen, tlb_hit_seen, pmp_addr[1:0]};
 
     assign mem_valid = !reset && ((state == FETCH && !irq_take && !fetch_deny && !fetch_walk && !fetch_page_fault) ||
-                                  (state == MEM) ||
+                                  (state == MEM) || (state == AMO_WRITE) ||
                                   (state == WALK && !walk_deny));
     assign mem_fetch = mem_valid && (state == FETCH);
     assign mem_ptw = mem_valid && (state == WALK);
     assign mem_addr = mem_fetch ? access_addr : mem_ptw ? pte_addr[31:0] : xlate_ok ? phys : alu_out;
-    assign mem_we = mem_valid && (state == MEM) && is_store;
+    assign mem_we = mem_valid && ((state == MEM && is_store && !is_amo) || state == AMO_WRITE);
     assign mem_strb = !mem_valid ? 4'b0000 : (mem_fetch || mem_ptw) ? 4'b1111 : strb;
     // Sub-word store data is replicated across the lanes so the strobe alone selects it.
-    assign mem_wdata = (width == 2'd0) ? {4{b[7:0]}} : (width == 2'd1) ? {2{b[15:0]}} : b;
+    assign mem_wdata = (state == AMO_WRITE) ? amo_value : (width == 2'd0) ? {4{b[7:0]}} : (width == 2'd1) ? {2{b[15:0]}} : b;
 
     // Trap entry: report it on the retirement port; vector through mtvec
     // unless the previous trap's handler has not retired yet, which halts
@@ -528,6 +553,7 @@ module rv32 #(
             trap_cause <= cause;
             trap_value <= value;
             xlate_ok <= 1'b0;
+            reserved <= 1'b0; // issue #34: a trap ends the reservation
             if (in_trap) begin
                 state <= HALT;
                 halted <= 1'b1;
@@ -586,6 +612,7 @@ module rv32 #(
             satp_mode <= 1'b0; satp_ppn <= 22'd0;
             xlate_ok <= 1'b0; walk_level <= 1'b0; walk_kind <= WALK_FETCH; phys <= 32'd0; pte_addr <= 34'd0;
             tlb_valid <= 4'd0; tlb_next <= 2'd0; // the entries themselves need no reset
+            reserved <= 1'b0; sc_held <= 1'b0; reservation <= 30'd0;
             for (entry = 0; entry < 8; entry = entry + 1) begin
                 pmpcfg[entry] <= 8'd0;
                 pmpaddr[entry] <= 32'd0;
@@ -659,8 +686,11 @@ module rv32 #(
                 EXECUTE: begin
                     alu_out <= execute_out;
                     taken <= branch_taken;
+                    sc_held <= !sc_skip;
                     if (access_misaligned)
                         take_trap(1'b0, is_load ? CAUSE_LOAD_MISALIGNED : CAUSE_STORE_MISALIGNED, alu_result, ir_pc);
+                    else if (sc_skip) // issue #34: a failing SC.W retires with no access
+                        state <= WRITEBACK;
                     else if (data_translating && !tlb_hit) begin // Sv32: a TLB miss walks first (issue #20, #24)
                         walk_kind <= is_store ? WALK_STORE : WALK_LOAD;
                         walk_level <= 1'b1;
@@ -748,6 +778,14 @@ module rv32 #(
                     mdr <= mem_rdata;
                     if (mem_error)
                         take_trap(1'b0, is_load ? CAUSE_LOAD_FAULT : CAUSE_STORE_FAULT, alu_out, ir_pc);
+                    else
+                        state <= is_amo ? AMO_WRITE : WRITEBACK;
+                end
+                // Issue #34: the AMO writes its result to the word MEM read, at the same address
+                // (`phys` and xlate_ok still hold a translation). A refused write is an access fault.
+                AMO_WRITE: if (mem_ready) begin
+                    if (mem_error)
+                        take_trap(1'b0, CAUSE_STORE_FAULT, alu_out, ir_pc);
                     else
                         state <= WRITEBACK;
                 end
@@ -843,6 +881,13 @@ module rv32 #(
                         mstatus_spp <= 1'b0;
                         mstatus_mprv <= 1'b0;
                     end
+                    // Issue #34: LR.W reserves its word; SC.W, mret and sret end any reservation (QEMU
+                    // clears it on xRET too, which the privileged specification allows).
+                    if (is_lr) begin
+                        reserved <= 1'b1;
+                        reservation <= alu_out[31:2];
+                    end else if (is_sc || is_mret || is_sret)
+                        reserved <= 1'b0;
                     if (is_sfence || (csr_we && csr_addr == CSR_SATP)) begin // issue #24: flush every entry
                         tlb_valid <= 4'd0;
                         tlb_next <= 2'd0;
@@ -856,7 +901,7 @@ module rv32 #(
                     state <= FETCH;
                 end
                 HALT: begin end // hold until reset
-                // Encodings 12-15 are never entered; should the state register
+                // Encodings 13-15 are never entered; should the state register
                 // ever hold one, stop the way a double fault does rather than
                 // hang with `halted` low.
                 default: begin

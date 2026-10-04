@@ -1,0 +1,4 @@
+atomcheck: fetch ops ok
+atomcheck: compare and swap ok
+atomcheck: spinlock ok
+PASS 40a0b037

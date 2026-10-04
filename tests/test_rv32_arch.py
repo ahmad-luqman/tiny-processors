@@ -1,4 +1,5 @@
-"""The architectural-test model (tests/arch/model_test.h) on its own, without the suite.
+"""The architectural-test model (tests/arch/model_test.h) on its own, without the suite, and the
+riscv-tests environment (tests/riscv-tests/riscv_test.h, issue #34) on its own, without rv32ua.
 
 Tiny programs use the model's macros the way the suite's tests do: the halt prints the
 signature, the suite's `csrs mstatus, a0` retires (the machine has mstatus since Track 2), the
@@ -18,6 +19,7 @@ from unittest import mock
 from tools import rv32_arch_test
 from tools.rv32_arch_test import (DEFAULT_QEMU_CPU, SUITES, EXCLUDED, TestFailure, link_flags, qemu_command, run_one,
                                   signature_lines)
+from tools import rv32_riscv_tests
 from tools.rv32_image import flatten, parse_elf
 from tools.rv32_run_emu import emulator_command, halt_line
 from tools.rv32_rtl import ROOT, Run, decode
@@ -121,8 +123,65 @@ class ModelTest(unittest.TestCase):
         for bad in ("", "PASS 1234\n", "0000ABCD\n", "123\n"):
             with self.subTest(bad=bad), self.assertRaises(TestFailure):
                 signature_lines(bad)
-        self.assertEqual(sorted(SUITES), ["F", "I", "M"])
+        self.assertEqual(sorted(SUITES), ["A", "F", "I", "M"])
+        self.assertEqual(SUITES["A"].march, "rv32ia_zicsr", "exactly A: an AMO outside it would not assemble")
         self.assertFalse(set(SUITES) & set(EXCLUDED), "a suite is either selected or excluded with a reason")
+
+
+# A riscv-tests ISA test in miniature: TEST_CASE and TEST_PASSFAIL as riscv-tests' test_macros.h
+# defines them, which is fetched only with the suite.
+RISCV_TEST_SOURCE = """#include "riscv_test.h"
+#define TEST_CASE(testnum, testreg, correctval, code...) test_ ## testnum: li TESTNUM, testnum; code; li x7, correctval; bne testreg, x7, fail;
+RVTEST_RV32U
+RVTEST_CODE_BEGIN
+  TEST_CASE(2, a0, 5, li a0, 5)
+  TEST_CASE(3, a4, {want}, la a3, word; li a1, 2; amoadd.w a4, a1, (a3); lw a4, (a3))
+  {extra}
+  bne x0, TESTNUM, pass
+fail:
+  RVTEST_FAIL
+pass:
+  RVTEST_PASS
+RVTEST_CODE_END
+  .data
+RVTEST_DATA_BEGIN
+word: .word 40
+RVTEST_DATA_END
+"""
+
+
+class RiscvTestEnvTest(unittest.TestCase):
+    """riscv_test.h: a test that passes prints PASS, a failing case prints FAIL with its number in
+    the done word, and any trap prints TRAP and fails with number 1, on the emulator and QEMU."""
+    setUpClass = classmethod(ModelTest.setUpClass.__func__)
+    tearDownClass = classmethod(ModelTest.tearDownClass.__func__)
+    run_emulator = ModelTest.run_emulator
+    run_qemu = ModelTest.run_qemu
+
+    def build_riscv_test(self, name, want, extra=""):
+        directory = Path(self.work.name)
+        source, elf = directory / f"{name}.S", directory / f"{name}.elf"
+        source.write_text(RISCV_TEST_SOURCE.format(want=want, extra=extra))
+        subprocess.run([CC, *link_flags(rv32_riscv_tests.MARCH, LD), f"-I{rv32_riscv_tests.ENV}",
+                        "-o", str(elf), str(source)], check=True)
+        image = elf.with_suffix(".bin")
+        image.write_bytes(flatten(parse_elf(elf.read_bytes())))
+        return elf, image
+
+    def test_pass_fail_and_trap(self):
+        for name, want, extra, console, outcome in (("pass", 42, "", "PASS\n", "pass"),
+                                                    ("fail", 41, "", "FAIL\n", "fail=3"),
+                                                    ("trap", 42, "ecall", "TRAP\n", "fail=1")):
+            with self.subTest(name=name):
+                elf, image = self.build_riscv_test(name, want, extra)
+                got, halt = self.run_emulator(image)
+                self.assertEqual((got, halt["outcome"]), (console, outcome))
+                qemu_console, status = self.run_qemu(elf)
+                self.assertEqual(qemu_console, console)
+                self.assertEqual(status == 0, outcome == "pass", "QEMU exits nonzero on a fail word")
+
+    def test_selection(self):
+        self.assertEqual(sorted(rv32_riscv_tests.EXCLUDED), ["amocas_d", "amocas_w"], "Zacas only")
 
 
 SIGNATURE = "12345678\ndeadbeef\n"

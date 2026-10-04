@@ -1155,8 +1155,9 @@ test-rv32-bench:
 test-rv32: test-rv32-bench bench-rv32-emu
 
 # Track 0: architectural compliance. riscv-arch-test is fetched at the pinned commit (only the
-# model headers and the I, M and F suites); each test's signature must match QEMU's and the
-# emulator's trace must match each simulator's. The QEMU CPU is generic RV32 with C and D off.
+# model headers and the I, M, F and, since issue #34, A suites); each test's signature must match
+# QEMU's and the emulator's trace must match each simulator's. The QEMU CPU is generic RV32 with
+# C and D off.
 .PHONY: fetch-rv32-arch-test test-rv32-arch-model test-rv32-arch test-rv32-arch-verilator test-rv32-arch-icarus
 RV32_ARCH_QEMU_CPU ?= rv32,c=false,d=false
 RV32_ARCH_JOBS ?= 4
@@ -1174,6 +1175,73 @@ test-rv32-arch-verilator: toolchain-rv32 fetch-rv32-arch-test $(RV32EMU) $(RV32_
 test-rv32-arch-icarus: toolchain-rv32 fetch-rv32-arch-test $(RV32EMU) $(RV32_TB_VVP)
 	$(PYTHON) tools/rv32_arch_test.py $(RV32_ARCH_ARGS) --backend icarus --icarus $(RV32_TB_VVP) --out build/rv32/arch/icarus
 test-rv32: test-rv32-arch-model test-rv32-arch test-rv32-arch-verilator
+# Issue #34: the A suite is small (nine AMO tests, 0.1 M instructions), so Icarus runs it in the
+# fast tier; test-rv32-arch-icarus above stays the long manual measurement of every suite.
+.PHONY: test-rv32-arch-a-icarus
+test-rv32-arch-a-icarus: toolchain-rv32 fetch-rv32-arch-test $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) tools/rv32_arch_test.py $(RV32_ARCH_ARGS) --suite A --backend qemu --backend icarus --icarus $(RV32_TB_VVP) --out build/rv32/arch/a-icarus
+test-rv32: test-rv32-arch-a-icarus
+
+# Issue #34: the A extension (docs/rv32-a.md). riscv-tests' rv32ua (lrsc.S and the AMOs) against
+# our own environment, tests/riscv-tests/riscv_test.h, on QEMU and both simulators; the directed
+# tests in tests/test_rv32_a.py on each simulator; and atomcheck, C built for RV32IMA whose
+# atomics the compiler lowers to AMOs and LR/SC loops, on QEMU, the emulator and the RTL.
+.PHONY: fetch-rv32-riscv-tests test-rv32-ua test-rv32-ua-icarus test-rv32-a test-rv32-a-verilator
+.PHONY: firmware-rv32a check-rv32a-image check-rv32af-flags run-rv32-atom-qemu run-rv32-atom-emu run-rv32-atom-rtl run-rv32-atom-rtl-verilator
+RV32_UA_ARGS = --cc $(RV32_CC) --ld $(RV32_LD) --qemu $(QEMU_RV32) --qemu-cpu $(RV32_ARCH_QEMU_CPU) --emulator $(RV32EMU) --jobs $(RV32_ARCH_JOBS)
+fetch-rv32-riscv-tests:
+	$(PYTHON) tools/rv32_riscv_tests.py --fetch
+test-rv32-ua: toolchain-rv32 fetch-rv32-riscv-tests $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) tools/rv32_riscv_tests.py $(RV32_UA_ARGS) --backend qemu --backend verilator --verilator $(RV32_TB_VERILATOR) --out build/rv32/riscv-tests/verilator
+test-rv32-ua-icarus: toolchain-rv32 fetch-rv32-riscv-tests $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) tools/rv32_riscv_tests.py $(RV32_UA_ARGS) --backend qemu --backend icarus --icarus $(RV32_TB_VVP) --out build/rv32/riscv-tests/icarus
+test-rv32-a: $(RV32EMU)
+	HOST_CC=$(HOST_CC) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_a.py' -v
+test-rv32-a-verilator: $(RV32EMU) $(RV32_TB_VERILATOR)
+	HOST_CC=$(HOST_CC) RV32_RTL_SIM=$(RV32_TB_VERILATOR) $(PYTHON) -m unittest discover -s tests -p 'test_rv32_a.py' -v
+# -march=rv32ima: the base flags with A (and M) added. As for RV32M, a substitution that misses
+# would leave an RV32I build, which --require-a refuses, so the link stops here first.
+RV32A_CFLAGS := $(subst -march=rv32i ,-march=rv32ima ,$(RV32_CFLAGS))
+RV32A_LDFLAGS := $(subst -march=rv32i ,-march=rv32ima ,$(RV32_LDFLAGS))
+RV32A_MARCH_CHECK = $(if $(and $(filter -march=rv32ima,$(RV32A_CFLAGS)),$(filter -march=rv32ima,$(RV32A_LDFLAGS))),,\
+	$(error RV32A_CFLAGS/RV32A_LDFLAGS did not get -march=rv32ima; check -march=rv32i in RV32_ARCH))
+# With F as well, for the single-float ABI (issue #33): compiled only, to show the flags combine.
+RV32AF_CFLAGS := $(subst -march=rv32ima ,-march=rv32imaf_zicsr -mabi=ilp32f ,$(filter-out -mabi=ilp32,$(RV32A_CFLAGS)))
+RV32_ATOMCHECK_OBJS := build/rv32a/atomcheck.o build/rv32a/start.o build/rv32a/console.o
+RV32_ATOMCHECK_HEX := 40a0b037
+RV32_ATOM_ARGS := --image build/rv32a/atomcheck.bin --expect-last-line "PASS $(RV32_ATOMCHECK_HEX)" --expect-console-file programs/rv32/atomcheck.expected
+build/rv32a:
+	mkdir -p $@
+build/rv32a/%.o: programs/rv32/%.c $(RV32_HEADERS) | build/rv32a
+	$(RV32_CC) $(RV32A_CFLAGS) -c -o $@ $<
+build/rv32a/%.o: programs/rv32/%.S programs/rv32/board.h | build/rv32a
+	$(RV32_CC) $(RV32A_CFLAGS) -c -o $@ $<
+build/rv32a/atomcheck.elf: $(RV32_ATOMCHECK_OBJS) programs/rv32/link.ld
+	$(RV32A_MARCH_CHECK)$(RV32_CC) $(RV32A_LDFLAGS) -Wl,-Map,$(@:.elf=.map) -o $@ $(RV32_ATOMCHECK_OBJS)
+build/rv32a/%.lst: build/rv32a/%.elf
+	$(RV32_OBJDUMP) -d -S $< > $@
+build/rv32a/%.bin: build/rv32a/%.elf
+	$(RV32_OBJCOPY) -O binary $< $@
+.SECONDARY: build/rv32a/atomcheck.elf $(RV32_ATOMCHECK_OBJS)
+firmware-rv32a: toolchain-rv32 build/rv32a/atomcheck.elf build/rv32a/atomcheck.bin build/rv32a/atomcheck.lst
+# --require-a: the listing holds A instructions; with --allow-m, since rv32ima also has M.
+check-rv32a-image: firmware-rv32a
+	$(PYTHON) tools/rv32_image.py build/rv32a/atomcheck.elf --listing build/rv32a/atomcheck.lst --bin build/rv32a/atomcheck.bin --hex build/rv32a/atomcheck.hex --allow-m --require-a
+check-rv32af-flags: toolchain-rv32 | build/rv32a
+	$(RV32_CC) $(RV32AF_CFLAGS) -c -o build/rv32a/atomcheck-f.o programs/rv32/atomcheck.c
+	$(RV32_OBJDUMP) -d build/rv32a/atomcheck-f.o > build/rv32a/atomcheck-f.lst
+	grep -q 'amoadd\.w' build/rv32a/atomcheck-f.lst
+run-rv32-atom-qemu: check-rv32a-image
+	$(PYTHON) tools/rv32_run_qemu.py build/rv32a/atomcheck.elf --qemu $(QEMU_RV32) --cpu $(RV32_PLATFORM_QEMU_CPU) --last-line --timeout 20 --expect-hex $(RV32_ATOMCHECK_HEX) --transcript build/rv32a/atomcheck.qemu.transcript
+	diff -u programs/rv32/atomcheck.expected build/rv32a/atomcheck.qemu.transcript
+run-rv32-atom-emu: check-rv32a-image $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_ATOM_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32a/emu
+run-rv32-atom-rtl: check-rv32a-image $(RV32EMU) $(RV32_TB_VVP)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_ATOM_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/rv32a/rtl
+run-rv32-atom-rtl-verilator: check-rv32a-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_ATOM_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --out build/rv32a/rtl-verilator
+test-rv32: test-rv32-ua test-rv32-ua-icarus test-rv32-a test-rv32-a-verilator check-rv32af-flags
+test-rv32: run-rv32-atom-qemu run-rv32-atom-emu run-rv32-atom-rtl run-rv32-atom-rtl-verilator
 
 # Track 1: a virt-compatible platform (docs/rv32-platform.md). The machine's device tree comes
 # from tools/rv32_dtb.py, which also writes the committed C array and boot ROM; platcheck reads
