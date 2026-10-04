@@ -46,7 +46,7 @@ The combinational logic in rv32_bus.v that turns an address into one peripheral 
 _Avoid_: a cache, an interconnect with arbitration.
 
 **RV32 machine**:
-Our RISC-V computer as defined by the machine contract in docs/rv32.md: an RV32IMF CPU with Zicsr and Zicntr (since Track 0), RAM at 0x8000_0000, and memory-mapped devices, implemented by our emulator and RTL. Since Track 1 its shared devices sit where QEMU's virt board has them and its own devices where virt has nothing.
+Our RISC-V computer as defined by the machine contract in docs/rv32.md: an RV32IMAF CPU (A since issue #34) with Zicsr and Zicntr (since Track 0), RAM at 0x8000_0000, and memory-mapped devices, implemented by our emulator and RTL. Since Track 1 its shared devices sit where QEMU's virt board has them and its own devices where virt has nothing.
 _Avoid_: SAP8, the QEMU virt board, a Linux-capable platform.
 
 **Reference runner**:

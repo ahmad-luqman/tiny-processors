@@ -83,8 +83,11 @@ A extension), [#35](https://github.com/ahmad-luqman/tiny-processors/issues/35)
    both backends and the kernel switches the FPU lazily. All 24 slots were
    taken, so RAM went to 8 MiB (56 slots) here, ahead of Doom
    ([record](../rv32-os.md#floating-state-issue-33)).
-2. **The A extension (B2).** A hardware milestone on both backends, like F1
-   and F2: the atomic instructions Linux needs.
+2. **The A extension (B2, issue #34).** A hardware milestone on both backends,
+   like F1 and F2: `lr.w`, `sc.w` and the nine AMOs that Linux needs, with a
+   single-hart reservation. riscv-arch-test's A suite and riscv-tests' rv32ua
+   pass on the emulator, Icarus and Verilator and match QEMU
+   ([record](../rv32-a.md)).
 3. **Doom (B3).** doomgeneric at 320×200 fits the framebuffer. It needs the
    reserved palette window built, more than 4 MiB of RAM (B1 made it 8 MiB;
    whether Doom needs more is #35's to measure), and a file system that holds

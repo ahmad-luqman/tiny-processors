@@ -102,7 +102,11 @@ program's stack. Stream B is four issues, one PR each. B1
 registers lazily, only when another float program takes the FPU; it raises RAM
 to 8 MiB (56 program slots); and `mandel`, a hard-float C library program,
 draws the Mandelbrot set ([record](docs/rv32-os.md#floating-state-issue-33)).
-The A extension (#34), Doom (#35) and Linux without an MMU (#36) follow.
+B2 ([#34](https://github.com/ahmad-luqman/tiny-processors/issues/34)) adds
+the A extension to both backends: `lr.w`, `sc.w` and the nine AMOs, with a
+reservation that every SC, trap and xRET clears. It passes riscv-arch-test's
+A suite and riscv-tests' rv32ua against QEMU ([record](docs/rv32-a.md)). Doom
+(#35) and Linux without an MMU (#36) follow.
 
 ## Later optional tracks
 

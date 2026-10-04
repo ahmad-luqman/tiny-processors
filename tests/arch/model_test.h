@@ -5,7 +5,7 @@
  * expands the RVMODEL_* macros below around each test. What they do here:
  *
  * - Boot installs a trap handler, and any trap fails the test (done code 2):
- *   no selected test is meant to trap. The one place the I, M and F suites
+ *   no selected test is meant to trap. The one place the I, M, F and A suites
  *   touch a privileged CSR is RVTEST_FP_ENABLE's `csrs mstatus, a0`, which sets
  *   FS so F instructions work on a machine that can turn them off. Until
  *   Track 2 the machine had no mstatus and the handler skipped exactly that
@@ -20,8 +20,8 @@
  *   virt board has the same console and done register (docs/rv32.md).
  * - With RVMODEL_ASSERT defined (the I and M suites), every integer result is
  *   also compared with the value the test generator computed and written into
- *   the test source, and a mismatch fails the test (done code 3). The F suite's
- *   sources carry no expected values, so only the signature comparison applies.
+ *   the test source, and a mismatch fails the test (done code 3). The F and A
+ *   suites' sources carry no expected values, so only the signature comparison applies.
  */
 #ifndef RV32_MODEL_TEST_H
 #define RV32_MODEL_TEST_H
