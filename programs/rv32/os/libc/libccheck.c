@@ -268,6 +268,11 @@ static void errors(void)
     check("reading nothing is EBADF", read(5, &opened, 1) == -1 && errno == EBADF);
     errno = 0;
     check("writing nothing is EBADF", write(9, "x", 1) == -1 && errno == EBADF);
+    struct stat none;
+    errno = 0;
+    check("stat is ENOSYS", stat("welcome", &none) == -1 && errno == ENOSYS);
+    errno = 0;
+    check("mkdir is ENOSYS (issue #35: tfs has no directories)", mkdir("saves", 0777) == -1 && errno == ENOSYS);
     int fd = open("welcome", O_RDONLY);
     char five[5];
     struct stat st;

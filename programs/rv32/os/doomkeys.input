@@ -1,0 +1,12 @@
+# Issue #35: keys for Doom's title and menus (doomkeys.session). Escape opens the menu, Q is not
+# given to Doom and must change nothing, Down then Enter picks Options, Escape backs out.
+frame 10 down ESCAPE
+frame 11 up ESCAPE
+frame 18 down Q
+frame 19 up Q
+frame 25 down DOWN
+frame 26 up DOWN
+frame 30 down ENTER
+frame 31 up ENTER
+frame 45 down ESCAPE
+frame 46 up ESCAPE

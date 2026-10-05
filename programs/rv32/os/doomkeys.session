@@ -1,0 +1,2 @@
+doom -iwad doom1.wad -frames 50 -fps
+halt

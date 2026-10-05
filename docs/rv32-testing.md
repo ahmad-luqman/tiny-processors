@@ -15,7 +15,7 @@ tiers are safe to run in parallel.
 | `make -j8 test-rv32-full` | Both | Before merging, or nightly |
 
 `test-rv32-full` ran exactly the 123 checks the single `test-rv32` ran before
-issue #26 (issue #33 added the float and mandel sessions since, and issue #35 the diskprog session on QEMU, the emulator and Verilator, 22 s on Verilator), with one exception. `test-rv32-3d` used to run four test files in
+issue #26 (issue #33 added the float and mandel sessions since, and issue #35 the diskprog session on QEMU, the emulator and Verilator, and Doom's 350 frames on QEMU and the emulator plus its keys and after-another-program sessions and window check; Doom's 35 frames on Verilator are in `test-rv32-slow`; the first run fetches the shareware WAD, so it needs the network), with one exception. `test-rv32-3d` used to run four test files in
 one process. The aggregate now runs them as two targets:
 
 - `test-rv32-3d-model` (in `test-rv32`) runs the oracle, the C reference and the

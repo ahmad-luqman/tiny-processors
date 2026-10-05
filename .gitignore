@@ -12,3 +12,6 @@ third_party/riscv-arch-test/
 
 # Fetched at a pinned commit by make fetch-rv32-riscv-tests (issue #34)
 third_party/riscv-tests/
+
+# The shareware WAD, fetched by make fetch-rv32-doom-wad (issue #35); never committed
+third_party/doom-wad/

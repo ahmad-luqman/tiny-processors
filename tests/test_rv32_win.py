@@ -180,6 +180,19 @@ class WindowTest(unittest.TestCase):
             self.assertEqual(status, 2)
             self.assertIn("is a symbolic link", stderr)
             self.assertFalse((Path(directory) / "target").exists(), "the link was not followed")
+            # Issue #35: the console input and the disk join the checks; the disk, written through,
+            # may not be an output's path, and a disk of the wrong size is refused before SDL starts.
+            disk, keys = Path(directory) / "disk", Path(directory) / "keys"
+            disk.write_bytes(bytes(512))
+            keys.write_text("x")
+            for args, words in ((["--record", str(disk), "--disk", str(disk)], "would overwrite"),
+                                (["--checkpoints", str(keys), "--console-input", str(keys)], "would overwrite"),
+                                (["--disk", str(keys)], "whole 512-byte sectors")):
+                with self.subTest(args=args):
+                    status, _, stderr = self.run_window("--image", str(image), *args)
+                    self.assertEqual(status, 2)
+                    self.assertIn(words, stderr)
+            self.assertEqual((disk.read_bytes(), keys.read_text()), (bytes(512), "x"), "neither was touched")
 
 
 if __name__ == "__main__":

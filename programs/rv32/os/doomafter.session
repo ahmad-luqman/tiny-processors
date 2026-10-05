@@ -1,0 +1,3 @@
+bars
+doom -iwad doom1.wad -timedemo demo1 -frames 1
+halt

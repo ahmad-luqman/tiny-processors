@@ -5,7 +5,7 @@
 1. **The platform:** what Doom needs from the machine and the kernel.
 2. **Doom:** the port itself.
 
-This record covers the platform, which is the first PR. The port's section is added by the second.
+The first PR's sections run from "What stood in the way" to "Keys"; [The port](#the-port) onward is the second's.
 
 ## What stood in the way
 
@@ -129,3 +129,81 @@ Codes 15 to 26 are added: `CTRL`, `SHIFT`, `TAB`, `Y`, `N` and `DIGIT1` to `DIGI
 - `run-rv32-pong-emu`: 200 checkpoints and `PASS 8fef54bc`, unchanged.
 - `run-rv32-platform-{qemu,emu,rtl,rtl-verilator}`: `PASS bee59113`.
 - `lint-rv32` and `lint-rv32-soc` are clean. `synth-rv32-soc` gives 338,990 cells.
+
+## The port
+
+Frame 120 of the demo, written as a PPM by the emulator (`rv32emu --frames`), shows E1M1 in its own colours, letterboxed between black bands 20 rows tall, with "PICKED UP THE ARMOR" at the top. The picture is not committed: it is id's artwork, which stays out of the repository like the WAD.
+
+### Licences
+
+- **doomgeneric** ([ozkl/doomgeneric](https://github.com/ozkl/doomgeneric), `master` at `dcb7a8db`) is GPL-2.0. It is vendored unmodified in [third_party/doomgeneric](../third_party/doomgeneric/README.md): the 80 sources its own Makefile compiles besides the X11 back end, every header, and `LICENSE`. The `doom` program built from it is therefore GPL too; nothing else links it.
+- **The shareware `doom1.wad` v1.9** is not free software. id's licence lets anyone copy it to give to others, unmodified and free of charge. The copyright file in Debian's `doom-wad-shareware` package keeps John Carmack's 1999 clarification that "the DOOM shareware wad is freely distributable".
+  - It is never committed. [tools/rv32_doom.py](../tools/rv32_doom.py) (`make fetch-rv32-doom-wad`) downloads that Debian package and checks its SHA-256. It takes out the WAD and checks its SHA-256 `1d7d43be…` (4,196,020 bytes, MD5 `f0cefca4…`, the Doom Wiki's v1.9). It checks the copyright file's SHA-256 too, and writes it, then the WAD, each whole or not at all, into the git-ignored `third_party/doom-wad/`. Both files are prerequisites of `doom.disk`, whose recipe runs `--check`, so deleting or replacing the licence rebuilds the disk and fails until it is fetched again.
+  - The mirrors that served the bare file directly were gone (404). The archive's pool keeps a version only while a release has it, so the tool falls back to snapshot.debian.org, which serves the same package by its SHA-1 for good. Both are checked against the same SHA-256.
+  - A target that needs the WAD fetches it, so the first `make test-rv32` needs the network. `--check` names the fetch target when the WAD or its licence is missing or not the pinned file.
+
+### Building it
+
+- **The build.** doomgeneric is built as its own Makefile builds it, with `CMAP256` and 320×200.
+  - `CMAP256` makes the screen buffer palette indices, and makes the palette the global `colors[]` with a `palette_changed` flag. The platform file reads both, so the engine needs no change.
+  - It is built for **rv32im**: the core has M, Doom's fixed point multiplies constantly, and rv32im objects link with the ilp32 C library.
+  - The upstream code is built with warnings off (`-w`), as the vendored C library is; the platform file is built with `-Wall -Wextra -Werror`.
+- **What the C library lacked.** The link needed eight picolibc functions no earlier program used: `atof`, `atoi`, `strcasecmp`, `strncasecmp`, `strdup`, `strncpy`, `putchar` and `vsnprintf`. They were copied unmodified from the pinned picolibc commit and added to its `SOURCES`.
+  - It also needed `mkdir`, which the OS layer now refuses with `ENOSYS`, as it does `stat`; `libccheck` checks both.
+  - Doom asks for its config directory `.` and its save directory `./.savegame/`. tfs has no directories, so **saving a game ends Doom**. Its save file `./.savegame/temp.dsg` is 20 bytes, one more than a tfs name holds. Doom then writes a recovery file, `/tmp/recovery.dsg` (a legal tfs name, at most 4 KiB), and stops with `I_Error`. Loading and saving are out of scope here.
+- **Where it runs.** `doom` is a disk program, a 474 KB image, in 64 slots, 27 to 90. That is 8 MiB for its image, the 6 MiB zone and its heap, crossing into the RAM 16 MiB added, with a 64 KiB stack. `rv32_ramdisk.py --check` caught a first placement at slot 56 colliding with the test programs.
+  - Its disk is 5 MiB: `doom1.wad` and the program.
+  - Doom saves its config (`.default.cfg`) only when it quits or stops on an error (`I_Quit`, `I_Error`). The measured runs end with `exit()` after their last frame, which skips that, so they leave the disk as it was; the disk comparison shows that nothing wrote to it. Quitting from the menu in the window does save, which is why `run-rv32-doom` plays on a copy.
+
+### The platform file
+
+[doom_rv32.c](../programs/rv32/os/libc/doom_rv32.c) implements doomgeneric's hooks:
+- **`DG_DrawFrame`**:
+  - writes a changed palette with `SYS_PALETTE`, then reads it back. On a machine with a display, a palette the device does not hold stops Doom with an error, so a palette call that fails cannot pass unnoticed.
+  - copies the 320×200 picture into framebuffer rows 20 to 219 and presents; a refused present is an error too. At start it clears the whole framebuffer, so the bands above and below are black even after another program drew there;
+  - every 35 frames prints `doom: frame N screen <hash> palette <hash>`.
+
+  The hashes are the checkpoint hash over Doom's screen buffer and over its 256 palette words, computed by the program, so QEMU, which has no display, prints the same lines.
+- **`DG_GetKey`** maps input events to Doom's keys, by `board.h`'s names:
+  - Left and Right turn, Up and Down (or W and S) move, A and D strafe;
+  - Ctrl fires, Space opens, Shift runs, 1 to 7 pick a weapon;
+  - Tab shows the map, Escape the menu, Y and N answer it, Enter confirms, P pauses. Q and R are not Doom's.
+- **`DG_GetTicksMs` and `DG_SleepMs`: a virtual clock.** This departs from the issue, which asked for time from `mtime`. The clock is a count of milliseconds that only `DG_SleepMs` advances.
+  - Doom waits for its clock in two places: `TryRunTics` before a tic, and the screen wipe when the screen changes (the title, a new level, an intermission). Both sleep a millisecond at a time while they wait, so each present comes one tic after the last, wipe frames included.
+  - A timedemo never waits in `TryRunTics`: it runs one tic per frame by itself. In play, the first frame after a wipe may run the tics the wipe let pass.
+  - With `mtime`, the wipe would draw as many frames as fit in the device time it took, and device time per frame differs between QEMU, the emulator and the RTL. The same demo would give each backend a different frame count.
+  - In the window, presents are paced at 35 a second, Doom's tic rate, and that is the game's real speed, as for Pong.
+- **`-frames N`** (N a count above 0; anything else is an error) ends the run after N frames, with `exit()`, not `I_Quit`: no config is saved and a timedemo's end-of-demo report (an `I_Error`) never comes. **`-fps`** adds a line with the device ticks from the first frame's present to the last's, read straight after each present, so neither start-up nor the reports are counted (it needs two frames or more): the low word of `mtime` (100 ns on QEMU, a step on the emulator, a cycle on the RTL). It depends on the backend, so the cross-backend sessions leave it out.
+
+### The pinned runs
+
+- `doom -iwad doom1.wad -timedemo demo1 -frames 350` plays ten seconds of the shareware demo.
+  - The timedemo sets `singletics`, and the virtual clock covers the wipe, so the run is the same everywhere.
+  - Both the emulator (`run-rv32-doom-emu`) and QEMU (`run-rv32-doom-qemu`) print the same ten screen hashes, ending `frame 350 screen ed9ddef9 palette 2002492b`, and `PASS 1af5ac24`. Their transcripts differ only in the two lines that name the platform.
+  - The emulator also pins every frame's framebuffer checkpoint: 350 lines, [doom.checkpoints](../programs/rv32/os/doom.checkpoints).
+- `-frames 35` runs on the emulator and Verilator (`run-rv32-doom35-rtl-verilator`, in the slow tier). The console, all 35 framebuffer checkpoints, `PASS 1af5ac24` and the disks they leave are identical. Verilator covers these 35 frames, not the 350.
+  - The RTL retires 243 M instructions to the emulator's 210 M. The difference is the kernel's timer interrupt, which fires by device time: cycles on the RTL, steps on the emulator. So it fires six times as often on the RTL, 122,064 interrupts against 20,550, at a few hundred kernel instructions each. Doom's own instructions are the same on both, since its clock is virtual.
+  - It takes 1.407 G cycles and 21 minutes.
+- **What the palette pins cover.** The palette changes during the demo: frames 105 and 175 print `a835bcb1`, frame 280 `04534b77` (the pickup and damage flashes), and the rest `2002492b`. So the lines pin Doom's palette at three different moments.
+  - On the emulator and Verilator, each palette written is also read back from the device and compared, so a palette that does not arrive stops the run.
+  - On QEMU the hash is Doom's own copy, since there is no device.
+- **Keys.** `doomkeys.session` (emulator) plays the title for 50 frames with scripted keys ([doomkeys.input](../programs/rv32/os/doomkeys.input)):
+  - Escape opens the menu, Q (not Doom's) changes nothing, Down then Enter opens Options, Escape closes it all.
+  - Its 50 framebuffer checkpoints are pinned, so a wrong key map changes them.
+  - It also pins `-fps`'s line and the reports of a limit that is not a multiple of 35 (frames 35 and 50).
+- **After another program.** `doomafter.session` (emulator) runs `bars`, which paints the left half of every row, then one timedemo frame. That frame, the 25th checkpoint, is a fresh boot's first, `5f599469`, because Doom clears the framebuffer at start (Codex's finding on PR #43). Without the clear it is `f0452469`.
+- **Untraced.** The runner compares these sessions with `--compare outputs`, new in this PR: the console, the outcome, every checkpoint and the disks, as `results` does, but with no trace written and so no trap records or stores. It is only for runs too long to trace, since nothing can check that a shorter one would not have given a full trace comparison. A trace of the 35 frames alone is 9.5 GB.
+- `check-rv32-doom-window` runs Doom through the window, headless, for 400 M instructions: the title and the demo, 396 frames through the palette.
+  - The run must give exactly the headless emulator's console and checkpoints.
+  - Doom must still be running at the end: a kill or an exit would leave the shell idling to the limit, which the console would show. On a failure it prints the end of both.
+- `make run-rv32-doom` opens the window for play at 35 frames a second and records the session. It runs on a copy of the disk, so it replays headless. It was not played by hand for this record.
+
+### How fast
+
+| Backend | Start-up (to the first frame) | A frame | 350 frames, wall time |
+| --- | --- | --- | --- |
+| Emulator | 202 M instructions | 1.28 M instructions | 26 s (25 M instructions/s) |
+| QEMU (`-icount`) | the same instructions | the same | 1.1 s |
+| Verilator (`--stall 1`) | about 1.2 G cycles | about 7.4 M cycles | 35 frames in 21 min (1.1 M cycles/s); 350 would take about an hour |
+
+Start-up is most of a short run: `W_Init` and `R_Init` read the WAD's directory and composite the wall textures, and `Z_Init` sets up the 6 MiB zone. A frame of E1M1 at 320×200 takes about 1.28 M instructions on the RV32IM core. The RTL averaged 5.8 cycles an instruction over the run, with a stall on every memory request as the slow tier runs it. That makes a frame about 7.4 M cycles: 6.8 frames a second at a 50 MHz clock, and 35, Doom's full rate, would need about 260 MHz.

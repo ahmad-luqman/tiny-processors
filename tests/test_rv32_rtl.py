@@ -1226,6 +1226,28 @@ class RunnerTest(unittest.TestCase):
                    "--emulator", str(emulator), "--simulator", str(self.simulator), "--out", str(out), *extra]
         return subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
 
+    def test_outputs_mode_writes_no_trace_and_still_compares(self):
+        """Issue #35: --compare outputs runs both backends untraced, compares the console and the
+        checkpoints, says what it leaves out, and still fails on a console that differs."""
+        out = Path(self.workdir.name) / "out"
+        for stale in out.glob("*.trace"):
+            stale.unlink()
+        good = self.run_results(self.emulator, compare="outputs")
+        self.assertEqual(good.returncode, 0, good.stderr)
+        self.assertIn("outputs identical (untraced): 1 console line(s) ending 'A', 1 checkpoint(s)", good.stdout)
+        self.assertIn("no trap records or stores compared", good.stdout)
+        self.assertEqual(sorted(out.glob("*.trace")), [], "no trace written")
+        noisy = self.wrapper("noisy-outputs", "printf x")
+        result = self.run_results(noisy, compare="outputs")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("console mismatch", result.stderr)
+        alone = self.run_results(self.emulator, "--backend", "emulator", compare="outputs")
+        self.assertEqual(alone.returncode, 0, alone.stderr)
+        self.assertIn("steps, untraced, 1 checkpoint(s)", alone.stdout)
+        refused = self.run_results(self.emulator, "--compare-traps", "faults", compare="outputs")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("requires --compare results", refused.stderr)
+
     def test_results_mode_accepts_agreeing_backends_and_rejects_each_mismatch(self):
         good = self.run_results(self.emulator)
         self.assertEqual(good.returncode, 0, good.stderr)

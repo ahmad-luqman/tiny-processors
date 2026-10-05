@@ -1,13 +1,18 @@
 """Unit tests for the RV32 image checker and QEMU driver; no cross toolchain needed."""
 
+import contextlib
+import io
 import json
+import lzma
 from pathlib import Path
 import re
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 from tools.rv32_asm import (ADDI, AMO_OPS, AMOADD_W, AMOSWAP_W, BOOTROM, CLINT, CONSOLE, CSRRC, CSRRS, CSRRWI, DISPLAY,
                             DONE, FB, INPUT, PALETTE, LR_W, LW, MSTATUS, PLIC, RAM, SC_W, VIRTIO, i_type, r_type)
@@ -18,7 +23,7 @@ from tools.rv32_devices import (DIAG_EXPECTED_VALUES, EVENT_PRESS, EVENT_VALID, 
 from tools.rv32_image import (ImageError, check_a_build, check_image, check_listing, check_m_build, flatten, parse_elf,
                               to_hex_words)
 from tools.rv32_run_qemu import classify, qemu_command
-from tools import rv32_mkfs, rv32_vendor_libc
+from tools import rv32_doom, rv32_mkfs, rv32_vendor_libc
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -779,10 +784,10 @@ class TestHarnessTests(unittest.TestCase):
 
 
 class VendoredSourcesTest(unittest.TestCase):
-    """Track 3: picolibc, compiler-rt and Lua match their SHA256SUMS.json manifests, as SoftFloat
+    """Track 3: picolibc, compiler-rt, Lua and doomgeneric (issue #35) match their SHA256SUMS.json manifests, as SoftFloat
     and MNIST are checked against theirs (docs/rv32-libc.md)."""
 
-    DIRECTORIES = ("third_party/picolibc", "third_party/compiler-rt", "third_party/lua")
+    DIRECTORIES = ("third_party/picolibc", "third_party/compiler-rt", "third_party/lua", "third_party/doomgeneric")
 
     def test_each_directory_matches_its_manifest(self):
         root = Path(__file__).resolve().parents[1]
@@ -834,6 +839,97 @@ class FloatingClaimTest(unittest.TestCase):
         self.assertEqual(groups[0x80420000 >> 17], [f"80420010 {flw_word:08x} trap 2 {flw_word:08x}"])
         self.assertEqual(groups[0x80440000 >> 17], [f"80440020 {illegal:08x} trap 2 {illegal:08x}"])
         self.assertEqual(len(trap_records_by_region(trace)[0x80420000 >> 17]), 2, "all of them without faults_only")
+
+
+class DoomFetchTest(unittest.TestCase):
+    """Issue #35: tools/rv32_doom.py takes the shareware WAD out of Debian's package and refuses
+    anything that is not the pinned file, without the network."""
+
+    @staticmethod
+    def ar(members):
+        blob = b"!<arch>\n"
+        for name, data in members.items():
+            blob += f"{name + '/':<16}{0:<12}{0:<6}{0:<6}{'100644':<8}{len(data):<10}`\n".encode() + data
+            blob += b"\n" if len(data) % 2 else b""
+        return blob
+
+    def package(self, wad, copyright=b"c"):
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as tar:
+            for name, data in (("./usr/share/games/doom/doom1.wad", wad), ("./usr/share/doc/doom-wad-shareware/copyright", copyright)):
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        return self.ar({"debian-binary": b"2.0\n", "control.tar.xz": b"", "data.tar.xz": lzma.compress(buffer.getvalue())})
+
+    def test_extract_and_refusals(self):
+        files = rv32_doom.extract(self.package(b"odd-length wad"))
+        self.assertEqual(files, {"doom1.wad": b"odd-length wad", "copyright": b"c"})
+        with self.assertRaisesRegex(rv32_doom.FetchError, "not an ar archive"):
+            rv32_doom.extract(b"PK\x03\x04")
+        with self.assertRaisesRegex(rv32_doom.FetchError, "no data.tar.xz"):
+            rv32_doom.extract(self.ar({"debian-binary": b"2.0\n"}))
+        with self.assertRaisesRegex(rv32_doom.FetchError, "cut short"):
+            rv32_doom.extract(self.ar({"data.tar.xz": b"abc"})[:-2])
+
+    def test_an_odd_member_is_padded(self):
+        """An ar member of odd size is followed by a padding byte; the next member is still read."""
+        self.assertEqual(rv32_doom.ar_members(self.ar({"odd": b"abc", "next": b"xy"})), {"odd": b"abc", "next": b"xy"})
+
+    def pinned(self, directory):
+        """rv32_doom's paths moved into `directory`."""
+        root = Path(directory)
+        return [mock.patch.object(rv32_doom, "ROOT", root), mock.patch.object(rv32_doom, "WAD_DIR", root),
+                mock.patch.object(rv32_doom, "WAD", root / "doom1.wad"), mock.patch.object(rv32_doom, "COPYRIGHT", root / "copyright")]
+
+    def test_fetch_checks_the_package_and_the_wad(self):
+        wad = b"a wad"
+        package = self.package(wad)
+
+        def serve(url, timeout):
+            return io.BytesIO(package)
+
+        with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
+            for patch in self.pinned(directory):
+                stack.enter_context(patch)
+            stack.enter_context(mock.patch.object(rv32_doom.urllib.request, "urlopen", serve))
+            with self.assertRaisesRegex(rv32_doom.FetchError, "no URL served the pinned package"):
+                rv32_doom.fetch()                         # the real pin: this package is not it
+            self.assertEqual(list(Path(directory).iterdir()), [], "nothing written")
+            stack.enter_context(mock.patch.object(rv32_doom, "PACKAGE_SHA256", rv32_doom.sha256(package)))
+            with self.assertRaisesRegex(rv32_doom.FetchError, "doom1.wad: 5 bytes"):
+                rv32_doom.fetch()                         # the package passes, the WAD is not the pinned one
+            stack.enter_context(mock.patch.object(rv32_doom, "WAD_SHA256", rv32_doom.sha256(wad)))
+            stack.enter_context(mock.patch.object(rv32_doom, "WAD_SIZE", len(wad)))
+            with self.assertRaisesRegex(rv32_doom.FetchError, "copyright file's SHA-256"):
+                rv32_doom.fetch()                         # the WAD passes, its licence is not the pinned one
+            self.assertEqual(list(Path(directory).iterdir()), [], "still nothing written")
+            stack.enter_context(mock.patch.object(rv32_doom, "COPYRIGHT_SHA256", rv32_doom.sha256(b"c")))
+            rv32_doom.fetch()
+            self.assertEqual(((Path(directory) / "doom1.wad").read_bytes(), (Path(directory) / "copyright").read_bytes()), (wad, b"c"))
+            rv32_doom.check()
+            with mock.patch.object(rv32_doom.urllib.request, "urlopen", side_effect=AssertionError("no network")), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(rv32_doom.main(["--fetch"]), 0, "in place: nothing is fetched")
+            self.assertIn("already the pinned WAD", out.getvalue())
+
+    def test_check_names_the_fetch_target(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
+            for patch in self.pinned(directory):
+                stack.enter_context(patch)
+            with self.assertRaisesRegex(rv32_doom.FetchError, "missing: run `make fetch-rv32-doom-wad`"):
+                rv32_doom.check()
+            (Path(directory) / "doom1.wad").write_bytes(b"not the shareware WAD")
+            with self.assertRaisesRegex(rv32_doom.FetchError, "not the pinned shareware v1.9"):
+                rv32_doom.check()
+            with mock.patch.object(rv32_doom, "WAD_SHA256", rv32_doom.sha256(b"not the shareware WAD")):
+                with self.assertRaisesRegex(rv32_doom.FetchError, "licence, is missing or not the pinned file"):
+                    rv32_doom.check()                     # no licence
+                (Path(directory) / "copyright").write_bytes(b"cut")
+                with self.assertRaisesRegex(rv32_doom.FetchError, "licence, is missing or not the pinned file"):
+                    rv32_doom.check()                     # a licence that is not the package's
+                with mock.patch.object(rv32_doom, "COPYRIGHT_SHA256", rv32_doom.sha256(b"cut")):
+                    rv32_doom.check()
 
 
 if __name__ == "__main__":
