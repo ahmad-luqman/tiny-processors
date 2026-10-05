@@ -455,7 +455,7 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertEqual(event_word(False, 31), EVENT_VALID | 31)
         self.assertEqual((key_code("left"), key_code("LEFT"), key_code("7"), key_code("31")), (1, 1, 7, 31))
         self.assertEqual(key_code("000000001"), 1, "nine digits is the most a number may have")
-        for bad in ("32", "-1", "shift", "", "0000000001", "٣"):  # ten digits; an Arabic-Indic three
+        for bad in ("32", "-1", "alt", "", "0000000001", "٣"):  # ten digits; an Arabic-Indic three
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     key_code(bad)

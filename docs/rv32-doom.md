@@ -37,7 +37,7 @@ The slot base (`0x8010_0000`) and size (128 KiB) do not change, so no program mo
 - The end-of-RAM fault cases, the debugger's edge reads and G2's depth-buffer edge all move to the new end.
 
 **Cost:**
-- The testbench zero-fills RAM at start. Icarus's `platcheck` run took 36.6 s at 16 MiB and 38.2 s on main, so the change made no measurable difference.
+- The testbench zero-fills RAM at start, and Icarus feels it. With the testbench already built (the second of two runs on each side), `make run-rv32-platform-rtl` takes 40.5 s against 36.8 s on main: about 3.7 s more per Icarus run. Verilator's start-up is not noticeably slower. A plusarg that sized RAM per run would win that back; it was not worth a second RAM size in the contract. The full aggregate (`test-rv32-full`, `-j8`) took 16 min 56 s, against 14 min 23 s for #34's, which also includes the new tests.
 - Synthesis shrinks RAM to 64 words, so its cell count is unaffected.
 
 ## A disk of any size
@@ -61,6 +61,13 @@ A program can live on the disk instead of in the kernel's image. Its file on the
 4. reads the image into the program's slots with the whole-sector path.
 
 A file that is being written cannot be run. The RAM disk's table is unchanged, so the boot line still says `20 programs` and no transcript moved.
+
+**Trust.** A RAM-disk program's entry comes from the kernel's image. A disk program's entry comes from a file that any program may write (`write` on a new file name). So the entry is untrusted, and `entry_ok` is the whole check: the image inside the file, the span inside the slots, and the stack whole pages inside the span. A disk program can therefore do exactly what a RAM-disk program with the same entry could, and nothing more:
+- It runs in user mode in its own slots, mapped and PMP-bounded as any process is.
+- `spawn` refuses it while its slots overlap a live process's.
+- If its `flags` ask for the accelerators, it gets their windows as `menu` does. The DMA window the kernel sets at every switch still bounds the engines to the process's own span.
+
+A file the kernel creates is at most 4 KiB, so a program written on the machine can only be a small one. The large ones come from the host.
 
 `diskprog` is the test. It carries 256 KiB of a generated sequence (the assembler writes it from a `.rept`) and is linked into slots 100–103, above 8 MiB. It sits at the end of a 6 MiB disk, behind a 4 MiB `pad` file. Its session:
 - runs it, and it checks every word;

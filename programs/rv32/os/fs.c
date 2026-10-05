@@ -128,13 +128,14 @@ void fs_truncate(int file)
  * file fill, so no byte past either is written. */
 static uint32_t direct_sectors(const struct entry *e, uint32_t position, const uint8_t *to, uint32_t left)
 {
+    const uint32_t ram = OS_SLOT_BASE - OS_KERNEL_SIZE, ram_end = OS_SLOT_BASE + OS_SLOTS * OS_SLOT_SIZE;
     uint32_t address = (uint32_t)(uintptr_t)to;
-    if (position % VIRTIO_SECTOR || address & 3u || address < OS_SLOT_BASE - OS_KERNEL_SIZE ||
-        address > OS_SLOT_BASE + OS_SLOTS * OS_SLOT_SIZE - left) {
+    if (position % VIRTIO_SECTOR || address & 3u || address < ram || address >= ram_end) {
         return 0;
     }
     uint32_t in_file = (e->size - position) / VIRTIO_SECTOR, wanted = left / VIRTIO_SECTOR;
-    return in_file < wanted ? in_file : wanted;
+    uint32_t whole = in_file < wanted ? in_file : wanted;
+    return whole <= (ram_end - address) / VIRTIO_SECTOR ? whole : 0; /* checked here, whoever calls */
 }
 
 uint32_t fs_read(int file, uint32_t position, uint8_t *to, uint32_t length)
