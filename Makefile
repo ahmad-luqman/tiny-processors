@@ -1857,20 +1857,26 @@ build/rv32/os/diskprog.disk: build/rv32/os/pad.bin $(RV32_OS_DISK_PRGS) tools/rv
 # Doom prints its screen and palette hashes every 35 frames, which it computes itself, so QEMU,
 # which has no display, pins the same picture; the emulator and Verilator also pin the
 # framebuffer's checkpoint. Start-up takes about 202 M instructions and a frame about 1.3 M.
-# The fetch is written twice on purpose: the phony target fetches again whenever the WAD is not the
-# pinned one, and the file target fetches only when it is missing (the disk's recipe then checks it).
+# The fetch is written three times on purpose: the phony target fetches again whenever the WAD or
+# its licence is not the pinned one, and the file targets fetch only when one is missing. Both files
+# are the disk's prerequisites, so a newer or deleted licence rebuilds the disk, whose recipe checks
+# both. The licence waits for the WAD's fetch (order-only), so a parallel make fetches once; when
+# the WAD is in place and only the licence is missing, its --fetch fetches both again.
 # A first run of test-rv32 therefore needs the network.
 .PHONY: fetch-rv32-doom-wad
 fetch-rv32-doom-wad:
 	$(PYTHON) tools/rv32_doom.py --fetch
 RV32_DOOM_WAD := third_party/doom-wad/doom1.wad
+RV32_DOOM_COPYRIGHT := third_party/doom-wad/copyright
 $(RV32_DOOM_WAD):
+	$(PYTHON) tools/rv32_doom.py --fetch
+$(RV32_DOOM_COPYRIGHT): | $(RV32_DOOM_WAD)
 	$(PYTHON) tools/rv32_doom.py --fetch
 RV32_OS_APPS_DISK_doom := build/rv32/os/doom.disk
 RV32_OS_APPS_DISK_doom35 := build/rv32/os/doom.disk
 RV32_OS_APPS_DISK_doomkeys := build/rv32/os/doom.disk
 RV32_OS_APPS_DISK_doomafter := build/rv32/os/doom.disk
-build/rv32/os/doom.disk: build/rv32/os/doom.prg $(RV32_DOOM_WAD) tools/rv32_mkfs.py tools/rv32_doom.py | build/rv32/os
+build/rv32/os/doom.disk: build/rv32/os/doom.prg $(RV32_DOOM_WAD) $(RV32_DOOM_COPYRIGHT) tools/rv32_mkfs.py tools/rv32_doom.py | build/rv32/os
 	$(PYTHON) tools/rv32_doom.py --check
 	$(PYTHON) tools/rv32_mkfs.py --new --size 0x500000 --add doom1.wad=$(RV32_DOOM_WAD) --add doom=$< $@
 # Untraced: a trace of the 35 frames alone is 9.5 GB. Every frame's framebuffer checkpoint is pinned.
