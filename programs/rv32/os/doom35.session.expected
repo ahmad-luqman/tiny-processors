@@ -1,0 +1,46 @@
+kernel: tiny-processors RV32 machine, hart 0
+kernel: devices console clint plic input display g1 g2 dma disk
+kernel: 20 programs
+kernel: disk 10240 sectors, tfs
+sh: ls, NAME [ARGS] [&], wait, halt [CODE]
+$ doom -iwad doom1.wad -timedemo demo1 -frames 35
+                           Doom Generic 0.1
+Z_Init: Init zone memory allocation daemon. 
+zone memory: 0x8054ce30, 600000 allocated for zone
+Using . for configuration and saves
+V_Init: allocate screens.
+M_LoadDefaults: Load system defaults.
+saving config in .default.cfg
+W_Init: Init WADfiles.
+ adding doom1.wad
+ adding demo1.lmp
+ couldn't open demo1.lmp
+Playing demo demo1.lmp.
+Using ./.savegame/ for savegames
+===========================================================================
+                            DOOM Shareware
+===========================================================================
+ Doom Generic is free software, covered by the GNU General Public
+ License.  There is NO warranty; not even for MERCHANTABILITY or FITNESS
+ FOR A PARTICULAR PURPOSE. You are welcome to change and distribute
+ copies under certain conditions. See the source for more information.
+===========================================================================
+I_Init: Setting up machine state.
+M_Init: Init miscellaneous info.
+R_Init: Init DOOM refresh daemon - ...................
+P_Init: Init Playloop state.
+S_Init: Setting up sound.
+D_CheckNetGame: Checking network game status.
+startskill 2  deathmatch: 0  startmap: 1  startepisode: 1
+player 1 of 1 (1 nodes)
+Emulating the behavior of the 'Doom 1.9' executable.
+HU_Init: Setting up heads up display.
+ST_Init: Init status bar.
+I_InitGraphics: framebuffer: x_res: 320, y_res: 200, x_virtual: 320, y_virtual: 200, bpp: 8
+I_InitGraphics: framebuffer: RGBA: 0000, red_off: 0, green_off: 0, blue_off: 0, transp_off: 0
+I_InitGraphics: DOOM screen size: w x h: 320 x 200
+I_InitGraphics: Auto-scaling factor: 1
+doom: frame 35 screen 5b6f9af4 palette 2002492b
+$ halt
+kernel: halt, 1 exits
+PASS 1af5ac24

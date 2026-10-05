@@ -1,0 +1,2 @@
+doom -iwad doom1.wad -timedemo demo1 -frames 350
+halt

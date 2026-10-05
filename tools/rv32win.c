@@ -49,13 +49,15 @@ static void usage(void)
 {
     fputs("usage: rv32win --image FILE [--base ADDR] [--pc ADDR] [--scale N] [--fps N] [--input FILE]\n"
           "               [--record FILE] [--checkpoints FILE] [--max-instructions N] [--allow-lost-events]\n"
+          "               [--console-input FILE|-] [--disk FILE]\n"
           "Runs FILE as rv32emu does, with no instruction limit unless --max-instructions, and shows\n"
           "each present in a window scaled by N (1..8, default 3),\n"
           "at most N presents per second (default 60; 0 runs unthrottled). Keys become the contract's\n"
           "events at the next present: arrows, space, return, escape, A, D, W, S, P, Q, R, and for\n"
           "Doom Ctrl, Shift (either one), Tab, Y, N and 1 to 7. A scripted\n"
           "--input replays as on rv32emu; --record writes every event, typed or scripted, as a script\n"
-          "that replays this session. Closing the window stops the run with halt=stopped.\n",
+          "that replays this session. --console-input and --disk are rv32emu's (issue #35: Doom runs\n"
+          "under the OS from a disk). Closing the window stops the run with halt=stopped.\n",
           stderr);
     exit(EXIT_EMULATOR_ERROR);
 }
@@ -97,6 +99,7 @@ static bool upload_frame(SDL_Texture *texture, const machine *m)
 int main(int argc, char **argv)
 {
     const char *image_path = NULL, *input_path = NULL, *record_path = NULL, *checkpoints_path = NULL;
+    const char *console_input = NULL, *disk_path = NULL; /* issue #35: the OS's console and disk */
     uint32_t base = RAM_BASE, start = 0, scale = 3, fps = 60;
     bool start_given = false, allow_lost_events = false;
     machine m;
@@ -134,6 +137,10 @@ int main(int argc, char **argv)
             record_path = value;
         } else if (!strcmp(arg, "--checkpoints")) {
             checkpoints_path = value;
+        } else if (!strcmp(arg, "--console-input")) {
+            console_input = value;
+        } else if (!strcmp(arg, "--disk")) {
+            disk_path = value;
         } else if (!strcmp(arg, "--max-instructions")) {
             m.limit = emu_parse_u64(value, UINT64_MAX, "instruction limit");
         } else {
@@ -155,8 +162,20 @@ int main(int argc, char **argv)
     emu_require_distinct(checkpoints_path, "checkpoints file", image_path, "image");
     emu_require_distinct(checkpoints_path, "checkpoints file", input_path, "input script");
     emu_require_distinct(checkpoints_path, "checkpoints file", record_path, "record file");
+    const char *console_file = console_input && strcmp(console_input, "-") ? console_input : NULL;
+    const char *outputs[][2] = {{record_path, "record file"}, {checkpoints_path, "checkpoints file"}};
+    for (size_t i = 0; i < sizeof outputs / sizeof outputs[0]; i++) {
+        emu_require_distinct(outputs[i][0], outputs[i][1], console_file, "console input");
+        emu_require_distinct(outputs[i][0], outputs[i][1], disk_path, "disk");
+    }
     if (input_path) {
         emu_read_input_script(&m, input_path); /* exits on a bad script */
+    }
+    if (console_input) {
+        emu_read_console_input(&m, console_input); /* exits on an unreadable file */
+    }
+    if (disk_path) {
+        emu_open_disk(&m, disk_path); /* exits on a missing or wrongly sized file */
     }
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         return fail_sdl("cannot initialise SDL");

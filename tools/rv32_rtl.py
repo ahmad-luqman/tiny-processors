@@ -396,6 +396,8 @@ def compare_backends(rtl, emulator, compare, compare_stores=False, checkpoints="
             return f"checkpoint count mismatch: RTL {len(rtl.checkpoints)}, emulator {len(emulator.checkpoints)}"
     elif rtl.checkpoints != emulator.checkpoints:
         return f"checkpoint mismatch: RTL {rtl.checkpoints}, emulator {emulator.checkpoints}"
+    if compare == "outputs":  # no traces were written (issue #35): what the guest printed and presented is all
+        return None
     if compare == "results":
         faults_only = traps == "faults"
         rtl_traps = trap_records_by_region(rtl.trace, faults_only)
@@ -529,9 +531,10 @@ def main():
     simd_delay = parser.add_mutually_exclusive_group()
     simd_delay.add_argument("--simd-stall", type=int, help="fixed wait cycles per accelerator data transfer")
     simd_delay.add_argument("--simd-seed", type=int, help="seeded 0..3 waits per accelerator data transfer")
-    parser.add_argument("--compare", choices=("trace", "results"), default="trace",
+    parser.add_argument("--compare", choices=("trace", "results", "outputs"), default="trace",
                         help="`trace`: identical retirement traces and the cycle formula; `results`: identical "
-                             "console, outcome, and checkpoints, for a program that reads the timer, the cycle/time counters or accelerator registers (device time)")
+                             "console, outcome, and checkpoints, for a program that reads the timer, the cycle/time counters or accelerator registers (device time); "
+                             "`outputs`: the same as `results` less the trap records, with no trace written, for a run too long to trace (issue #35: Doom)")
     parser.add_argument("--compare-checkpoints", choices=("lines", "count"), default="lines",
                         help="`count` compares only how many frames each backend presented, for programs whose frames "
                              "depend on how the scheduler interleaved them (O4); results mode only")
@@ -626,7 +629,8 @@ def main():
         copy.write_bytes(args.disk.read_bytes())
         return copy
 
-    emulator = run_emulator(args.emulator, bin_path, out / f"{name}.emu.trace", timeout=args.timeout,
+    untraced = args.compare == "outputs"
+    emulator = run_emulator(args.emulator, bin_path, None if untraced else out / f"{name}.emu.trace", timeout=args.timeout,
                             checkpoints=out / f"{name}.emu.checkpoints", input_script=args.input, frames=args.frames,
                             allow_lost_events=args.allow_lost_events, console_input=args.console_input, limit=args.limit,
                             disk=backend_disk("emu"))
@@ -644,7 +648,7 @@ def main():
     uses_simd = uses_accelerator(emulator.trace)
     if args.compare == "trace" and uses_simd:
         sys.exit("this program accesses accelerator registers; use --compare results")
-    if args.compare == "results" and not (reads_timer or uses_simd or interrupted):
+    if args.compare == "results" and not (reads_timer or uses_simd or interrupted):  # untraced runs cannot tell
         sys.exit("--compare results is for a program that reads the timer, the cycle/time counters or accelerator registers, "
                  "or takes interrupts, with cycle ticks; this one does not, use --compare trace")
     if args.expect_console_file is not None:
@@ -660,13 +664,13 @@ def main():
         if args.disk_out is not None:
             args.disk_out.write_bytes((out / f"{name}.emu.disk").read_bytes())
         print(emulator.stderr.strip().splitlines()[-1])
-        print(f"emulator: {len(emulator.trace)} trace lines, {len(emulator.checkpoints)} checkpoint(s), "
-              f"console ends {last_line!r}")
+        steps = f"{emulator.halt['steps']} steps, untraced" if untraced else f"{len(emulator.trace)} trace lines"
+        print(f"emulator: {steps}, {len(emulator.checkpoints)} checkpoint(s), console ends {last_line!r}")
         return
 
     def run_rtl_as_asked(stall, seed, wave=None):
         """The RTL run every mode makes: the arguments given, with this stall setting."""
-        return run_rtl(args.simulator, hex_path, out / f"{name}.rtl.trace", stall=stall, seed=seed, wave=wave,
+        return run_rtl(args.simulator, hex_path, None if untraced else out / f"{name}.rtl.trace", stall=stall, seed=seed, wave=wave,
                        timeout=args.timeout if args.rtl_timeout is None else args.rtl_timeout, max_cycles=args.max_cycles, checkpoints=out / f"{name}.rtl.checkpoints",
                        input_script=args.input, allow_lost_events=args.allow_lost_events, simd_stall=args.simd_stall,
                        simd_seed=args.simd_seed, gpu_stall=args.gpu_stall, gpu_seed=args.gpu_seed, ticks=args.ticks,
@@ -727,7 +731,11 @@ def main():
         print(f"disks identical: {len(emu_disk)} bytes")
         if args.disk_out is not None:
             args.disk_out.write_bytes(emu_disk)
-    if args.compare == "results":
+    if untraced:
+        print(f"outputs identical (untraced): {len(emulator.console.splitlines())} console line(s) ending {last_line!r}, "
+              f"{len(rtl.checkpoints)} checkpoint(s); RTL {rtl.halt['steps']} instructions in {rtl.halt['cycles']} cycles, "
+              f"emulator {emulator.halt['steps']} instructions")
+    elif args.compare == "results":
         # What the guest printed and presented agreed, and so did every fault it took: the same PC,
         # word, cause, and value in the same order, only the step numbers differing.
         if args.compare_stores:
