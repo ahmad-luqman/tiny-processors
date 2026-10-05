@@ -627,7 +627,7 @@ class RtlTest(unittest.TestCase):
             ("load from the done register", LI(1, DONE) + [LW(2, 1, 0)], 5, DONE),
             ("byte store to the done register", LI(1, DONE) + [SB(1, 1, 0)], 7, DONE),
             ("word store past the done register", LI(1, DONE) + [SW(1, 1, 4)], 7, DONE + 4),
-            ("store past the end of RAM", LI(1, RAM + 0x800000) + [SW(1, 1, 0)], 7, RAM + 0x800000),
+            ("store past the end of RAM", LI(1, RAM + 0x1000000) + [SW(1, 1, 0)], 7, RAM + 0x1000000),
             ("misaligned halfword load", LI(1, RAM + 0x201) + [LH(2, 1, 0)], 4, RAM + 0x201),
             ("misaligned halfword store", LI(1, RAM + 0x203) + [SH(1, 1, 0)], 6, RAM + 0x203),
             ("halfword load of the console status", LI(1, CONSOLE) + [LHU(2, 1, 4)], 5, CONSOLE + 4),
@@ -662,7 +662,7 @@ class RtlTest(unittest.TestCase):
             ("aligned halfword inside a device window", LI(1, MTIME + 2) + [LHU(2, 1, 0)], 5, MTIME + 2),
             ("load from the palette window reserved for M6", LI(1, 0x11003000) + [LW(2, 1, 0)], 5, 0x11003000),
             ("store to the palette window reserved for M6", LI(1, 0x11003000) + [SW(1, 1, 0)], 7, 0x11003000),
-            ("fetch from the first word past RAM", LI(1, RAM + 0x800000) + [JALR(0, 1, 0)], 1, RAM + 0x800000),
+            ("fetch from the first word past RAM", LI(1, RAM + 0x1000000) + [JALR(0, 1, 0)], 1, RAM + 0x1000000),
         ]
         for name, words, cause, value in cases:
             with self.subTest(name=name):

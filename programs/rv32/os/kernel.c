@@ -88,7 +88,7 @@ _Static_assert(FS_NAME == OS_FILE_NAME, "sys.h and fs.h agree on a file name's l
 #define PTE_A 0x40u /* every leaf has A and D: our hart never sets them (Svade), QEMU need not */
 #define PTE_D 0x80u
 #define SATP_SV32 0x80000000u
-#define PAGE_TABLES 5u /* per process table entry: the root and a level-0 table per 4 MiB touched */
+#define PAGE_TABLES 7u /* per process table entry: the root and a level-0 table per 4 MiB touched */
 
 /* A context: kentry.S knows these offsets. */
 struct frame {

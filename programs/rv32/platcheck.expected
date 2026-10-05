@@ -1,6 +1,6 @@
 platcheck: hart 0
 platcheck: model tiny-processors RV32 machine
-platcheck: memory 80000000 00800000
+platcheck: memory 80000000 01000000
 platcheck: done 00100000
 platcheck: console 10000000
 platcheck: clint 02000000
@@ -15,4 +15,4 @@ platcheck: simd4-program 11005000 00000400
 platcheck: simd4-data 11006000 00000400
 platcheck: g1 11007000 00000080
 platcheck: g2 11008000 00002000
-PASS 91659113
+PASS bee59113

@@ -3,7 +3,7 @@
  * One RAM region holds code, read-only data, initialized data, zeroed data,
  * and the stack. Load addresses equal run addresses, so the image is placed
  * in RAM exactly as linked and startup copies nothing. The contract RAM is
- * 8 MiB; this slice deliberately fits in the first 256 KiB (see board.h and
+ * 16 MiB; this slice deliberately fits in the first 256 KiB (see board.h and
  * docs/rv32.md).
  */
 OUTPUT_ARCH(riscv)

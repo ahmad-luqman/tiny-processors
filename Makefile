@@ -1259,7 +1259,7 @@ test-rv32: run-rv32-atom-qemu run-rv32-atom-emu run-rv32-atom-rtl run-rv32-atom-
 .PHONY: check-rv32-dtb check-rv32-virt-map check-rv32-platcheck-image test-rv32-platform
 .PHONY: run-rv32-platform-qemu run-rv32-platform-emu run-rv32-platform-rtl run-rv32-platform-rtl-verilator
 RV32_PLATCHECK_OBJS := build/rv32/platcheck.o build/rv32/fdt.o $(RV32_COMMON_OBJS)
-RV32_PLATCHECK_HEX := 91659113
+RV32_PLATCHECK_HEX := bee59113
 # QEMU 8.2 has no bare `rv32i` model; the generic CPU runs the RV32I image as is.
 RV32_PLATFORM_QEMU_CPU ?= rv32
 RV32_PLATFORM_ARGS := --image build/rv32/platcheck.bin --compare results --expect-last-line "PASS $(RV32_PLATCHECK_HEX)" --expect-console-file programs/rv32/platcheck.expected
@@ -1428,7 +1428,7 @@ RV32_OS_SLOT_libccheck := 6
 RV32_OS_SLOT_lua := 18
 RV32_OS_SPAN_lua := 6
 RV32_OS_STACK_lua := 0x28000
-# Issue #33: the slots 8 MiB added, from 24 on.
+# Issue #33: the slots 8 MiB added, from 24 on (issue #35 made RAM 16 MiB: slots 56 to 119).
 RV32_OS_SLOT_fpcheck := 24
 RV32_OS_SLOT_fpmate := 25
 RV32_OS_SLOT_mandel := 26

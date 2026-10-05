@@ -23,7 +23,7 @@
 /* Machine contract constants; keep in step with programs/rv32/board.h;
  * the graphics contract is imported from programs/rv32/gpu.h. */
 #define RAM_BASE 0x80000000u
-#define RAM_SIZE 0x00800000u
+#define RAM_SIZE 0x01000000u
 #define CONSOLE_BASE 0x10000000u
 #define CONSOLE_TX 0x0u      /* write: transmit; read: RBR, the next received byte (O2) */
 #define CONSOLE_STATUS 0x5u

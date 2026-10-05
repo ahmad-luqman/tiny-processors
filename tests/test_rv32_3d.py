@@ -447,8 +447,8 @@ class Raster(Reference):
 
     def test_zbase_is_validated_by_both_references(self):
         verts = [vertex(-.5, -.5), vertex(.5, -.5), vertex(0, .5)]
-        for zbase, ok in ((0x80040000, True), (0x80800000 - M.Z_BYTES, True), (0x80000000, True),
-                          (0x80040002, False), (0x7ffffffc, False), (0x80800000 - M.Z_BYTES + 4, False), (0, False)):
+        for zbase, ok in ((0x80040000, True), (0x81000000 - M.Z_BYTES, True), (0x80000000, True),
+                          (0x80040002, False), (0x7ffffffc, False), (0x81000000 - M.Z_BYTES + 4, False), (0, False)):
             py = self.draw(verts, [(0, 1, 2)], zbase=zbase)
             self.assertEqual(py['fault'] is None, ok, hex(zbase))
 

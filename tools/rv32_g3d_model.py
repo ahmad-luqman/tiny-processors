@@ -38,7 +38,7 @@ TMAX = 64
 DEPTH = 8            # mask-stack entries
 WIDTH, HEIGHT = 320, 240
 Z_BYTES = WIDTH * HEIGHT * 2
-RAM_BASE, RAM_SIZE = 0x80000000, 0x800000
+RAM_BASE, RAM_SIZE = 0x80000000, 0x1000000
 ONE = 1 << 16        # Q16.16
 W_NEAR = ONE >> 4    # 1/16
 GUARD = 4            # |x|,|y| <= GUARD*w

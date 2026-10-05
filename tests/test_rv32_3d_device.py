@@ -15,7 +15,7 @@ from tools.rv32_g3d_scene import SHADERS, constants, cube  # noqa: E402
 from tools.rv32_g3d_scene import passthrough, random_program, vertex  # noqa: E402
 
 BUILD = ROOT / 'build/g3d'
-RAM_ORIGIN, RAM_SIZE = 0x80000000, 0x800000
+RAM_ORIGIN, RAM_SIZE = 0x80000000, 0x1000000
 ZBASE = 0x80040000
 
 
@@ -175,11 +175,11 @@ class EmulatorDevice(unittest.TestCase):
     def test_parameter_and_index_faults(self):
         verts = [vertex(-.5, -.5), vertex(.5, -.5), vertex(0, .5)]
         for kw in ({'limit': 0}, {'limit': 0x10000}, {'vcount': 0}, {'vcount': 33}, {'zbase': ZBASE + 2},
-                   {'zbase': 0x7ffffffc}, {'zbase': 0x80800000 - M.Z_BYTES + 4}):
+                   {'zbase': 0x7ffffffc}, {'zbase': 0x81000000 - M.Z_BYTES + 4}):
             d, py = self.agree(passthrough(), [0] * 32, verts, [(0, 1, 2)], **kw)
             self.assertEqual(py['fault'].reason, M.E_PARAM)
         self.agree(passthrough(), [0] * 32, verts, [(0, 1, 2), (0, 1, 3)])
-        self.agree(passthrough(), [0] * 32, verts, [(0, 1, 2)], zbase=0x80800000 - M.Z_BYTES)
+        self.agree(passthrough(), [0] * 32, verts, [(0, 1, 2)], zbase=0x81000000 - M.Z_BYTES)
 
     def test_clear_z(self):
         d = Device(self.lib)

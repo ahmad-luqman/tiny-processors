@@ -29,7 +29,7 @@
 // (DEVICE_NEEDS_RESET) and stops. tools/rv32emu_core.c runs the same steps.
 module rv32_virtio_blk #(
     parameter integer DISK_WORDS = 32768,   // 128 KiB: 256 sectors
-    parameter integer RAM_WORDS = 2097152,
+    parameter integer RAM_WORDS = 4194304,
     parameter [31:0] RAM_BASE = 32'h8000_0000
 ) (
     input  wire        clk,

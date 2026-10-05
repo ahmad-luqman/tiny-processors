@@ -32,11 +32,11 @@
 #define RV32_SIMD4_START             0x01
 #define RV32_SIMD4_RESET             0x02
 
-/* RAM: 8 MiB (4 MiB before issue #33); the M1 firmware image, .bss, and stack fit in the
+/* RAM: 16 MiB (4 MiB before issue #33, 8 MiB before issue #35); the M1 firmware image, .bss, and stack fit in the
  * first 256 KiB so a small emulator or RTL memory can run the same ELF. */
 #define RV32_RAM_BASE          0x80000000
 #define RV32_RAM_SLICE_SIZE    0x00040000
-#define RV32_RAM_PLANNED_SIZE  0x00800000
+#define RV32_RAM_PLANNED_SIZE  0x01000000
 
 /* Debug console: write one byte to TX. STATUS bit 5 reads 1 when TX can
  * accept a byte; in our machine it is always 1. Compatible with the 16550

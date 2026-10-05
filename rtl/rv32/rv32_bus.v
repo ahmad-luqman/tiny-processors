@@ -17,7 +17,7 @@
 // one term in each of the three OR-reductions below. Forgetting `none_sel`
 // makes the new window answer as unmapped (`error`) and as its slave at once.
 module rv32_bus #(
-    parameter integer RAM_WORDS = 2097152,
+    parameter integer RAM_WORDS = 4194304,
     parameter integer FB_WORDS = 19200
 ) (
     // Core side.

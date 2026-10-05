@@ -395,7 +395,7 @@ class QemuDriverTests(unittest.TestCase):
                                        "-kernel", "fw.elf"])
         self.assertIn("-no-reboot", command)
         self.assertNotIn("-no-shutdown", command)
-        self.assertEqual(command[command.index("-m") + 1], "8M")
+        self.assertEqual(command[command.index("-m") + 1], "16M")
         self.assertEqual(command[command.index("-monitor") + 1], "none")
         self.assertNotIn("-d", command)
         self.assertIn("-D", qemu_command("q", "fw.elf", log="q.log"))

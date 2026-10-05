@@ -9,7 +9,7 @@
 // word, a present) leave as strobes and the host's key events come in
 // through the input push port; the host decides what they mean.
 module rv32_soc #(
-    parameter integer RAM_WORDS = 2097152,
+    parameter integer RAM_WORDS = 4194304,
     parameter integer FB_WORDS = 19200, // 320 x 240 one-byte pixels, as 32-bit words
     parameter integer CONSOLE_BUSY = 0,
     parameter integer DISK_WORDS = 32768  // the virtio-blk disk (O3): 128 KiB

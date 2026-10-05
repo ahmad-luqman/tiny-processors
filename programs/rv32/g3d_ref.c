@@ -223,8 +223,8 @@ uint32_t g3d_reference(uint8_t *fb, uint16_t *zbuf, const struct g3d_job *job, s
     c->error=c->fault_pc=c->instructions=c->transfers=0;
     c->divides=c->pixels=c->zfail=c->culled=0;
     c->cycles=1;   /* validate */
-    /* ZBASE: word aligned, and its 153,600 bytes inside the 8 MiB RAM at 0x80000000. */
-    int zbase_ok=(job->zbase&3u)==0 && job->zbase>=0x80000000u && job->zbase-0x80000000u<=0x800000u-320u*240u*2u;
+    /* ZBASE: word aligned, and its 153,600 bytes inside the 16 MiB RAM at 0x80000000. */
+    int zbase_ok=(job->zbase&3u)==0 && job->zbase>=0x80000000u && job->zbase-0x80000000u<=0x1000000u-320u*240u*2u;
     if (!zbase_ok || job->vcount<1 || job->vcount>G3D_VMAX || job->tcount>G3D_TMAX || job->limit<1 || job->limit>0xffffu
         || job->program_words>G3D_PROGRAM_WORDS)
         return c->error=G3D_E_PARAM;
