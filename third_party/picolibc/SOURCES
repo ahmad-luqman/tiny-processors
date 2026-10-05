@@ -141,3 +141,11 @@ newlib/libc/machine/riscv/setjmp.S
 newlib/libc/machine/riscv/strcmp.S
 newlib/libc/machine/riscv/strcpy.c
 newlib/libc/machine/riscv/strlen.c
+newlib/libc/stdlib/atof.c
+newlib/libc/stdlib/atoi.c
+newlib/libc/tinystdio/putchar.c
+newlib/libc/string/strcasecmp.c
+newlib/libc/string/strdup.c
+newlib/libc/string/strncasecmp.c
+newlib/libc/string/strncpy.c
+newlib/libc/tinystdio/vsnprintf.c

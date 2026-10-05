@@ -1,5 +1,6 @@
 """Unit tests for the RV32 image checker and QEMU driver; no cross toolchain needed."""
 
+import io
 import json
 from pathlib import Path
 import re
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from tools.rv32_asm import (ADDI, AMO_OPS, AMOADD_W, AMOSWAP_W, BOOTROM, CLINT, CONSOLE, CSRRC, CSRRS, CSRRWI, DISPLAY,
                             DONE, FB, INPUT, PALETTE, LR_W, LW, MSTATUS, PLIC, RAM, SC_W, VIRTIO, i_type, r_type)
@@ -779,10 +781,10 @@ class TestHarnessTests(unittest.TestCase):
 
 
 class VendoredSourcesTest(unittest.TestCase):
-    """Track 3: picolibc, compiler-rt and Lua match their SHA256SUMS.json manifests, as SoftFloat
+    """Track 3: picolibc, compiler-rt, Lua and doomgeneric (issue #35) match their SHA256SUMS.json manifests, as SoftFloat
     and MNIST are checked against theirs (docs/rv32-libc.md)."""
 
-    DIRECTORIES = ("third_party/picolibc", "third_party/compiler-rt", "third_party/lua")
+    DIRECTORIES = ("third_party/picolibc", "third_party/compiler-rt", "third_party/lua", "third_party/doomgeneric")
 
     def test_each_directory_matches_its_manifest(self):
         root = Path(__file__).resolve().parents[1]
@@ -838,3 +840,47 @@ class FloatingClaimTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DoomFetchTest(unittest.TestCase):
+    """Issue #35: tools/rv32_doom.py takes the shareware WAD out of Debian's package and refuses
+    anything that is not the pinned file, without the network."""
+
+    @staticmethod
+    def ar(members):
+        blob = b"!<arch>\n"
+        for name, data in members.items():
+            blob += f"{name + '/':<16}{0:<12}{0:<6}{0:<6}{'100644':<8}{len(data):<10}`\n".encode() + data
+            blob += b"\n" if len(data) % 2 else b""
+        return blob
+
+    def package(self, wad):
+        import lzma
+        import tarfile
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as tar:
+            for name, data in (("./usr/share/games/doom/doom1.wad", wad), ("./usr/share/doc/doom-wad-shareware/copyright", b"c")):
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        return self.ar({"debian-binary": b"2.0\n", "control.tar.xz": b"", "data.tar.xz": lzma.compress(buffer.getvalue())})
+
+    def test_extract_and_refusals(self):
+        from tools import rv32_doom
+        files = rv32_doom.extract(self.package(b"odd-length wad"))
+        self.assertEqual(files, {"doom1.wad": b"odd-length wad", "copyright": b"c"})
+        with self.assertRaisesRegex(rv32_doom.FetchError, "not an ar archive"):
+            rv32_doom.extract(b"PK\x03\x04")
+        with self.assertRaisesRegex(rv32_doom.FetchError, "no data.tar.xz"):
+            rv32_doom.extract(self.ar({"debian-binary": b"2.0\n"}))
+
+    def test_check_names_the_fetch_target(self):
+        from tools import rv32_doom
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(rv32_doom, "WAD", Path(directory) / "doom1.wad"), \
+                mock.patch.object(rv32_doom, "ROOT", Path(directory)):
+            with self.assertRaisesRegex(rv32_doom.FetchError, "missing: run `make fetch-rv32-doom-wad`"):
+                rv32_doom.check()
+            (Path(directory) / "doom1.wad").write_bytes(b"not the shareware WAD")
+            with self.assertRaisesRegex(rv32_doom.FetchError, "not the pinned shareware v1.9"):
+                rv32_doom.check()

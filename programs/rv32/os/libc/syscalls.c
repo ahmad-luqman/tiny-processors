@@ -12,7 +12,9 @@
  *   gettimeofday     the epoch, with no system call: there is no real-time clock
  *   times            the low word of mtime, in device ticks (see times())
  *   unlink, rename,
- *   stat, getentropy not provided by the kernel: ENOSYS
+ *   stat, mkdir,
+ *   getentropy       not provided by the kernel: ENOSYS (mkdir since issue #35:
+ *                    Doom makes its save directory, and tfs has none)
  *
  * A failed call sets errno and returns -1 as POSIX says. Streams the program
  * opened and never closed are flushed when it exits (the end of this file). */
@@ -241,6 +243,13 @@ int stat(const char *restrict name, struct stat *restrict st)
 {
     (void)name;
     (void)st;
+    return fail(ENOSYS);
+}
+
+int mkdir(const char *name, mode_t mode)
+{
+    (void)name;
+    (void)mode;
     return fail(ENOSYS);
 }
 
