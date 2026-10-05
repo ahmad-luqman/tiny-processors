@@ -1953,22 +1953,22 @@ test-rv32-slow: run-rv32-doom35-rtl-verilator
 # Docker (7 minutes from a filled download cache) into the git-ignored third_party/linux/ and holds it to a
 # pinned SHA-256; the targets below need it, and build it if it is missing or stale. The session's
 # lines reach the shell one at a time, each once the prompt is printed (--console-prompt and
-# --prompt), so the transcript reads as typed. QEMU's transcript is pinned on its own: a few lines
-# name QEMU's CPU (docs/rv32-linux.md lists them).
+# --prompt), so the transcript reads as typed. QEMU's transcript is pinned on its own: one line
+# differs, /proc/cpuinfo's marchid, which names QEMU's CPU.
 .PHONY: rv32-linux-image check-rv32-linux-image run-rv32-linux-qemu run-rv32-linux-emu run-rv32-linux-rtl-verilator test-rv32-linux
 RV32_LINUX := programs/rv32/linux
 RV32_LINUX_IMAGE := third_party/linux/Image
-RV32_LINUX_ARGS = --image $(RV32_LINUX_IMAGE) --console-input $(RV32_LINUX)/linux.session --console-prompt '/ \# ' \
+RV32_LINUX_PROMPT := '/ \# '
+RV32_LINUX_ARGS = --image $(RV32_LINUX_IMAGE) --console-input $(RV32_LINUX)/linux.session --console-prompt $(RV32_LINUX_PROMPT) \
 	--compare outputs --ticks steps --allow-traps --limit 200000000 --timeout 3600 \
 	--expect-console-file $(RV32_LINUX)/linux.session.expected
 rv32-linux-image:
 	$(PYTHON) tools/rv32_linux.py --build
 check-rv32-linux-image:
 	$(PYTHON) tools/rv32_linux.py --check
-run-rv32-linux-qemu: rv32-linux-image | build/rv32
-	mkdir -p build/rv32/linux
+run-rv32-linux-qemu: rv32-linux-image
 	$(PYTHON) tools/rv32_run_qemu.py $(RV32_LINUX_IMAGE) --qemu $(QEMU_RV32) --cpu rv32,mmu=false --icount 3 \
-		--stdin $(RV32_LINUX)/linux.session --prompt '/ # ' --status-only --timeout 300 --transcript build/rv32/linux/qemu.transcript
+		--stdin $(RV32_LINUX)/linux.session --prompt $(RV32_LINUX_PROMPT) --status-only --timeout 300 --transcript build/rv32/linux/qemu.transcript
 	diff -u $(RV32_LINUX)/linux.session.qemu.expected build/rv32/linux/qemu.transcript
 run-rv32-linux-emu: rv32-linux-image $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(RV32_LINUX_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32/linux/emu

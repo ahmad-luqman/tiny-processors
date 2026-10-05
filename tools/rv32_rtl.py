@@ -525,7 +525,8 @@ def main():
                         help="input script delivered to both backends (docs/rv32.md, Input); not a file under --out")
     parser.add_argument("--frames", type=Path, help="directory for the emulator's frame-NNNN.ppm pictures")
     parser.add_argument("--console-input", type=Path,
-                        help="bytes both backends' consoles receive, all waiting from reset (O2); not a file under --out")
+                        help="bytes both backends' consoles receive, all waiting from reset (O2) unless --console-prompt "
+                             "gates them; not a file under --out")
     parser.add_argument("--console-prompt",
                         help="make line k of --console-input visible only once the guest has sent this k times (issue #36)")
     parser.add_argument("--limit", type=int, help="the emulator's instruction limit (default: its own)")
@@ -665,7 +666,7 @@ def main():
         sys.exit("--compare results is for a program that reads the timer, the cycle/time counters or accelerator registers, "
                  "or takes interrupts, with cycle ticks; this one does not, use --compare trace")
     if args.expect_console_file is not None:
-        args.expect_console = args.expect_console_file.read_bytes().decode().rstrip("\n")  # bytes: keep a guest's \r (Linux sends \r\n)
+        args.expect_console = args.expect_console_file.read_text(newline="").rstrip("\n")  # keep Linux's \r\n
     if args.expect_console is not None and emulator.console.rstrip("\n") != args.expect_console:
         sys.exit(f"emulator console {emulator.console!r} is not {args.expect_console!r}")
     last_line = emulator.console.rstrip("\n").rsplit("\n", 1)[-1]

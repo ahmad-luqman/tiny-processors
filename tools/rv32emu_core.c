@@ -195,26 +195,22 @@ static void console_poll_stdin(machine *m)
 static bool console_rx_waiting(machine *m)
 {
     console_poll_stdin(m);
-    return m->console_in_next < (m->console_prompt_len ? m->console_in_limit : m->console_in_len);
+    return m->console_in_next < m->console_in_len &&
+           (!m->console_prompt_len || m->console_lines_taken < m->console_prompts_seen);
 }
 
-/* --console-prompt: after each byte sent, a match of the prompt makes the next input line visible. */
+/* --console-prompt: each byte sent shifts into the tail; every match releases one more input line. */
 static void console_watch_prompt(machine *m, uint8_t byte)
 {
     size_t n = m->console_prompt_len;
-    if (m->console_tail_len == n) {
-        memmove(m->console_tail, m->console_tail + 1, n - 1);
-        m->console_tail_len--;
+    memmove(m->console_tail, m->console_tail + 1, n - 1);
+    m->console_tail[n - 1] = byte;
+    if (m->console_tail_len < n) {
+        m->console_tail_len++;
     }
-    m->console_tail[m->console_tail_len++] = byte;
-    if (m->console_tail_len < n || memcmp(m->console_tail, m->console_prompt, n) != 0) {
-        return;
+    if (m->console_tail_len == n && memcmp(m->console_tail, m->console_prompt, n) == 0) {
+        m->console_prompts_seen++;
     }
-    size_t at = m->console_in_limit;
-    while (at < m->console_in_len && m->console_in[at] != '\n') {
-        at++;
-    }
-    m->console_in_limit = at < m->console_in_len ? at + 1 : m->console_in_len;
 }
 
 /* The console (docs/rv32.md, "Console"): the subset of a 16550 that Linux's 8250 driver drives
@@ -234,7 +230,13 @@ static mem_access console_load(machine *m, uint32_t offset, int width, uint32_t 
             *value = m->console_dll;
             m->console_latched++; /* no byte is taken: reported if DLAB is still set at the halt */
         } else {
-            *value = console_rx_waiting(m) ? m->console_in[m->console_in_next++] : 0u;
+            if (console_rx_waiting(m)) {
+                uint8_t b = m->console_in[m->console_in_next++];
+                m->console_lines_taken += b == '\n';
+                *value = b;
+            } else {
+                *value = 0u;
+            }
         }
         return ACC_OK;
     case CONSOLE_IER: *value = dlab ? m->console_dlm : m->console_ier; return ACC_OK;
@@ -2257,6 +2259,10 @@ void emu_read_input_script(machine *m, const char *path)
 void emu_set_console_prompt(machine *m, const char *prompt)
 {
     size_t n = strlen(prompt);
+    if (m->console_stdin) { /* stdin replaces the buffer as it arrives; the gate counts lines of a file */
+        fprintf(stderr, "%s: --console-prompt gates a --console-input file\n", emu_prog);
+        exit(EXIT_EMULATOR_ERROR);
+    }
     if (n == 0 || n > sizeof m->console_prompt) {
         fprintf(stderr, "%s: --console-prompt must be 1 to %zu bytes\n", emu_prog, sizeof m->console_prompt);
         exit(EXIT_EMULATOR_ERROR);
@@ -2268,6 +2274,10 @@ void emu_set_console_prompt(machine *m, const char *prompt)
 void emu_read_console_input(machine *m, const char *path)
 {
     if (strcmp(path, "-") == 0) {
+        if (m->console_prompt_len) {
+            fprintf(stderr, "%s: --console-prompt gates a --console-input file\n", emu_prog);
+            exit(EXIT_EMULATOR_ERROR);
+        }
         m->console_stdin = true;
         return;
     }
@@ -2465,6 +2475,11 @@ int emu_report_halt(const machine *m, size_t loaded)
     if (m->console_lcr & CONSOLE_LCR_DLAB) {
         fprintf(stderr, "%s: warning: the console ended with LCR.DLAB set; %" PRIu64 " byte(s) since went to the "
                 "divisor latch and were not sent or taken\n", emu_prog, m->console_latched);
+    }
+    if (m->console_prompt_len && m->console_in_next < m->console_in_len) { /* a prompt that never came */
+        fprintf(stderr, "%s: console input: %zu of %zu byte(s) taken; the prompt was sent %" PRIu64 " time(s), %" PRIu64
+                " line(s) taken\n", emu_prog, m->console_in_next, m->console_in_len, m->console_prompts_seen,
+                m->console_lines_taken);
     }
     int status = EXIT_EMULATOR_ERROR;
     fprintf(stderr, "%s: halt=%s steps=%" PRIu64 " retired=%" PRIu64 " traps=%" PRIu64, emu_prog,

@@ -56,7 +56,7 @@ INPUT_IRQ = rv32_asm.PLIC_SOURCE_INPUT
 VIRTIO_BASE, VIRTIO_SIZE, VIRTIO_IRQ = rv32_asm.VIRTIO, rv32_asm.VIRTIO_SIZE, rv32_asm.PLIC_SOURCE_VIRTIO
 # Interrupt wiring (O1): phandles of the hart's local interrupt controller and of the PLIC, and the
 # mip bit numbers each connection raises.
-CPU_INTC, PLIC_PHANDLE = 1, 2
+CPU_INTC, PLIC_PHANDLE, DONE_PHANDLE = 1, 2, 3  # DONE_PHANDLE: Linux's tree (issue #36)
 IRQ_MSI, IRQ_MTI, IRQ_MEI = 3, 7, 11
 INPUT_BASE = rv32_asm.INPUT
 DISPLAY_BASE = rv32_asm.DISPLAY
@@ -160,7 +160,9 @@ MACHINE = node("", {
 LINUX_TIMEBASE = 10_000_000
 LINUX_UART_CLOCK = 3_686_400   # a common 16550 crystal; the divisor it implies sets no rate here
 LINUX_ISA_EXTENSIONS = ("i", "m", "a", "zicsr", "zicntr", "zifencei")
-LINUX_DONE_PHANDLE = 3
+# riscv,isa spells the same list: the single letters after "rv32", then the rest joined by "_".
+LINUX_ISA = "rv32" + "".join(e for e in LINUX_ISA_EXTENSIONS if len(e) == 1) + \
+    "".join("_" + e for e in LINUX_ISA_EXTENSIONS if len(e) > 1)
 LINUX_POWEROFF_WORD = 0x5555  # the done register's pass word (docs/rv32.md, "Done register")
 LINUX = node("", {
     "#address-cells": u32(1), "#size-cells": u32(1),
@@ -170,18 +172,18 @@ LINUX = node("", {
     node("chosen", {"stdout-path": string(f"/soc/serial@{CONSOLE_BASE:x}")}),
     node("cpus", {"#address-cells": u32(1), "#size-cells": u32(0), "timebase-frequency": u32(LINUX_TIMEBASE)},
          node("cpu@0", {"device_type": string("cpu"), "reg": u32(0), "compatible": string("riscv"),
-                        "riscv,isa": string("rv32ima_zicsr_zicntr_zifencei"),
+                        "riscv,isa": string(LINUX_ISA),
                         "riscv,isa-base": string("rv32i"),
                         "riscv,isa-extensions": string(*LINUX_ISA_EXTENSIONS), "status": string("okay")},
               node("interrupt-controller", {"#interrupt-cells": u32(1), "interrupt-controller": b"",
                                             "compatible": string("riscv,cpu-intc"), "phandle": u32(CPU_INTC)}))),
     node(f"memory@{RAM_BASE:x}", {"device_type": string("memory"), "reg": u32(RAM_BASE, RAM_SIZE)}),
-    node("poweroff", {"compatible": string("syscon-poweroff"), "regmap": u32(LINUX_DONE_PHANDLE),
+    node("poweroff", {"compatible": string("syscon-poweroff"), "regmap": u32(DONE_PHANDLE),
                       "offset": u32(0), "value": u32(LINUX_POWEROFF_WORD)}),
     node("soc", {"#address-cells": u32(1), "#size-cells": u32(1),
                  "compatible": string("simple-bus"), "ranges": b""},
          device("test", DONE_BASE, ("sifive,test0", "syscon"), ((DONE_BASE, 4),),
-                {"phandle": u32(LINUX_DONE_PHANDLE)}),
+                {"phandle": u32(DONE_PHANDLE)}),
          device("clint", CLINT_BASE, ("riscv,clint0",), ((CLINT_BASE, CLINT_SIZE),),
                 {"interrupts-extended": u32(CPU_INTC, IRQ_MSI, CPU_INTC, IRQ_MTI)}),
          device("serial", CONSOLE_BASE, ("ns16550a",), ((CONSOLE_BASE, 8),),
@@ -414,7 +416,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--write", action="store_true", help="refresh tools/rv32_dtb.h and rtl/rv32/rv32_bootrom.v")
     parser.add_argument("--check", action="store_true", help="fail when the committed copies are stale")
     parser.add_argument("--dts", action="store_true", help="print the tree")
-    parser.add_argument("--linux-dtb", type=Path, help="write Linux's tree (issue #36) here")
     parser.add_argument("--linux-dts", action="store_true", help="print Linux's tree")
     args = parser.parse_args(argv)
     blob = build(MACHINE)
@@ -436,9 +437,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"rv32_dtb: {len(blob)}-byte blob; {C_HEADER.name} and {VERILOG.name} are up to date")
     if args.dts:
         print(dts(parse(blob)))
-    if args.linux_dtb:
-        args.linux_dtb.parent.mkdir(parents=True, exist_ok=True)
-        args.linux_dtb.write_bytes(build(LINUX))
     if args.linux_dts:
         print(dts(parse(build(LINUX))))
     return 0

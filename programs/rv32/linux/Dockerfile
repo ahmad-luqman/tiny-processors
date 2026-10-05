@@ -11,6 +11,6 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
     bc bison build-essential bzip2 ca-certificates cpio device-tree-compiler file findutils flex git gzip \
     libncurses-dev patch perl python3 rsync tar unzip wget which xz-utils \
  && rm -rf /var/lib/apt/lists/*
-RUN useradd -m -u 1000 builder && mkdir /build /out && chown builder /build /out
+RUN useradd -m -u 1000 builder && mkdir /build /dl && chown builder /build /dl
 USER builder
 WORKDIR /build

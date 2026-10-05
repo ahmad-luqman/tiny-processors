@@ -809,6 +809,30 @@ class RtlTest(unittest.TestCase):
         x = registers(rtl.trace)
         self.assertEqual({r: x[r] for r in expected}, expected)
 
+    def test_console_prompt_edges(self):
+        """Issue #36: the gate's edges (test_rv32_emu's console_prompt_edges_program) on both
+        backends: overlapping prompts, a last line without a newline, a prompt byte under DLAB."""
+        from test_rv32_emu import console_prompt_edges_program
+        words, expected = console_prompt_edges_program()
+        emulator, rtl = self.assert_same_pass(words + FINISH(), stall=1, console_input=b"x\ny\nz", console_prompt="aa")
+        x = registers(rtl.trace)
+        self.assertEqual({r: x[r] for r in expected}, expected)
+
+    def test_console_prompt_options_are_checked(self):
+        """Issue #36: the testbench refuses +console-prompt-hex without +console-input, as the emulator
+        refuses --console-prompt without a file, and a prompt that is not whole hex bytes."""
+        with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
+            hex_path, _ = write_image(FINISH(), directory, "image")
+            source = Path(directory) / "in.txt"
+            source.write_bytes(b"x\n")
+            for extra, message in ((["+console-prompt-hex=3e20"], "gates +console-input"),
+                                   ([f"+console-input={source}", "+console-prompt-hex=3e2"], "must be 2 to 128 hex digits")):
+                with self.subTest(message=message):
+                    command = simulator_command(self.simulator, hex_path) + extra
+                    completed = subprocess.run(command, capture_output=True, text=True, timeout=RTL_TIMEOUT)
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertIn(message, completed.stdout + completed.stderr)
+
     def test_timer_ticks_are_clock_cycles(self):
         """Device time (docs/rv32.md): on the RTL a read of mtime's low word (the M5 timer's TICKS
         until Track 1) returns the number of the cycle that accepts it, so the value is hand-computed from the state machine; the emulator reads its

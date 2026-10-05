@@ -1,5 +1,6 @@
-# Linux 6.12.27 on top of tinyconfig (issue #36, docs/rv32-linux.md). build.sh merges this into
-# allnoconfig with tiny.config and saves the result as /build/gen/linux.config.
+# Linux 6.12.27 on top of tinyconfig (issue #36, docs/rv32-linux.md). build.sh merges this with
+# tinyconfig's fragments (kernel/configs/tiny-base.config and tiny.config) on allnoconfig, checks
+# that every line here stuck, and saves the result as /build/gen/linux.config.
 # M-mode nommu RV32IMA: no C, no FPU (F alone; Linux needs D), one hart.
 CONFIG_ARCH_RV32I=y
 # CONFIG_MMU is not set

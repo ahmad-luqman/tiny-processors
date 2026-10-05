@@ -89,6 +89,20 @@ def console_prompt_program():
     return words, {6: 0x60, 8: 0x61, 9: ord("a"), 10: 0x0A, 11: 0x60, 12: 0x60, 13: ord("b"), 14: 0x0A}
 
 
+def console_prompt_edges_program():
+    """Issue #36, the gate's edges, with --console-prompt "aa" and the input "x\ny\nz" (no last
+    newline): "aaa" holds two overlapping prompts and releases two lines; an "a" stored under DLAB
+    goes to the divisor latch, not the tail; the next "a" completes a third prompt and releases "z";
+    then more prompts than lines release nothing. Returns the words (no FINISH) and the registers."""
+    send = lambda *chars: [w for c in chars for w in LI(7, ord(c)) + [SB(7, 5, 0)]]  # noqa: E731
+    words = LI(5, CONSOLE) + send("a", "a", "a")
+    words += [LBU(6, 5, 0), LBU(8, 5, 0), LBU(9, 5, 0), LBU(10, 5, 0), LBU(11, 5, 5)]  # x \n y \n; nothing more
+    words += LI(7, 0x80) + [SB(7, 5, 3)] + send("a") + LI(7, 0x03) + [SB(7, 5, 3), LBU(12, 5, 5)]  # DLAB: not a prompt
+    words += send("a") + [LBU(13, 5, 0), LBU(14, 5, 5)]                                # "z", then input exhausted
+    words += send("a", "a") + [LBU(15, 5, 5)]                                          # prompts beyond the lines
+    return words, {6: ord("x"), 8: 0x0A, 9: ord("y"), 10: 0x0A, 11: 0x60, 12: 0x60, 13: ord("z"), 14: 0x60, 15: 0x60}
+
+
 def machine_information_program():
     """Issue #36: misa ignores writes of every kind, the four ID CSRs read 0, fence.i retires, and
     the done register reads 0. Uses x7 and x21-x28."""
@@ -531,6 +545,29 @@ class EmulatorTest(unittest.TestCase):
                     result = self.run_words(FINISH(), extra=extra)
                     self.assertEqual(result.status, 2)
                     self.assertIn(message, result.stderr)
+
+    def test_console_prompt_edges(self):
+        """Issue #36: overlapping prompts, a last line without a newline, a prompt byte under DLAB and
+        prompts beyond the input (console_prompt_edges_program); an empty line is a line; a prompt is
+        1 to 64 bytes; and a run that ends with input unrevealed says so."""
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "in.txt"
+            source.write_bytes(b"x\ny\nz")
+            words, expected = console_prompt_edges_program()
+            result = self.run_pass(words, extra=("--console-input", str(source), "--console-prompt", "aa"))
+            self.assertEqual({r: result.state.x[r] for r in expected}, expected)
+            self.assertNotIn("console input:", result.stderr, "every byte was taken")
+            source.write_bytes(b"\nq\n")
+            reads = LI(5, CONSOLE) + LI(7, ord(">")) + [SB(7, 5, 0), LBU(6, 5, 0), LBU(8, 5, 5)]
+            result = self.run_pass(reads, extra=("--console-input", str(source), "--console-prompt", ">"))
+            self.assertEqual((result.state.x[6], result.state.x[8]), (0x0A, 0x60), "an empty line is one line")
+            self.assertIn("console input: 1 of 3 byte(s) taken; the prompt was sent 1 time(s), 1 line(s) taken",
+                          result.stderr, "input left unrevealed is reported")
+            result = self.run_pass([], extra=("--console-input", str(source), "--console-prompt", "y" * 64))
+            self.assertEqual(result.status, 0, "64 bytes is the longest prompt")
+            result = self.run_words(FINISH(), extra=("--console-input", str(source), "--console-prompt", ""))
+            self.assertEqual(result.status, 2)
+            self.assertIn("1 to 64 bytes", result.stderr)
 
     def test_machine_information_csrs_fence_i_and_done_read(self):
         """Issue #36 (machine_information_program); and a write to a read-only ID register traps."""

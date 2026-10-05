@@ -26,7 +26,7 @@ Calibrating delay loop (skipped), value calculated using timer frequency.. 20.00
 pid_max: default: 32768 minimum: 301
 Mount-cache hash table entries: 1024 (order: 0, 4096 bytes, linear)
 Mountpoint-cache hash table entries: 1024 (order: 0, 4096 bytes, linear)
-Memory: 13260K/16384K available (1212K kernel code, 445K rwdata, 140K rodata, 785K init, 163K bss, 2936K reserved, 0K cma-reserved)
+Memory: 13260K/16384K available (1209K kernel code, 451K rwdata, 140K rodata, 782K init, 163K bss, 2936K reserved, 0K cma-reserved)
 devtmpfs: initialized
 clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 19112604462750000 ns
 futex hash table entries: 256 (order: -1, 3072 bytes, linear)

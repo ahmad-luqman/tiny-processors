@@ -127,12 +127,12 @@ int main(int argc, char **argv)
     if (input_path) {
         emu_read_input_script(&m, input_path); /* exits on a bad script */
     }
-    if (console_prompt && (!console_input || !strcmp(console_input, "-"))) {
-        fputs("rv32emu: --console-prompt gates a --console-input file\n", stderr);
-        return EXIT_EMULATOR_ERROR;
-    }
     if (console_prompt) {
-        emu_set_console_prompt(&m, console_prompt); /* exits on an empty or overlong prompt */
+        if (!console_input) {
+            fputs("rv32emu: --console-prompt gates a --console-input file\n", stderr);
+            return EXIT_EMULATOR_ERROR;
+        }
+        emu_set_console_prompt(&m, console_prompt); /* exits on stdin input, an empty or an overlong prompt */
     }
     if (console_input) {
         emu_read_console_input(&m, console_input); /* exits on an unreadable file */

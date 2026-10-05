@@ -1,5 +1,6 @@
 # Buildroot's configuration (issue #36, docs/rv32-linux.md). Upstream's
-# qemu_riscv32_nommu_virt_defconfig, with:
+# qemu_riscv32_nommu_virt_defconfig, without its ext2 image, host QEMU, post-image script, DHCP
+# and getty, and with:
 # - the ISA narrowed to our RV32IMA (no F, D or C);
 # - the root file system built into the kernel as an initramfs;
 # - Linux and busybox configured from the fragments beside this file (build.sh writes the

@@ -22,8 +22,8 @@ from tools.rv32_devices import (DIAG_EXPECTED_VALUES, EVENT_PRESS, EVENT_VALID, 
                                 event_word, frame_hash, is_decimal, key_code, parse_input_script, render_diag_frame)
 from tools.rv32_image import (ImageError, check_a_build, check_image, check_listing, check_m_build, flatten, parse_elf,
                               to_hex_words)
-from tools.rv32_run_qemu import classify, qemu_command
-from tools import rv32_doom, rv32_mkfs, rv32_vendor_libc
+from tools.rv32_run_qemu import PromptCounter, classify, classify_status, input_lines, qemu_command, run_gated
+from tools import rv32_doom, rv32_linux, rv32_mkfs, rv32_vendor_libc
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -648,6 +648,18 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertEqual(rv32_dtb.cells(poweroff.props["regmap"]), rv32_dtb.cells(soc.child(f"test@{rv32_asm.DONE:x}").props["phandle"]))
         self.assertEqual(rv32_dtb.cells(poweroff.props["value"]), [0x5555])
         self.assertEqual(rv32_dtb.main(["--check"]), 0, "the boot ROM's tree is unchanged")
+        handles = []
+
+        def walk(node):
+            if "phandle" in node.props:
+                handles.extend(rv32_dtb.cells(node.props["phandle"]))
+            for child in node.children:
+                walk(child)
+        walk(tree)
+        self.assertEqual(len(handles), len(set(handles)), "phandles are unique in the tree")
+        stdout = rv32_dtb.strings_of(tree.child("chosen").props["stdout-path"])[0]
+        self.assertEqual(stdout, f"/soc/{serial.name}", "the console Linux writes to is the serial node")
+        self.assertEqual(rv32_dtb.strings_of(cpu.props["riscv,isa"]), ["rv32ima_zicsr_zicntr_zifencei"])
 
     def test_window_bases_and_sizes_agree_everywhere(self):
         """Review on PR #18: the map check proves our windows avoid virt's using the device tree's
@@ -957,3 +969,133 @@ class DoomFetchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# A stand-in for QEMU in the gated runner's tests: it prints PROMPT, then waits for a line and echoes
+# it, COUNT times, then exits with STATUS; it never waits for input before printing the prompt.
+FAKE_GUEST = """
+import os, sys
+prompt, count, status = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+for _ in range(count):
+    sys.stdout.write(prompt); sys.stdout.flush()
+    line = os.read(0, 4096)
+    sys.stdout.write("got " + repr(line) + "\\r\\n"); sys.stdout.flush()
+sys.exit(status)
+"""
+
+
+class GatedQemuRunnerTests(unittest.TestCase):
+    """Issue #36: tools/rv32_run_qemu.py's --prompt feeds a line per prompt the guest prints, as the
+    emulator's and the testbench's gates release them, and --status-only judges the exit status."""
+
+    def gated(self, data, prompt, count, status=0, timeout=10, script=FAKE_GUEST):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "in"
+            source.write_bytes(data)
+            return run_gated([sys.executable, "-c", script, prompt, str(count), str(status)], timeout, source, prompt)
+
+    def test_lines_split_after_newlines_only(self):
+        self.assertEqual(input_lines(b"a\nb\rc\n\nd"), [b"a\n", b"b\rc\n", b"\n", b"d"])
+        self.assertEqual(input_lines(b""), [])
+
+    def test_prompts_are_counted_with_overlaps_across_pieces(self):
+        counter = PromptCounter(b"aa")
+        for piece in (b"a", b"aa", b"xa", b"a"):
+            counter.feed(piece)
+        self.assertEqual(counter.seen, 3, "aaa holds two overlapping matches, and one spans two pieces")
+
+    def test_each_line_is_fed_after_its_prompt(self):
+        run = self.gated(b"one\ntwo", "> ", 2)
+        self.assertEqual((run.status, run.timed_out, run.fed, run.lines), (0, False, 2, 2))
+        self.assertEqual(run.stdout, "> got b'one\\n'\r\n> got b'two'\r\n", "the last line keeps no newline; \\r\\n survives")
+
+    def test_a_missing_prompt_times_out_and_says_which_line(self):
+        silent = "import sys, time\ntime.sleep(30)"
+        run = self.gated(b"one\n", "> ", 1, timeout=1, script=silent)
+        self.assertEqual((run.status, run.timed_out, run.fed), (None, True, 0))
+        outcome = classify_status(run.status, run.stdout, run.timed_out, run.fed, run.lines)
+        self.assertFalse(outcome.ok)
+        self.assertIn("line 1 of 1 was never fed", outcome.reason)
+
+    def test_an_early_exit_leaves_lines_unfed(self):
+        run = self.gated(b"one\ntwo\nthree\n", "> ", 1)
+        self.assertEqual((run.status, run.fed, run.lines), (0, 1, 3), "one prompt, one line")
+        outcome = classify_status(run.status, run.stdout, run.timed_out, run.fed, run.lines)
+        self.assertFalse(outcome.ok, "exit 0 is not a pass while input is unfed")
+
+    def test_status_only_verdicts(self):
+        self.assertTrue(classify_status(0, "a\r\nb\r\n", False, 2, 2).ok)
+        self.assertTrue(classify_status(0, "", False).ok, "without a gate only the status counts")
+        self.assertIn("exit status 3", classify_status(3, "", False, 1, 1).reason)
+        self.assertFalse(classify_status(0, "", True, 1, 1).ok, "a timeout fails whatever the status")
+
+
+class LinuxBuildTests(unittest.TestCase):
+    """Issue #36: tools/rv32_linux.py's input hash, its check, and that a build never trusts a stamp
+    whose image is not the pinned one. Docker is never run."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        root = Path(self.directory.name)
+        self.source = root / "src"
+        subprocess.run(["cp", "-R", str(rv32_linux.SOURCE), str(self.source)], check=True)
+        self.out = root / "out"
+        self.out.mkdir()
+        for name, value in (("SOURCE", self.source), ("OUT", self.out), ("IMAGE", self.out / "Image"),
+                            ("STAMP", self.out / "inputs"), ("DTB", root / "linux.dtb")):
+            patcher = mock.patch.object(rv32_linux, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_inputs_cover_what_the_build_reads_and_nothing_else(self):
+        first = rv32_linux.inputs()
+        self.assertEqual(rv32_linux.inputs(), first)
+        (self.source / "linux.session").write_text("ls\n")
+        (self.source / "linux.session.expected").write_text("x")
+        self.assertEqual(rv32_linux.inputs(), first, "the session and its transcripts are not build inputs")
+        inittab = self.source / "rootfs-overlay" / "etc" / "inittab"
+        inittab.chmod(0o755)
+        self.assertNotEqual(rv32_linux.inputs(), first, "a mode change in the overlay changes the image")
+        inittab.chmod(0o644)
+        inittab.write_text(inittab.read_text() + "# x\n")
+        self.assertNotEqual(rv32_linux.inputs(), first)
+
+    def test_inputs_refuse_hidden_and_missing_files(self):
+        (self.source / "rootfs-overlay" / "etc" / ".inittab.swp").write_text("x")
+        with self.assertRaisesRegex(rv32_linux.BuildError, "hidden files"):
+            rv32_linux.inputs()
+        (self.source / "rootfs-overlay" / "etc" / ".inittab.swp").unlink()
+        (self.source / "busybox.fragment").unlink()
+        with self.assertRaisesRegex(rv32_linux.BuildError, "missing"):
+            rv32_linux.inputs()
+
+    def test_check_holds_the_image_to_its_pin(self):
+        image = self.out / "Image"
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(rv32_linux.check(), 1)
+        self.assertIn("missing", err.getvalue())
+        image.write_bytes(b"not linux")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(rv32_linux.check(), 1)
+        self.assertIn("not the pinned", err.getvalue())
+        with mock.patch.object(rv32_linux, "IMAGE_SHA256", rv32_linux.sha256(image)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(rv32_linux.check(), 0)
+
+    def test_a_stamp_does_not_excuse_a_wrong_image(self):
+        """Codex P2 on PR #45: a matching stamp beside an image that is not the pinned one must lead to
+        a build, which here fails, and the stamp is gone so the next one is not skipped either."""
+        (self.out / "Image").write_bytes(b"corrupt")
+        (self.out / "inputs").write_text(rv32_linux.inputs() + "\n")
+        calls = []
+
+        def docker(*args, quiet=False):
+            calls.append(args[0])
+            raise rv32_linux.BuildError("no docker here")
+
+        with mock.patch.object(rv32_linux, "docker", docker), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(rv32_linux.main(["--build"]), 1)
+        self.assertEqual(calls, ["build"])
+        self.assertFalse((self.out / "inputs").exists())
