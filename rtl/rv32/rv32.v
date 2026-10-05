@@ -94,7 +94,11 @@ module rv32 #(
                       CSR_CYCLEH = 12'hc80, CSR_TIMEH = 12'hc81, CSR_INSTRETH = 12'hc82,
                       CSR_MEDELEG = 12'h302, CSR_MIDELEG = 12'h303, CSR_SSTATUS = 12'h100, CSR_SIE = 12'h104,
                       CSR_STVEC = 12'h105, CSR_SCOUNTEREN = 12'h106, CSR_SSCRATCH = 12'h140, CSR_SEPC = 12'h141,
-                      CSR_SCAUSE = 12'h142, CSR_STVAL = 12'h143, CSR_SIP = 12'h144, CSR_SATP = 12'h180;
+                      CSR_SCAUSE = 12'h142, CSR_STVAL = 12'h143, CSR_SIP = 12'h144, CSR_SATP = 12'h180,
+                      CSR_MISA = 12'h301;
+    // misa (issue #36): MXL 1 and A F I M S U; writes are ignored (WARL). The ID registers
+    // mvendorid, marchid, mimpid and mhartid (0xf11-0xf14) read 0 through the mux's last arm.
+    localparam [31:0] MISA_VALUE = 32'h40141121;
     localparam [2:0] DIRECT_NONE=3'd0, DIRECT_SIGN=3'd1, DIRECT_CLASS=3'd3;
     localparam [31:0] RESET_PC = 32'h8000_0000;
 
@@ -314,6 +318,8 @@ module rv32 #(
         (csr_addr == CSR_TIMEH) ? time_now[63:32] :
         (csr_addr == CSR_INSTRET) ? instret_count[31:0] :
         (csr_addr == CSR_INSTRETH) ? instret_count[63:32] :
+        (csr_addr == CSR_MISA) ? MISA_VALUE :
+        (csr_addr[11:3] == 9'h1e2) ? 32'd0 : // 0xf10-0xf17; only 0xf11-0xf14 exist
         mtval; // CSR_MTVAL
     wire [31:0] csr_operand = funct3[2] ? {27'd0, rs1} : a;
     wire [31:0] csr_new = (funct3[1:0] == 2'd1) ? csr_operand :

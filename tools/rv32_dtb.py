@@ -102,9 +102,13 @@ def device(name: str, base: int, compatible: tuple[str, ...], regs: tuple[tuple[
 # Root and soc use one address cell and one size cell: every address is 32-bit.
 # Compatible strings name our own device first. A generic name follows only
 # where our device implements everything a driver for it may touch: the done
-# register is a sifive,test0 without the reset word; the console is a 16550's
+# register is a sifive,test0 without the reset word; the console was a 16550's
 # transmit and line-status registers only, so a 16550 driver's initialization
-# would fault and "ns16550a" is not claimed. Since O1 the hart has a
+# would fault and "ns16550a" is not claimed. Issue #36 gave the console the
+# rest of the subset Linux's 8250 driver drives, but this tree's bytes stay as
+# they were (platcheck and irqcheck hash them); Linux compiles in its own tree,
+# and the "a" missing from riscv,isa waits for a change that may move those
+# words. Since O1 the hart has a
 # riscv,cpu-intc; the CLINT raises its software and timer interrupts, the PLIC
 # (a full SiFive PLIC for one context, so it claims the generic names) its
 # external interrupt, and the input queue is PLIC source 12. Since O3 a

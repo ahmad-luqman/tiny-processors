@@ -78,24 +78,30 @@ class RtlTest(unittest.TestCase):
         cls.workdir.cleanup()
 
     def run_both(self, words, stall=None, seed=None, limit=100000, max_cycles=None, checkpoints=False,
-                 input_script=None, reset_at=None, simulator=None, allow_lost_events=False):
+                 input_script=None, reset_at=None, simulator=None, allow_lost_events=False, console_input=None):
         """Run one image on both backends; the caller decides what must agree. With `checkpoints`
         both write their `frame N <hash>` lines; `input_script` is text for both `+input`/`--input`;
-        `allow_lost_events` tells both that a dropped or undelivered event is expected."""
+        `allow_lost_events` tells both that a dropped or undelivered event is expected;
+        `console_input` is bytes waiting at the console from reset on both."""
         with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
             hex_path, bin_path = write_image(words, directory, "image")
             script = None
             if input_script is not None:
                 script = Path(directory) / "input.txt"
                 script.write_text(input_script)
+            console = None
+            if console_input is not None:
+                console = Path(directory) / "console.txt"
+                console.write_bytes(console_input)
             emu_checkpoints = Path(directory) / "emu.checkpoints" if checkpoints else None
             rtl_checkpoints = Path(directory) / "rtl.checkpoints" if checkpoints else None
             emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace", limit=limit,
-                                    checkpoints=emu_checkpoints, input_script=script, allow_lost_events=allow_lost_events)
+                                    checkpoints=emu_checkpoints, input_script=script, allow_lost_events=allow_lost_events,
+                                    console_input=console)
             rtl = run_rtl(simulator or self.simulator, hex_path, Path(directory) / "rtl.trace",
                           stall=stall, seed=seed, max_cycles=max_cycles, checkpoints=rtl_checkpoints,
                           input_script=script, reset_at=reset_at, allow_lost_events=allow_lost_events,
-                          timeout=RTL_TIMEOUT)
+                          timeout=RTL_TIMEOUT, console_input=console)
         report = f"\n--- simulator output ---\n{rtl.noise}--- guest console ---\n{rtl.console}--- stderr ---\n{rtl.stderr}"
         self.assertEqual(rtl.status, 0, report)
         self.assertEqual(rtl.noise, "", "the simulator printed something of its own" + report)
@@ -253,9 +259,10 @@ class RtlTest(unittest.TestCase):
 
     def test_illegal_encodings_and_ecall_ebreak_fault(self):
         unused_op = r_type(0x33, 1, 0, 2, 3, 2)  # funct7 2 is unused (funct7 1 is the M extension)
-        fence_i = i_type(0x0F, 0, 1, 0, 0)
+        reserved_fence = i_type(0x0F, 0, 2, 0, 0)  # fence.i (funct3 1) is legal since issue #36
         bad_srai = SRAI(1, 1, 0x20 | 0x400 | 1)  # a funct7 bit set that neither srli nor srai allows
-        illegal = [unused_op, fence_i, 0xFFFFFFFF, CSRRW(0, 0x7C0, 1), bad_srai]
+        id_write = CSRRW(0, 0xF14, 1)              # mhartid is read-only
+        illegal = [unused_op, reserved_fence, 0xFFFFFFFF, CSRRW(0, 0x7C0, 1), bad_srai, id_write]
         cases = [(word, 2, word) for word in illegal] + [(ECALL(), 11, 0), (EBREAK(), 3, RAM + 4)]
         for word, cause, value in cases:
             with self.subTest(word=f"{word:08x}"):
@@ -283,7 +290,7 @@ class RtlTest(unittest.TestCase):
             SB(6, 1, 9),             # 16 byte 80 into lane 1 of data+8
             LH(12, 1, 8),            # 17 x12 = ffff8000: the other byte was never written
         ] + LI(13, CONSOLE) + [
-            LBU(14, 13, 5),          # 20 the console status byte: 0x20 in lane 1
+            LBU(14, 13, 5),          # 20 the console status byte: 0x60 in lane 1
         ] + FINISH()
         for stall in (0, 2):
             with self.subTest(stall=stall):
@@ -303,7 +310,7 @@ class RtlTest(unittest.TestCase):
         self.assertEqual(by_step["16"], "x11=80ff7f01 mem[80000204]->80ff7f01/4")
         self.assertEqual(by_step["17"], "mem[80000209]<-00000080/1")
         self.assertEqual(by_step["18"], "x12=ffff8000 mem[80000208]->00008000/2")
-        self.assertEqual(by_step["21"], "x14=00000020 mem[10000005]->00000020/1", "a byte read the strobe identifies")
+        self.assertEqual(by_step["21"], "x14=00000060 mem[10000005]->00000060/1", "a byte read the strobe identifies")
 
     def test_alu_operations_directed(self):
         words = LI(1, 0x7FFFFFFF) + [
@@ -692,7 +699,9 @@ class RtlTest(unittest.TestCase):
             ("byte store to the console status", LI(1, CONSOLE) + [SB(1, 1, 5)], 7, CONSOLE + 5),
             ("word load from the console", LI(1, CONSOLE) + [LW(2, 1, 4)], 5, CONSOLE + 4),
             ("byte store past the console", LI(1, CONSOLE) + [SB(1, 1, 8)], 7, CONSOLE + 8),
-            ("load from the done register", LI(1, DONE) + [LW(2, 1, 0)], 5, DONE),
+            ("byte store to the console MSR", LI(1, CONSOLE) + [SB(1, 1, 6)], 7, CONSOLE + 6),
+            ("halfword load of the console IIR", LI(1, CONSOLE) + [LHU(2, 1, 2)], 5, CONSOLE + 2),
+            ("halfword load of the done register", LI(1, DONE) + [LHU(2, 1, 0)], 5, DONE),
             ("byte store to the done register", LI(1, DONE) + [SB(1, 1, 0)], 7, DONE),
             ("word store past the done register", LI(1, DONE) + [SW(1, 1, 4)], 7, DONE + 4),
             ("store past the end of RAM", LI(1, RAM + 0x1000000) + [SW(1, 1, 0)], 7, RAM + 0x1000000),
@@ -774,6 +783,27 @@ class RtlTest(unittest.TestCase):
                 self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
                 self.assertEqual((rtl.halt["halt"], rtl.halt["done"], rtl.halt["outcome"]), ("done", word, outcome))
                 self.assertEqual((emulator.halt["halt"], emulator.halt["outcome"]), ("done", outcome))
+
+    def test_console_16550_registers_and_machine_information(self):
+        """Issue #36: the console's 16550 subset (IER, IIR, LCR, MCR, MSR, SCR and the divisor latch
+        under DLAB), misa and the ID CSRs, fence.i and a word read of the done register retire
+        identically on both backends, with a received byte waiting so IIR and DLAB meet RBR."""
+        words = LI(5, CONSOLE) + [LBU(6, 5, 2)]
+        words += LI(7, 0xFF) + [SB(7, 5, 1), LBU(8, 5, 1), SB(7, 5, 4), LBU(9, 5, 4), SB(7, 5, 2), LBU(10, 5, 6)]
+        words += LI(7, 0x5A) + [SB(7, 5, 7), LBU(11, 5, 7), LBU(12, 5, 2)]
+        words += LI(7, 0x02) + [SB(7, 5, 1), LBU(13, 5, 2)]
+        words += LI(7, 0x83) + [SB(7, 5, 3), LBU(14, 5, 3)]
+        words += LI(7, 0x41) + [SB(7, 5, 0)] + LI(7, 0x42) + [SB(7, 5, 1), LBU(15, 5, 0), LBU(16, 5, 1), LBU(17, 5, 5)]
+        words += LI(7, 0x03) + [SB(7, 5, 3), LBU(18, 5, 1), LBU(19, 5, 0), LBU(20, 5, 5)]
+        words += [CSRRS(21, 0x301, 0), CSRRW(0, 0x301, 0), CSRRS(22, 0x301, 0), CSRRS(23, 0xF11, 0),
+                  CSRRS(24, 0xF12, 0), CSRRS(25, 0xF13, 0), CSRRS(26, 0xF14, 0), i_type(0x0F, 0, 1, 0, 0)]
+        words += LI(27, DONE) + [LW(28, 27, 0)]
+        emulator, rtl = self.assert_same_pass(words + FINISH(), stall=1, console_input=b"Z")
+        self.assertEqual(rtl.console, "", "the divisor latch transmits nothing")
+        x = registers(rtl.trace)
+        self.assertEqual([x[r] for r in (6, 8, 9, 10, 11, 12, 13, 14)], [0x01, 0x0F, 0x1F, 0xB0, 0x5A, 0x04, 0x02, 0x83])
+        self.assertEqual([x[r] for r in (15, 16, 17, 18, 19, 20)], [0x41, 0x42, 0x61, 0x02, ord("Z"), 0x60])
+        self.assertEqual([x[r] for r in range(21, 27)] + [x[28]], [0x40141121, 0x40141121, 0, 0, 0, 0, 0])
 
     def test_timer_ticks_are_clock_cycles(self):
         """Device time (docs/rv32.md): on the RTL a read of mtime's low word (the M5 timer's TICKS

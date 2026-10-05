@@ -64,14 +64,16 @@ module rv32_decode (
     // pmpcfg0-1 and pmpaddr0-7, the three
     // floating aliases, and the six Zicntr counters (cycle, time, instret and their high
     // halves); since issue #20 medeleg, mideleg and the supervisor's CSRs (sstatus, sie, stvec,
-    // scounteren, sscratch, sepc, scause, stval, sip, satp); other numbers are illegal.
+    // scounteren, sscratch, sepc, scause, stval, sip, satp); since issue #36 misa and the ID
+    // registers mvendorid, marchid, mimpid and mhartid; other numbers are illegal.
     wire csr_exists = (csr == 12'h001) || (csr == 12'h002) || (csr == 12'h003) || (csr == 12'h305) || (csr == 12'h341) || (csr == 12'h342) || (csr == 12'h343) ||
                       (csr == 12'h300) || (csr == 12'h304) || (csr == 12'h340) || (csr == 12'h344) ||
                       (csr == 12'h306) || (csr == 12'h3a0) || (csr == 12'h3a1) || (csr[11:3] == 9'h076) || // O5: mcounteren, PMP
                       (csr == 12'hc00) || (csr == 12'hc01) || (csr == 12'hc02) || (csr == 12'hc80) || (csr == 12'hc81) || (csr == 12'hc82) ||
                       (csr == 12'h302) || (csr == 12'h303) || (csr == 12'h100) || (csr == 12'h180) ||
                       (csr[11:3] == 9'h020 && csr[2:0] >= 3'd4 && csr[2:0] <= 3'd6) || // sie, stvec, scounteren
-                      (csr[11:3] == 9'h028 && csr[2:0] <= 3'd4);                         // sscratch, sepc, scause, stval, sip
+                      (csr[11:3] == 9'h028 && csr[2:0] <= 3'd4) ||                       // sscratch, sepc, scause, stval, sip
+                      (csr == 12'h301) || (csr >= 12'hf11 && csr <= 12'hf14);              // issue #36: misa, the IDs
     // CSR numbers with bits [11:10] set are read-only; csrrw always writes, and
     // csrrs/csrrc (and the immediate forms) write when the rs1 field is nonzero.
     wire csr_write_to_read_only = (csr[11:10] == 2'b11) && ((funct3[1:0] == 2'd1) || (rs1 != 5'd0));
@@ -127,7 +129,7 @@ module rv32_decode (
                               (funct3 == 3'd5 && funct7 != 7'd0 && funct7 != 7'h20);   // neither srli nor srai
             OP_REG: illegal = !(funct7 == 7'd0 || funct7 == 7'd1 ||                      // funct7 1 is the M extension
                                 (funct7 == 7'h20 && (funct3 == 3'd0 || funct3 == 3'd5)));
-            OP_FENCE: illegal = (funct3 != 3'd0);                                      // fence.i and the rest
+            OP_FENCE: illegal = (funct3 > 3'd1);                                       // fence and fence.i (issue #36)
             OP_AMO: illegal = funct3 != 3'd2 || !(amo_funct5 || funct5 == A_SC ||       // words only, and
                                                   (funct5 == A_LR && rs2 == 5'd0));    // lr.w with rs2 0
             OP_SYSTEM: illegal = (funct3 == 3'd0) ? !(is_ecall || is_ebreak || is_mret || is_wfi || is_sret || is_sfence)

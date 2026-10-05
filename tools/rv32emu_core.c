@@ -51,7 +51,12 @@ enum csr { CSR_FFLAGS = 0x001, CSR_FRM = 0x002, CSR_FCSR = 0x003, CSR_MSTATUS = 
            /* S-mode (issue #20) */
            CSR_MEDELEG = 0x302, CSR_MIDELEG = 0x303,
            CSR_SSTATUS = 0x100, CSR_SIE = 0x104, CSR_STVEC = 0x105, CSR_SCOUNTEREN = 0x106, CSR_SSCRATCH = 0x140,
-           CSR_SEPC = 0x141, CSR_SCAUSE = 0x142, CSR_STVAL = 0x143, CSR_SIP = 0x144, CSR_SATP = 0x180 };
+           CSR_SEPC = 0x141, CSR_SCAUSE = 0x142, CSR_STVAL = 0x143, CSR_SIP = 0x144, CSR_SATP = 0x180,
+           /* machine information (issue #36): misa, and the read-only ID registers, which read 0 */
+           CSR_MISA = 0x301, CSR_MVENDORID = 0xf11, CSR_MARCHID = 0xf12, CSR_MIMPID = 0xf13, CSR_MHARTID = 0xf14 };
+/* misa: MXL 1 (32-bit) and the extensions both backends implement, A F I M S U. Writes are
+ * ignored (WARL), so no extension can be switched off. */
+#define MISA_VALUE 0x40141121u
 /* mstatus and the interrupt bits (O1, docs/rv32.md "Behavior fixed in Track 2"). MPP is 3 (machine) or
  * 0 (user) since O5, and 1 (supervisor) too since issue #20, kept in machine.mpp. FS is writable since issue #33
  * (Dirty from reset) and SD reads FS == Dirty. */
@@ -185,33 +190,92 @@ static void console_poll_stdin(machine *m)
     m->console_in_next = 0;
 }
 
-/* The console (docs/rv32.md, "Console"): a 16550's transmit and line-status registers, and since O2
- * its receive buffer: a byte read of +0 takes the next received byte (0 when there is none) and
- * LSR bit 0 says one is waiting. */
+/* The console (docs/rv32.md, "Console"): the subset of a 16550 that Linux's 8250 driver drives
+ * (issue #36), with no interrupt. RBR/THR at +0 (since O2 a read takes the next received byte, 0
+ * when there is none), LSR at +5, and since issue #36 IER, IIR/FCR, LCR, MCR, MSR and SCR, with
+ * the divisor latch at +0 and +1 while LCR.DLAB is set. Bytes only. */
+static bool console_rx_waiting(machine *m)
+{
+    console_poll_stdin(m);
+    return m->console_in_next < m->console_in_len;
+}
+
 static mem_access console_load(machine *m, uint32_t offset, int width, uint32_t *value)
 {
-    if (width == 1 && offset == CONSOLE_STATUS) {
-        console_poll_stdin(m);
+    if (width != 1) {
+        return ACC_FAULT;
+    }
+    bool dlab = m->console_lcr & CONSOLE_LCR_DLAB;
+    switch (offset) {
+    case CONSOLE_TX:
+        if (dlab) {
+            *value = m->console_dll;
+        } else {
+            *value = console_rx_waiting(m) ? m->console_in[m->console_in_next++] : 0u;
+        }
+        return ACC_OK;
+    case CONSOLE_IER: *value = dlab ? m->console_dlm : m->console_ier; return ACC_OK;
+    case CONSOLE_IIR: /* a 16550's priorities, among the enabled sources the console has */
+        if ((m->console_ier & CONSOLE_IER_RDI) && console_rx_waiting(m)) {
+            *value = 0x04u;
+        } else if (m->console_ier & CONSOLE_IER_THRI) {
+            *value = 0x02u; /* the transmitter is always empty */
+        } else {
+            *value = 0x01u; /* nothing pending */
+        }
+        return ACC_OK;
+    case CONSOLE_LCR: *value = m->console_lcr; return ACC_OK;
+    case CONSOLE_MCR: *value = m->console_mcr; return ACC_OK;
+    case CONSOLE_STATUS:
         /* always ready to transmit: every byte is accepted at once */
-        *value = CONSOLE_TX_READY | (m->console_in_next < m->console_in_len ? CONSOLE_RX_READY : 0u);
+        *value = CONSOLE_TX_READY | CONSOLE_TX_EMPTY | (console_rx_waiting(m) ? CONSOLE_RX_READY : 0u);
         return ACC_OK;
+    case CONSOLE_MSR: *value = CONSOLE_MSR_LINE; return ACC_OK;
+    case CONSOLE_SCR: *value = m->console_scr; return ACC_OK;
+    default: return ACC_FAULT;
     }
-    if (width == 1 && offset == CONSOLE_TX) {
-        console_poll_stdin(m);
-        *value = m->console_in_next < m->console_in_len ? m->console_in[m->console_in_next++] : 0u;
-        return ACC_OK;
-    }
-    return ACC_FAULT; /* the status and RBR are bytes; other offsets do not exist */
 }
 
 static mem_access console_store(machine *m, uint32_t offset, int width, uint32_t value)
 {
+    if (width != 1) {
+        return ACC_FAULT; /* bytes only */
+    }
+    bool dlab = m->console_lcr & CONSOLE_LCR_DLAB;
+    uint8_t byte = (uint8_t)value;
+    switch (offset) {
+    case CONSOLE_TX:
+        if (dlab) {
+            m->console_dll = byte; /* the divisor sets no rate here: bytes leave at once */
+        } else {
+            fputc(byte, stdout);
+        }
+        return ACC_OK;
+    case CONSOLE_IER:
+        if (dlab) {
+            m->console_dlm = byte;
+        } else {
+            m->console_ier = byte & 0x0fu;
+        }
+        return ACC_OK;
+    case CONSOLE_IIR: return ACC_OK; /* FCR: there is no FIFO to enable or clear */
+    case CONSOLE_LCR: m->console_lcr = byte; return ACC_OK;
+    case CONSOLE_MCR: m->console_mcr = byte & 0x1fu; return ACC_OK;
+    case CONSOLE_SCR: m->console_scr = byte; return ACC_OK;
+    default: return ACC_FAULT; /* LSR and MSR are read-only */
+    }
+}
+
+/* The done register reads 0 (issue #36), as QEMU's sifive_test does, so Linux's syscon-poweroff
+ * can read it before it writes. */
+static mem_access done_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
     (void)m;
-    if (width == 1 && offset == CONSOLE_TX) {
-        fputc((int)(value & 0xff), stdout);
+    if (width == 4 && offset == 0) {
+        *value = 0;
         return ACC_OK;
     }
-    return ACC_FAULT; /* the status is read-only; TX takes bytes only */
+    return ACC_FAULT; /* byte and halfword reads */
 }
 
 static mem_access done_store(machine *m, uint32_t offset, int width, uint32_t value)
@@ -847,7 +911,7 @@ static const region REGIONS[] = {
     {"gpu", GPU_BASE, 128, gpu_load, gpu_store},
     {"dma_window", DMA_WINDOW_BASE, 8, dma_window_load, dma_window_store},
     {"g3d", G3D_BASE, G3D_SIZE, g3d_mmio_load, g3d_mmio_store},
-    {"done", DONE_ADDR, 4, NULL, done_store},
+    {"done", DONE_ADDR, 4, done_load, done_store},
     {"console", CONSOLE_BASE, 8, console_load, console_store},
     {"clint", CLINT_BASE, CLINT_SIZE, clint_load, clint_store},
     {"plic", PLIC_BASE, PLIC_SIZE, plic_load, plic_store},
@@ -1253,6 +1317,8 @@ static bool csr_read(const machine *m, uint32_t number, uint32_t *value)
     case CSR_STVAL: *value = m->stval; return true;
     case CSR_SATP: *value = m->satp; return true;
     case CSR_MCOUNTEREN: *value = m->mcounteren; return true;
+    case CSR_MISA: *value = MISA_VALUE; return true;
+    case CSR_MVENDORID: case CSR_MARCHID: case CSR_MIMPID: case CSR_MHARTID: *value = 0; return true;
     case CSR_PMPCFG0: case CSR_PMPCFG1: {
         const uint8_t *c = m->pmpcfg + 4 * (number - CSR_PMPCFG0);
         *value = (uint32_t)c[0] | (uint32_t)c[1] << 8 | (uint32_t)c[2] << 16 | (uint32_t)c[3] << 24;
@@ -1343,6 +1409,7 @@ static void csr_write(machine *m, uint32_t number, uint32_t value)
     case CSR_MEPC: m->mepc = value & ~3u; break;   /* IALIGN is 32 */
     case CSR_MCAUSE: m->mcause = value; break;
     case CSR_MTVAL: m->mtval = value; break;
+    case CSR_MISA: break; /* WARL: the extensions are fixed */
     default:
         if (number >= CSR_PMPADDR0 && number <= CSR_PMPADDR7) {
             uint32_t i = number - CSR_PMPADDR0;
@@ -1707,8 +1774,8 @@ static void step(machine *m)
         writes_rd = true;
         break;
     }
-    case 0x0f: /* FENCE: one hart, no caches, nothing to order. FENCE.I is not in the contract. */
-        if (funct3 != 0) {
+    case 0x0f: /* FENCE and FENCE.I (issue #36): one hart, no caches, nothing to order or flush. */
+        if (funct3 > 1) {
             goto illegal;
         }
         break;
