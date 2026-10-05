@@ -462,6 +462,19 @@ static const struct program *programs(uint32_t *count)
     return (const struct program *)(ramdisk + 16);
 }
 
+/* What tools/rv32_ramdisk.py promises of an entry in a RAM disk of `size` bytes: inside the disk
+ * and its slots, the file no larger than the memory it loads into, the entry point inside the file. */
+static int entry_ok(const struct program *e, uint32_t size)
+{
+    uint32_t slots_end = OS_SLOT_BASE + OS_SLOTS * OS_SLOT_SIZE;
+    return !(e->name[sizeof e->name - 1] || e->offset > size || e->file_size > size - e->offset ||
+             e->file_size > e->memory_size || e->span == 0 || e->span % OS_SLOT_SIZE ||
+             e->span > OS_SLOTS * OS_SLOT_SIZE || e->load < OS_SLOT_BASE || (e->load - OS_SLOT_BASE) % OS_SLOT_SIZE ||
+             e->load > slots_end - e->span || e->stack % PAGE_SIZE || e->stack < 2 * PAGE_SIZE ||
+             e->stack >= e->span || e->memory_size > e->span - e->stack ||
+             e->entry < e->load || e->entry - e->load >= e->file_size);
+}
+
 /* The RAM disk is part of the kernel's image, but spawn trusts its table, so it is checked once
  * at boot for what tools/rv32_ramdisk.py promises: every entry inside the disk and its slots,
  * the file no larger than the memory it loads into, the entry point inside the file. */
@@ -473,14 +486,7 @@ static void check_programs(void)
         panic("RAM disk table larger than the disk");
     }
     for (uint32_t i = 0; i < count; i++) {
-        const struct program *e = &list[i];
-        uint32_t slots_end = OS_SLOT_BASE + OS_SLOTS * OS_SLOT_SIZE;
-        if (e->name[sizeof e->name - 1] || e->offset > size || e->file_size > size - e->offset ||
-            e->file_size > e->memory_size || e->span == 0 || e->span % OS_SLOT_SIZE ||
-            e->span > OS_SLOTS * OS_SLOT_SIZE || e->load < OS_SLOT_BASE || (e->load - OS_SLOT_BASE) % OS_SLOT_SIZE ||
-            e->load > slots_end - e->span || e->stack % PAGE_SIZE || e->stack < 2 * PAGE_SIZE ||
-            e->stack >= e->span || e->memory_size > e->span - e->stack ||
-            e->entry < e->load || e->entry - e->load >= e->file_size) {
+        if (!entry_ok(&list[i], size)) {
             kputs("kernel: RAM disk entry ");
             kputdec(i);
             kputc('\n');
@@ -641,11 +647,39 @@ static void check_page_table_budget(void)
 }
 
 /* Load a program into its slots and make it ready; returns the process or 0. */
+static int may_open(int file, uint32_t mode);
+
+/* Issue #35: a program too large for the kernel's image lives on the disk, as a tfs file that is
+ * a RAM disk of one program (tools/rv32_ramdisk.py writes both) named as the program is. Its entry
+ * is read into `e` and checked as the boot check checks the RAM disk's, against the file's size;
+ * returns the file, or -1 when there is no such program, it is malformed or it is being written. */
+static int disk_program(const char *name, struct program *e)
+{
+    uint32_t header[4];
+    int file = fs_open(name, 0);
+    if (file < 0 || !may_open(file, O_READ)) {
+        return -1;
+    }
+    uint32_t size = fs_size(file);
+    if (fs_read(file, 0, (uint8_t *)header, sizeof header) != sizeof header || header[0] != RAMDISK_MAGIC ||
+        header[1] != 1 || fs_read(file, sizeof header, (uint8_t *)e, sizeof *e) != sizeof *e ||
+        !entry_ok(e, size) || !fdt_same(e->name, name)) {
+        return -1;
+    }
+    return file;
+}
+
 static struct proc *spawn(const char *name, const char *args, uint32_t parent)
 {
+    static struct program on_disk;
     const struct program *program = program_named(name);
+    int file = -1;
     if (!program) {
-        return 0;
+        file = disk_program(name, &on_disk);
+        if (file < 0) {
+            return 0;
+        }
+        program = &on_disk;
     }
     struct proc *p = 0;
     for (uint32_t i = 0; i < MAX_PROCS; i++) {
@@ -660,12 +694,16 @@ static struct proc *spawn(const char *name, const char *args, uint32_t parent)
     if (!p) {
         return 0;
     }
+    uint8_t *base = (uint8_t *)(uintptr_t)program->load;
+    if (file < 0) {
+        memcpy(base, ramdisk + program->offset, program->file_size);
+    } else if (fs_read(file, program->offset, base, program->file_size) != program->file_size) {
+        return 0;
+    }
     memset(p, 0, sizeof *p);
     p->base = program->load;
     p->span = program->span;
     p->flags = program->flags;
-    uint8_t *base = (uint8_t *)(uintptr_t)program->load;
-    memcpy(base, ramdisk + program->offset, program->file_size);
     memset(base + program->file_size, 0, program->memory_size - program->file_size);
     uint32_t top = p->base + p->span;
     char *copy = (char *)(uintptr_t)(top - ARGS_MAX);
