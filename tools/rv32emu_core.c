@@ -275,6 +275,9 @@ static mem_access console_store(machine *m, uint32_t offset, int width, uint32_t
             m->console_latched++;   /* no byte is sent: reported if DLAB is still set at the halt */
         } else {
             fputc(byte, stdout);
+            if (m->console_stdin) { /* interactive: a guest echoing a key shows it now, not at the next newline */
+                fflush(stdout);
+            }
             if (m->console_prompt_len) {
                 console_watch_prompt(m, byte);
             }

@@ -9,6 +9,7 @@ state dump, the trace, the console output, and the exit status.
 
 from collections import namedtuple
 from pathlib import Path
+import os
 import re
 import resource
 import shutil
@@ -489,6 +490,33 @@ class EmulatorTest(unittest.TestCase):
         result = self.run_words(FINISH(), extra=("--console-input", "/nonexistent/in.txt"))
         self.assertEqual(result.status, 2)
         self.assertIn("cannot open console input", result.stderr)
+
+    def test_interactive_console_output_is_not_held_back(self):
+        """With --console-input - on a terminal, each byte the guest sends appears at once: a guest
+        echoing a key must not wait for the next newline in stdio's line buffer."""
+        import pty
+        import select
+        words = LI(5, CONSOLE) + LI(7, ord("a")) + [SB(7, 5, 0)]
+        words += [LBU(6, 5, 5), ANDI(6, 6, 1), BEQ(6, 0, -8)]  # wait for a received byte
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "image.bin"
+            image.write_bytes(b"".join(w.to_bytes(4, "little") for w in words + FINISH()))
+            master, slave = pty.openpty()
+            process = subprocess.Popen([str(self.emulator), "--image", str(image), "--console-input", "-",
+                                        "--max-instructions", "100000000"], stdin=slave, stdout=slave,
+                                       stderr=subprocess.DEVNULL)
+            os.close(slave)
+            try:
+                ready, _, _ = select.select([master], [], [], 5)
+                self.assertTrue(ready, "the guest's byte was held back")
+                self.assertEqual(os.read(master, 1), b"a")
+                os.write(master, b"x\n")  # the pty is canonical: a line reaches the emulator
+                self.assertEqual(process.wait(timeout=10), 0)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                os.close(master)
 
     def test_console_and_done_register(self):
         words = LI(5, CONSOLE) + [LBU(6, 5, 5)] + LI(7, ord("H")) + [SB(7, 5, 0)] + LI(7, ord("i")) + [SB(7, 5, 0)]
