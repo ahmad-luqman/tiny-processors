@@ -16,6 +16,7 @@ import tempfile
 import unittest
 
 from tools import rv32_dtb, rv32_virt_map
+from tools.rv32_run_qemu import run as run_captured
 
 ROOT = Path(__file__).resolve().parents[1]
 QEMU = os.environ.get("QEMU_RV32", "qemu-system-riscv32")
@@ -278,11 +279,10 @@ class PlatcheckOnQemuTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             dtb = Path(directory) / "tree.dtb"
             dtb.write_bytes(rv32_dtb.build(tree))
-            result = subprocess.run([QEMU, "-M", "virt", "-cpu", os.environ.get("RV32_PLATFORM_QEMU_CPU", "rv32"),
-                                     "-bios", "none", "-m", "16M", "-nographic", "-monitor", "none", "-no-reboot",
-                                     "-dtb", str(dtb), "-kernel", str(self.ELF)],
-                                    capture_output=True, text=True, timeout=60)
-        return result.returncode, result.stdout.replace("\r", "")
+            status, console, _, _ = run_captured([QEMU, "-M", "virt", "-cpu", os.environ.get("RV32_PLATFORM_QEMU_CPU", "rv32"),
+                                                  "-bios", "none", "-m", "16M", "-nographic", "-monitor", "none", "-no-reboot",
+                                                  "-dtb", str(dtb), "-kernel", str(self.ELF)], 60)
+        return status, console.replace("\r", "")
 
     def virt_with(self, *nodes):
         tree = rv32_dtb.parse(VIRT_FIXTURE.read_bytes())
