@@ -20,8 +20,9 @@
  * `-frames N` (N > 0) ends the run after N frames. Every 35 frames, and at the end, it prints the
  * frame number and the hashes of the screen buffer and of the palette (the checkpoint hash of
  * docs/rv32.md: h = h*33 ^ word from 5381), which it computes itself, so QEMU, which has no
- * display, prints the same lines. `-fps` adds a line with the device ticks the frames took (the low
- * word of mtime); that depends on the backend, so the cross-backend sessions leave it out.
+ * display, prints the same lines. `-fps` adds a line with the device ticks (the low word of mtime)
+ * from the first frame's present to the last's, so start-up is not counted; that depends on the
+ * backend, so the cross-backend sessions leave it out.
  */
 #include <errno.h>
 #include <stdbool.h>
@@ -50,7 +51,7 @@ static uint32_t palette_words[OS_PALETTE_ENTRIES], device_palette[OS_PALETTE_ENT
 static uint32_t virtual_ms = 1; /* from 1: i_timer.c takes a first reading of 0 as "not started" */
 static uint32_t frames;
 static uint32_t frame_limit;    /* 0: no -frames, so no limit (frames is never 0 when it is compared) */
-static uint32_t start_ticks;
+static uint32_t first_ticks; /* mtime's low word at the first frame's present */
 static bool report_ticks;
 
 static uint32_t word_hash(const uint32_t *words, uint32_t count)
@@ -83,7 +84,11 @@ void DG_Init(void)
         frame_limit = (uint32_t)n;
     }
     report_ticks = M_CheckParm("-fps") != 0;
-    start_ticks = sys_time();
+    if (framebuffer) {
+        /* Another program may have drawn here: the bands above and below the picture start black
+         * (index 0 is black in Doom's palettes, and the power-on palette's too). */
+        memset(framebuffer, 0, FB_COLUMNS * FB_ROWS);
+    }
 }
 
 /* Send a changed palette to the display and read it back: on a machine with a display, a palette
@@ -115,14 +120,17 @@ void DG_DrawFrame(void)
         }
     }
     frames++;
+    if (frames == 1) {
+        first_ticks = sys_time();
+    }
     bool last = frames == frame_limit;
     if (frames % REPORT_EVERY == 0 || last) {
         report();
     }
     if (last) {
         if (report_ticks) {
-            printf("doom: %lu frames in %lu device ticks\n", (unsigned long)frames,
-                   (unsigned long)(sys_time() - start_ticks));
+            printf("doom: frames 2 to %lu in %lu device ticks\n", (unsigned long)frames,
+                   (unsigned long)(sys_time() - first_ticks));
         }
         /* exit(), not I_Quit(): Doom's own exit handlers stay out of a measured run, so it saves
          * no config and a timedemo's end-of-demo report (an I_Error) never comes. */

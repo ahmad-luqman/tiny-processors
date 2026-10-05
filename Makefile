@@ -1813,7 +1813,7 @@ test-rv32: run-rv32-os-qemu run-rv32-os-qemu-reboot run-rv32-os-qemu-enter run-r
 #   RV32_OS_APPS_QEMU_TIMEOUT_a  QEMU's seconds (default 120)
 RV32_OS_APPS := libc lua float mandel diskprog
 RV32_OS_APPS_QEMU := $(RV32_OS_APPS) doom
-RV32_OS_APPS_EMU := $(RV32_OS_APPS) doom doom35 doomkeys
+RV32_OS_APPS_EMU := $(RV32_OS_APPS) doom doom35 doomkeys doomafter
 RV32_OS_APPS_VERILATOR := $(RV32_OS_APPS) doom35
 RV32_OS_APPS_COMPARE_DEFAULT := results --compare-traps faults
 ifneq ($(filter-out $(RV32_OS_APPS_EMU),$(RV32_OS_APPS_QEMU)),)
@@ -1869,6 +1869,7 @@ $(RV32_DOOM_WAD):
 RV32_OS_APPS_DISK_doom := build/rv32/os/doom.disk
 RV32_OS_APPS_DISK_doom35 := build/rv32/os/doom.disk
 RV32_OS_APPS_DISK_doomkeys := build/rv32/os/doom.disk
+RV32_OS_APPS_DISK_doomafter := build/rv32/os/doom.disk
 build/rv32/os/doom.disk: build/rv32/os/doom.prg $(RV32_DOOM_WAD) tools/rv32_mkfs.py tools/rv32_doom.py | build/rv32/os
 	$(PYTHON) tools/rv32_doom.py --check
 	$(PYTHON) tools/rv32_mkfs.py --new --size 0x500000 --add doom1.wad=$(RV32_DOOM_WAD) --add doom=$< $@
@@ -1880,9 +1881,13 @@ build/rv32/os/doom.disk: build/rv32/os/doom.prg $(RV32_DOOM_WAD) tools/rv32_mkfs
 RV32_OS_APPS_COMPARE_doom := outputs
 RV32_OS_APPS_COMPARE_doom35 := outputs
 RV32_OS_APPS_COMPARE_doomkeys := outputs
+RV32_OS_APPS_COMPARE_doomafter := outputs
 RV32_OS_APPS_ARGS_doom := --limit 2000000000 --expect-checkpoints $(RV32_OS)/doom.checkpoints
 RV32_OS_APPS_ARGS_doom35 := --limit 1000000000 --expect-checkpoints $(RV32_OS)/doom35.checkpoints
 RV32_OS_APPS_ARGS_doomkeys := --limit 1000000000 --input $(RV32_OS)/doomkeys.input --expect-checkpoints $(RV32_OS)/doomkeys.checkpoints
+# doomafter runs bars, which paints the left half of every row, then one timedemo frame: Doom
+# clears the framebuffer at start, so its frame (the 25th) is a fresh boot's first, 5f599469.
+RV32_OS_APPS_ARGS_doomafter := --limit 1000000000 --expect-checkpoints $(RV32_OS)/doomafter.checkpoints
 # Doom's 35 frames take about 1.41 G cycles; the runner refuses a budget over 2^31-1.
 RV32_OS_APPS_CYCLES_doom35 := 2000000000
 RV32_OS_APPS_TIMEOUT_doom35 := 5400
@@ -1935,7 +1940,7 @@ $(foreach a,$(RV32_OS_APPS_VERILATOR),run-rv32-$(a)-rtl-verilator): run-rv32-%-r
 test-rv32: $(foreach a,$(RV32_OS_APPS),run-rv32-$(a)-qemu run-rv32-$(a)-emu run-rv32-$(a)-rtl-verilator)
 # Issue #35: Doom's 350 frames on the emulator (about 26 s) and QEMU (about 1 s), its keys and the
 # window, in the fast tier; its 35 frames on Verilator in the slow one.
-test-rv32: run-rv32-doom-qemu run-rv32-doom-emu run-rv32-doomkeys-emu check-rv32-doom-window
+test-rv32: run-rv32-doom-qemu run-rv32-doom-emu run-rv32-doomkeys-emu run-rv32-doomafter-emu check-rv32-doom-window
 test-rv32-slow: run-rv32-doom35-rtl-verilator
 
 # O3: storage. virtiocheck drives the virtio-blk device directly on QEMU virt (a 128 KiB drive on

@@ -160,7 +160,7 @@ Frame 120 of the demo, written as a PPM by the emulator (`rv32emu --frames`), sh
 [doom_rv32.c](../programs/rv32/os/libc/doom_rv32.c) implements doomgeneric's hooks:
 - **`DG_DrawFrame`**:
   - writes a changed palette with `SYS_PALETTE`, then reads it back. On a machine with a display, a palette the device does not hold stops Doom with an error, so a palette call that fails cannot pass unnoticed.
-  - copies the 320×200 picture into framebuffer rows 20 to 219 and presents; a refused present is an error too;
+  - copies the 320×200 picture into framebuffer rows 20 to 219 and presents; a refused present is an error too. At start it clears the whole framebuffer, so the bands above and below are black even after another program drew there;
   - every 35 frames prints `doom: frame N screen <hash> palette <hash>`.
 
   The hashes are the checkpoint hash over Doom's screen buffer and over its 256 palette words, computed by the program, so QEMU, which has no display, prints the same lines.
@@ -173,7 +173,7 @@ Frame 120 of the demo, written as a PPM by the emulator (`rv32emu --frames`), sh
   - A timedemo never waits in `TryRunTics`: it runs one tic per frame by itself. In play, the first frame after a wipe may run the tics the wipe let pass.
   - With `mtime`, the wipe would draw as many frames as fit in the device time it took, and device time per frame differs between QEMU, the emulator and the RTL. The same demo would give each backend a different frame count.
   - In the window, presents are paced at 35 a second, Doom's tic rate, and that is the game's real speed, as for Pong.
-- **`-frames N`** (N a count above 0; anything else is an error) ends the run after N frames, with `exit()`, not `I_Quit`: no config is saved and a timedemo's end-of-demo report (an `I_Error`) never comes. **`-fps`** adds a line with the device ticks the frames took, the low word of `mtime` (100 ns on QEMU, a step on the emulator, a cycle on the RTL). It depends on the backend, so the cross-backend sessions leave it out.
+- **`-frames N`** (N a count above 0; anything else is an error) ends the run after N frames, with `exit()`, not `I_Quit`: no config is saved and a timedemo's end-of-demo report (an `I_Error`) never comes. **`-fps`** adds a line with the device ticks from the first frame's present to the last's, so start-up is not counted: the low word of `mtime` (100 ns on QEMU, a step on the emulator, a cycle on the RTL). It depends on the backend, so the cross-backend sessions leave it out.
 
 ### The pinned runs
 
@@ -191,6 +191,7 @@ Frame 120 of the demo, written as a PPM by the emulator (`rv32emu --frames`), sh
   - Escape opens the menu, Q (not Doom's) changes nothing, Down then Enter opens Options, Escape closes it all.
   - Its 50 framebuffer checkpoints are pinned, so a wrong key map changes them.
   - It also pins `-fps`'s line and the reports of a limit that is not a multiple of 35 (frames 35 and 50).
+- **After another program.** `doomafter.session` (emulator) runs `bars`, which paints the left half of every row, then one timedemo frame. That frame, the 25th checkpoint, is a fresh boot's first, `5f599469`, because Doom clears the framebuffer at start (Codex's finding on PR #43). Without the clear it is `f0452469`.
 - **Untraced.** The runner compares these sessions with `--compare outputs`, new in this PR: the console, the outcome, every checkpoint and the disks, as `results` does, but with no trace written and so no trap records or stores. It is only for runs too long to trace, since nothing can check that a shorter one would not have given a full trace comparison. A trace of the 35 frames alone is 9.5 GB.
 - `check-rv32-doom-window` runs Doom through the window, headless, for 400 M instructions: the title and the demo, 396 frames through the palette.
   - The run must give exactly the headless emulator's console and checkpoints.
