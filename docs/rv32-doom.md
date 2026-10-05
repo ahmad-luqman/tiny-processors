@@ -57,25 +57,37 @@ Every existing session keeps its 128 KiB disk, so none of their transcripts or P
 A program can live on the disk instead of in the kernel's image. Its file on the disk is a RAM disk of one program, which is exactly the format `tools/rv32_ramdisk.py` already writes. When the RAM disk has no program with the name being spawned, the kernel:
 1. opens the tfs file of that name;
 2. reads the header and the entry;
-3. checks the entry exactly as the boot check checks the RAM disk's (one function, `entry_ok`, against the file's size), and requires the entry's name to be the file's;
+3. checks the entry exactly as the boot check checks the RAM disk's (one function, `entry_ok`, against the file's size, now also refusing any flag the kernel does not know), and requires the entry's name to be the file's and its flags to be none;
 4. reads the image into the program's slots with the whole-sector path.
 
-A file that is being written cannot be run. The RAM disk's table is unchanged, so the boot line still says `20 programs` and no transcript moved.
+A program in the RAM disk comes first, so a file named `hello` cannot replace the built-in one. A file that is being written cannot be run. When a file exists but cannot run, the kernel says why before the shell's `cannot run`:
+- `being written`;
+- `not a program` (a bad header);
+- `a program that breaks the slot rules`;
+- `a program filed under another name`;
+- `a program on the disk may not drive the accelerators`.
 
-**Trust.** A RAM-disk program's entry comes from the kernel's image. A disk program's entry comes from a file that any program may write (`write` on a new file name). So the entry is untrusted, and `entry_ok` is the whole check: the image inside the file, the span inside the slots, and the stack whole pages inside the span. A disk program can therefore do exactly what a RAM-disk program with the same entry could, and nothing more:
+The RAM disk's table is unchanged, so the boot line still says `20 programs` and no transcript moved.
+
+**Trust.** A RAM-disk program's entry comes from the kernel's image. A disk program's entry comes from a file that any program may write (`write` on a new file name). So the entry is untrusted. `entry_ok` checks its geometry: the image inside the file, the span inside the slots, and the stack whole pages inside the span. What it may ask for is limited too:
 - It runs in user mode in its own slots, mapped and PMP-bounded as any process is.
 - `spawn` refuses it while its slots overlap a live process's.
-- If its `flags` ask for the accelerators, it gets their windows as `menu` does. The DMA window the kernel sets at every switch still bounds the engines to the process's own span.
+- It may not drive the accelerators. Only the kernel's own image grants them. A disk program that asked for them could keep an engine busy forever, and while an engine is busy the scheduler runs only the programs that drive the engines, so the shell would starve (the six-agent review found this).
 
 A file the kernel creates is at most 4 KiB, so a program written on the machine can only be a small one. The large ones come from the host.
 
-`diskprog` is the test. It carries 256 KiB of a generated sequence (the assembler writes it from a `.rept`) and is linked into slots 100–103, above 8 MiB. It sits at the end of a 6 MiB disk, behind a 4 MiB `pad` file. Its session:
+`diskprog` is the test. It carries 256 KiB of a generated sequence (the assembler writes it from a `.rept`) and is linked into slots 100–103, above 8 MiB. It sits just past 4 MiB into a 6 MiB disk, behind a 4 MiB `pad` file whose byte `i` is `i mod 256`. Its session:
 - runs it, and it checks every word;
-- refuses `pad` (not a program) and `renamed` (the same file under another name);
-- runs `palcheck` (below);
+- refuses `pad` (not a program) and `renamed` (the same file under another name), each with the kernel's reason;
+- runs the RAM disk's `hello`, although a disk file of that name exists;
+- runs `palcheck`, then `palcheck leave`, then `palcheck` again (below);
+- runs `readcheck`, a user program's reads of `pad` on every path of `fs_read`. It reads whole sectors into an aligned buffer, the same into a misaligned one, mid-sector to mid-sector, and a sector and a part followed by a canary word. It reads past the end of the file followed by a canary, and at the end. Its own second instance is refused while it runs;
+- writes a file with `write`, far past the old 128 KiB, and reads it back with `cat`;
 - lists the files.
 
-QEMU, the emulator and Verilator agree (`PASS e9591b4a`), and the 6 MiB disks they leave are identical. Verilator takes about 22 s.
+QEMU, the emulator and Verilator agree (`PASS d4d49003`), and the 6 MiB disks they leave are identical. Verilator takes about 30 s.
+
+A unit test (`DiskProgramTest`) breaks a good program file one clause at a time, 17 ways (a short header, a count of 2, a reserved word, a cut image, an offset past the file, a file larger than its memory, a load below, between or past the slots, a span past them, a stack that is not whole pages or fills the span, memory that runs into the stack, an entry outside the image, a name with no NUL, an unknown flag, the accelerators flag). It checks each is refused with its reason, a good one still runs, and the shell carries on.
 
 ## The palette
 
@@ -90,26 +102,30 @@ The checkpoint hash covers pixel indices only, so Pong's 200 checkpoints and `PA
 | Where | What |
 | --- | --- |
 | Emulator | A region in the device table. The PPM writer and the window colour a frame through the palette as it is at the present; the window rebuilds its table at every present |
-| RTL | [rv32_palette.v](../rtl/rv32/rv32_palette.v): a 256×24 array, filled at power-on from two level tables (the RGB332 fields scaled with truncation), with a bus port and select. Synthesis shrinks it to 16 entries as it shrinks RAM: 338,753 SoC cells, 1,527 more |
+| RTL | [rv32_palette.v](../rtl/rv32/rv32_palette.v): a 256×24 array, filled at power-on from two level tables (the RGB332 fields scaled with truncation), with a bus port and select. Synthesis shrinks it to 16 entries as it shrinks RAM: 338,990 SoC cells, 1,764 more |
 | Device tree | The display node's third `reg` entry. `check-rv32-virt-map` stays clean: the window is in the hole between `fw_cfg` and flash |
-| Kernel | `SYS_PALETTE` (22): `palette(colours, set)` reads all 256 entries into a word-aligned user buffer (`set` 0) or writes them from it (1). It is an error on a machine without a palette (QEMU), for a misaligned buffer, for another `set` value, or for memory that is not the caller's. PMP has no free entry, so the window is not mapped into programs |
-| `platcheck` | Prints the window and checks four power-on colours. Its word is unchanged; the expected console gains a line |
+| Kernel | `SYS_PALETTE` (22): `palette(colours, direction)` reads all 256 entries into a word-aligned user buffer (`OS_PALETTE_READ`) or writes them from it (`OS_PALETTE_WRITE`). The kernel keeps the palette it found at boot and puts it back when the process that last wrote the palette finishes, so a program that sets colours (Doom) and exits, or is killed, leaves the next one RGB332. A display without a palette is a boot panic, as one without a framebuffer is. It is an error on a machine without a palette (QEMU), for a misaligned buffer, for another `set` value, or for memory that is not the caller's. PMP has no free entry, so the window is not mapped into programs |
+| `platcheck` | Prints the window and checks four power-on colours. The palette line does not change its word (the RAM size did); the expected console gains a line |
 
 **Tests:**
 - The emulator and RTL tests hash every power-on word and check the top byte, the sub-word and fetch faults, trace for trace.
 - The PPM shows a written colour.
 - The old unmapped-palette faults moved to `0x1100_3400`, the unmapped rest of that page.
-- `palcheck`, a disk program next to `diskprog`, reads the RGB332 palette through the kernel. It then sets a palette whose words carry a top byte, reads it back with that byte dropped, restores it, and checks three refusals. On QEMU it prints `no palette`.
+- `palcheck`, a disk program next to `diskprog`, reads the RGB332 palette through the kernel. It then sets a palette whose words carry a top byte, reads it back with that byte dropped, restores it and reads that back.
+  - It checks five refusals: a misaligned buffer, an unknown direction, memory that is not its own, a buffer past the top of its memory, and one into its guard page.
+  - `palcheck leave` sets a palette and exits, and the next `palcheck` finds RGB332 again: the kernel's restore.
+  - On QEMU it prints `no palette`. On a machine with a display, a missing palette is a failure.
+- An RTL test writes a palette word, resets with `+reset-at` and reads the word back. An emulator test shows that each of two frames is coloured by the palette at its own present.
 
 ## Keys
 
-Codes 15 to 26 are added: `CTRL`, `SHIFT`, `TAB`, `Y`, `N` and `DIGIT1` to `DIGIT7`. They are in `board.h`, the emulator's name table, the testbench, `rv32_devices.py` and the window, where either Ctrl or either Shift is the one key. The digits are named rather than `1`..`7` because an input script already reads a bare number as a raw code. The fourteen existing codes do not move. A new RTL test reads every named key from a script on both backends, in both cases.
+Codes 15 to 26 are added: `CTRL`, `SHIFT`, `TAB`, `Y`, `N` and `DIGIT1` to `DIGIT7`. They are in `board.h`, the emulator's name table, the testbench, `rv32_devices.py` and the window, where either Ctrl or either Shift is the one key. The digits are named rather than `1`..`7` because an input script already reads a bare number as a raw code. The fourteen existing codes do not move. A new RTL test reads every named key from a script on both backends, written in upper and in lower case. The window counts the two host keys that share a code: the contract's key is pressed with the first and released with the last.
 
 ## Evidence (platform PR)
 
 - `make test-rv32`: every target passes on macOS.
   - Under `-j8` load QEMU once truncated `F/fsub_b11-01`'s console. That is issue #41, and the suite passed 198/198 when rerun alone.
-- `run-rv32-diskprog-{qemu,emu,rtl-verilator}`: `PASS e9591b4a`, with identical disks.
+- `run-rv32-diskprog-{qemu,emu,rtl-verilator}`: `PASS d4d49003`, with identical disks.
 - `run-rv32-pong-emu`: 200 checkpoints and `PASS 8fef54bc`, unchanged.
 - `run-rv32-platform-{qemu,emu,rtl,rtl-verilator}`: `PASS bee59113`.
-- `lint-rv32` and `lint-rv32-soc` are clean. `synth-rv32-soc` gives 338,753 cells.
+- `lint-rv32` and `lint-rv32-soc` are clean. `synth-rv32-soc` gives 338,990 cells.

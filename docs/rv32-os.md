@@ -211,10 +211,10 @@ back in `a0` ([sys.h](../programs/rv32/os/sys.h)):
 | `event()`, `keys()` | The next input event from the kernel's buffer, and the held-key mask |
 | `present()`, `display()` | Show the framebuffer; its address, or 0 on a platform without a display |
 | `sbrk(n)` | Grow the heap; it stops below the stack |
-| `spawn(name, args)`, `wait(pid)`, `list(i, buf, len)` | Run a program from the RAM disk (or, since issue #35, from the disk), wait for a child, list the RAM disk |
+| `spawn(name, args)`, `wait(pid)`, `list(i, buf, len)` | Run a program from the RAM disk (or, since issue #35, from the disk, whose refusals the kernel explains), wait for a child, list the RAM disk |
 | `yield()`, `sleep(ticks)`, `time()`, `getpid()`, `halt(code)` | Scheduling and time; `halt` stops the machine |
 | `seek(fd, offset, whence)` | Move an open file's position (Track 3, for the C library's `fseek`) |
-| `palette(colours, set)` | Read the display's 256 colours into `colours` (`set` 0) or write them from it (1); an error without a palette (issue #35, [record](rv32-doom.md#the-palette)) |
+| `palette(colours, direction)` | Read the display's 256 colours into `colours` or write them from it; an error without a palette or for a bad request. The kernel restores the boot palette when the last writer finishes (issue #35, [record](rv32-doom.md#the-palette)) |
 
 Every pointer must lie inside the caller's slot, and every call that cannot
 be served returns `0xffff_ffff`. [syscheck.c](../programs/rv32/os/syscheck.c)
@@ -314,7 +314,7 @@ the disk, since the session writes to it:
 ```sh
 make check-rv32-os-image
 cp build/rv32/os/disk.img build/rv32/os/my.disk
-qemu-system-riscv32 -M virt -cpu rv32 -bios none -m 8M \
+qemu-system-riscv32 -M virt -cpu rv32 -bios none -m 16M \
   -kernel build/rv32/os/kernel.elf -nographic -no-reboot \
   -icount shift=3,sleep=off -global virtio-mmio.force-legacy=false \
   -drive file=build/rv32/os/my.disk,if=none,format=raw,id=disk0 \

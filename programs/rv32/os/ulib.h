@@ -40,8 +40,8 @@ static inline uint32_t sys_getpid(void) { return syscall3(SYS_GETPID, 0, 0, 0); 
 static inline uint8_t *sys_display(void) { return (uint8_t *)(uintptr_t)syscall3(SYS_DISPLAY, 0, 0, 0); }
 /* Issue #35: the 256 palette entries (0x00RRGGBB): read into `colours`, or set from them; 0, or
  * SYS_ERROR without a palette. */
-static inline uint32_t sys_get_palette(uint32_t *colours) { return syscall3(SYS_PALETTE, (uint32_t)(uintptr_t)colours, 0, 0); }
-static inline uint32_t sys_set_palette(const uint32_t *colours) { return syscall3(SYS_PALETTE, (uint32_t)(uintptr_t)colours, 1, 0); }
+static inline uint32_t sys_get_palette(uint32_t *colours) { return syscall3(SYS_PALETTE, (uint32_t)(uintptr_t)colours, OS_PALETTE_READ, 0); }
+static inline uint32_t sys_set_palette(const uint32_t *colours) { return syscall3(SYS_PALETTE, (uint32_t)(uintptr_t)colours, OS_PALETTE_WRITE, 0); }
 static inline uint32_t sys_open(const char *name, uint32_t flags) { return syscall3(SYS_OPEN, (uint32_t)(uintptr_t)name, flags, 0); }
 static inline uint32_t sys_close(uint32_t fd) { return syscall3(SYS_CLOSE, fd, 0, 0); }
 static inline uint32_t sys_files(uint32_t index, char *buf, uint32_t len) { return syscall3(SYS_FILES, index, (uint32_t)(uintptr_t)buf, len); }

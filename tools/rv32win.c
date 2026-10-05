@@ -52,7 +52,8 @@ static void usage(void)
           "Runs FILE as rv32emu does, with no instruction limit unless --max-instructions, and shows\n"
           "each present in a window scaled by N (1..8, default 3),\n"
           "at most N presents per second (default 60; 0 runs unthrottled). Keys become the contract's\n"
-          "events at the next present: arrows, space, return, escape, A, D, W, S, P, Q, R. A scripted\n"
+          "events at the next present: arrows, space, return, escape, A, D, W, S, P, Q, R, and for\n"
+          "Doom Ctrl, Shift (either one), Tab, Y, N and 1 to 7. A scripted\n"
           "--input replays as on rv32emu; --record writes every event, typed or scripted, as a script\n"
           "that replays this session. Closing the window stops the run with halt=stopped.\n",
           stderr);
@@ -72,7 +73,9 @@ static bool upload_frame(SDL_Texture *texture, const machine *m)
 {
     uint32_t lut[PALETTE_ENTRIES];
     for (unsigned p = 0; p < PALETTE_ENTRIES; p++) {
-        lut[p] = 0xff000000u | m->palette[p];
+        uint8_t rgb[3];
+        emu_palette_rgb(m, (uint8_t)p, rgb); /* as the PPM writer colours it */
+        lut[p] = 0xff000000u | (uint32_t)rgb[0] << 16 | (uint32_t)rgb[1] << 8 | rgb[2];
     }
     const uint8_t *fb = m->fb;
     void *pixels;
@@ -192,6 +195,7 @@ int main(int argc, char **argv)
 
     uint32_t *pending = NULL; /* host keys polled since the last present; grows as needed */
     size_t pending_count = 0, pending_capacity = 0;
+    int held[32] = {0}; /* host keys held per contract key code */
     bool closing = false, render_ok = true;
     uint64_t period = fps ? 1000000000ull / fps : 0, next_frame = SDL_GetTicksNS();
     for (;;) {
@@ -204,7 +208,14 @@ int main(int argc, char **argv)
                 if (e.key.repeat || code < 0) { /* held keys are one press; unmapped keys do not exist */
                     continue;
                 }
-                uint32_t event = EVENT_VALID | (e.type == SDL_EVENT_KEY_DOWN ? EVENT_PRESS : 0u) | (uint32_t)code;
+                /* Two host keys share a code (either Ctrl, either Shift): the contract's key is
+                 * pressed with the first and released with the last, as one key would be. */
+                bool down = e.type == SDL_EVENT_KEY_DOWN;
+                held[code] += down ? 1 : (held[code] ? -1 : 0);
+                if (held[code] != (down ? 1 : 0)) {
+                    continue;
+                }
+                uint32_t event = EVENT_VALID | (down ? EVENT_PRESS : 0u) | (uint32_t)code;
                 if (pending_count == pending_capacity) {
                     pending_capacity = pending_capacity ? 2 * pending_capacity : 64;
                     pending = realloc(pending, pending_capacity * sizeof *pending);

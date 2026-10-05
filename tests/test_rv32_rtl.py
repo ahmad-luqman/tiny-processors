@@ -639,6 +639,49 @@ class RtlTest(unittest.TestCase):
             self.assertNotEqual(rtl.status, 0)
             self.assertIn("whole sectors", rtl.stderr + rtl.noise)
 
+    def test_requests_are_bounded_by_the_disk_in_the_drive(self):
+        """Issue #35: on a 1 MiB disk (2,048 sectors) the last sector reads, the first past it is
+        IOERR, and a two-sector write from the last is IOERR and leaves the disk as it was, on both
+        backends trace for trace; neither bounds requests by the largest disk."""
+        ring = RAM + 0x3000
+        desc, avail, used, header, data, status = ring, ring + 0x100, ring + 0x200, ring + 0x300, ring + 0x400, ring + 0xc00
+        words = []
+
+        def put(address, value):
+            words.extend(LI(1, address) + LI(2, value) + [SW(2, 1, 0)])
+
+        for i, (address, length, flags) in enumerate(((header, 16, 1 | 1 << 16), (data, 512, 3 | 2 << 16), (status, 1, 2))):
+            put(desc + 16 * i, address)
+            put(desc + 16 * i + 8, length)
+            put(desc + 16 * i + 12, flags)
+        for offset, value in ((0x070, 0), (0x070, 1), (0x070, 3), (0x070, 11), (0x030, 0), (0x038, 8), (0x080, desc),
+                              (0x090, avail), (0x0A0, used), (0x044, 1), (0x070, 15)):
+            put(VIRTIO + offset, value)
+        requests = ((0, 2047, 512, 3, 3), (0, 2048, 512, 3, 4), (1, 2047, 1024, 1, 5))  # type, sector, length, flags, reg
+        for index, (kind, sector, length, flags, reg) in enumerate(requests):
+            put(header, kind)
+            put(header + 8, sector)
+            put(desc + 16 + 8, length)
+            put(desc + 16 + 12, flags | 2 << 16)
+            put(avail, (index + 1) << 16)                  # ring[index] stays 0: descriptor 0
+            put(VIRTIO + 0x050, 0)                         # served before the store retires
+            words += LI(1, status) + [LBU(reg, 1, 0)]
+        words += LI(1, data) + [LW(6, 1, 0)] + FINISH()
+        image = bytes(range(256)) * (0x100000 // 256)
+        with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
+            hex_path, bin_path = write_image(words, directory, "image")
+            disks = {name: Path(directory) / f"{name}.disk" for name in ("emu", "rtl")}
+            for disk in disks.values():
+                disk.write_bytes(image)
+            emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace", disk=disks["emu"])
+            rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", disk=disks["rtl"], timeout=RTL_TIMEOUT)
+            self.assertEqual((rtl.halt["halt"], rtl.halt["outcome"]), ("done", "pass"), rtl.stderr)
+            self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
+            values = registers(rtl.trace)
+            self.assertEqual((values[3], values[4], values[5]), (0, 1, 1), "OK, then IOERR past the end and across it")
+            self.assertEqual(values[6], int.from_bytes(image[2047 * 512:2047 * 512 + 4], "little"))
+            self.assertEqual((disks["emu"].read_bytes(), disks["rtl"].read_bytes()), (image, image), "nothing written")
+
     def test_memory_and_target_faults(self):
         cases = [
             ("load outside the map", LI(1, UNMAPPED) + [LW(2, 1, 0)], 5, UNMAPPED),
@@ -1001,6 +1044,19 @@ class RtlTest(unittest.TestCase):
                 self.assertEqual(rtl.halt["stalls"], stall * rtl.halt["transfers"] + 2 * 3, "two extra stalls per byte")
         emulator, rtl = self.assert_same_pass(say + FINISH(), stall=0)
         self.assertEqual(rtl.halt["stalls"], 0, "the default console never waits")
+
+    def test_a_reset_leaves_the_palette(self):
+        """Issue #35: the palette, like the framebuffer, keeps what was written across a +reset-at
+        reset; only power-on fills it with RGB332 (the emulator has no warm reset)."""
+        words = LI(1, PALETTE) + [LW(2, 1, 20)] + LI(3, 0x123456) + [SW(3, 1, 20)] + [ADDI(4, 4, 1)] * 100 + FINISH()
+        emulator, rtl = self.run_both(words, stall=0, reset_at=200)
+        self.assertEqual((rtl.halt["halt"], rtl.halt["outcome"]), ("done", "pass"), rtl.stderr)
+        restarts = [i for i, line in enumerate(rtl.trace) if line.split()[1] == f"{RAM:08x}"]
+        self.assertEqual(len(restarts), 2, "the machine restarted once")
+        first, second = rtl.trace[restarts[0]:restarts[1]], rtl.trace[restarts[1]:]
+        index = next(i for i, line in enumerate(first) if f"mem[{PALETTE + 20:08x}]->" in line)
+        self.assertEqual(effects(first[index]), f"x2={power_on_palette()[5]:08x} mem[{PALETTE + 20:08x}]->{power_on_palette()[5]:08x}/4")
+        self.assertEqual(effects(second[index]), f"x2=00123456 mem[{PALETTE + 20:08x}]->00123456/4", "the write survived the reset")
 
     def test_reset_during_a_held_store(self):
         """+reset-at=N resets the machine while a store is being held: it never lands, the timer,

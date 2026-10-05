@@ -53,6 +53,8 @@
 #define VIRTIO_SIZE 0x200u
 #define VIRTIO_DISK_SIZE 0x20000u /* 128 KiB: the disk a run without --disk holds */
 #define VIRTIO_DISK_MAX 0x800000u  /* 8 MiB, the RTL's DISK_WORDS: the largest disk file (issue #35) */
+_Static_assert(VIRTIO_DISK_SIZE % 512u == 0 && VIRTIO_DISK_MAX % 512u == 0 && VIRTIO_DISK_SIZE <= VIRTIO_DISK_MAX,
+               "disks are whole sectors, the default no larger than the largest");
 #define INPUT_BASE 0x11001000u
 #define INPUT_EVENT 0x0u
 #define INPUT_COUNT 0x4u
@@ -210,9 +212,8 @@ const char *emu_key_name(int code);   /* the board.h name of a code, or NULL for
 emu_stop emu_run_until(machine *m, uint64_t budget);
 
 /* Display helpers shared by the PPM writer and the window: the checkpoint hash over the
- * framebuffer, and the fixed RGB332 mapping of one pixel. */
+ * framebuffer's pixel indices. */
 uint32_t emu_frame_hash(const uint8_t *pixels);
-void emu_rgb332(uint8_t pixel, uint8_t rgb[3]);
 /* The colour the palette gives `pixel` now (issue #35), as the PPM writer and the window draw it. */
 void emu_palette_rgb(const machine *m, uint8_t pixel, uint8_t rgb[3]);
 

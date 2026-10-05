@@ -6,8 +6,11 @@
 // refused. Its power-on contents are the fixed RGB332 mapping the framebuffer
 // had before (bits 7:5 red, 4:2 green, 1:0 blue, each scaled to 0..255), so a
 // program that never writes it looks as it always did; a reset leaves it as it
-// is, like the framebuffer. The host reads it at a present to colour the frame
-// (tools/rv32emu_core.c holds the same table). ENTRIES is 256 except in
+// is, like the framebuffer. The RTL itself colours nothing: the testbench's
+// checkpoints hash pixel indices, and only the emulator's PPM writer and the
+// window colour a frame, through the emulator's copy of this table. The same
+// power-on table is in tools/rv32emu_core.c, tools/rv32_devices.py and
+// programs/rv32/os/palcheck.c; tests compare them. ENTRIES is 256 except in
 // synthesis, which shrinks it as it shrinks RAM; the index then wraps.
 module rv32_palette #(
     parameter integer ENTRIES = 256
@@ -53,6 +56,12 @@ module rv32_palette #(
         endcase
     endfunction
 
+`ifndef SYNTHESIS
+    initial if (ENTRIES < 1 || ENTRIES > 256 || (ENTRIES & (ENTRIES - 1)) != 0)
+        begin $display("rv32_palette: ENTRIES must be a power of two from 1 to 256, not %0d", ENTRIES); $stop; end
+`endif
+
+    // The levels are tables, not field * 255 / 7, so no wide arithmetic leaves unused bits for lint.
     integer i;
     initial begin
         for (i = 0; i < ENTRIES; i = i + 1)

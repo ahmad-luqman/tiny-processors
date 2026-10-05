@@ -79,7 +79,8 @@
 #define RV32_PLIC_SOURCE_VIRTIO 1
 
 /* virtio-blk (O3): a virtio-mmio version 2 block device in virt's first slot,
- * 512 bytes of registers, one queue of up to 8 entries, a 128 KiB disk. Find it
+ * 512 bytes of registers, one queue of up to 8 entries, a disk of up to 8 MiB
+ * (128 KiB without one; issue #35). Find it
  * through the device tree ("virtio,mmio" whose DeviceID reads 2). */
 #define RV32_VIRTIO_BASE       0x10001000
 

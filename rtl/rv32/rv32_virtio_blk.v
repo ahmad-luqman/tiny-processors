@@ -62,6 +62,15 @@ module rv32_virtio_blk #(
     localparam [31:0] RAM_BYTES = RAM_WORDS * 4;
     localparam [31:0] MAX_SECTORS = DISK_WORDS / 128;
     wire [31:0] sectors = disk_sectors > MAX_SECTORS ? MAX_SECTORS : disk_sectors;
+`ifndef SYNTHESIS
+    // The clamp keeps a synthesized device safe; in simulation a disk larger than the memory, or a
+    // memory that is not whole sectors, is the testbench's mistake and stops the run.
+    initial if (DISK_WORDS >= 128 && DISK_WORDS % 128 != 0)
+        begin $display("rv32_virtio_blk: DISK_WORDS %0d is not whole 128-word sectors", DISK_WORDS); $stop; end
+    always @(posedge clk)
+        if (disk_sectors > MAX_SECTORS)
+            begin $display("rv32_virtio_blk: a disk of %0d sectors does not fit the %0d-sector memory", disk_sectors, MAX_SECTORS); $stop; end
+`endif
     localparam [3:0] IDLE = 4'd0, AVAIL_IDX = 4'd1, RING = 4'd2, DESC = 4'd3, HEADER = 4'd4, COPY = 4'd5,
                      STATUS = 4'd6, USED_ID = 4'd7, USED_LEN = 4'd8, USED_IDX = 4'd9, NEXT = 4'd10, FAIL = 4'd11;
 

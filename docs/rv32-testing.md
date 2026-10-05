@@ -93,7 +93,7 @@ and under a minute, so it runs in `test-rv32` beside the float session
 (`run-rv32-float-rtl-verilator`, 31.2 M cycles), and its 100 M cycle budget
 fails a slower FPU.
 
-With issue #35's platform PR (16 MiB RAM, the diskprog session, the palette and key tests) `make -j8 test-rv32` took 5 min 5 s and 5 min 19 s on two runs on the same Mac, against #26's 284 s; the added Verilator runs account for most of it.
+With issue #35's platform PR (16 MiB RAM, the diskprog session, the palette and key tests) `make -j8 test-rv32` took 5 min 5 s and 5 min 19 s on two runs on the same Mac, against #26's 284 s; the added Verilator runs account for most of it, and every Icarus run starts about 3.7 s later, zero-filling 16 MiB of RAM.
 
 The OS sessions never ran on Icarus in the aggregate; `run-rv32-os-rtl` is a
 manual target.

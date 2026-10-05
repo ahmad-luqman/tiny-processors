@@ -31,10 +31,14 @@
 #define SYS_PS      19  /* ps(index, buf, len): one line about process table entry `index` (O4) */
 #define SYS_SWITCHES 20 /* switches(): how often the timer took the machine from the caller (O4) */
 #define SYS_SEEK    21  /* seek(fd, offset, whence): move an open file's position (Track 3); returns the new one */
-#define SYS_PALETTE 22  /* palette(colours, set): all 256 entries, 0x00RRGGBB words, read into colours (set 0) or
-                         * written from them (set 1) (issue #35); 0, or an error without a palette */
+#define SYS_PALETTE 22  /* palette(colours, direction): all 256 entries, 0x00RRGGBB words, read into colours
+                         * (OS_PALETTE_READ) or written from them (OS_PALETTE_WRITE) (issue #35); 0, or an
+                         * error without a palette or for a bad request. The kernel restores the palette
+                         * it found at boot when the last process to write it finishes. */
 #define SYS_CALLS   23
 #define OS_PALETTE_ENTRIES 256u
+#define OS_PALETTE_READ    0u
+#define OS_PALETTE_WRITE   1u
 
 #define SYS_ERROR 0xffffffffu
 

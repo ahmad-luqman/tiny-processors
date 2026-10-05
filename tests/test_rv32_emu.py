@@ -673,6 +673,20 @@ class EmulatorTest(unittest.TestCase):
         header = len(b"P6\n320 240\n255\n")
         self.assertEqual(data[header:header + 6], b"\x00\x00\x00\x12\x34\x56", "pixel 1 is value 5, drawn in the new colour")
 
+    def test_each_frame_is_coloured_by_its_own_palette(self):
+        """Issue #35: a frame's picture is taken at its present, palette included; a change after
+        the first present colours only the second."""
+        words = LI(7, FB) + LI(8, 9) + [SB(8, 7, 0)] + LI(9, DISPLAY) + [SW(0, 9, 0)]
+        words += LI(1, PALETTE) + LI(4, 0x00ABCDEF) + [SW(4, 1, 4 * 9), SW(0, 9, 0)]
+        with tempfile.TemporaryDirectory() as directory:
+            self.run_pass(words, extra=("--frames", directory))
+            first, second = ((Path(directory) / f"frame-000{n}.ppm").read_bytes() for n in (1, 2))
+        header = len(b"P6\n320 240\n255\n")
+        before = power_on_palette()[9]
+        self.assertEqual(first[header:header + 3], before.to_bytes(3, "big"))
+        self.assertEqual(second[header:header + 3], b"\xab\xcd\xef")
+        self.assertEqual(first[header + 3:], second[header + 3:], "every other pixel is value 0 in both")
+
     def test_frames_are_written_as_ppm(self):
         """--frames DIR writes one binary PPM per present with the RGB332 mapping; an unwritable
         directory rejects the run."""

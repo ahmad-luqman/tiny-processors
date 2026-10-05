@@ -1,6 +1,12 @@
 diskprog one two
 pad
 renamed
+hello
 palcheck
+palcheck leave
+palcheck
+readcheck
+write note far past the old disk
+cat note
 files
 halt

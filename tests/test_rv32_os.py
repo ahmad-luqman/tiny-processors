@@ -4,11 +4,14 @@ The RAM disk tests use the program ELFs `make check-rv32-os-image` builds. The k
 session runs on the emulator and the RTL in step-tick mode, where the whole trace, interrupt
 lines included, must agree; the Make targets run it on QEMU and with cycle ticks.
 """
+import contextlib
+import io
 import os
 import re
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -82,6 +85,12 @@ class RamdiskTest(unittest.TestCase):
             for name, (paths, accelerators) in cases.items():
                 with self.subTest(name), self.assertRaises(rv32_ramdisk.RamdiskError):
                     rv32_ramdisk.build(paths, accelerators)
+            # Issue #35: --check takes the RAM disk's programs and the disk's together and writes nothing.
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(rv32_ramdisk.main(["--check", str(hello), str(primes)]), 0)
+                self.assertEqual(rv32_ramdisk.main(["--check", str(hello), str(twin)]), 1, "a shared slot")
+            self.assertIn("2 programs, no two sharing a name or a slot", out.getvalue())
         # Track 3: a stack is whole pages, at least two (one is the kernel's guard), inside the span
         # and above the program. hello loads at 0x8012_0000 with one slot; each case changes its
         # stack's bottom or, to reach the last rule with a well-formed stack, its size in memory.
@@ -130,8 +139,14 @@ class FileSystemToolTest(unittest.TestCase):
         mkfs.add(disk, "big", b"\x5a" * 0x400001)
         self.assertEqual(mkfs.entries(disk), [("big", 2, 0x2001, 0x400001)])
         self.assertEqual(mkfs.read(disk, "big"), b"\x5a" * 0x400001)
+        # The kernel's rule (fs_mount): the file system may be smaller than the disk, never larger.
+        self.assertEqual(mkfs.entries(disk + bytes(512)), mkfs.entries(disk))
         with self.assertRaises(mkfs.FsError):
-            mkfs.entries(disk + bytes(512))  # the superblock says 0x3000 sectors
+            mkfs.entries(disk[:-512])  # the superblock says 0x3000 sectors
+        rejected = subprocess.run([sys.executable, str(ROOT / "tools/rv32_mkfs.py"), "x.img", "--size", "0x600000"],
+                                  capture_output=True, text=True)
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("--size makes a new disk", rejected.stderr)
         self.assertEqual(len(mkfs.blank(mkfs.DISK_MAX)), mkfs.DISK_MAX)
 
     def test_refusals(self):
@@ -330,6 +345,95 @@ class ShellTest(unittest.TestCase):
         self.assertIn("$ hello e\nhello from pid 7, args: e\n$ hello f\nhello from pid 8, args: f\n", console,
                       "Enter ends the line even inside an escape sequence")
         self.assertIn("$ halt\n", console, "backspace on an empty line rubs out nothing")
+
+
+class DiskProgramTest(unittest.TestCase):
+    """Issue #35: a program on the disk comes from a file any program may write, so its entry is
+    checked as the boot check checks the RAM disk's, clause by clause. Each variant here breaks one
+    clause of a good program file (palcheck.prg, renamed to match its file) and must be refused with
+    its reason while the shell carries on; one valid variant runs."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not (OS / "kernel.bin").exists() or not (OS / "palcheck.prg").exists():
+            raise unittest.SkipTest("run make check-rv32-os-image")
+        cls.workdir = tempfile.TemporaryDirectory()
+        cls.emulator = Path(cls.workdir.name) / "rv32emu"
+        integer_tests.build_emulator(cls.emulator)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.workdir.cleanup()
+
+    REASONS = {"not": "not a program", "rules": "a program that breaks the slot rules",
+               "flags": "a program on the disk may not drive the accelerators"}
+
+    def variants(self):
+        from tools import rv32_ramdisk
+        good = (OS / "palcheck.prg").read_bytes()
+        name, load, entry, size, memory, offset, flags, span, stack = rv32_ramdisk.ENTRY.unpack_from(good, 16)
+        slots_end = rv32_ramdisk.SLOT_BASE + rv32_ramdisk.SLOTS * rv32_ramdisk.SLOT_SIZE
+
+        def entry_with(file_name, **change):
+            fields = dict(name=file_name.encode(), load=load, entry=entry, size=size, memory=memory, offset=offset,
+                          flags=flags, span=span, stack=stack)
+            fields.update(change)
+            blob = bytearray(good)
+            rv32_ramdisk.ENTRY.pack_into(blob, 16, *fields.values())
+            return bytes(blob)
+
+        header = bytearray(entry_with("count2"))
+        header[4] = 2
+        reserved = bytearray(entry_with("reserved"))
+        reserved[8] = 1
+        return {
+            "valid": (entry_with("valid"), None),
+            "short": (good[:40], "not"),
+            "count2": (bytes(header), "not"),
+            "reserved": (bytes(reserved), "not"),
+            "truncated": (entry_with("truncated")[:offset + size - 4], "rules"),
+            "offsetpast": (entry_with("offsetpast", offset=len(good) + 4), "rules"),
+            "filebigger": (entry_with("filebigger", memory=size - 4), "rules"),
+            "lowload": (entry_with("lowload", load=rv32_ramdisk.SLOT_BASE - rv32_ramdisk.SLOT_SIZE,
+                                   entry=rv32_ramdisk.SLOT_BASE - rv32_ramdisk.SLOT_SIZE), "rules"),
+            "oddload": (entry_with("oddload", load=load + 0x1000, entry=entry + 0x1000), "rules"),
+            "pastslots": (entry_with("pastslots", load=slots_end - rv32_ramdisk.SLOT_SIZE, entry=slots_end - rv32_ramdisk.SLOT_SIZE,
+                                     span=2 * rv32_ramdisk.SLOT_SIZE), "rules"),
+            "hugespan": (entry_with("hugespan", span=(rv32_ramdisk.SLOTS + 1) * rv32_ramdisk.SLOT_SIZE), "rules"),
+            "oddstack": (entry_with("oddstack", stack=stack + 16), "rules"),
+            "stackspan": (entry_with("stackspan", stack=span), "rules"),
+            "nomemory": (entry_with("nomemory", memory=span - stack + 4), "rules"),
+            "outentry": (entry_with("outentry", entry=load + size), "rules"),
+            "nonul": (entry_with("nonul", name=b"nonul" + b"x" * 19), "rules"),
+            "unknownflag": (entry_with("unknownflag", flags=2), "rules"),
+            "engines": (entry_with("engines", flags=1), "flags"),
+        }
+
+    def console_with(self, files, keys):
+        with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
+            work = Path(directory)
+            disk = mkfs.blank(0x100000)
+            for name, data in files.items():
+                mkfs.add(disk, name, data)
+            (work / "disk").write_bytes(disk)
+            (work / "keys").write_bytes(keys)
+            run = run_emulator(self.emulator, OS / "kernel.bin", None, console_input=work / "keys", disk=work / "disk")
+        self.assertEqual(run.halt["outcome"], "pass", run.stderr)
+        return run.console
+
+    def test_each_broken_clause_is_refused_with_its_reason(self):
+        variants = list(self.variants().items())
+        for start in range(0, len(variants), 12):  # a directory holds 16 files
+            batch = dict(variants[start:start + 12])
+            console = self.console_with({name: data for name, (data, _) in batch.items()},
+                                        "".join(f"{name}\n" for name in batch).encode() + b"hello\nhalt\n")
+            for name, (_, reason) in batch.items():
+                with self.subTest(name):
+                    if reason is None:
+                        self.assertIn(f"$ {name}\npalcheck: palette is RGB332\n", console)
+                    else:
+                        self.assertIn(f"$ {name}\nkernel: {name}: {self.REASONS[reason]}\nsh: {name}: cannot run\n", console)
+            self.assertIn("$ hello\nhello from pid", console, "the shell carries on")
 
 
 def kernel_constant(name):

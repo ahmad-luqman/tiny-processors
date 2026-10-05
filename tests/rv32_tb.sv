@@ -168,6 +168,7 @@ module rv32_tb;
 
     string disk_path, disk_out_path; // +disk=, +disk-out=: the virtio-blk disk as hex words (O3)
     integer disk_words = 32768;       // the disk's size (issue #35): +disk's word count, else 128 KiB
+    reg has_disk;
     wire [31:0] disk_sectors = disk_words / 128;
     string image_path, trace_path, wave_path, console_path, checkpoints_path, input_path, text;
     integer trace_fd = 0, console_fd = 0, checkpoints_fd = 0;
@@ -744,14 +745,16 @@ module rv32_tb;
         // The disk: +disk gives its words, whole 512-byte sectors and at most DISK_WORDS of them, as
         // the emulator requires of a disk file (issue #35); without it, 128 KiB of zeros. Only the
         // disk's own words are cleared, loaded and saved. It survives a +reset-at reset, as a disk would.
-        if ($value$plusargs("disk=%s", disk_path)) begin
+        has_disk = $value$plusargs("disk=%s", disk_path);
+        if (has_disk) begin
             disk_words = count_words(disk_path);
             if (disk_words == 0 || disk_words % 128 != 0 || disk_words > dut.DISK_WORDS)
-                $fatal(1, "Disk %0s must hold whole sectors of 128 words, at most %0d words", disk_path, dut.DISK_WORDS);
+                $fatal(1, "Disk %0s holds %0d words; it must hold whole sectors of 128 words, at most %0d words",
+                       disk_path, disk_words, dut.DISK_WORDS);
         end
         for (i = 0; i < disk_words; i = i + 1)
             dut.virtio.disk[i] = 32'd0;
-        if (disk_path != "") $readmemh(disk_path, dut.virtio.disk, 0, disk_words - 1);
+        if (has_disk) $readmemh(disk_path, dut.virtio.disk, 0, disk_words - 1);
         if (!$value$plusargs("disk-out=%s", disk_out_path)) disk_out_path = "";
         repeat (2) @(posedge clk);
         #1 reset = 0;

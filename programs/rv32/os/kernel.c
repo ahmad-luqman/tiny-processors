@@ -1,8 +1,9 @@
 /* The kernel (Track 2, O2; docs/rv32-os.md).
  *
  * It boots from the device tree it is given in a1, loads programs from the RAM
- * disk bundled into its image into fixed slots of 128 KiB (a program may span
- * several; sys.h), and serves their
+ * disk bundled into its image (or, since issue #35, from a tfs file on the
+ * disk) into fixed slots of 128 KiB (a program may span several; sys.h), and
+ * serves their
  * system calls (sys.h). Every context, each process and the idle loop, has a
  * frame; kentry.S saves the running one on every trap and resumes whichever
  * kernel_trap returns. The kernel runs with interrupts off and must never trap
@@ -75,6 +76,7 @@
 #define CAUSE_LOAD_PAGE 13u  /* issue #25: a load, or a store, the page table refuses */
 #define CAUSE_STORE_PAGE 15u
 #define RAMDISK_MAGIC 0x4b534452u /* "RDSK" */
+#define RAMDISK_HEADER 16u        /* the magic, the entry count and two reserved zero words; the table follows */
 #define OPEN_FILES OS_OPEN_FILES /* descriptors OS_FIRST_FILE on */
 _Static_assert(FS_NAME == OS_FILE_NAME, "sys.h and fs.h agree on a file name's length");
 
@@ -142,6 +144,8 @@ static uint32_t next_pid = 1, exits, exit_sum;
 
 static uint32_t console, done_register, clint, plic;
 static uint32_t input, input_source, display, framebuffer, framebuffer_size, palette, gpu, g3d, disk;
+static uint32_t boot_palette[OS_PALETTE_ENTRIES]; /* issue #35: the colours at boot */
+static uint32_t palette_writer;                   /* the pid that last wrote the palette, or 0 */
 static uint32_t accelerators, accelerators_end; /* O5: the window PMP grants a PROGRAM_ACCELERATORS program */
 /* The engines' register and memory windows. O5's PMP region spans them all; since issue #25 the
  * page table of a PROGRAM_ACCELERATORS program maps each one, and nothing between them. */
@@ -358,11 +362,17 @@ static void discover(uintptr_t address)
     if (display && fdt_find(&t, "compatible", "tiny-processors,display", 1, &framebuffer, &framebuffer_size) != FDT_OK) {
         panic("display without a framebuffer");
     }
-    /* Issue #35: the display's palette, its third window; a tree without one gives the call an error. */
+    /* Issue #35: the display's palette, its third window, and the colours it held at boot, which
+     * the kernel puts back when the process that last wrote it finishes. */
     uint32_t palette_size;
-    if (!display || fdt_find(&t, "compatible", "tiny-processors,display", 2, &palette, &palette_size) != FDT_OK ||
-        palette_size < 4 * OS_PALETTE_ENTRIES) {
-        palette = 0;
+    if (display) {
+        if (fdt_find(&t, "compatible", "tiny-processors,display", 2, &palette, &palette_size) != FDT_OK ||
+            palette_size < 4 * OS_PALETTE_ENTRIES) {
+            panic("display without a palette");
+        }
+        for (uint32_t i = 0; i < OS_PALETTE_ENTRIES; i++) {
+            boot_palette[i] = mmio_read32(palette + 4 * i);
+        }
     }
     /* The disk: the first "virtio,mmio" node with a block device behind it. QEMU lists all eight
      * of virt's slots, most of them empty (DeviceID 0); our tree lists the one we have. */
@@ -461,19 +471,20 @@ static int user_string(const struct proc *p, uint32_t address, char *out, uint32
 static const struct program *programs(uint32_t *count)
 {
     const uint32_t *header = (const uint32_t *)ramdisk;
-    if ((uint32_t)(ramdisk_end - ramdisk) < 16 || header[0] != RAMDISK_MAGIC) {
+    if ((uint32_t)(ramdisk_end - ramdisk) < RAMDISK_HEADER || header[0] != RAMDISK_MAGIC || header[2] || header[3]) {
         panic("no RAM disk");
     }
     *count = header[1];
-    return (const struct program *)(ramdisk + 16);
+    return (const struct program *)(ramdisk + RAMDISK_HEADER);
 }
 
 /* What tools/rv32_ramdisk.py promises of an entry in a RAM disk of `size` bytes: inside the disk
- * and its slots, the file no larger than the memory it loads into, the entry point inside the file. */
+ * and its slots, the file no larger than the memory it loads into, the entry point inside the file,
+ * and no flag the kernel does not know. */
 static int entry_ok(const struct program *e, uint32_t size)
 {
     uint32_t slots_end = OS_SLOT_BASE + OS_SLOTS * OS_SLOT_SIZE;
-    return !(e->name[sizeof e->name - 1] || e->offset > size || e->file_size > size - e->offset ||
+    return !(e->name[sizeof e->name - 1] || (e->flags & ~PROGRAM_ACCELERATORS) || e->offset > size || e->file_size > size - e->offset ||
              e->file_size > e->memory_size || e->span == 0 || e->span % OS_SLOT_SIZE ||
              e->span > OS_SLOTS * OS_SLOT_SIZE || e->load < OS_SLOT_BASE || (e->load - OS_SLOT_BASE) % OS_SLOT_SIZE ||
              e->load > slots_end - e->span || e->stack % PAGE_SIZE || e->stack < 2 * PAGE_SIZE ||
@@ -482,13 +493,12 @@ static int entry_ok(const struct program *e, uint32_t size)
 }
 
 /* The RAM disk is part of the kernel's image, but spawn trusts its table, so it is checked once
- * at boot for what tools/rv32_ramdisk.py promises: every entry inside the disk and its slots,
- * the file no larger than the memory it loads into, the entry point inside the file. */
+ * at boot, entry by entry, with entry_ok. */
 static void check_programs(void)
 {
     uint32_t count, size = (uint32_t)(ramdisk_end - ramdisk);
     const struct program *list = programs(&count);
-    if (count > (size - 16) / sizeof *list) {
+    if (count > (size - RAMDISK_HEADER) / sizeof *list) {
         panic("RAM disk table larger than the disk");
     }
     for (uint32_t i = 0; i < count; i++) {
@@ -652,29 +662,56 @@ static void check_page_table_budget(void)
     }
 }
 
-/* Load a program into its slots and make it ready; returns the process or 0. */
 static int may_open(int file, uint32_t mode);
+
+/* Why a file on the disk named as a program cannot run it (issue #35). */
+static int refuse_disk_program(const char *name, const char *why)
+{
+    kputs("kernel: ");
+    kputs(name);
+    kputs(": ");
+    kputs(why);
+    kputc('\n');
+    return -1;
+}
 
 /* Issue #35: a program too large for the kernel's image lives on the disk, as a tfs file that is
  * a RAM disk of one program (tools/rv32_ramdisk.py writes both) named as the program is. Its entry
  * is read into `e` and checked as the boot check checks the RAM disk's, against the file's size;
- * returns the file, or -1 when there is no such program, it is malformed or it is being written. */
+ * returns the file, or -1. No such file is the shell's to report; for a file that exists the kernel
+ * says why it cannot run. The entry comes from a file any program may write, so it may not ask for
+ * the accelerators, which only the kernel's own image grants. */
 static int disk_program(const char *name, struct program *e)
 {
-    uint32_t header[4];
+    uint32_t header[RAMDISK_HEADER / 4];
     int file = fs_open(name, 0);
-    if (file < 0 || !may_open(file, O_READ)) {
+    if (file < 0) {
         return -1;
+    }
+    if (!may_open(file, O_READ)) {
+        return refuse_disk_program(name, "being written");
     }
     uint32_t size = fs_size(file);
     if (fs_read(file, 0, (uint8_t *)header, sizeof header) != sizeof header || header[0] != RAMDISK_MAGIC ||
-        header[1] != 1 || fs_read(file, sizeof header, (uint8_t *)e, sizeof *e) != sizeof *e ||
-        !entry_ok(e, size) || !fdt_same(e->name, name)) {
-        return -1;
+        header[1] != 1 || header[2] || header[3] || fs_read(file, sizeof header, (uint8_t *)e, sizeof *e) != sizeof *e) {
+        return refuse_disk_program(name, "not a program");
+    }
+    if (!entry_ok(e, size)) {
+        return refuse_disk_program(name, "a program that breaks the slot rules");
+    }
+    if (!fdt_same(e->name, name)) {
+        return refuse_disk_program(name, "a program filed under another name");
+    }
+    if (e->flags) {
+        return refuse_disk_program(name, "a program on the disk may not drive the accelerators");
     }
     return file;
 }
 
+/* Load a program into its slots and make it ready; returns the process or 0. A program the RAM
+ * disk does not hold is looked for on the disk (issue #35). Nothing else runs between reading its
+ * entry and its image, since the kernel is never preempted in a system call, so the file cannot
+ * change in between. */
 static struct proc *spawn(const char *name, const char *args, uint32_t parent)
 {
     static struct program on_disk;
@@ -787,9 +824,21 @@ static void stop_orphaned_engines(const struct proc *p)
     }
 }
 
+/* Issue #35: set all 256 palette entries. */
+static void write_palette(const uint32_t *colours)
+{
+    for (uint32_t i = 0; i < OS_PALETTE_ENTRIES; i++) {
+        mmio_write32(palette + 4 * i, colours[i]);
+    }
+}
+
 static void finish(struct proc *p, uint32_t code)
 {
     stop_orphaned_engines(p);
+    if (palette_writer == p->pid) {
+        write_palette(boot_palette); /* issue #35: the next program starts with the boot colours */
+        palette_writer = 0;
+    }
     if (fpu_owner == p) {
         fpu_owner = 0; /* issue #33: its floating state goes with it, unsaved */
     }
@@ -1140,16 +1189,18 @@ static int syscall(struct proc *p)
         result = framebuffer;
         break;
     case SYS_PALETTE:
-        if (palette && !(a0 & 3u) && a1 <= 1 && user_range(p, a0, 4 * OS_PALETTE_ENTRIES)) {
+        if (palette && !(a0 & 3u) && user_range(p, a0, 4 * OS_PALETTE_ENTRIES)) {
             uint32_t *colours = (uint32_t *)(uintptr_t)a0;
-            for (uint32_t i = 0; i < OS_PALETTE_ENTRIES; i++) {
-                if (a1) {
-                    mmio_write32(palette + 4 * i, colours[i]);
-                } else {
+            if (a1 == OS_PALETTE_READ) {
+                for (uint32_t i = 0; i < OS_PALETTE_ENTRIES; i++) {
                     colours[i] = mmio_read32(palette + 4 * i);
                 }
+                result = 0;
+            } else if (a1 == OS_PALETTE_WRITE) {
+                write_palette(colours);
+                palette_writer = p->pid;
+                result = 0;
             }
-            result = 0;
         }
         break;
     case SYS_SWITCHES:

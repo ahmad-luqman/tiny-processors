@@ -123,7 +123,7 @@ Every value that is the same on both backends is folded into an FNV-1a checksum,
 
 ## What synthesis built
 
-`make synth-rv32-soc` synthesizes the whole machine with both memories shrunk to 64 words (`chparam -set RAM_WORDS 64 -set FB_WORDS 64`) so the count measures the decoder and the devices, not 16 MiB of flip-flops (since issue #35 the virtio disk's memory and the palette shrink too: `-set DISK_WORDS 64 -set PALETTE_ENTRIES 16`). Yosys 0.69+post, `check -assert`, no latches:
+`make synth-rv32-soc` synthesizes the whole machine with both memories shrunk to 64 words (`chparam -set RAM_WORDS 64 -set FB_WORDS 64`) so the count measures the decoder and the devices, not 16 MiB of flip-flops (the virtio disk's memory shrinks too, `-set DISK_WORDS 64`, and since issue #35 the palette, `-set PALETTE_ENTRIES 16`). Yosys 0.69+post, `check -assert`, no latches:
 
 | Module | Cells | Flip-flops | Note |
 | --- | ---: | ---: | --- |

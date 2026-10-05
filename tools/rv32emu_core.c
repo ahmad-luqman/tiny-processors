@@ -694,13 +694,13 @@ uint32_t emu_frame_hash(const uint8_t *pixels)
     return h;
 }
 
-/* The fixed RGB332 mapping (bits 7:5 red, 4:2 green, 1:0 blue, each scaled
- * to 0..255), shared by the PPM writer and the window's table. */
-void emu_rgb332(uint8_t pixel, uint8_t rgb[3])
+/* The palette's power-on word for a pixel value (issue #35): the fixed RGB332 mapping the pixels
+ * had before, bits 7:5 red, 4:2 green, 1:0 blue, each scaled to 0..255 with truncation, as
+ * 0x00RRGGBB. The same table is in rtl/rv32/rv32_palette.v, tools/rv32_devices.py
+ * (power_on_palette) and programs/rv32/os/palcheck.c; tests compare them, so change all four. */
+static uint32_t rgb332_word(uint8_t pixel)
 {
-    rgb[0] = (uint8_t)(((pixel >> 5) & 7u) * 255u / 7u);
-    rgb[1] = (uint8_t)(((pixel >> 2) & 7u) * 255u / 7u);
-    rgb[2] = (uint8_t)((pixel & 3u) * 255u / 3u);
+    return ((pixel >> 5) & 7u) * 255u / 7u << 16 | ((pixel >> 2) & 7u) * 255u / 7u << 8 | (pixel & 3u) * 255u / 3u;
 }
 
 void emu_palette_rgb(const machine *m, uint8_t pixel, uint8_t rgb[3])
@@ -2195,8 +2195,14 @@ void emu_open_disk(machine *m, const char *path)
         exit(EXIT_EMULATOR_ERROR);
     }
     size_t got = fread(v->disk, 1, VIRTIO_DISK_MAX, v->file);
-    if (ferror(v->file) || got == 0 || got % 512u || fgetc(v->file) != EOF) {
-        fprintf(stderr, "%s: disk %s must be whole 512-byte sectors, at most %u bytes\n", emu_prog, path, VIRTIO_DISK_MAX);
+    bool longer = got == VIRTIO_DISK_MAX && fgetc(v->file) != EOF;
+    if (ferror(v->file)) {
+        fprintf(stderr, "%s: cannot read disk %s: %s\n", emu_prog, path, strerror(errno));
+        exit(EXIT_EMULATOR_ERROR);
+    }
+    if (longer || got == 0 || got % 512u) {
+        fprintf(stderr, "%s: disk %s is %s%zu bytes; it must be whole 512-byte sectors, at most %u bytes\n", emu_prog,
+                path, longer ? "more than " : "", got, VIRTIO_DISK_MAX);
         exit(EXIT_EMULATOR_ERROR);
     }
     v->disk_size = (uint32_t)got;
@@ -2217,10 +2223,8 @@ void emu_init(machine *m)
     m->x[10] = BOOT_HART;
     m->x[11] = RV32_DTB_ROM_BASE;
     m->limit = 100000000ull;
-    for (uint32_t i = 0; i < PALETTE_ENTRIES; i++) { /* issue #35: power-on colours are RGB332's */
-        uint8_t rgb[3];
-        emu_rgb332((uint8_t)i, rgb);
-        m->palette[i] = (uint32_t)rgb[0] << 16 | (uint32_t)rgb[1] << 8 | rgb[2];
+    for (uint32_t i = 0; i < PALETTE_ENTRIES; i++) {
+        m->palette[i] = rgb332_word((uint8_t)i); /* issue #35: power-on colours are RGB332's */
     }
 }
 
