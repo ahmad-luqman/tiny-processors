@@ -135,7 +135,8 @@ class PmpTest(StepTicksCase):
         refused = [CSRRS(5, MSTATUS, 0), CSRRS(5, MSCRATCH, 0), MRET(), WFI(),
                    CSRRS(5, MCOUNTEREN, 0), CSRRS(5, PMPADDR0, 0), CSRRS(5, PMPCFG0, 0),
                    RDTIME(5),                                 # TM is clear in mcounteren
-                   SRET(), SFENCE_VMA(), CSRRS(5, SSTATUS, 0), CSRRS(5, SATP, 0)]  # issue #20: S mode's
+                   SRET(), SFENCE_VMA(), CSRRS(5, SSTATUS, 0), CSRRS(5, SATP, 0),  # issue #20: S mode's
+                   CSRRS(5, 0x301, 0), CSRRS(5, 0xF14, 0)]    # issue #36: misa and mhartid are machine CSRs
         allowed = [RDCYCLE(6), RDINSTRET(7), RDINSTRETH(8), CSRRS(9, FCSR, 0)]
         user = refused + allowed + [ECALL()]
         machine = set_pmp(ALL) + [CSRRWI(0, MCOUNTEREN, 0b101), CSRRWI(0, SCOUNTEREN, 0b111)] + enter_user()

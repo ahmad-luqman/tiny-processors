@@ -10,7 +10,7 @@ import unittest
 import test_rv32_mmu as mmu
 from rv32_step_case import DISARM_TIMER, SAVE, StepTicksCase, at_handler, dump, set_timer, stored
 from test_rv32_m import signed
-from test_rv32_rtl import effects
+from test_rv32_rtl import diff_traces, effects
 from tools.rv32_asm import *  # noqa: F401,F403
 from tools.rv32_image import valid_a_word
 
@@ -276,6 +276,21 @@ class AtomicTest(StepTicksCase):
         encodable = {op(5, 6, 7) for op in AMO_OPS} | {SC_W(5, 6, 7), LR_W(5, 7)}
         self.assertEqual({word for word in words if valid_a_word(word)}, encodable)
         self.assertEqual(len(encodable), 11)
+
+    def test_atomics_on_the_done_register_are_a_read_then_a_write(self):
+        """Issue #36 made the done register readable (a word reads 0), so under the rule that an AMO
+        is a read and then a write under the window's rules, an AMO there no longer faults: it stores
+        the word it computes, which ends the run like any word store. LR and SC are a load and a
+        store too. QEMU's sifive_test behaves the same way."""
+        for body, outcome in [(LI(7, DONE) + LI(6, 0x5555) + [AMOSWAP_W(5, 6, 7)], "pass"),       # 0x5555 stored
+                              (LI(7, DONE) + [AMOOR_W(5, 0, 7)], "error=undefined-done-word"),      # 0 | 0 stored
+                              (LI(7, DONE) + LI(6, 0x5555) + [LR_W(5, 7), SC_W(8, 6, 7)], "pass")]:
+            with self.subTest(outcome=outcome, words=len(body)):
+                emulator, rtl = self.run_both(body + [ADDI(9, 0, 1)] + FINISH((3 << 16) | 0x3333))
+                self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
+                self.assertEqual((emulator.halt["outcome"], rtl.halt["outcome"]), (outcome, outcome))
+                self.assertIn(f"mem[{DONE:08x}]<-{0x5555 if outcome == 'pass' else 0:08x}/4", rtl.trace[-1],
+                              "the atomic's store is the last instruction: it ends the run")
 
     def test_faults(self):
         """Misaligned: LR is a load (4), SC and the AMOs are stores (6), SC even without a

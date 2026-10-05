@@ -20,12 +20,12 @@ module rv32_done (
     output wire        done_valid,
     output wire [31:0] done_word
 );
-    wire word_write = we && (strb == 4'b1111);
+    wire word = strb == 4'b1111;
 
     assign ready = valid;
-    assign error = strb != 4'b1111;
+    assign error = !word;
     assign rdata = 32'd0;
-    assign done_valid = valid && word_write;
+    assign done_valid = valid && we && word;
     assign done_word = wdata;
 
     wire unused_ok = &{1'b0, clk, reset, addr};

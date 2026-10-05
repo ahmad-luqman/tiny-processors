@@ -262,7 +262,8 @@ class RtlTest(unittest.TestCase):
         reserved_fence = i_type(0x0F, 0, 2, 0, 0)  # fence.i (funct3 1) is legal since issue #36
         bad_srai = SRAI(1, 1, 0x20 | 0x400 | 1)  # a funct7 bit set that neither srli nor srai allows
         id_write = CSRRW(0, 0xF14, 1)              # mhartid is read-only
-        illegal = [unused_op, reserved_fence, 0xFFFFFFFF, CSRRW(0, 0x7C0, 1), bad_srai, id_write]
+        beside_ids = [CSRRS(1, 0xF10, 0), CSRRS(1, 0xF15, 0)]  # the read mux covers 0xf1x; csr_exists does not
+        illegal = [unused_op, reserved_fence, 0xFFFFFFFF, CSRRW(0, 0x7C0, 1), bad_srai, id_write] + beside_ids
         cases = [(word, 2, word) for word in illegal] + [(ECALL(), 11, 0), (EBREAK(), 3, RAM + 4)]
         for word, cause, value in cases:
             with self.subTest(word=f"{word:08x}"):
@@ -785,25 +786,16 @@ class RtlTest(unittest.TestCase):
                 self.assertEqual((emulator.halt["halt"], emulator.halt["outcome"]), ("done", outcome))
 
     def test_console_16550_registers_and_machine_information(self):
-        """Issue #36: the console's 16550 subset (IER, IIR, LCR, MCR, MSR, SCR and the divisor latch
-        under DLAB), misa and the ID CSRs, fence.i and a word read of the done register retire
-        identically on both backends, with a received byte waiting so IIR and DLAB meet RBR."""
-        words = LI(5, CONSOLE) + [LBU(6, 5, 2)]
-        words += LI(7, 0xFF) + [SB(7, 5, 1), LBU(8, 5, 1), SB(7, 5, 4), LBU(9, 5, 4), SB(7, 5, 2), LBU(10, 5, 6)]
-        words += LI(7, 0x5A) + [SB(7, 5, 7), LBU(11, 5, 7), LBU(12, 5, 2)]
-        words += LI(7, 0x02) + [SB(7, 5, 1), LBU(13, 5, 2)]
-        words += LI(7, 0x83) + [SB(7, 5, 3), LBU(14, 5, 3)]
-        words += LI(7, 0x41) + [SB(7, 5, 0)] + LI(7, 0x42) + [SB(7, 5, 1), LBU(15, 5, 0), LBU(16, 5, 1), LBU(17, 5, 5)]
-        words += LI(7, 0x03) + [SB(7, 5, 3), LBU(18, 5, 1), LBU(19, 5, 0), LBU(20, 5, 5)]
-        words += [CSRRS(21, 0x301, 0), CSRRW(0, 0x301, 0), CSRRS(22, 0x301, 0), CSRRS(23, 0xF11, 0),
-                  CSRRS(24, 0xF12, 0), CSRRS(25, 0xF13, 0), CSRRS(26, 0xF14, 0), i_type(0x0F, 0, 1, 0, 0)]
-        words += LI(27, DONE) + [LW(28, 27, 0)]
-        emulator, rtl = self.assert_same_pass(words + FINISH(), stall=1, console_input=b"Z")
+        """Issue #36: test_rv32_emu's console and machine-information programs retire identically on
+        both backends, with a received byte waiting so IIR and DLAB meet RBR."""
+        from test_rv32_emu import console_16550_program, machine_information_program
+        console, console_expected = console_16550_program()
+        info, info_expected = machine_information_program()
+        emulator, rtl = self.assert_same_pass(console + info + FINISH(), stall=1, console_input=b"Z")
         self.assertEqual(rtl.console, "", "the divisor latch transmits nothing")
         x = registers(rtl.trace)
-        self.assertEqual([x[r] for r in (6, 8, 9, 10, 11, 12, 13, 14)], [0x01, 0x0F, 0x1F, 0xB0, 0x5A, 0x04, 0x02, 0x83])
-        self.assertEqual([x[r] for r in (15, 16, 17, 18, 19, 20)], [0x41, 0x42, 0x61, 0x02, ord("Z"), 0x60])
-        self.assertEqual([x[r] for r in range(21, 27)] + [x[28]], [0x40141121, 0x40141121, 0, 0, 0, 0, 0])
+        expected = console_expected | info_expected
+        self.assertEqual({r: x[r] for r in expected}, expected)
 
     def test_timer_ticks_are_clock_cycles(self):
         """Device time (docs/rv32.md): on the RTL a read of mtime's low word (the M5 timer's TICKS
@@ -1059,12 +1051,15 @@ class RtlTest(unittest.TestCase):
 
     def test_console_backpressure_holds_ready_per_byte(self):
         """With CONSOLE_BUSY=2 the console holds `ready` low for two cycles before each byte it
-        accepts; status reads and the rest of the bus are not delayed, and the trace is unchanged."""
+        accepts; status reads and the rest of the bus are not delayed, and the trace is unchanged.
+        Issue #36: stores to the divisor latch and the other registers are not delayed either, and
+        a THR store waits again once DLAB is cleared."""
         if shutil.which("iverilog") is None:
             self.skipTest("the busy console needs an Icarus build with -P")
         busy = Path(self.workdir.name) / "rv32_tb_busy.vvp"
         compile_testbench(busy, params={"CONSOLE_BUSY": 2})
         say = LI(1, CONSOLE) + [LBU(3, 1, 5)]
+        say += LI(2, 0x83) + [SB(2, 1, 3), SB(2, 1, 0), SB(2, 1, 1), SB(2, 1, 7)] + LI(2, 0x03) + [SB(2, 1, 3)]
         for byte in b"Hi\n":
             say += LI(2, byte) + [SB(2, 1, 0)]
         for stall in (0, 1):

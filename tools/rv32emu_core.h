@@ -25,20 +25,28 @@
 #define RAM_BASE 0x80000000u
 #define RAM_SIZE 0x01000000u
 #define CONSOLE_BASE 0x10000000u
-#define CONSOLE_TX 0x0u      /* write: transmit; read: RBR, the next received byte (O2) */
-#define CONSOLE_IER 0x1u     /* the 16550 subset Linux's 8250 driver drives (issue #36) */
+/* The console: the subset of a 16550 Linux's 8250 driver drives polled (issue #36); before it,
+ * only THR/RBR at +0 and LSR at +5. Register offsets: */
+#define CONSOLE_TX 0x0u      /* THR on writes, RBR (O2) on reads; DLL while LCR.DLAB is set */
+#define CONSOLE_IER 0x1u     /* DLM while LCR.DLAB is set */
 #define CONSOLE_IIR 0x2u     /* read: IIR; write: FCR, ignored */
 #define CONSOLE_LCR 0x3u
 #define CONSOLE_MCR 0x4u
 #define CONSOLE_STATUS 0x5u  /* LSR */
 #define CONSOLE_MSR 0x6u
 #define CONSOLE_SCR 0x7u
+/* Their values and widths: */
 #define CONSOLE_TX_READY 0x20u /* LSR.THRE */
 #define CONSOLE_TX_EMPTY 0x40u /* LSR.TEMT: nothing is ever left to shift out (issue #36) */
 #define CONSOLE_RX_READY 0x01u /* LSR.DR: a received byte is waiting (O2) */
 #define CONSOLE_LCR_DLAB 0x80u /* +0 and +1 are the divisor latch while it is set */
+#define CONSOLE_IER_MASK 0x0fu /* IER is four bits, MCR five; the RTL's registers are as wide */
+#define CONSOLE_MCR_MASK 0x1fu
 #define CONSOLE_IER_RDI 0x01u
 #define CONSOLE_IER_THRI 0x02u
+#define CONSOLE_IIR_RDI 0x04u  /* IIR codes, in a 16550's priority order */
+#define CONSOLE_IIR_THRI 0x02u
+#define CONSOLE_IIR_NONE 0x01u
 #define CONSOLE_MSR_LINE 0xb0u /* DCD, DSR and CTS: a connected line */
 #define DONE_ADDR 0x00100000u
 #define DONE_PASS 0x5555u
@@ -180,6 +188,7 @@ typedef struct {
     size_t console_in_len, console_in_next;
     bool console_stdin;     /* --console-input -: bytes arrive from stdin as the host has them */
     uint8_t console_ier, console_lcr, console_mcr, console_scr, console_dll, console_dlm; /* issue #36 */
+    uint64_t console_latched; /* THR stores and RBR reads that met the divisor latch instead (DLAB set) */
     /* Effects of the current step, for the trace line. */
     int wr_reg, wr_freg;
     bool wr_fcsr;

@@ -39,6 +39,11 @@ module rv32_console #(
 );
     localparam [31:0] BUSY = BUSY_CYCLES;
     localparam [2:0] RBR = 3'd0, IER = 3'd1, IIR = 3'd2, LCR = 3'd3, MCR = 3'd4, LSR = 3'd5, MSR = 3'd6, SCR = 3'd7;
+    // The values, named as tools/rv32emu_core.h names them.
+    localparam [7:0] IIR_RDI = 8'h04, IIR_THRI = 8'h02, IIR_NONE = 8'h01;
+    localparam [7:0] LSR_TX_IDLE = 8'h60;  // THRE and TEMT: the transmitter is always empty
+    localparam [7:0] MSR_LINE = 8'hb0;     // DCD, DSR and CTS: a connected line
+    localparam IER_RDI = 0, IER_THRI = 1;
 
     reg [3:0] ier;
     reg [7:0] lcr, scr, dll, dlm;
@@ -46,11 +51,11 @@ module rv32_console #(
     wire [2:0] off = addr[2:0];
     wire byte_ok = strb == (4'b0001 << addr[1:0]);
     wire dlab = lcr[7];
-    wire [7:0] wbyte = (addr[1:0] == 2'd0) ? wdata[7:0] : (addr[1:0] == 2'd1) ? wdata[15:8] :
-                       (addr[1:0] == 2'd2) ? wdata[23:16] : wdata[31:24];
+    wire [7:0] wbyte = wdata[8 * addr[1:0] +: 8]; // the strobed lane carries the byte
 
-    wire tx_ok = we && byte_ok && off == RBR && !dlab;
-    wire rbr_ok = !we && byte_ok && off == RBR && !dlab;
+    wire rbr_thr = byte_ok && off == RBR && !dlab; // under DLAB, +0 is the divisor latch
+    wire tx_ok = we && rbr_thr;
+    wire rbr_ok = !we && rbr_thr;
     reg [31:0] waited; // cycles the presented byte has waited; never exceeds BUSY
 
     reg [7:0] rbyte;
@@ -58,12 +63,12 @@ module rv32_console #(
         case (off)
             RBR: rbyte = dlab ? dll : (rx_valid ? rx_byte : 8'd0);
             IER: rbyte = dlab ? dlm : {4'd0, ier};
-            IIR: rbyte = (ier[0] && rx_valid) ? 8'h04 : ier[1] ? 8'h02 : 8'h01;
+            IIR: rbyte = (ier[IER_RDI] && rx_valid) ? IIR_RDI : ier[IER_THRI] ? IIR_THRI : IIR_NONE;
             LCR: rbyte = lcr;
             MCR: rbyte = {3'd0, mcr};
-            LSR: rbyte = {7'b0110000, rx_valid};
-            MSR: rbyte = 8'hb0;
-            default: rbyte = scr; // SCR
+            LSR: rbyte = LSR_TX_IDLE | {7'd0, rx_valid};
+            MSR: rbyte = MSR_LINE;
+            default: rbyte = scr; // SCR, the eighth offset
         endcase
     end
 
@@ -82,14 +87,15 @@ module rv32_console #(
             scr <= 8'd0;
             dll <= 8'd0;
             dlm <= 8'd0;
-        end else if (valid && we && !error) begin
+        end else if (valid && ready && we && !error) begin // once, in the accepting cycle
             case (off)
                 RBR: if (dlab) dll <= wbyte;
                 IER: if (dlab) dlm <= wbyte; else ier <= wbyte[3:0];
                 LCR: lcr <= wbyte;
                 MCR: mcr <= wbyte[4:0];
                 SCR: scr <= wbyte;
-                default: ; // FCR: there is no FIFO to enable or clear
+                IIR: ;     // FCR: there is no FIFO to enable or clear
+                default: ; // THR (transmitted, not stored); LSR and MSR are refused
             endcase
         end
     end

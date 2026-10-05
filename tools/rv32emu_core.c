@@ -190,15 +190,18 @@ static void console_poll_stdin(machine *m)
     m->console_in_next = 0;
 }
 
-/* The console (docs/rv32.md, "Console"): the subset of a 16550 that Linux's 8250 driver drives
- * (issue #36), with no interrupt. RBR/THR at +0 (since O2 a read takes the next received byte, 0
- * when there is none), LSR at +5, and since issue #36 IER, IIR/FCR, LCR, MCR, MSR and SCR, with
- * the divisor latch at +0 and +1 while LCR.DLAB is set. Bytes only. */
+/* Whether a received byte waits. With --console-input - this reads the host's stdin, so even an
+ * LSR or IIR read can take in input; the RTL's input is all there from reset. */
 static bool console_rx_waiting(machine *m)
 {
     console_poll_stdin(m);
     return m->console_in_next < m->console_in_len;
 }
+
+/* The console (docs/rv32.md, "Console"): the subset of a 16550 that Linux's 8250 driver drives
+ * polled (issue #36), with no interrupt. RBR/THR at +0 (since O2 a read takes the next received
+ * byte, 0 when there is none), LSR at +5, and since issue #36 IER, IIR/FCR, LCR, MCR, MSR and
+ * SCR, with the divisor latch at +0 and +1 while LCR.DLAB is set. Bytes only. */
 
 static mem_access console_load(machine *m, uint32_t offset, int width, uint32_t *value)
 {
@@ -210,6 +213,7 @@ static mem_access console_load(machine *m, uint32_t offset, int width, uint32_t 
     case CONSOLE_TX:
         if (dlab) {
             *value = m->console_dll;
+            m->console_latched++; /* no byte is taken: reported at the halt */
         } else {
             *value = console_rx_waiting(m) ? m->console_in[m->console_in_next++] : 0u;
         }
@@ -217,11 +221,11 @@ static mem_access console_load(machine *m, uint32_t offset, int width, uint32_t 
     case CONSOLE_IER: *value = dlab ? m->console_dlm : m->console_ier; return ACC_OK;
     case CONSOLE_IIR: /* a 16550's priorities, among the enabled sources the console has */
         if ((m->console_ier & CONSOLE_IER_RDI) && console_rx_waiting(m)) {
-            *value = 0x04u;
+            *value = CONSOLE_IIR_RDI;
         } else if (m->console_ier & CONSOLE_IER_THRI) {
-            *value = 0x02u; /* the transmitter is always empty */
+            *value = CONSOLE_IIR_THRI; /* the transmitter is always empty; a read does not clear it */
         } else {
-            *value = 0x01u; /* nothing pending */
+            *value = CONSOLE_IIR_NONE;
         }
         return ACC_OK;
     case CONSOLE_LCR: *value = m->console_lcr; return ACC_OK;
@@ -247,6 +251,7 @@ static mem_access console_store(machine *m, uint32_t offset, int width, uint32_t
     case CONSOLE_TX:
         if (dlab) {
             m->console_dll = byte; /* the divisor sets no rate here: bytes leave at once */
+            m->console_latched++;   /* no byte is sent: reported at the halt */
         } else {
             fputc(byte, stdout);
         }
@@ -255,12 +260,12 @@ static mem_access console_store(machine *m, uint32_t offset, int width, uint32_t
         if (dlab) {
             m->console_dlm = byte;
         } else {
-            m->console_ier = byte & 0x0fu;
+            m->console_ier = byte & CONSOLE_IER_MASK;
         }
         return ACC_OK;
     case CONSOLE_IIR: return ACC_OK; /* FCR: there is no FIFO to enable or clear */
     case CONSOLE_LCR: m->console_lcr = byte; return ACC_OK;
-    case CONSOLE_MCR: m->console_mcr = byte & 0x1fu; return ACC_OK;
+    case CONSOLE_MCR: m->console_mcr = byte & CONSOLE_MCR_MASK; return ACC_OK;
     case CONSOLE_SCR: m->console_scr = byte; return ACC_OK;
     default: return ACC_FAULT; /* LSR and MSR are read-only */
     }
@@ -1052,7 +1057,7 @@ static mem_access load(machine *m, uint32_t va, int width, uint32_t *value, uint
     }
     const region *r = find_region(addr, width);
     if (!r || !r->load) {
-        return ACC_FAULT; /* unmapped, or a write-only window such as the done register */
+        return ACC_FAULT; /* unmapped (every window can be read since issue #36 made the done register readable) */
     }
     if (pa) {
         *pa = addr;
@@ -2417,6 +2422,10 @@ int emu_report_halt(const machine *m, size_t loaded)
         fprintf(stderr, "%s: %zu scripted event(s) never delivered (first: frame %" PRIu32 ")\n", emu_prog,
                 m->scripted - m->next_scripted, m->script[m->next_scripted].frame);
     }
+    if (m->console_latched) { /* a 16550 does the same, so it is not a fault; but it is rarely meant */
+        fprintf(stderr, "%s: warning: %" PRIu64 " console byte(s) met the divisor latch (LCR.DLAB set) and were not "
+                "sent or taken\n", emu_prog, m->console_latched);
+    }
     int status = EXIT_EMULATOR_ERROR;
     fprintf(stderr, "%s: halt=%s steps=%" PRIu64 " retired=%" PRIu64 " traps=%" PRIu64, emu_prog,
             emu_halt_name(m->halt), m->steps, m->retired, m->traps);
@@ -2530,8 +2539,8 @@ bool emu_csr_read(const machine *m, uint32_t number, uint32_t *value)
 bool emu_csr_write(machine *m, uint32_t number, uint32_t value)
 {
     uint32_t old;
-    if (!csr_read(m, number, &old) || csr_read_only(number)) { /* absent, or a read-only counter */
-        return false;
+    if (!csr_read(m, number, &old) || csr_read_only(number) || number == CSR_MISA) {
+        return false; /* absent, read-only, or misa, whose writes are ignored (issue #36) */
     }
     csr_write(m, number, value);
     return true;
