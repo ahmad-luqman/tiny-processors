@@ -49,6 +49,7 @@ SUITES = {
     "M": Suite("rv32im_zicsr", asserts=True, tests=8),
     "F": Suite("rv32if_zicsr", asserts=False, tests=142),
     "A": Suite("rv32ia_zicsr", asserts=False, tests=9),  # issue #34: the nine AMOs; LR/SC in tools/rv32_riscv_tests.py
+    "Zifencei": Suite("rv32i_zicsr_zifencei", asserts=True, tests=1),  # issue #36: fence.i, after a store to code
 }
 # Suites in rv32i_m that are not selected, and why (docs/rv32-groundwork.md).
 EXCLUDED = {
@@ -65,9 +66,8 @@ EXCLUDED = {
     "Zcmop": "no compressed instructions",
     "Zfh": "no half precision",
     "Zicond": "no Zicond",
-    "Zifencei": "fence.i is an illegal instruction in our contract (docs/rv32.md)",
     "Zimop": "no may-be-operations",
-    "privilege": "needs misa and the suite's full trap-handler harness; S-mode and Sv32 (issue #20) are checked by mmucheck against QEMU and by tests/test_rv32_mmu.py instead",
+    "privilege": "needs the suite's full trap-handler harness; S-mode and Sv32 (issue #20) are checked by mmucheck against QEMU and by tests/test_rv32_mmu.py instead",
 }
 BACKENDS = ("emulator", "qemu", "icarus", "verilator")
 DEFAULT_QEMU_CPU = "rv32,c=false,d=false"  # generic RV32 with C and D off: IMAF plus Zicsr
@@ -202,9 +202,9 @@ def sparse_checkout(path, url, commit, patterns):
 
 def fetch(arch_test):
     """Check out the pinned commit, only the files the selected suites need (the whole suite,
-    D and Zfh included, is over 500 MB): the model headers, the licences, and I, M, F and A. A
-    checkout at the pinned commit that lacks a selected suite's tests (one made before A was added,
-    issue #34) is fetched again."""
+    D and Zfh included, is over 500 MB): the model headers, the licences, and I, M, F, A and
+    Zifencei. A checkout at the pinned commit that lacks a selected suite's tests (one made before
+    a suite was added: A in issue #34, Zifencei in issue #36) is fetched again."""
     if (arch_test / ".git").exists() and checkout_commit(arch_test) == ARCH_TEST_COMMIT and all(
             len(suite_sources(arch_test, suite)) == SUITES[suite].tests for suite in SUITES):
         print(f"{arch_test} is at the pinned {ARCH_TEST_COMMIT}")

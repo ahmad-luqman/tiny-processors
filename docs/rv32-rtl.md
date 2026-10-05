@@ -49,7 +49,7 @@ The core executes all of RV32I, the M2 trap subset and the extensions added sinc
 
 ### Every other encoding
 
-An encoding the emulator rejects (`mul` and every other M-extension word, `fence.i`, an unused `funct3`/`funct7`, an unknown opcode, `wfi`, `sret`, `mstatus` and every other CSR the machine lacks) traps with cause 2 and the instruction word in `mtval`, exactly the emulator's `illegal` path. The decoder's `illegal` output is written arm by arm to mirror `goto illegal` in [tools/rv32emu_core.c](../tools/rv32emu_core.c); every valid word sets exactly one class flag. The M3 `unsupported` halt no longer exists: there is no valid RV32I word the core refuses.
+An encoding the emulator rejects (`mul` and every other M-extension word, `fence.i` until issue #36, an unused `funct3`/`funct7`, an unknown opcode, `wfi`, `sret`, `mstatus` and every other CSR the machine lacks) traps with cause 2 and the instruction word in `mtval`, exactly the emulator's `illegal` path. The decoder's `illegal` output is written arm by arm to mirror `goto illegal` in [tools/rv32emu_core.c](../tools/rv32emu_core.c); every valid word sets exactly one class flag. The M3 `unsupported` halt no longer exists: there is no valid RV32I word the core refuses.
 
 ## Traps
 
@@ -192,7 +192,7 @@ make test-rv32                 # M1 firmware, M2 emulator, and the RTL together
 
 | Area | Implemented | Not implemented |
 | --- | --- | --- |
-| RV32I | all 37 computational, memory, and control instructions, `fence`, `ecall`, `ebreak` | `fence.i` (illegal on the machine) |
+| RV32I | all 37 computational, memory, and control instructions, `fence`, `ecall`, `ebreak` | `fence.i` (illegal on the machine until issue #36) |
 | Privileged | `mtvec` (direct mode), `mepc`, `mcause`, `mtval`, the six CSR instructions, `mret`, the trap causes 0–7 and 11, the double-fault halt | `mstatus`, `misa`, CSR counters (the timer is a device), `wfi`, `sret`, interrupts, nested trap state beyond the CSRs (a nested trap overwrites them, as in the emulator) |
 | Extensions | none | M (illegal on the machine), A, F, C |
 | Memory | one port, one request outstanding, byte strobes both ways, misalignment checked before the request is issued, exactly-once writes; RAM and framebuffer as RTL memories behind the bus decoder | overlap of fetch and data, caches, misaligned access emulation, memory macros in synthesis |

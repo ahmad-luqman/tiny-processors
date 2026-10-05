@@ -89,10 +89,12 @@ a warning:
 The blob was 1,340 bytes at Track 1; with the nodes added since (the PLIC,
 virtio-blk, and issue #20's DMA window) it is 2,012. A compatible list names our device first and adds a
 generic name only where the device implements everything a driver for that
-name may touch. The console implements only a 16550's transmit and
+name may touch. The console implemented only a 16550's transmit and
 line-status registers, and a 16550 driver's first act is to program the
-divisor and FIFO registers, which fault here, so it does not claim
-`ns16550a`. There is no `timebase-frequency`, because the contract gives a
+divisor and FIFO registers, which faulted, so it does not claim
+`ns16550a`. Issue #36 added the rest of the subset Linux's 8250 driver drives,
+but this tree is unchanged, so the PASS words that hash it stay; Linux compiles
+in its own tree ([contract](rv32.md#linuxs-needs-issue-36)). There is no `timebase-frequency`, because the contract gives a
 device tick no rate.
 
 ## The CLINT

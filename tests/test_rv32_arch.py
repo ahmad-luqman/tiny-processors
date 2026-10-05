@@ -125,7 +125,7 @@ class ModelTest(unittest.TestCase):
         for bad in ("", "PASS 1234\n", "0000ABCD\n", "123\n"):
             with self.subTest(bad=bad), self.assertRaises(TestFailure):
                 signature_lines(bad)
-        self.assertEqual(sorted(SUITES), ["A", "F", "I", "M"])
+        self.assertEqual(sorted(SUITES), ["A", "F", "I", "M", "Zifencei"])
         self.assertEqual(SUITES["A"].march, "rv32ia_zicsr", "exactly A: an AMO outside it would not assemble")
         self.assertFalse(set(SUITES) & set(EXCLUDED), "a suite is either selected or excluded with a reason")
 

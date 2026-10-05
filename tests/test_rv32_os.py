@@ -229,7 +229,7 @@ class ConsoleReceiveTest(unittest.TestCase):
         self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
         self.assertEqual((emulator.console, rtl.console), ("ok", "ok"))
         loads = [line.split("->")[1].split("/")[0] for line in rtl.trace if "->" in line]
-        self.assertEqual(loads, ["00000021", "0000006f", "00000021", "0000006b", "00000020", "00000000"])
+        self.assertEqual(loads, ["00000061", "0000006f", "00000061", "0000006b", "00000060", "00000000"])  # LSR: THRE and TEMT
 
 
 class DecimalTest(unittest.TestCase):

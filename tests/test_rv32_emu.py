@@ -52,6 +52,40 @@ def effects(line):
     return parts[3] if len(parts) == 4 else ""
 
 
+
+# misa (issue #36): MXL 1 and the extension letters, derived here so the hex in the C and the RTL is
+# checked independently.
+MISA_VALUE = 1 << 30 | sum(1 << (ord(c) - ord("A")) for c in "AFIMSU")
+
+
+def console_16550_program():
+    """Issue #36: the console's 16550 subset, run with b"Z" waiting at the console. Returns the words
+    (no FINISH, which uses x30 and x31) and the registers they leave: x1-x3, x5-x20. test_rv32_rtl.py runs the same program on both backends."""
+    words = LI(5, CONSOLE) + [LBU(6, 5, 2)]                                       # IIR: nothing enabled
+    words += LI(7, 0xFF) + [SB(7, 5, 1), LBU(8, 5, 1), SB(7, 5, 4), LBU(9, 5, 4),
+                            SB(7, 5, 2), LBU(1, 5, 7), LBU(10, 5, 6)]            # IER, MCR, FCR (lands nowhere: SCR 0), MSR
+    words += LI(7, 0x5A) + [SB(7, 5, 7), LBU(11, 5, 7), LBU(12, 5, 2)]            # SCR; IIR: a byte waits, RDI first
+    words += LI(7, 0x02) + [SB(7, 5, 1), LBU(13, 5, 2)]                           # IIR: THRI only
+    words += LI(7, 0x83) + [SB(7, 5, 3), LBU(14, 5, 3)]                           # DLAB on
+    words += LI(7, 0x41) + [SB(7, 5, 0)] + LI(7, 0x42) + [SB(7, 5, 1)]            # DLL, DLM: nothing sent
+    words += [LBU(15, 5, 0), LBU(16, 5, 1), LBU(17, 5, 5)]                        # read back; DR still set
+    words += LI(7, 0x03) + [SB(7, 5, 3), LBU(18, 5, 1), LBU(19, 5, 0), LBU(20, 5, 5)]  # DLAB off: RBR takes Z
+    words += LI(7, 0x01) + [SB(7, 5, 1), LBU(2, 5, 2)]                           # IIR: RDI, but nothing waits
+    words += LI(7, 0x03) + [SB(7, 5, 1), LBU(3, 5, 2)]                           # IIR: RDI and THRI, nothing waits
+    expected = {6: 0x01, 8: 0x0F, 9: 0x1F, 1: 0x00, 10: 0xB0, 11: 0x5A, 12: 0x04, 13: 0x02, 14: 0x83,
+                15: 0x41, 16: 0x42, 17: 0x61, 18: 0x02, 19: ord("Z"), 20: 0x60, 2: 0x01, 3: 0x02}
+    return words, expected
+
+
+def machine_information_program():
+    """Issue #36: misa ignores writes of every kind, the four ID CSRs read 0, fence.i retires, and
+    the done register reads 0. Uses x7 and x21-x28."""
+    words = LI(7, 0xFFFFFFFF) + [CSRRW(21, 0x301, 7), CSRRC(0, 0x301, 7), CSRRWI(0, 0x301, 0x1F),
+                                 CSRRS(22, 0x301, 0), CSRRS(23, 0xF11, 0), CSRRS(24, 0xF12, 0),
+                                 CSRRS(25, 0xF13, 0), CSRRS(26, 0xF14, 0), i_type(0x0F, 0, 1, 0, 0)]
+    words += LI(27, DONE) + [LW(28, 27, 0)]
+    return words, {21: MISA_VALUE, 22: MISA_VALUE, 23: 0, 24: 0, 25: 0, 26: 0, 28: 0}
+
 class EmulatorTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -262,8 +296,10 @@ class EmulatorTest(unittest.TestCase):
                 ([EBREAK()], 3, RAM + 12),
                 ([0x00000000], 2, 0),
                 ([r_type(0x33, 1, 0, 2, 3, 2)], 2, r_type(0x33, 1, 0, 2, 3, 2)),   # OP with an unused funct7
-                ([i_type(0x0F, 0, 1, 0, 0)], 2, i_type(0x0F, 0, 1, 0, 0)),         # fence.i
+                ([i_type(0x0F, 0, 2, 0, 0)], 2, i_type(0x0F, 0, 2, 0, 0)),         # a reserved FENCE funct3
                 ([CSRRS(1, 0x7C0, 0)], 2, CSRRS(1, 0x7C0, 0)),                     # unimplemented CSR
+                ([CSRRS(1, 0xF10, 0)], 2, CSRRS(1, 0xF10, 0)),                     # beside the ID registers (issue #36)
+                ([CSRRS(1, 0xF15, 0)], 2, CSRRS(1, 0xF15, 0)),
                 ([i_type(0x13, 1, 1, 0, 0x420)], 2, i_type(0x13, 1, 1, 0, 0x420)),  # slli with funct7 set
                 ([r_type(0x33, 1, 1, 2, 3, 0x20)], 2, r_type(0x33, 1, 1, 2, 3, 0x20)),  # sll with sub bit
                 ([b_type(2, 0, 0, 8)], 2, b_type(2, 0, 0, 8)),                     # unused branch funct3
@@ -302,13 +338,15 @@ class EmulatorTest(unittest.TestCase):
             ([SW(1, 2, 0)], 0xFFFFFFFC, 7, 0xFFFFFFFC),     # top of the address space
             ([LW(1, 2, 0)], 0xFFFFFFFC, 5, 0xFFFFFFFC),
             ([LHU(1, 2, 0)], CONSOLE, 5, CONSOLE),          # RBR (O2) is a byte
-            ([LBU(1, 2, 1)], CONSOLE, 5, CONSOLE + 1),      # other console offsets
-            ([LHU(1, 2, 4)], CONSOLE, 5, CONSOLE + 4),      # console status is byte-only
+            ([LHU(1, 2, 4)], CONSOLE, 5, CONSOLE + 4),      # a halfword over MCR and LSR: registers are bytes
             ([LW(1, 2, 0)], CONSOLE, 5, CONSOLE),
             ([SB(1, 2, 5)], CONSOLE, 7, CONSOLE + 5),       # status is read-only
+            ([SB(1, 2, 6)], CONSOLE, 7, CONSOLE + 6),       # and so is MSR (issue #36)
+            ([LHU(1, 2, 2)], CONSOLE, 5, CONSOLE + 2),      # every register is a byte
             ([SH(1, 2, 0)], CONSOLE, 7, CONSOLE),           # TX is byte-only
             ([SW(1, 2, 0)], CONSOLE, 7, CONSOLE),
-            ([LW(1, 2, 0)], DONE, 5, DONE),                 # done register is write-only
+            ([LBU(1, 2, 0)], DONE, 5, DONE),                # the done register reads a word (issue #36)
+            ([LHU(1, 2, 0)], DONE, 5, DONE),
             ([SB(1, 2, 0)], DONE, 7, DONE),                 # and word-only
             ([SH(1, 2, 0)], DONE, 7, DONE),
             ([SW(1, 2, 4)], DONE, 7, DONE + 4),
@@ -419,9 +457,9 @@ class EmulatorTest(unittest.TestCase):
             source.write_bytes(b"AB")
             words = LI(5, CONSOLE) + [LBU(6, 5, 5), LBU(7, 5, 0), LBU(8, 5, 5), LBU(9, 5, 0), LBU(10, 5, 5), LBU(11, 5, 0)]
             x = self.run_pass(words, extra=("--console-input", str(source))).state.x
-            self.assertEqual(x[6:12], [0x21, ord("A"), 0x21, ord("B"), 0x20, 0])
+            self.assertEqual(x[6:12], [0x61, ord("A"), 0x61, ord("B"), 0x60, 0])
             x = self.run_pass(words).state.x
-            self.assertEqual(x[6:12], [0x20, 0, 0x20, 0, 0x20, 0], "no input: nothing waits")
+            self.assertEqual(x[6:12], [0x60, 0, 0x60, 0, 0x60, 0], "no input: nothing waits")
         result = self.run_words(FINISH(), extra=("--console-input", "/nonexistent/in.txt"))
         self.assertEqual(result.status, 2)
         self.assertIn("cannot open console input", result.stderr)
@@ -431,7 +469,7 @@ class EmulatorTest(unittest.TestCase):
         words += LI(7, 0x10A) + [SB(7, 5, 0)]
         result = self.run_pass(words)
         self.assertEqual(result.stdout, "Hi\n", "only the low byte of x7 is transmitted")
-        self.assertEqual(result.state.x[6], 0x20, "console always ready")
+        self.assertEqual(result.state.x[6], 0x60, "console always ready: THRE and TEMT")
         self.assertEqual(result.halt, {"halt": "done", "steps": result.state.steps, "retired": result.state.steps,
                                        "traps": 0, "loaded": 4 * (len(words) + 5), "done": 0x5555, "outcome": "pass"})
         result = self.run_words(FINISH((7 << 16) | 0x3333))
@@ -445,6 +483,30 @@ class EmulatorTest(unittest.TestCase):
                 result = self.run_words(FINISH(word))
                 self.assertEqual((result.status, result.halt["outcome"]), (2, "error=undefined-done-word"))
         self.assertEqual(result.trace[-1].split()[-1], f"mem[00100000]<-{word:08x}/4", "the done store retires")
+
+    def test_console_16550_registers(self):
+        """Issue #36: the 16550 subset Linux's 8250 driver drives (console_16550_program)."""
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "in.txt"
+            source.write_bytes(b"Z")
+            words, expected = console_16550_program()
+            result = self.run_pass(words, extra=("--console-input", str(source)))
+        self.assertEqual(result.stdout, "", "the divisor latch transmits nothing")
+        self.assertEqual({r: result.state.x[r] for r in expected}, expected)
+        self.assertNotIn("warning", result.stderr, "DLAB was cleared again, as a driver setting the divisor does")
+        muted = LI(5, CONSOLE) + LI(7, 0x80) + [SB(7, 5, 3), SB(7, 5, 3)] + LI(7, ord("x")) + [SB(7, 5, 0), SB(7, 5, 0)]
+        result = self.run_pass(muted)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("warning: the console ended with LCR.DLAB set; 2 byte(s) since went to the divisor latch",
+                      result.stderr, "a run left muted is reported, counting from when DLAB was set")
+
+    def test_machine_information_csrs_fence_i_and_done_read(self):
+        """Issue #36 (machine_information_program); and a write to a read-only ID register traps."""
+        words, expected = machine_information_program()
+        x = self.run_pass(words).state.x
+        self.assertEqual({r: x[r] for r in expected}, expected)
+        result = self.run_trapping([CSRRW(0, 0xF14, 1)])
+        self.assertEqual((result.state.x[10], result.state.x[11]), (2, CSRRW(0, 0xF14, 1)))
 
     def test_timer_counts_executed_instructions(self):
         """Device time (docs/rv32.md): a load inside instruction N reads N - 1, trapped instructions

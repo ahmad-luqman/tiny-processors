@@ -5,7 +5,7 @@
  * expands the RVMODEL_* macros below around each test. What they do here:
  *
  * - Boot installs a trap handler, and any trap fails the test (done code 2):
- *   no selected test is meant to trap. The one place the I, M, F and A suites
+ *   no selected test is meant to trap. The one place the I, M, F, A and Zifencei suites
  *   touch a privileged CSR is RVTEST_FP_ENABLE's `csrs mstatus, a0`, which sets
  *   FS so F instructions work on a machine that can turn them off. Until
  *   Track 2 the machine had no mstatus and the handler skipped exactly that
@@ -18,7 +18,7 @@
  *   signatures use; then it writes the pass word.
  *   The same bytes come out of the emulator, both RTL simulators and QEMU, whose
  *   virt board has the same console and done register (docs/rv32.md).
- * - With RVMODEL_ASSERT defined (the I and M suites), every integer result is
+ * - With RVMODEL_ASSERT defined (the I, M and Zifencei suites), every integer result is
  *   also compared with the value the test generator computed and written into
  *   the test source, and a mismatch fails the test (done code 3). The F and A
  *   suites' sources carry no expected values, so only the signature comparison applies.

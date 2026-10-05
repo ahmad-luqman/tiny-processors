@@ -180,13 +180,13 @@ implementation passes when its signature equals the reference model's.
 
 **Selection.** Release 3.9.1 (commit `eb66181d`), `rv32i_m`: the I suite (39
 tests), M (8) and F (142), 189 tests; issue #34 added A (9 AMO tests, no LR/SC;
-riscv-tests' rv32ua covers those, [A record](rv32-a.md#tests)), 198 in all. `make fetch-rv32-arch-test` checks out
+riscv-tests' rv32ua covers those, [A record](rv32-a.md#tests)), 198 in all; issue #36 added Zifencei (1 test), 199. `make fetch-rv32-arch-test` checks out
 only those, the headers and the licences at the pinned commit into
 `third_party/riscv-arch-test` (ignored by git; the whole suite is over 500 MB,
 D and Zfh being most of it). Every other suite is excluded with a reason in
 [`tools/rv32_arch_test.py`](../tools/rv32_arch_test.py): B, C, D, K, Zacas, Zfh,
-Zicond and the rest are not in our ISA; Zifencei is excluded because `fence.i`
-is an illegal instruction in our contract; the privilege suite needs
+Zicond and the rest are not in our ISA; Zifencei was excluded because `fence.i`
+was an illegal instruction in our contract, until issue #36; the privilege suite needs
 `mstatus`, `mscratch` and the suite's full trap harness, which arrive with O1.
 
 **The model.** A target supplies a small header of `RVMODEL_*` macros;
