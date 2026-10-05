@@ -5,6 +5,11 @@ QEMU is the independent reference runner for M1: its 16550 UART and sifive_test
 device sit at the machine contract's console and done-register addresses, so
 the exact firmware image runs unmodified. Guest console bytes arrive on stdout;
 QEMU's own diagnostics stay on stderr.
+
+QEMU's stdout is a file, never a pipe (issue #41). The architectural tests store to the UART
+without polling LSR, and once a pipe is full the bytes that do not fit never arrive, though QEMU
+still exits 0: a reader that fell behind under load lost a 250 KB signature's tail that way. A
+file takes every byte, however slowly it is read.
 """
 
 import argparse
@@ -17,6 +22,7 @@ from pathlib import Path
 import re
 import select
 import subprocess
+import tempfile
 import time
 
 
@@ -53,15 +59,16 @@ def qemu_command(qemu, elf, cpu=DEFAULT_CPU, memory="16M", log=None, drive=None,
 
 def run(command, timeout, stdin=None):
     """Return (exit status or None, stdout, stderr, timed_out). `stdin` is a file whose bytes the
-    guest's UART receives (O2); without it the UART receives nothing."""
-    try:
-        with open(stdin, "rb") if stdin is not None else open("/dev/null", "rb") as source:
-            completed = subprocess.run(command, stdin=source, capture_output=True, timeout=timeout)
-        completed.stdout = decode(completed.stdout)
-        completed.stderr = decode(completed.stderr)
-    except subprocess.TimeoutExpired as expired:
-        return None, decode(expired.stdout), decode(expired.stderr), True
-    return completed.returncode, completed.stdout, completed.stderr, False
+    guest's UART receives (O2); without it the UART receives nothing. stdout goes through a file
+    (issue #41), so a timed-out run still returns all the console it printed."""
+    with tempfile.TemporaryFile() as console, open(stdin, "rb") if stdin is not None else open("/dev/null", "rb") as source:
+        try:
+            completed = subprocess.run(command, stdin=source, stdout=console, stderr=subprocess.PIPE, timeout=timeout)
+            status, stderr, timed_out = completed.returncode, completed.stderr, False
+        except subprocess.TimeoutExpired as expired:  # QEMU has been killed and reaped: the file is whole
+            status, stderr, timed_out = None, expired.stderr, True
+        console.seek(0)
+        return status, decode(console.read()), decode(stderr), timed_out
 
 
 def input_lines(data):
@@ -89,35 +96,47 @@ PROMPT_MAX = 64  # bytes: the emulator's --console-prompt and the testbench's +c
 def run_gated(command, timeout, stdin, prompt):
     """Like run(), but the guest receives line k of `stdin` only once it has printed `prompt` k times
     (issue #36), so a shell sees each command when it is waiting for one, as the emulator's
-    --console-prompt and the testbench's +console-prompt-hex arrange. Output is read and input
-    written as the pipes allow, in one select loop, so the timeout holds even when the guest stops
-    reading; QEMU's stdin stays open. Returns a GatedRun; a line counts as fed once its last byte
+    --console-prompt and the testbench's +console-prompt-hex arrange. The console file is polled and
+    input written as the pipe allows, in one select loop, so the timeout holds even when the guest
+    stops reading; QEMU's stdin stays open. Returns a GatedRun; a line counts as fed once its last byte
     is written."""
     lines = input_lines(Path(stdin).read_bytes())
     ends = list(itertools.accumulate(len(line) for line in lines))  # the byte offset past each line
     prompts = PromptCounter(prompt.encode())
-    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    console = tempfile.TemporaryFile()  # not a pipe: see the module docstring (issue #41)
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=console, stderr=subprocess.PIPE)
     out, err, pending, released, written, closed = bytearray(), bytearray(), bytearray(), 0, 0, False
-    inp = process.stdin.fileno()
+    inp, errors = process.stdin.fileno(), process.stderr.fileno()
     os.set_blocking(inp, False)
     fed = lambda: bisect.bisect_right(ends, written)  # noqa: E731
+
+    def drain():  # the console bytes QEMU has written since the last call; pread leaves QEMU's offset alone
+        while chunk := os.pread(console.fileno(), 65536, len(out)):
+            out.extend(chunk)
+            prompts.feed(chunk)
+
     try:
         deadline = time.monotonic() + timeout
-        streams = {process.stdout.fileno(): out, process.stderr.fileno(): err}
-        while streams and (left := deadline - time.monotonic()) > 0:
+        while (left := deadline - time.monotonic()) > 0:
+            drain()
+            status = process.poll()
+            if status is not None:
+                drain()
+                while errors is not None and (chunk := os.read(errors, 65536)):
+                    err.extend(chunk)
+                return GatedRun(status, decode(out), decode(err), False, fed(), len(lines))
             while released < len(lines) and prompts.seen > released:
                 pending += lines[released]
                 released += 1
             wanted = [inp] if pending and not closed else []
-            readable, writable, _ = select.select(list(streams), wanted, [], min(left, 0.5))
-            for fd in readable:
-                chunk = os.read(fd, 65536)
-                if not chunk:
-                    del streams[fd]
-                    continue
-                streams[fd].extend(chunk)
-                if fd == process.stdout.fileno():
-                    prompts.feed(chunk)
+            # A file is always readable, so the console is polled: stderr and stdin wake the loop early.
+            readable, writable, _ = select.select([errors] if errors is not None else [], wanted, [], min(left, 0.05))
+            if readable:
+                chunk = os.read(errors, 65536)
+                if chunk:
+                    err.extend(chunk)
+                else:
+                    errors = None
             if writable:
                 try:
                     count = os.write(inp, pending)
@@ -127,16 +146,13 @@ def run_gated(command, timeout, stdin, prompt):
                     pass
                 except BrokenPipeError:  # QEMU has gone; classify_status says which line it missed
                     closed = True
-        if streams:
-            return GatedRun(None, decode(out), decode(err), True, fed(), len(lines))
-        status = process.wait(timeout=max(1.0, deadline - time.monotonic()))
-        return GatedRun(status, decode(out), decode(err), False, fed(), len(lines))
-    except subprocess.TimeoutExpired:
+        drain()
         return GatedRun(None, decode(out), decode(err), True, fed(), len(lines))
     finally:
         if process.poll() is None:  # a timeout, an interrupt or an error: never leave QEMU running
             process.kill()
             process.wait()
+        console.close()
 
 
 def classify_status(status, transcript, timed_out, fed=None, lines=None):

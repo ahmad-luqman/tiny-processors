@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.rv32_image import RAM_BASE, flatten, parse_elf, write_hex  # noqa: E402
 from tools.rv32_rtl import check_passed, diff_traces, run_emulator, run_rtl  # noqa: E402
-from tools.rv32_run_qemu import qemu_command  # noqa: E402
+from tools.rv32_run_qemu import qemu_command, run as run_captured  # noqa: E402
 # The pinned suite: riscv-arch-test tag 3.9.1.
 ARCH_TEST_URL = "https://github.com/riscv-non-isa/riscv-arch-test.git"
 ARCH_TEST_COMMIT = "eb66181dd27ff7847e2c3a010705b13490b0bf75"
@@ -129,13 +129,12 @@ def signature_lines(console):
 
 def run_qemu(args, elf):
     """Run one test's ELF on QEMU's virt board and return its console, the reference signature."""
-    try:
-        qemu = subprocess.run(qemu_command(args.qemu, elf, cpu=args.qemu_cpu), capture_output=True, timeout=args.timeout)
-    except subprocess.TimeoutExpired:
-        raise TestFailure(f"QEMU did not finish within {args.timeout} s") from None
-    if qemu.returncode != 0:
-        raise TestFailure(f"QEMU exited {qemu.returncode}: {qemu.stderr.decode(errors='replace').strip()}")
-    return qemu.stdout.decode(errors="replace")
+    status, console, diagnostics, timed_out = run_captured(qemu_command(args.qemu, elf, cpu=args.qemu_cpu), args.timeout)
+    if timed_out:
+        raise TestFailure(f"QEMU did not finish within {args.timeout} s")
+    if status != 0:
+        raise TestFailure(f"QEMU exited {status}: {diagnostics.strip()}")
+    return console
 
 
 def run_one(test, suite, args):

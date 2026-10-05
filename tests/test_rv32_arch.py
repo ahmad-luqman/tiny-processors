@@ -24,6 +24,7 @@ from tools.rv32_arch_test import (DEFAULT_QEMU_CPU, SUITES, EXCLUDED, TestFailur
 from tools import rv32_riscv_tests
 from tools.rv32_image import flatten, parse_elf
 from tools.rv32_run_emu import emulator_command, halt_line
+from tools.rv32_run_qemu import run as run_captured
 from tools.rv32_rtl import ROOT, Run, decode
 
 CC = os.environ.get("RV32_CC", "clang")
@@ -76,8 +77,8 @@ class ModelTest(unittest.TestCase):
         return decode(result.stdout), halt_line(decode(result.stderr))
 
     def run_qemu(self, elf):
-        result = subprocess.run(qemu_command(QEMU, elf, cpu=QEMU_CPU), capture_output=True, timeout=30)
-        return decode(result.stdout), result.returncode
+        status, console, _, _ = run_captured(qemu_command(QEMU, elf, cpu=QEMU_CPU), 30)
+        return console, status
 
     def test_halt_prints_the_signature_on_both(self):
         elf, image = self.build("plain", "li t0, 1")
@@ -85,6 +86,25 @@ class ModelTest(unittest.TestCase):
         self.assertEqual((halt["halt"], halt["outcome"]), ("done", "pass"))
         self.assertEqual(signature_lines(console), ["12345678", "deadbeef", "00000000", "00000000"])
         self.assertEqual(self.run_qemu(elf), (console, 0))
+
+    def test_a_long_burst_reaches_the_runner_whole(self):
+        """Issue #41: 256 KiB written to the UART without waiting on LSR, then the done register.
+        Through a pipe, QEMU kept only what the pipe held when its reader fell behind (64 KiB, and
+        still exit 0); through the runner's file every byte arrives."""
+        body = """li t0, 0x10000000
+    li t1, 32768
+1:  li t2, 0x30
+    li t3, 0x37
+2:  sb t2, 0(t0)
+    addi t2, t2, 1
+    bne t2, t3, 2b
+    li t2, 10
+    sb t2, 0(t0)
+    addi t1, t1, -1
+    bnez t1, 1b"""
+        elf, _ = self.build("burst", body)
+        signature = "12345678\ndeadbeef\n00000000\n00000000\n"
+        self.assertEqual(self.run_qemu(elf), ("0123456\n" * 32768 + signature, 0))
 
     def test_the_fp_enable_write_retires_and_registers_survive(self):
         # The suite's RVTEST_FP_ENABLE: set FS in mstatus. Since O1 the write retires without a

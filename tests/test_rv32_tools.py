@@ -23,7 +23,7 @@ from tools.rv32_devices import (DIAG_EXPECTED_VALUES, EVENT_PRESS, EVENT_VALID, 
                                 event_word, frame_hash, is_decimal, key_code, parse_input_script, render_diag_frame)
 from tools.rv32_image import (ImageError, check_a_build, check_image, check_listing, check_m_build, flatten, parse_elf,
                               to_hex_words)
-from tools.rv32_run_qemu import PromptCounter, classify, classify_status, input_lines, qemu_command, run_gated
+from tools.rv32_run_qemu import PromptCounter, classify, classify_status, input_lines, qemu_command, run, run_gated
 from tools import rv32_doom, rv32_linux, rv32_mkfs, rv32_vendor_libc
 
 
@@ -1053,6 +1053,25 @@ class GatedQemuRunnerTests(unittest.TestCase):
         run = self.gated(b"\n" * 65536, "> ", 0, timeout=1)
         self.assertLess(time.monotonic() - started, 5)
         self.assertEqual((run.fed, run.lines), (0, 65536))
+
+    def test_the_console_is_a_file_not_a_pipe(self):
+        """Issue #41: QEMU drops console bytes a full pipe cannot take and still exits 0, so both
+        runners hand it a regular file as stdout, whatever the host's load."""
+        is_file = "import os, stat, sys\nsys.exit(0 if stat.S_ISREG(os.fstat(1).st_mode) else 7)"
+        self.assertEqual(run([sys.executable, "-c", is_file], 10)[0], 0)
+        self.assertEqual(self.gated(b"", "> ", 0, script=is_file).status, 0)
+
+    def test_a_long_burst_before_the_prompt_arrives_whole(self):
+        """Issue #41: 256 KiB before the first prompt takes several reads of the console file."""
+        burst = FAKE_GUEST.replace("for _ in range(count):", "sys.stdout.write('0123456\\n' * 32768)\nfor _ in range(count):")
+        run_ = self.gated(b"one\n", "> ", 1, script=burst)
+        self.assertEqual((run_.status, run_.fed), (0, 1))
+        self.assertEqual(run_.stdout, "0123456\n" * 32768 + "> got b'one\\n'\r\n")
+
+    def test_a_timed_out_run_keeps_its_console(self):
+        partial = "import sys, time\nsys.stdout.write('half\\n'); sys.stdout.flush()\ntime.sleep(30)"
+        status, console, _, timed_out = run([sys.executable, "-c", partial], 1)
+        self.assertEqual((status, console, timed_out), (None, "half\n", True))
 
     def test_status_only_verdicts(self):
         self.assertTrue(classify_status(0, "a\r\nb\r\n", False, 2, 2).ok)
