@@ -34,9 +34,19 @@ module rv32_tb;
     localparam integer CONSOLE_IN_MAX = 65536;
     reg [7:0] console_in [0:CONSOLE_IN_MAX-1];
     integer console_in_len = 0, console_in_next = 0;
-    wire console_rx_valid = console_in_next < console_in_len;
+    // +console-prompt-hex=HEX (issue #36): line k of the input becomes visible only once the guest
+    // has sent the prompt (HEX, its bytes) k times, as the emulator's --console-prompt does: a byte
+    // waits while fewer lines have been taken than prompts sent (overlapping matches count).
+    reg [7:0] console_prompt [0:63];
+    reg [7:0] console_tail [0:63];
+    integer console_prompt_len = 0, console_tail_len = 0, console_prompts_seen = 0, console_lines_taken = 0;
+    wire console_rx_valid = console_in_next < console_in_len &&
+                            (console_prompt_len == 0 || console_lines_taken < console_prompts_seen);
     wire [7:0] console_rx_byte = console_rx_valid ? console_in[console_in_next[15:0]] : 8'd0;
-    always @(posedge clk) if (!reset && console_rx_take) console_in_next <= console_in_next + 1; // +ticks=steps: the deterministic tick mode (docs/rv32.md, "Device time")
+    always @(posedge clk) if (!reset && console_rx_take) begin
+        if (console_in[console_in_next[15:0]] == 8'h0a) console_lines_taken <= console_lines_taken + 1;
+        console_in_next <= console_in_next + 1;
+    end // +ticks=steps: the deterministic tick mode (docs/rv32.md, "Device time")
     reg [31:0] in_event = 0;
 
     // The input script (+input=FILE): `frame N down|up KEY` lines, delivered in
@@ -271,6 +281,9 @@ module rv32_tb;
             // refused before any halt line exists, so the runner cannot take the run as complete.
             if (reset_at > 0 && !reset_done)
                 $fatal(1, "+reset-at=%0d was never reached: the run ended at cycle %0d", reset_at, cycles);
+            if (console_prompt_len != 0 && console_in_next < console_in_len) // a prompt that never came
+                $fwrite(STDERR, "rv32_tb: console input: %0d of %0d byte(s) taken; the prompt was sent %0d time(s), %0d line(s) taken\n",
+                        console_in_next, console_in_len, console_prompts_seen, console_lines_taken);
             $fwrite(STDERR, "rv32_tb: halt=%0s cycles=%0d steps=%0d stalls=%0d transfers=%0d",
                     halt_name, cycles, steps, stalls, transfers);
             if (interrupts != 0) $fwrite(STDERR, " interrupts=%0d", interrupts);
@@ -367,6 +380,7 @@ module rv32_tb;
                         // The guest console: a file when +console is given, else stdout.
                         if (console_fd != 0) $fwrite(console_fd, "%c", console_byte);
                         else $write("%c", console_byte);
+                        if (console_prompt_len != 0) watch_console_prompt(console_byte);
                     end
                     if (done_valid) begin
                         done_pending = 1;
@@ -652,6 +666,38 @@ module rv32_tb;
         end
     endtask
 
+    // Each byte sent shifts into the tail; every match releases one more input line.
+    task watch_console_prompt;
+        input [7:0] b;
+        integer i;
+        reg matched;
+        begin
+            for (i = 0; i + 1 < console_prompt_len; i = i + 1) console_tail[i] = console_tail[i + 1];
+            console_tail[console_prompt_len - 1] = b;
+            if (console_tail_len < console_prompt_len) console_tail_len = console_tail_len + 1;
+            matched = console_tail_len == console_prompt_len;
+            for (i = 0; matched && i < console_prompt_len; i = i + 1)
+                if (console_tail[i] != console_prompt[i]) matched = 0;
+            if (matched) console_prompts_seen = console_prompts_seen + 1;
+        end
+    endtask
+
+    // The prompt from its hex digits, two per byte.
+    task read_console_prompt;
+        input string hex;
+        integer i, value;
+        begin
+            if (hex.len() == 0 || hex.len() % 2 != 0 || hex.len() > 128)
+                $fatal(1, "+console-prompt-hex=%0s must be 2 to 128 hex digits, an even number", hex);
+            for (i = 0; i < hex.len() / 2; i = i + 1) begin
+                if ($sscanf(hex.substr(2 * i, 2 * i + 1), "%h", value) != 1)
+                    $fatal(1, "+console-prompt-hex=%0s is not hex", hex);
+                console_prompt[i] = value[7:0];
+            end
+            console_prompt_len = hex.len() / 2;
+        end
+    endtask
+
     // The console input file, byte by byte ($fgetc works the same on both simulators).
     task read_console_input;
         input string path;
@@ -677,6 +723,10 @@ module rv32_tb;
         if ($value$plusargs("input=%s", input_path)) read_input_script(input_path);
         if ($test$plusargs("allow-lost-events")) allow_lost_events = 1;
         if ($value$plusargs("console-input=%s", text)) read_console_input(text);
+        if ($value$plusargs("console-prompt-hex=%s", text)) begin
+            if (!$test$plusargs("console-input=")) $fatal(1, "+console-prompt-hex gates +console-input, which is missing");
+            read_console_prompt(text);
+        end
         if ($value$plusargs("ticks=%s", text)) begin
             if (text == "steps") step_ticks = 1;
             else if (text != "cycles") $fatal(1, "+ticks=%0s must be steps or cycles", text);

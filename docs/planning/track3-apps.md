@@ -97,9 +97,14 @@ A extension), [#35](https://github.com/ahmad-luqman/tiny-processors/issues/35)
    program; the shareware WAD fetched from Debian's pool, never committed; a
    virtual clock, so the timedemo draws the same frames on QEMU, the emulator
    and Verilator ([record](../rv32-doom.md)).
-4. **Linux without an MMU (B4).** `mini-rv32ima` shows Linux booting on
-   RV32IMA with a CLINT and a UART; on B2's A extension and B3's RAM, it runs
-   on the emulator first and on Verilator slowly.
+4. **Linux without an MMU (B4).** Linux 6.12, nommu, in machine mode, built by
+   upstream Buildroot in Docker from pinned sources and never committed, boots
+   to a busybox shell on QEMU `virt`, the emulator and Verilator, from one image
+   with a device tree compiled in. The first of its two PRs gave the machine what
+   Linux needs: `misa` and the ID CSRs, `fence.i`, a 16550 the 8250 driver can
+   drive, and a readable done register. The second builds the image and types a
+   session into the shell, a line per prompt on every backend
+   ([record](../rv32-linux.md)).
 
 MicroPython is an alternative to Lua that stream A did not need. Its port
 would reuse L1 unchanged.

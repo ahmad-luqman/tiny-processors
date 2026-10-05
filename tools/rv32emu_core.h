@@ -189,6 +189,15 @@ typedef struct {
     bool console_stdin;     /* --console-input -: bytes arrive from stdin as the host has them */
     uint8_t console_ier, console_lcr, console_mcr, console_scr, console_dll, console_dlm; /* issue #36 */
     uint64_t console_latched; /* THR stores and RBR reads that met the divisor latch since DLAB was last set */
+    /* --console-prompt (issue #36): the guest sees input line k only once it has sent the prompt k
+     * times, so a program that echoes as bytes arrive (Linux's tty) sees each line when it waits.
+     * A byte waits only while fewer input lines have been taken than prompts sent; the testbench and
+     * tools/rv32_run_qemu.py --prompt keep the same two counts. */
+    uint8_t console_prompt[64];
+    size_t console_prompt_len;  /* 0: no gate, every byte waits from reset */
+    uint8_t console_tail[64];   /* the last bytes sent (up to the prompt's length), matched against it */
+    size_t console_tail_len;
+    uint64_t console_prompts_seen, console_lines_taken; /* matches, overlapping ones included; '\n' bytes read */
     /* Effects of the current step, for the trace line. */
     int wr_reg, wr_freg;
     bool wr_fcsr;
@@ -218,6 +227,8 @@ void emu_read_input_script(machine *m, const char *path);
 /* Console input (O2): every byte of `path` is received before the first instruction; "-" instead
  * reads stdin as it arrives, for interactive use. Exits with a message on error. */
 void emu_read_console_input(machine *m, const char *path);
+/* --console-prompt: 1 to 64 bytes, and not with --console-input -; exits otherwise. */
+void emu_set_console_prompt(machine *m, const char *prompt);
 /* The disk (O3): a file of whole 512-byte sectors, at most VIRTIO_DISK_MAX bytes (issue #35), read
  * now and written through on every OUT request; its size is the capacity the device reports.
  * Without one the disk is VIRTIO_DISK_SIZE zero bytes that last only for the run. Exits with

@@ -1,0 +1,34 @@
+# Buildroot's configuration (issue #36, docs/rv32-linux.md). Upstream's
+# qemu_riscv32_nommu_virt_defconfig, without its ext2 image, host QEMU, post-image script, DHCP
+# and getty, and with:
+# - the ISA narrowed to our RV32IMA (no F, D or C);
+# - the root file system built into the kernel as an initramfs;
+# - Linux and busybox configured from the fragments beside this file (build.sh writes the
+#   full configurations into /build/gen);
+# - the device tree compiled in;
+# - a reproducible build.
+BR2_riscv=y
+BR2_riscv_custom=y
+BR2_RISCV_ISA_RVM=y
+BR2_RISCV_ISA_RVA=y
+BR2_RISCV_32=y
+# BR2_RISCV_USE_MMU is not set
+BR2_RISCV_ABI_ILP32=y
+BR2_REPRODUCIBLE=y
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12=y
+BR2_GLOBAL_PATCH_DIR="board/qemu/patches"
+BR2_DOWNLOAD_FORCE_CHECK_HASHES=y
+BR2_SYSTEM_DHCP=""
+# BR2_TARGET_GENERIC_GETTY is not set
+BR2_ROOTFS_OVERLAY="/src/rootfs-overlay"
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.12.27"
+BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="/build/gen/linux.config"
+BR2_LINUX_KERNEL_DTS_SUPPORT=y
+BR2_LINUX_KERNEL_CUSTOM_DTS_PATH="/build/gen/tiny-processors.dts"
+BR2_PACKAGE_BUSYBOX_CONFIG="/build/gen/busybox.config"
+BR2_TARGET_ROOTFS_CPIO=y
+BR2_TARGET_ROOTFS_INITRAMFS=y
+# BR2_TARGET_ROOTFS_TAR is not set

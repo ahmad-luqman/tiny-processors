@@ -15,3 +15,6 @@ third_party/riscv-tests/
 
 # The shareware WAD, fetched by make fetch-rv32-doom-wad (issue #35); never committed
 third_party/doom-wad/
+
+# The Linux image and its build records, from make rv32-linux-image (issue #36); never committed
+third_party/linux/

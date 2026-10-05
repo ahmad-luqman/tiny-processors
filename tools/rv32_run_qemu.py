@@ -8,10 +8,16 @@ QEMU's own diagnostics stay on stderr.
 """
 
 import argparse
+import bisect
+import io
+import itertools
+import os
 from collections import namedtuple
 from pathlib import Path
 import re
+import select
 import subprocess
+import time
 
 
 PASS_LINE = re.compile(r"\APASS ([0-9a-f]{8})\Z")
@@ -21,6 +27,12 @@ DEFAULT_CPU = "rv32i"
 CPU_FALLBACKS = ("rv32i,zicsr=true", "rv32,m=false,a=false,f=false,d=false,c=false")
 
 Outcome = namedtuple("Outcome", "ok reason code checksum")
+# A gated run: as run() returns, and how many of the input's lines were fed.
+GatedRun = namedtuple("GatedRun", "status stdout stderr timed_out fed lines")
+
+
+def decode(data):
+    return bytes(data or b"").decode("utf-8", errors="backslashreplace")
 
 
 def qemu_command(qemu, elf, cpu=DEFAULT_CPU, memory="16M", log=None, drive=None, icount=None):
@@ -45,12 +57,101 @@ def run(command, timeout, stdin=None):
     try:
         with open(stdin, "rb") if stdin is not None else open("/dev/null", "rb") as source:
             completed = subprocess.run(command, stdin=source, capture_output=True, timeout=timeout)
-        completed.stdout = completed.stdout.decode("utf-8", errors="backslashreplace")
-        completed.stderr = completed.stderr.decode("utf-8", errors="backslashreplace")
+        completed.stdout = decode(completed.stdout)
+        completed.stderr = decode(completed.stderr)
     except subprocess.TimeoutExpired as expired:
-        decode = lambda data: (data or b"").decode("utf-8", errors="backslashreplace")  # noqa: E731
         return None, decode(expired.stdout), decode(expired.stderr), True
     return completed.returncode, completed.stdout, completed.stderr, False
+
+
+def input_lines(data):
+    """The lines a gated input feeds one at a time, split after each newline only (a lone \\r stays
+    inside its line, as on the emulator and the testbench); a last line without one is still a line."""
+    return io.BytesIO(data).readlines()
+
+
+class PromptCounter:
+    """Counts the prompt in a byte stream that arrives in pieces, overlapping matches included: the
+    rolling tail the emulator's --console-prompt and the testbench's +console-prompt-hex keep."""
+
+    def __init__(self, prompt):
+        self.prompt, self.tail, self.seen = prompt, b"", 0
+
+    def feed(self, chunk):
+        for byte in chunk:
+            self.tail = (self.tail + bytes([byte]))[-len(self.prompt):]
+            self.seen += self.tail == self.prompt
+
+
+PROMPT_MAX = 64  # bytes: the emulator's --console-prompt and the testbench's +console-prompt-hex allow 1 to 64
+
+
+def run_gated(command, timeout, stdin, prompt):
+    """Like run(), but the guest receives line k of `stdin` only once it has printed `prompt` k times
+    (issue #36), so a shell sees each command when it is waiting for one, as the emulator's
+    --console-prompt and the testbench's +console-prompt-hex arrange. Output is read and input
+    written as the pipes allow, in one select loop, so the timeout holds even when the guest stops
+    reading; QEMU's stdin stays open. Returns a GatedRun; a line counts as fed once its last byte
+    is written."""
+    lines = input_lines(Path(stdin).read_bytes())
+    ends = list(itertools.accumulate(len(line) for line in lines))  # the byte offset past each line
+    prompts = PromptCounter(prompt.encode())
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err, pending, released, written, closed = bytearray(), bytearray(), bytearray(), 0, 0, False
+    inp = process.stdin.fileno()
+    os.set_blocking(inp, False)
+    fed = lambda: bisect.bisect_right(ends, written)  # noqa: E731
+    try:
+        deadline = time.monotonic() + timeout
+        streams = {process.stdout.fileno(): out, process.stderr.fileno(): err}
+        while streams and (left := deadline - time.monotonic()) > 0:
+            while released < len(lines) and prompts.seen > released:
+                pending += lines[released]
+                released += 1
+            wanted = [inp] if pending and not closed else []
+            readable, writable, _ = select.select(list(streams), wanted, [], min(left, 0.5))
+            for fd in readable:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    del streams[fd]
+                    continue
+                streams[fd].extend(chunk)
+                if fd == process.stdout.fileno():
+                    prompts.feed(chunk)
+            if writable:
+                try:
+                    count = os.write(inp, pending)
+                    del pending[:count]
+                    written += count
+                except BlockingIOError:
+                    pass
+                except BrokenPipeError:  # QEMU has gone; classify_status says which line it missed
+                    closed = True
+        if streams:
+            return GatedRun(None, decode(out), decode(err), True, fed(), len(lines))
+        status = process.wait(timeout=max(1.0, deadline - time.monotonic()))
+        return GatedRun(status, decode(out), decode(err), False, fed(), len(lines))
+    except subprocess.TimeoutExpired:
+        return GatedRun(None, decode(out), decode(err), True, fed(), len(lines))
+    finally:
+        if process.poll() is None:  # a timeout, an interrupt or an error: never leave QEMU running
+            process.kill()
+            process.wait()
+
+
+def classify_status(status, transcript, timed_out, fed=None, lines=None):
+    """--status-only: the verdict is QEMU's exit status, 0 for the done register's pass word (with
+    -no-reboot a guest reset also exits 0, which is why the caller compares the transcript too), and
+    with a gated input every line must have been fed."""
+    count = len(transcript.replace("\r", "").splitlines())
+    waiting = f"; line {fed + 1} of {lines} was never fed" if lines is not None and fed < lines else ""
+    if timed_out:
+        return Outcome(False, f"timed out with {count} console line(s){waiting}", None, None)
+    if status != 0:
+        return Outcome(False, f"QEMU exit status {status}, not the pass word's 0{waiting}", status, None)
+    if waiting:
+        return Outcome(False, f"QEMU exited 0 before the input was all fed{waiting}", 0, None)
+    return Outcome(True, f"QEMU exit status 0 (the pass word) after {count} console lines", 0, None)
 
 
 def classify(status, transcript, timed_out, expect_hex=None, last_line=False):
@@ -94,24 +195,43 @@ def main():
     parser.add_argument("--last-line", action="store_true", help="judge the last console line; earlier lines are a report")
     parser.add_argument("--stdin", type=Path, help="bytes the guest's UART receives (O2)")
     parser.add_argument("--drive", type=Path, help="a raw disk image for virtio-blk (O3); the guest may write it")
+    parser.add_argument("--prompt", help="feed --stdin a line at a time, line k once the guest has printed this k times (issue #36)")
+    parser.add_argument("--status-only", action="store_true",
+                        help="for a guest such as Linux that prints no PASS line: judge QEMU's exit status (0 is the done "
+                             "register's pass word, though a guest reset exits 0 too, so the caller compares the transcript), "
+                             "and with --prompt require every line to have been fed")
     parser.add_argument("--icount", type=int, choices=range(11), metavar="N",
                         help="instruction-counted time: each instruction advances virtual time 2**N ns, and wfi skips ahead")
     args = parser.parse_args()
+    if args.prompt is not None and args.stdin is None:
+        parser.error("--prompt gates --stdin, which is missing")
+    if args.prompt is not None and not 1 <= len(args.prompt.encode()) <= PROMPT_MAX:
+        parser.error(f"--prompt must be 1 to {PROMPT_MAX} bytes, as on the emulator and the testbench")
     command = qemu_command(args.qemu, args.elf, cpu=args.cpu, memory=args.memory, log=args.qemu_log, drive=args.drive,
                            icount=args.icount)
+    fed = lines = None
     try:
-        status, transcript, diagnostics, timed_out = run(command, args.timeout, args.stdin)
+        if args.prompt is not None:
+            status, transcript, diagnostics, timed_out, fed, lines = run_gated(command, args.timeout, args.stdin, args.prompt)
+        else:
+            status, transcript, diagnostics, timed_out = run(command, args.timeout, args.stdin)
     except OSError as error:
         parser.exit(1, f"{args.qemu}: {error}\n")
     if args.transcript:
         args.transcript.parent.mkdir(parents=True, exist_ok=True)
         args.transcript.write_text(transcript)
-    outcome = classify(status, transcript, timed_out, args.expect_hex, args.last_line)
+    if args.status_only:
+        outcome = classify_status(status, transcript, timed_out, fed, lines)
+    else:
+        outcome = classify(status, transcript, timed_out, args.expect_hex, args.last_line)
     print(" ".join(command))
     print(transcript, end="" if transcript.endswith("\n") else "\n")
     if not outcome.ok:
         parser.exit(1, f"{args.elf}: {outcome.reason}\n{diagnostics}")
-    print(f"QEMU exit status {status}; console and done register agree: {outcome.reason} {outcome.checksum}")
+    if args.status_only:
+        print(outcome.reason)
+    else:
+        print(f"QEMU exit status {status}; console and done register agree: {outcome.reason} {outcome.checksum}")
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ static void usage(void)
     fputs("usage: rv32emu --image FILE [--base ADDR] [--pc ADDR] [--trace FILE] [--dump-state FILE]\n"
           "               [--max-instructions N] [--checkpoints FILE] [--frames DIR] [--input FILE]\n"
           "               [--record FILE] [--allow-lost-events] [--gdb PORT] [--console-input FILE|-]\n"
-          "               [--disk FILE]\n"
+          "               [--disk FILE] [--console-prompt TEXT]\n"
           "Loads FILE at ADDR (default 0x80000000), starts at --pc (default 0x80000000), and runs\n"
           "until the done register is written. Console bytes go to stdout, the trace and state\n"
           "to their files, and a final 'rv32emu: halt=...' line to stderr. Each present appends\n"
@@ -33,7 +33,9 @@ static void usage(void)
           "127.0.0.1:PORT (0 picks a free port; the chosen one is printed to stderr) with the\n"
           "machine stopped at the reset pc (docs/rv32-gdb.md). --console-input gives the console's\n"
           "receive side every byte of FILE from reset, or stdin as it arrives with -. --disk backs\n"
-          "the virtio-blk device with FILE (128 KiB), written through as the guest writes.\n",
+          "the virtio-blk device with FILE (128 KiB), written through as the guest writes.\n"
+          "--console-prompt makes line k of the console input visible only once the guest has\n"
+          "sent TEXT k times, for a guest that echoes input as it arrives (issue #36).\n",
           stderr);
     exit(EXIT_EMULATOR_ERROR);
 }
@@ -42,6 +44,7 @@ int main(int argc, char **argv)
 {
     const char *image_path = NULL, *trace_path = NULL, *state_path = NULL, *checkpoints_path = NULL;
     const char *input_path = NULL, *record_path = NULL, *frames_dir = NULL, *console_input = NULL, *disk_path = NULL;
+    const char *console_prompt = NULL;
     uint32_t base = RAM_BASE, start = 0;
     bool start_given = false, allow_lost_events = false;
     int gdb_port = -1; /* --gdb: serve a debugger on this port (0 picks one) */
@@ -82,6 +85,8 @@ int main(int argc, char **argv)
             disk_path = value;
         } else if (!strcmp(arg, "--console-input")) {
             console_input = value;
+        } else if (!strcmp(arg, "--console-prompt")) {
+            console_prompt = value;
         } else if (!strcmp(arg, "--gdb")) {
             gdb_port = (int)emu_parse_u64(value, 65535, "gdb port");
         } else {
@@ -121,6 +126,13 @@ int main(int argc, char **argv)
     }
     if (input_path) {
         emu_read_input_script(&m, input_path); /* exits on a bad script */
+    }
+    if (console_prompt) {
+        if (!console_input) {
+            fputs("rv32emu: --console-prompt gates a --console-input file\n", stderr);
+            return EXIT_EMULATOR_ERROR;
+        }
+        emu_set_console_prompt(&m, console_prompt); /* exits on stdin input, an empty or an overlong prompt */
     }
     if (console_input) {
         emu_read_console_input(&m, console_input); /* exits on an unreadable file */

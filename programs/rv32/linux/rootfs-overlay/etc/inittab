@@ -1,0 +1,6 @@
+# busybox init (issue #36): mount /proc, say so, and give the console a shell. Buildroot's
+# /init has already mounted devtmpfs on /dev. `poweroff` ends the run through syscon-poweroff.
+::sysinit:/bin/mount -t proc proc /proc
+::sysinit:/bin/echo "tiny-processors linux: up"
+ttyS0::respawn:-/bin/sh
+::shutdown:/bin/echo "tiny-processors linux: down"
