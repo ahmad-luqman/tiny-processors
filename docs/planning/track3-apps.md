@@ -93,7 +93,10 @@ A extension), [#35](https://github.com/ahmad-luqman/tiny-processors/issues/35)
    The same PR builds the palette window, lets a disk be up to 8 MiB for the
    WAD (tfs extents were already any length; the disk was the limit), lets
    programs live on the disk (the kernel's image cannot hold Doom), and adds
-   keys. The second PR ports Doom ([record](../rv32-doom.md)).
+   keys. The second PR ports Doom: doomgeneric unmodified, GPL-2.0, as a disk
+   program; the shareware WAD fetched from Debian's pool, never committed; a
+   virtual clock, so the timedemo draws the same frames on QEMU, the emulator
+   and Verilator ([record](../rv32-doom.md)).
 4. **Linux without an MMU (B4).** `mini-rv32ima` shows Linux booting on
    RV32IMA with a CLINT and a UART; on B2's A extension and B3's RAM, it runs
    on the emulator first and on Verilator slowly.

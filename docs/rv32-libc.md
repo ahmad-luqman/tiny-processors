@@ -26,7 +26,7 @@ math functions. What it needs is short:
 | `gettimeofday` | the epoch: there is no real-time clock | none |
 | `times` (so `clock()`) | the low word of `mtime`, in device ticks | `time` |
 | `_exit` | the end of the process | `exit` |
-| `unlink`, `rename`, `stat`, `getentropy` | not provided: `ENOSYS` | |
+| `unlink`, `rename`, `stat`, `mkdir`, `getentropy` | not provided: `ENOSYS` (`mkdir` since issue #35: Doom makes a save directory, and tfs has none) | |
 
 and three compiler-runtime facts: the programs are built for RV32I, which has
 no multiply or divide, no floating point (the core has RV32F, but the OS's
@@ -44,7 +44,7 @@ run side by side.
 ### Vendoring
 
 [third_party/picolibc](../third_party/picolibc/README.md) is picolibc 1.8.10 cut
-down to the 143 source files the two programs link, with every header they
+down to the 143 source files the two programs link (151 since issue #35 added Doom's eight, [record](rv32-doom.md#the-port)), with every header they
 include and the `picolibc.h` that meson generated for our configuration
 (tiny stdio, nano-malloc, a global `errno`, single-threaded, `long long` in
 printf). [third_party/compiler-rt](../third_party/compiler-rt/README.md) is
