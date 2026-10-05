@@ -288,7 +288,7 @@ class AtomicTest(StepTicksCase):
             (LI(7, DATA + 3) + [AMOADD_W(5, 0, 7)], 6, DATA + 3),
             (LI(7, 0x00200000) + [LR_W(5, 7)], 5, 0x00200000),
             (LI(7, 0x00200000) + [AMOOR_W(5, 0, 7)], 7, 0x00200000),
-            (LI(7, RAM + 0x00800000) + [AMOSWAP_W(5, 0, 7)], 7, RAM + 0x00800000),  # one past RAM
+            (LI(7, RAM + 0x01000000) + [AMOSWAP_W(5, 0, 7)], 7, RAM + 0x01000000),  # one past RAM
             (LI(7, CONSOLE) + [AMOSWAP_W(5, 0, 7)], 7, CONSOLE),      # the console takes no words
             (LI(7, DONE) + [AMOSWAP_W(5, 0, 7)], 7, DONE),            # write-only: the read is refused
             (LI(7, BOOTROM) + [AMOSWAP_W(5, 0, 7)], 7, BOOTROM),      # read-only: the write is refused

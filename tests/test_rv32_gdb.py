@@ -570,10 +570,10 @@ class GdbStubTest(unittest.TestCase):
         while len(data) < len(image):
             data += bytes.fromhex(client.read(RAM + len(data), min(0x700, len(image) - len(data))))
         self.assertEqual(data, image)
-        self.assertEqual(client.read(RAM + 0x7FFFFC, 4), "00000000")
+        self.assertEqual(client.read(RAM + 0xFFFFFC, 4), "00000000")
         self.assertEqual(client.read(FB, 8), "00" * 8)
         self.assertEqual(client.read(UNMAPPED, 4), "E01")
-        self.assertEqual(client.read(RAM + 0x7FFFFE, 4), "E01")
+        self.assertEqual(client.read(RAM + 0xFFFFFE, 4), "E01")
         self.assertEqual(client.read(0xFFFFFFFE, 4), "E01", "a wrapping range is refused")
         self.assertEqual(client.read(RAM - 2, 4), "E01")
         self.assertEqual(client.ask("m80000000"), "E01", "no length")

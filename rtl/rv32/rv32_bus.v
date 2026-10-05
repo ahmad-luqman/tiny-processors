@@ -17,7 +17,7 @@
 // one term in each of the three OR-reductions below. Forgetting `none_sel`
 // makes the new window answer as unmapped (`error`) and as its slave at once.
 module rv32_bus #(
-    parameter integer RAM_WORDS = 2097152,
+    parameter integer RAM_WORDS = 4194304,
     parameter integer FB_WORDS = 19200
 ) (
     // Core side.
@@ -74,6 +74,11 @@ module rv32_bus #(
     input  wire        display_ready,
     input  wire        display_error,
     input  wire [31:0] display_rdata,
+    // Palette at 0x1100_3000, 1 KiB (issue #35).
+    output wire        palette_valid,
+    input  wire        palette_ready,
+    input  wire        palette_error,
+    input  wire [31:0] palette_rdata,
     // Framebuffer at 0x1200_0000.
     output wire        fb_valid,
     input  wire        fb_ready,
@@ -108,6 +113,7 @@ module rv32_bus #(
     localparam [31:0] BOOTROM_BASE = 32'h0000_1000;
     localparam [31:0] INPUT_BASE = 32'h1100_1000;
     localparam [31:0] DISPLAY_BASE = 32'h1100_2000;
+    localparam [31:0] PALETTE_BASE = 32'h1100_3000;
     localparam [31:0] FB_BASE = 32'h1200_0000;
     localparam [31:0] FB_BYTES = FB_WORDS * 4;
 
@@ -130,6 +136,7 @@ module rv32_bus #(
     wire rom_sel = !mem_fetch && (mem_addr[31:12] == BOOTROM_BASE[31:12]);
     wire input_sel = !mem_fetch && (mem_addr[31:4] == INPUT_BASE[31:4]);
     wire display_sel = !mem_fetch && (mem_addr[31:4] == DISPLAY_BASE[31:4]);
+    wire palette_sel = !mem_fetch && (mem_addr[31:10] == PALETTE_BASE[31:10]);
     wire fb_sel = !mem_fetch && (mem_addr >= FB_BASE) && (fb_offset < FB_BYTES);
     wire simd_sel = !mem_fetch && (((mem_addr & 32'hffff_ffe0) == SIMD4_BASE) ||
                       ((mem_addr & 32'hffff_fc00) == SIMD4_PROGRAM) ||
@@ -137,7 +144,7 @@ module rv32_bus #(
     wire gpu_sel = !mem_fetch && mem_addr[31:7]==GPU_BASE[31:7];
     wire g3d_sel = !mem_fetch && mem_addr[31:13] == G3D_BASE[31:13];   // 8 KiB
     wire dma_window_sel = !mem_fetch && (mem_addr[31:3] == DMA_WINDOW_BASE[31:3]);
-    wire none_sel = !(ram_sel || console_sel || done_sel || clint_sel || plic_sel || virtio_sel || rom_sel || input_sel || display_sel || fb_sel || simd_sel || gpu_sel || g3d_sel || dma_window_sel);
+    wire none_sel = !(ram_sel || console_sel || done_sel || clint_sel || plic_sel || virtio_sel || rom_sel || input_sel || display_sel || palette_sel || fb_sel || simd_sel || gpu_sel || g3d_sel || dma_window_sel);
 
     assign gpu_valid = req && gpu_sel;
     assign g3d_valid = req && g3d_sel;
@@ -152,21 +159,22 @@ module rv32_bus #(
     assign rom_valid = req && rom_sel;
     assign input_valid = req && input_sel;
     assign display_valid = req && display_sel;
+    assign palette_valid = req && palette_sel;
     assign fb_valid = req && fb_sel;
 
     assign mem_ready = req && ((ram_sel && ram_ready) || (console_sel && console_ready) ||
                                (done_sel && done_ready) || (clint_sel && clint_ready) || (plic_sel && plic_ready) || (virtio_sel && virtio_ready) || (rom_sel && rom_ready) ||
-                               (input_sel && input_ready) || (display_sel && display_ready) ||
+                               (input_sel && input_ready) || (display_sel && display_ready) || (palette_sel && palette_ready) ||
                                (fb_sel && fb_ready) || (simd_sel && simd_ready) || (gpu_sel && gpu_ready) || (g3d_sel && g3d_ready) ||
                                (dma_window_sel && dma_window_ready) || none_sel);
     assign mem_error = (ram_sel && ram_error) || (console_sel && console_error) ||
                        (done_sel && done_error) || (clint_sel && clint_error) || (plic_sel && plic_error) || (virtio_sel && virtio_error) || (rom_sel && rom_error) ||
-                       (input_sel && input_error) || (display_sel && display_error) ||
+                       (input_sel && input_error) || (display_sel && display_error) || (palette_sel && palette_error) ||
                        (fb_sel && fb_error) || (simd_sel && simd_error) || (gpu_sel && gpu_error) || (g3d_sel && g3d_error) ||
                        (dma_window_sel && dma_window_error) || none_sel;
     assign mem_rdata = ({32{ram_sel}} & ram_rdata) | ({32{console_sel}} & console_rdata) |
                        ({32{done_sel}} & done_rdata) | ({32{clint_sel}} & clint_rdata) | ({32{plic_sel}} & plic_rdata) | ({32{virtio_sel}} & virtio_rdata) | ({32{rom_sel}} & rom_rdata) |
-                       ({32{input_sel}} & input_rdata) | ({32{display_sel}} & display_rdata) |
+                       ({32{input_sel}} & input_rdata) | ({32{display_sel}} & display_rdata) | ({32{palette_sel}} & palette_rdata) |
                        ({32{fb_sel}} & fb_rdata) | ({32{simd_sel}} & simd_rdata) | ({32{gpu_sel}} & gpu_rdata) |
                        ({32{g3d_sel}} & g3d_rdata) | ({32{dma_window_sel}} & dma_window_rdata);
 

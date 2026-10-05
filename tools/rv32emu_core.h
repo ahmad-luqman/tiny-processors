@@ -23,7 +23,7 @@
 /* Machine contract constants; keep in step with programs/rv32/board.h;
  * the graphics contract is imported from programs/rv32/gpu.h. */
 #define RAM_BASE 0x80000000u
-#define RAM_SIZE 0x00800000u
+#define RAM_SIZE 0x01000000u
 #define CONSOLE_BASE 0x10000000u
 #define CONSOLE_TX 0x0u      /* write: transmit; read: RBR, the next received byte (O2) */
 #define CONSOLE_STATUS 0x5u
@@ -51,7 +51,10 @@
 #define PLIC_WIRED ((1u << PLIC_SOURCE_INPUT) | (1u << PLIC_SOURCE_VIRTIO))
 #define VIRTIO_BASE 0x10001000u  /* virt's first virtio-mmio slot (O3) */
 #define VIRTIO_SIZE 0x200u
-#define VIRTIO_DISK_SIZE 0x20000u /* 128 KiB, the RTL's DISK_WORDS: a disk file must be this size */
+#define VIRTIO_DISK_SIZE 0x20000u /* 128 KiB: the disk a run without --disk holds */
+#define VIRTIO_DISK_MAX 0x800000u  /* 8 MiB, the RTL's DISK_WORDS: the largest disk file (issue #35) */
+_Static_assert(VIRTIO_DISK_SIZE % 512u == 0 && VIRTIO_DISK_MAX % 512u == 0 && VIRTIO_DISK_SIZE <= VIRTIO_DISK_MAX,
+               "disks are whole sectors, the default no larger than the largest");
 #define INPUT_BASE 0x11001000u
 #define INPUT_EVENT 0x0u
 #define INPUT_COUNT 0x4u
@@ -64,6 +67,11 @@
 #define DISPLAY_FRAMES 0x4u
 #define DISPLAY_WIDTH 0x8u
 #define DISPLAY_HEIGHT 0xCu
+/* The palette (issue #35): 256 words, 0x00RRGGBB, the colour of each pixel value; word access
+ * only, the top byte reads as zero. Its power-on contents are the RGB332 mapping. */
+#define PALETTE_BASE 0x11003000u
+#define PALETTE_SIZE 0x400u
+#define PALETTE_ENTRIES 256u
 /* The DMA window (issue #20): the RAM G1 and G2 may reach, [START, END), in its own page so the
  * kernel can keep it from the programs it grants the engines. */
 #define DMA_WINDOW_BASE 0x1100a000u
@@ -81,7 +89,8 @@ typedef struct {
     bool features_sel, queue_sel_zero, queue_ready, interrupt;
     uint32_t queue_num, desc_lo, desc_hi, driver_lo, driver_hi, device_lo, device_hi;
     uint16_t last_avail, used_idx;
-    uint8_t disk[VIRTIO_DISK_SIZE];
+    uint8_t disk[VIRTIO_DISK_MAX];
+    uint32_t disk_size; /* bytes: the file's, or VIRTIO_DISK_SIZE without one */
     FILE *file;       /* --disk: written through on every OUT request, or NULL */
     bool write_error;
 } virtio_blk;
@@ -143,6 +152,7 @@ typedef struct {
     uint64_t mtimecmp;     /* CLINT: mip.MTIP is mtime >= mtimecmp, mip.MSIP is msip (O1) */
     uint32_t msip;
     uint8_t *fb;           /* the framebuffer window, FB_SIZE bytes */
+    uint32_t palette[PALETTE_ENTRIES]; /* issue #35: 0x00RRGGBB per pixel value */
     uint32_t frames;       /* presents since reset */
     FILE *checkpoints;     /* one `frame N <hash>` line per present, or NULL */
     const char *frames_dir; /* directory for frame-NNNN.ppm, or NULL */
@@ -187,8 +197,9 @@ void emu_read_input_script(machine *m, const char *path);
 /* Console input (O2): every byte of `path` is received before the first instruction; "-" instead
  * reads stdin as it arrives, for interactive use. Exits with a message on error. */
 void emu_read_console_input(machine *m, const char *path);
-/* The disk (O3): a file of exactly VIRTIO_DISK_SIZE bytes, read now and written through on every
- * OUT request. Without one the disk is that many zero bytes that last only for the run. Exits with
+/* The disk (O3): a file of whole 512-byte sectors, at most VIRTIO_DISK_MAX bytes (issue #35), read
+ * now and written through on every OUT request; its size is the capacity the device reports.
+ * Without one the disk is VIRTIO_DISK_SIZE zero bytes that last only for the run. Exits with
  * a message on error. */
 void emu_open_disk(machine *m, const char *path);
 void emu_deliver_events(machine *m);
@@ -201,9 +212,10 @@ const char *emu_key_name(int code);   /* the board.h name of a code, or NULL for
 emu_stop emu_run_until(machine *m, uint64_t budget);
 
 /* Display helpers shared by the PPM writer and the window: the checkpoint hash over the
- * framebuffer, and the fixed RGB332 mapping of one pixel. */
+ * framebuffer's pixel indices. */
 uint32_t emu_frame_hash(const uint8_t *pixels);
-void emu_rgb332(uint8_t pixel, uint8_t rgb[3]);
+/* The colour the palette gives `pixel` now (issue #35), as the PPM writer and the window draw it. */
+void emu_palette_rgb(const machine *m, uint8_t pixel, uint8_t rgb[3]);
 
 /* Reporting. emu_finish_outputs flushes the console and closes whichever of the trace, checkpoints,
  * and record streams are open (a path is only for the message), returning false when any output is

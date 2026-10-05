@@ -29,7 +29,7 @@ flowchart LR
     BUS -->|simd_valid| SIMD["rv32_simd4: registers + program/data memories"]
     BUS -->|gpu_valid| GPU["rv32_gpu: integer rasterizer"]
     GPU --> MUX["SoC RAM arbiter and framebuffer mux"]
-    MUX -->|"arbitrated reads"| RAM["rv32_ram 8 MiB at 0x8000_0000"]
+    MUX -->|"arbitrated reads"| RAM["rv32_ram 16 MiB at 0x8000_0000"]
     MUX -->|"exclusive ownership"| FB["rv32_ram 76,800 B at 0x1200_0000"]
     GPU_HOLD["testbench gpu_memory_hold"] --> MUX
     SIMD_HOLD["testbench simd_memory_hold"] --> SIMD
@@ -123,7 +123,7 @@ Every value that is the same on both backends is folded into an FNV-1a checksum,
 
 ## What synthesis built
 
-`make synth-rv32-soc` synthesizes the whole machine with both memories shrunk to 64 words (`chparam -set RAM_WORDS 64 -set FB_WORDS 64`) so the count measures the decoder and the devices, not 8 MiB of flip-flops. Yosys 0.69+post, `check -assert`, no latches:
+`make synth-rv32-soc` synthesizes the whole machine with both memories shrunk to 64 words (`chparam -set RAM_WORDS 64 -set FB_WORDS 64`) so the count measures the decoder and the devices, not 16 MiB of flip-flops (the virtio disk's memory shrinks too, `-set DISK_WORDS 64`, and since issue #35 the palette, `-set PALETTE_ENTRIES 16`). Yosys 0.69+post, `check -assert`, no latches:
 
 | Module | Cells | Flip-flops | Note |
 | --- | ---: | ---: | --- |
@@ -137,7 +137,7 @@ Every value that is the same on both backends is folded into an FNV-1a checksum,
 | `rv32_ram` × 2 (64 words each) | 13,434 | 4,096 | 2,048 flip-flops and a 64-way read mux each; the `addr - BASE` index costs nothing because the bases are aligned |
 | Total | 23,664 | 6,210 | |
 
-The lesson of the table is the memories: the two 64-word memories together already cost more than the core, and the real 8 MiB RAM and 76,800-byte framebuffer would be memory macros, not flip-flops, on any target. The devices themselves are small; the input queue is the largest because it is a 16-word memory in flip-flops.
+The lesson of the table is the memories: the two 64-word memories together already cost more than the core, and the real 16 MiB RAM and 76,800-byte framebuffer would be memory macros, not flip-flops, on any target. The devices themselves are small; the input queue is the largest because it is a 16-word memory in flip-flops.
 
 ## Run and verify
 

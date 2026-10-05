@@ -160,7 +160,7 @@ Yosys 0.33.
 | Range | What |
 | --- | --- |
 | `0x8000_0000`–`0x800F_FFFF` | The kernel: code, data, the RAM disk, a 16 KiB stack at the top ([kernel.ld](../programs/rv32/os/kernel.ld)) |
-| `0x8010_0000 + 0x2_0000 × n`, n = 0..55 | Program slot n of 128 KiB (256 KiB, 12 slots, until O4; 24 slots until issue #33 made RAM 8 MiB); a program spans one or more: code, data and `.bss` from the bottom, the heap above them, a 32 KiB stack at the top ([user.ld](../programs/rv32/os/user.ld)); since Track 3 a program may ask for a larger stack, and its lowest page is an unmapped guard ([record](rv32-libc.md#the-stack-a-size-per-program-and-a-guard-page)) |
+| `0x8010_0000 + 0x2_0000 × n`, n = 0..119 | Program slot n of 128 KiB (256 KiB, 12 slots, until O4; 24 slots until issue #33 made RAM 8 MiB, 56 until issue #35 made it 16 MiB); a program spans one or more: code, data and `.bss` from the bottom, the heap above them, a 32 KiB stack at the top ([user.ld](../programs/rv32/os/user.ld)); since Track 3 a program may ask for a larger stack, and its lowest page is an unmapped guard ([record](rv32-libc.md#the-stack-a-size-per-program-and-a-guard-page)) |
 
 Each program is linked for its own slot (`--defsym SLOT_BASE=...`), so any
 set of programs can be resident at once with no relocation and no MMU; the
@@ -211,9 +211,10 @@ back in `a0` ([sys.h](../programs/rv32/os/sys.h)):
 | `event()`, `keys()` | The next input event from the kernel's buffer, and the held-key mask |
 | `present()`, `display()` | Show the framebuffer; its address, or 0 on a platform without a display |
 | `sbrk(n)` | Grow the heap; it stops below the stack |
-| `spawn(name, args)`, `wait(pid)`, `list(i, buf, len)` | Run a program from the RAM disk, wait for a child, list the RAM disk |
+| `spawn(name, args)`, `wait(pid)`, `list(i, buf, len)` | Run a program from the RAM disk (or, since issue #35, from the disk, whose refusals the kernel explains), wait for a child, list the RAM disk |
 | `yield()`, `sleep(ticks)`, `time()`, `getpid()`, `halt(code)` | Scheduling and time; `halt` stops the machine |
 | `seek(fd, offset, whence)` | Move an open file's position (Track 3, for the C library's `fseek`) |
+| `palette(colours, direction)` | Read the display's 256 colours into `colours` or write them from it; an error without a palette or for a bad request. The kernel restores the boot palette when the last writer finishes (issue #35, [record](rv32-doom.md#the-palette)) |
 
 Every pointer must lie inside the caller's slot, and every call that cannot
 be served returns `0xffff_ffff`. [syscheck.c](../programs/rv32/os/syscheck.c)
@@ -278,7 +279,8 @@ The kernel finds its devices only through the tree: the console
 (`sifive,test0`), the CLINT and PLIC, and our input, display and engines where
 listed. QEMU puts its tree 2 MiB below the end of RAM: at `0x8020_0000` with 4 MiB,
 inside slot 8 (slot 4 of O2's 256 KiB slots, where `tetris` was linked then), and
-at `0x8060_0000` (slot 40) since issue #33's 8 MiB, so the kernel reads
+at `0x8060_0000` (slot 40) with issue #33's 8 MiB, and at `0x80E0_0000` (slot 104)
+since issue #35's 16 MiB, so the kernel reads
 everything it needs (including the model string) before loading the first
 program. The same `kernel.elf` then ran O2's console session on QEMU `virt`
 (the addresses and the count have moved with later steps; the pinned
@@ -312,7 +314,7 @@ the disk, since the session writes to it:
 ```sh
 make check-rv32-os-image
 cp build/rv32/os/disk.img build/rv32/os/my.disk
-qemu-system-riscv32 -M virt -cpu rv32 -bios none -m 8M \
+qemu-system-riscv32 -M virt -cpu rv32 -bios none -m 16M \
   -kernel build/rv32/os/kernel.elf -nographic -no-reboot \
   -icount shift=3,sleep=off -global virtio-mmio.force-legacy=false \
   -drive file=build/rv32/os/my.disk,if=none,format=raw,id=disk0 \
@@ -417,10 +419,14 @@ The file system, `tfs` ([fs.c](../programs/rv32/os/fs.c),
 [rv32_mkfs.py](../tools/rv32_mkfs.py)), is the smallest that still is one: a
 superblock, one directory sector of sixteen 32-byte entries (name, first
 sector, capacity, size), and one contiguous extent per file, allocated at
-creation after the last extent in use with a capacity of 8 sectors. Writing a
+creation after the last extent in use with a capacity of 8 sectors (a file the
+host adds is as long as it needs). Writing a
 file replaces its contents from the start; the new size reaches the disk when
-the file is closed (or its process ends). Every transfer goes through one
-sector buffer, so a partial sector is read, changed and written back.
+the file is closed (or its process ends). A transfer goes through one
+sector buffer, so a partial sector is read, changed and written back; since
+issue #35 a read moves whole sectors straight into a word-aligned buffer in
+RAM, one request per run of them, and a disk may be up to 8 MiB
+([record](rv32-doom.md#a-disk-of-any-size)).
 Descriptors 3 to 6 of each process are its open files; `open`, `close`,
 `files`, and `read`/`write` on those descriptors are the calls.
 
@@ -504,10 +510,11 @@ fast it passes.
 ### Slots
 
 Twelve 256 KiB slots were all taken by the end of O3. Slots are now 128 KiB
-(24 of them, 56 since issue #33 made RAM 8 MiB, though the RAM disk,
+(24 of them, 56 since issue #33 made RAM 8 MiB, 120 since issue #35 made it 16 MiB, though the RAM disk,
 linked into the kernel's 1 MiB, still bounds the programs' bytes: the kernel
 with its 580 KB RAM disk, 609 KB, then its page tables (160 KiB) and stack
-(16 KiB) leave 244 KiB), and a program may span several: its link script's
+(16 KiB) leave 244 KiB, 180 KiB with issue #35's seven tables; a program too
+large for that lives on the disk instead, [record](rv32-doom.md#programs-on-the-disk)), and a program may span several: its link script's
 `SLOT_SPAN`, recorded in the RAM disk entry, sets where its stack starts. The
 menu, the only program larger than 96 KiB, spans three since issue #20 gave it
 its own depth buffer (two before). `spawn` refuses a
@@ -840,14 +847,14 @@ questions (exercise 1).
 
 Every leaf also has V, U, A and D set. Our hart never sets A or D (Svade), and
 a leaf that has them already behaves the same on QEMU, whatever it does about
-them. A process table entry owns five tables, its root and a level-0 table for
-each 4 MiB region it touches: the slots (the 56 of 8 MiB RAM lie in two
-megapages, `0x8000_0000`'s and `0x8040_0000`'s; four tables sufficed for 24),
+them. A process table entry owns seven tables, its root and a level-0 table for
+each 4 MiB region it touches: the slots (the 120 of 16 MiB RAM lie in four
+megapages, `0x8000_0000`'s to `0x80C0_0000`'s; five tables sufficed for 56 and four for 24),
 the framebuffer and the accelerators. The kernel checks at boot that
 the most any process could touch (every slot, the framebuffer and every engine
 window in the tree) fits, and panics if not, rather than at the first spawn of
-the program that would need a sixth table; `test-rv32-os` checks the same on
-our tree. Eight entries make 160 KiB (128 KiB with four tables), in a page-aligned NOBITS section of
+the program that would need an eighth table; `test-rv32-os` checks the same on
+our tree. Eight entries make 224 KiB (160 KiB with five tables, 128 KiB with four), in a page-aligned NOBITS section of
 [kernel.ld](../programs/rv32/os/kernel.ld), `.pagetables`, which startup does
 not clear. [rv32_image.py](../tools/rv32_image.py) admits that section only
 when asked (`--page-tables`, which only the kernel's check passes), and then
@@ -1178,7 +1185,7 @@ Their PASS words are unchanged: console `8b4402e5`, jobs `408a6738`, menu
    `read` ecall that executes more than once. What changed between the two
    executions, and which function made the process ready again?
 2. **Where the tree is.** Link the shell, the first program spawned, at
-   slot 40, where QEMU puts its tree since issue #33's 8 MiB (slot 8 before),
+   slot 104, where QEMU puts its tree since issue #35's 16 MiB (slot 40 with 8 MiB, slot 8 before),
    and move the kernel's
    `discover()` after that first `spawn`. Run the session on QEMU and on the
    emulator. How does the QEMU run end, what does the done register say, and

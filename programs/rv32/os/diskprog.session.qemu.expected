@@ -1,0 +1,43 @@
+kernel: riscv-virtio,qemu, hart 0
+kernel: devices console clint plic disk
+kernel: 20 programs
+kernel: disk 12288 sectors, tfs
+sh: ls, NAME [ARGS] [&], wait, halt [CODE]
+$ diskprog one two
+diskprog: 65536 words at 80d80834, all right, args: one two
+$ pad
+kernel: pad: not a program
+sh: pad: cannot run
+$ renamed
+kernel: renamed: a program filed under another name
+sh: renamed: cannot run
+$ hello
+hello from pid 3
+$ palcheck
+palcheck: no palette
+$ palcheck leave
+palcheck: no palette
+$ palcheck
+palcheck: no palette
+$ readcheck
+readcheck: eight whole sectors, aligned: ok
+readcheck: two whole sectors, misaligned buffer: ok
+readcheck: mid-sector to mid-sector: ok
+readcheck: a sector and a part, canary kept: ok
+readcheck: past the end of the file, canary kept: ok
+readcheck: at the end of the file: ok
+readcheck: a second instance refused: ok
+$ write note far past the old disk
+$ cat note
+far past the old disk
+$ files
+pad 4194304
+diskprog 264316
+renamed 264316
+palcheck 3212
+readcheck 3352
+hello 3212
+note 22
+$ halt
+kernel: halt, 9 exits
+PASS d4d49003

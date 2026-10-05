@@ -64,7 +64,7 @@ def directed_faults():
         job('limit-0', passthrough(), limit=0),
         job('limit-65536', passthrough(), limit=0x10000),
         job('zbase-below-ram', passthrough(), zbase=0x7ffffffc),
-        job('zbase-past-ram', passthrough(), zbase=0x80800000 - M.Z_BYTES + 4),
+        job('zbase-past-ram', passthrough(), zbase=0x81000000 - M.Z_BYTES + 4),
         job('index-top-byte', passthrough(), [0xff020100, 0x00030100]),
     ]
 
@@ -102,7 +102,7 @@ def raster_cases():
         job('sliver-mirrored', passthrough(), [(0, 1, 2), (0, 2, 1)], mirrored),
         job('clamps', passthrough(), [(0, 1, 2)], clamp),
         job('limits-32-64', passthrough(), cells, grid, limit=0xffff),
-        job('zbase-top-of-ram', passthrough(), [(0, 1, 2)], tri, zbase=0x80800000 - M.Z_BYTES),
+        job('zbase-top-of-ram', passthrough(), [(0, 1, 2)], tri, zbase=0x81000000 - M.Z_BYTES),
         job('limit-exact', assemble('LDI r0, 0\nLDI r0, 0\nEND'), inputs=[[0] * 8] * 8, limit=3),
         job('tcount-0', passthrough(), (), tri),
     ]

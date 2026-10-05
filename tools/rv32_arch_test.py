@@ -71,9 +71,9 @@ EXCLUDED = {
 }
 BACKENDS = ("emulator", "qemu", "icarus", "verilator")
 DEFAULT_QEMU_CPU = "rv32,c=false,d=false"  # generic RV32 with C and D off: IMAF plus Zicsr
-# With -m 8M, QEMU's virt board writes its device tree 6 MiB into RAM (the end of RAM less the
+# With -m 16M, QEMU's virt board writes its device tree 14 MiB into RAM (the end of RAM less the
 # tree, rounded down to 2 MiB); a longer image would be overwritten there. The largest selected test is 1.7 MiB.
-QEMU_FDT_OFFSET = 0x600000
+QEMU_FDT_OFFSET = 0xE00000
 
 
 class TestFailure(Exception):

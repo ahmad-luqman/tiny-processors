@@ -23,7 +23,7 @@ CPU_FALLBACKS = ("rv32i,zicsr=true", "rv32,m=false,a=false,f=false,d=false,c=fal
 Outcome = namedtuple("Outcome", "ok reason code checksum")
 
 
-def qemu_command(qemu, elf, cpu=DEFAULT_CPU, memory="8M", log=None, drive=None, icount=None):
+def qemu_command(qemu, elf, cpu=DEFAULT_CPU, memory="16M", log=None, drive=None, icount=None):
     command = [qemu, "-M", "virt", "-cpu", cpu, "-bios", "none", "-kernel", str(elf), "-m", memory,
                "-nographic", "-monitor", "none", "-no-reboot"]
     # Virtual time advances 2**icount ns per instruction instead of following the host, and an idle
@@ -86,7 +86,7 @@ def main():
     parser.add_argument("elf", type=Path)
     parser.add_argument("--qemu", default="qemu-system-riscv32")
     parser.add_argument("--cpu", default=DEFAULT_CPU)
-    parser.add_argument("--memory", default="8M", help="QEMU RAM; keep equal to the contract RAM")
+    parser.add_argument("--memory", default="16M", help="QEMU RAM; keep equal to the contract RAM")
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--transcript", type=Path, help="write the guest console output here")
     parser.add_argument("--qemu-log", type=Path, help="enable QEMU guest error logging to this file")

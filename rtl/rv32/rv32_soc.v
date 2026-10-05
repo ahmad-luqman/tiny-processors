@@ -9,13 +9,15 @@
 // word, a present) leave as strobes and the host's key events come in
 // through the input push port; the host decides what they mean.
 module rv32_soc #(
-    parameter integer RAM_WORDS = 2097152,
+    parameter integer RAM_WORDS = 4194304,
     parameter integer FB_WORDS = 19200, // 320 x 240 one-byte pixels, as 32-bit words
     parameter integer CONSOLE_BUSY = 0,
-    parameter integer DISK_WORDS = 32768  // the virtio-blk disk (O3): 128 KiB
+    parameter integer PALETTE_ENTRIES = 256,  // the palette (issue #35); synthesis shrinks it like RAM
+    parameter integer DISK_WORDS = 2097152  // the virtio-blk disk's memory (O3): 8 MiB, the largest disk (issue #35)
 ) (
     input  wire        clk,
     input  wire        reset,
+    input  wire [31:0] disk_sectors,  // the virtio-blk disk's size in 512-byte sectors (issue #35)
     input  wire        mem_hold,
     // Deterministic tick mode (O1): mtime and `cycle` advance once per step, as on the emulator.
     input  wire        step_ticks,
@@ -101,6 +103,8 @@ module rv32_soc #(
     wire [31:0] in_rdata;
     wire dp_valid, dp_ready, dp_error;
     wire [31:0] dp_rdata;
+    wire pal_valid, pal_ready, pal_error;
+    wire [31:0] pal_rdata;
     wire fb_valid, fb_ready, fb_error;
     wire [31:0] fb_rdata;
 
@@ -147,6 +151,7 @@ module rv32_soc #(
         .rom_valid(rom_valid), .rom_ready(rom_ready), .rom_error(rom_error), .rom_rdata(rom_rdata),
         .input_valid(in_valid), .input_ready(in_ready), .input_error(in_error), .input_rdata(in_rdata),
         .display_valid(dp_valid), .display_ready(dp_ready), .display_error(dp_error), .display_rdata(dp_rdata),
+        .palette_valid(pal_valid), .palette_ready(pal_ready), .palette_error(pal_error), .palette_rdata(pal_rdata),
         .fb_valid(fb_valid), .fb_ready(fb_ready), .fb_error(fb_error), .fb_rdata(fb_rdata),
         .gpu_valid(gpu_valid), .gpu_ready(gpu_ready), .gpu_error(gpu_error), .gpu_rdata(gpu_rdata),
         .simd_valid(simd_valid), .simd_ready(simd_ready), .simd_error(simd_error), .simd_rdata(simd_rdata),
@@ -286,7 +291,7 @@ module rv32_soc #(
 
     // virtio-blk at virt's first virtio slot (O3); the testbench loads and saves its disk.
     rv32_virtio_blk #(.DISK_WORDS(DISK_WORDS), .RAM_WORDS(RAM_WORDS), .RAM_BASE(RAM_BASE)) virtio (
-        .clk(clk), .reset(reset), .valid(virtio_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
+        .clk(clk), .reset(reset), .disk_sectors(disk_sectors), .valid(virtio_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
         .wdata(mem_wdata), .rdata(virtio_rdata), .ready(virtio_ready), .error(virtio_error),
         .busy(virtio_busy), .dma_valid(vio_valid), .dma_we(vio_we), .dma_addr(vio_addr), .dma_strb(vio_strb),
         .dma_wdata(vio_wdata), .dma_rdata(ram_physical_rdata), .dma_ready(vio_ready), .irq(virtio_irq)
@@ -311,6 +316,11 @@ module rv32_soc #(
         .clk(clk), .reset(reset), .valid(dp_valid && !present_locked), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
         .wdata(mem_wdata), .rdata(dp_rdata), .ready(display_device_ready), .error(display_device_error),
         .present(display_present), .frames(display_frames)
+    );
+
+    rv32_palette #(.ENTRIES(PALETTE_ENTRIES)) palette (
+        .clk(clk), .valid(pal_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
+        .wdata(mem_wdata), .rdata(pal_rdata), .ready(pal_ready), .error(pal_error)
     );
 
     // The pixels: ordinary memory behind its own window (docs/rv32.md, "framebuffer").

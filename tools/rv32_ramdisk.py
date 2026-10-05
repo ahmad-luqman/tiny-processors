@@ -23,6 +23,11 @@ the kernel leaves the lowest unmapped as a guard (Track 3).
 
     python3 tools/rv32_ramdisk.py --out build/rv32/os/ramdisk.img --accelerators menu build/rv32/os/sh.elf ...
     python3 tools/rv32_ramdisk.py --list build/rv32/os/ramdisk.img
+    python3 tools/rv32_ramdisk.py --check build/rv32/os/*.elf   # no two programs share a slot
+
+A program on the disk (issue #35) is a file that is a RAM disk of one program; --check takes the
+RAM disk's programs and the disk's together, since each disk program's own RAM disk cannot see
+the others.
 """
 from __future__ import annotations
 
@@ -41,7 +46,7 @@ MAGIC = 0x4B534452
 HEADER = struct.Struct("<4I")
 ENTRY = struct.Struct("<24s8I")
 assert ENTRY.size == 56, "the kernel's struct program"
-SLOT_BASE, SLOT_SIZE, SLOTS = 0x80100000, 0x20000, 56
+SLOT_BASE, SLOT_SIZE, SLOTS = 0x80100000, 0x20000, 120
 STACK_SIZE = 0x8000  # a program's stack unless its link asks for more (sys.h's OS_STACK_SIZE)
 PAGE = 0x1000
 PT_LOAD = 1
@@ -137,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("programs", nargs="*", type=Path)
     parser.add_argument("--out", type=Path, help="write the RAM disk here")
     parser.add_argument("--list", type=Path, help="print the entries of a RAM disk")
+    parser.add_argument("--check", action="store_true",
+                        help="check that the programs' names and slots are distinct, writing nothing")
     parser.add_argument("--accelerators", action="append", default=[], metavar="NAME",
                         help="a program that drives the accelerators itself (repeatable)")
     args = parser.parse_args(argv)
@@ -146,6 +153,9 @@ def main(argv: list[str] | None = None) -> int:
             args.out.parent.mkdir(parents=True, exist_ok=True)
             args.out.write_bytes(blob)
             print(f"rv32_ramdisk: {len(args.programs)} programs, {len(blob)} bytes")
+        if args.check:
+            build(args.programs)
+            print(f"rv32_ramdisk: {len(args.programs)} programs, no two sharing a name or a slot")
         if args.list:
             for e in parse(args.list.read_bytes()):
                 accelerators = ", accelerators" if e["flags"] & ACCELERATORS else ""

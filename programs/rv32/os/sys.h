@@ -31,7 +31,14 @@
 #define SYS_PS      19  /* ps(index, buf, len): one line about process table entry `index` (O4) */
 #define SYS_SWITCHES 20 /* switches(): how often the timer took the machine from the caller (O4) */
 #define SYS_SEEK    21  /* seek(fd, offset, whence): move an open file's position (Track 3); returns the new one */
-#define SYS_CALLS   22
+#define SYS_PALETTE 22  /* palette(colours, direction): all 256 entries, 0x00RRGGBB words, read into colours
+                         * (OS_PALETTE_READ) or written from them (OS_PALETTE_WRITE) (issue #35); 0, or an
+                         * error without a palette or for a bad request. The kernel restores the palette
+                         * it found at boot when the last process to write it finishes. */
+#define SYS_CALLS   23
+#define OS_PALETTE_ENTRIES 256u
+#define OS_PALETTE_READ    0u
+#define OS_PALETTE_WRITE   1u
 
 #define SYS_ERROR 0xffffffffu
 
@@ -59,7 +66,7 @@
 #define OS_KERNEL_SIZE 0x00100000u
 #define OS_SLOT_BASE   0x80100000u
 #define OS_SLOT_SIZE   0x00020000u
-#define OS_SLOTS       56u
+#define OS_SLOTS       120u
 #define OS_STACK_SIZE  0x00008000u /* a program's stack unless it asks for more (the Makefile's default) */
 #define OS_GUARD_SIZE  0x00001000u /* the stack's lowest page, left unmapped (Track 3) */
 

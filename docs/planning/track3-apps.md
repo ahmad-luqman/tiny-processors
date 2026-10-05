@@ -88,10 +88,12 @@ A extension), [#35](https://github.com/ahmad-luqman/tiny-processors/issues/35)
    single-hart reservation. riscv-arch-test's A suite and riscv-tests' rv32ua
    pass on the emulator, Icarus and Verilator and match QEMU
    ([record](../rv32-a.md)).
-3. **Doom (B3).** doomgeneric at 320×200 fits the framebuffer. It needs the
-   reserved palette window built, more than 4 MiB of RAM (B1 made it 8 MiB;
-   whether Doom needs more is #35's to measure), and a file system that holds
-   a WAD (tfs files are 4 KiB).
+3. **Doom (B3, issue #35).** doomgeneric at 320×200 fits the framebuffer. Its
+   6 MiB zone ruled out 8 MiB, so the first of its two PRs makes RAM 16 MiB.
+   The same PR builds the palette window, lets a disk be up to 8 MiB for the
+   WAD (tfs extents were already any length; the disk was the limit), lets
+   programs live on the disk (the kernel's image cannot hold Doom), and adds
+   keys. The second PR ports Doom ([record](../rv32-doom.md)).
 4. **Linux without an MMU (B4).** `mini-rv32ima` shows Linux booting on
    RV32IMA with a CLINT and a UART; on B2's A extension and B3's RAM, it runs
    on the emulator first and on Verilator slowly.

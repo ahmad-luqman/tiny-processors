@@ -16,7 +16,7 @@ module rv32_g3d_tb;
     wire [3:0] memory_strb;
     reg memory_ready = 1;
     // The DMA window at its reset value, all of the device's RAM; the SoC tests narrow it.
-    wire [31:0] window_start = 32'h8000_0000, window_end = 32'h8000_0000 + 2097152 * 4;
+    wire [31:0] window_start = 32'h8000_0000, window_end = 32'h8000_0000 + 4194304 * 4;
     localparam [31:0] ZBASE = 32'h8004_0000;
     // State numbers of rv32_g3d.v's memory phases, for the cancellation check.
     localparam [3:0] ZREAD = 4'd10, ZWRITE = 4'd11, PWRITE = 4'd12, CLEAR = 4'd14;
@@ -27,7 +27,7 @@ module rv32_g3d_tb;
     wire in_z = memory_addr >= zb && z_off < 32'd153600;
     wire in_fb = memory_addr >= 32'h1200_0000 && fb_off < 32'd76800;
     wire [31:0] memory_rdata = in_z ? {zmem[z_off+3], zmem[z_off+2], zmem[z_off+1], zmem[z_off]} : 32'd0;
-    rv32_g3d #(.RAM_WORDS(2097152)) dut (.*);
+    rv32_g3d #(.RAM_WORDS(4194304)) dut (.*);
 
     reg saw_held_read = 0, saw_held_write = 0, cancelled = 0;
     reg held = 0, held_we;
@@ -101,7 +101,7 @@ module rv32_g3d_tb;
             // program 128, consts 32, then the input rows and triangles the windows can hold
             vrows = head[0] > 32 ? 32 : head[0];
             trows = head[1] > 64 ? 64 : head[1];
-            zb = head[3][1:0] == 2'b00 && head[3] >= 32'h8000_0000 && head[3] - 32'h8000_0000 <= 32'h0080_0000 - 32'd153600 ?
+            zb = head[3][1:0] == 2'b00 && head[3] >= 32'h8000_0000 && head[3] - 32'h8000_0000 <= 32'h0100_0000 - 32'd153600 ?
                  head[3] : ZBASE;
             for (n = 0; n < 160 + 8 * vrows + trows; n = n + 1)
                 if ($fscanf(file, "%h", body[n]) != 1) $fatal(1, "short job");

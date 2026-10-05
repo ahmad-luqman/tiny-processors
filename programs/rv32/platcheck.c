@@ -215,6 +215,12 @@ static void check_own_devices(const fdt *t, int ours)
             fail("display size");
         }
         own_device(t, ours, "framebuffer", "tiny-processors,display", 1, RV32_FB_BASE);
+        /* Issue #35: the palette, whose power-on colours are RGB332's: red, green, blue, white. */
+        if (own_device(t, ours, "palette", "tiny-processors,display", 2, RV32_PALETTE_BASE) &&
+            (mmio_read32(RV32_PALETTE_BASE + 4 * 0xe0) != 0xff0000u || mmio_read32(RV32_PALETTE_BASE + 4 * 0x1c) != 0x00ff00u ||
+             mmio_read32(RV32_PALETTE_BASE + 4 * 0x03) != 0x0000ffu || mmio_read32(RV32_PALETTE_BASE + 4 * 0xff) != 0xffffffu)) {
+            fail("palette power-on colours");
+        }
     }
     if (own_device(t, ours, "simd4", "tiny-processors,simd4", 0, RV32_SIMD4_BASE)) {
         own_device(t, ours, "simd4-program", "tiny-processors,simd4", 1, RV32_SIMD4_PROGRAM);

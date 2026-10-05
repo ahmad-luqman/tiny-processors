@@ -261,7 +261,7 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("--ld-path=ld.lld", flags)
         command = qemu_command("qemu", "t.elf", cpu=DEFAULT_QEMU_CPU)
         self.assertEqual(command[command.index("-cpu") + 1], DEFAULT_QEMU_CPU)
-        self.assertEqual(command[command.index("-m") + 1], "8M", "the FDT offset check assumes 8 MiB")
+        self.assertEqual(command[command.index("-m") + 1], "16M", "the FDT offset check assumes 16 MiB")
 
 
 class RiscvTestsRunnerTest(unittest.TestCase):

@@ -122,7 +122,7 @@ class FloatingTest(unittest.TestCase):
         self.assert_same_pass([CSRRWI(0, 2, 7), arithmetic(0, 0)] + FINISH())
 
     def test_float_memory_faults(self):
-        for addr, load_cause, store_cause in ((RAM+1, 4, 6), (UNMAPPED, 5, 7), (RAM+0x800000, 5, 7), (INPUT, 0, 7)):
+        for addr, load_cause, store_cause in ((RAM+1, 4, 6), (UNMAPPED, 5, 7), (RAM+0x1000000, 5, 7), (INPUT, 0, 7)):
             if load_cause:
                 self.assert_same_double_fault(LI(8, addr) + [flw(0, 8)], load_cause, addr, stall=3)
             self.assert_same_double_fault(LI(8, addr) + [fsw(0, 8)], store_cause, addr, stall=3)

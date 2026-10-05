@@ -32,11 +32,11 @@
 #define RV32_SIMD4_START             0x01
 #define RV32_SIMD4_RESET             0x02
 
-/* RAM: 8 MiB (4 MiB before issue #33); the M1 firmware image, .bss, and stack fit in the
+/* RAM: 16 MiB (4 MiB before issue #33, 8 MiB before issue #35); the M1 firmware image, .bss, and stack fit in the
  * first 256 KiB so a small emulator or RTL memory can run the same ELF. */
 #define RV32_RAM_BASE          0x80000000
 #define RV32_RAM_SLICE_SIZE    0x00040000
-#define RV32_RAM_PLANNED_SIZE  0x00800000
+#define RV32_RAM_PLANNED_SIZE  0x01000000
 
 /* Debug console: write one byte to TX. STATUS bit 5 reads 1 when TX can
  * accept a byte; in our machine it is always 1. Compatible with the 16550
@@ -79,7 +79,8 @@
 #define RV32_PLIC_SOURCE_VIRTIO 1
 
 /* virtio-blk (O3): a virtio-mmio version 2 block device in virt's first slot,
- * 512 bytes of registers, one queue of up to 8 entries, a 128 KiB disk. Find it
+ * 512 bytes of registers, one queue of up to 8 entries, a disk of up to 8 MiB
+ * (128 KiB without one; issue #35). Find it
  * through the device tree ("virtio,mmio" whose DeviceID reads 2). */
 #define RV32_VIRTIO_BASE       0x10001000
 
@@ -117,6 +118,19 @@
 #define RV32_KEY_P             12
 #define RV32_KEY_Q             13
 #define RV32_KEY_R             14
+/* Issue #35, for Doom: fire, run, the map, yes and no, and the weapons. */
+#define RV32_KEY_CTRL            15
+#define RV32_KEY_SHIFT           16
+#define RV32_KEY_TAB             17
+#define RV32_KEY_Y               18
+#define RV32_KEY_N               19
+#define RV32_KEY_DIGIT1          20
+#define RV32_KEY_DIGIT2          21
+#define RV32_KEY_DIGIT3          22
+#define RV32_KEY_DIGIT4          23
+#define RV32_KEY_DIGIT5          24
+#define RV32_KEY_DIGIT6          25
+#define RV32_KEY_DIGIT7          26
 
 /* Display (M5): a word write to PRESENT snapshots the framebuffer (a
  * checkpoint hash in M5, the native window in M6); FRAMES counts presents
@@ -129,8 +143,14 @@
 #define RV32_DISPLAY_COLUMNS   320
 #define RV32_DISPLAY_ROWS      240
 
-/* Framebuffer (M5): one byte per pixel, row-major from the top-left, RGB332
- * until a palette exists; readable and writable at every width. */
+/* Palette (issue #35): 256 words, word N the colour of pixel value N as
+ * 0x00RRGGBB; word access only, the top byte reads as zero. Its power-on
+ * contents are the RGB332 mapping. */
+#define RV32_PALETTE_BASE      0x11003000
+#define RV32_PALETTE_SIZE      0x400
+
+/* Framebuffer (M5): one byte per pixel, row-major from the top-left, coloured
+ * through the palette; readable and writable at every width. */
 #define RV32_FB_BASE           0x12000000
 #define RV32_FB_SIZE           (RV32_DISPLAY_COLUMNS * RV32_DISPLAY_ROWS)
 

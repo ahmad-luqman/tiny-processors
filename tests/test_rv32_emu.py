@@ -20,7 +20,8 @@ import unittest
 
 # The encoder lives in tools/rv32_asm.py so the RTL tests assemble the same words.
 from tools.rv32_asm import *  # noqa: F401,F403
-from tools.rv32_devices import FB_SIZE, KEYS, diag_checksum, event_word, frame_hash, render_diag_frame
+from tools.rv32_devices import (FB_SIZE, KEYS, diag_checksum, event_word, frame_hash, power_on_palette, render_diag_frame,
+                                word_hash)
 from tools.rv32_diff_qemu import compare, qemu_pcs, trace_pcs
 from tools.rv32_pong_native import EXPECTED as PONG_EXPECTED, INPUT as PONG_INPUT
 from tools.rv32_run_emu import build_emulator, halt_line
@@ -293,9 +294,9 @@ class EmulatorTest(unittest.TestCase):
             ([SH(1, 2, 1)], RAM, 6, RAM + 1),               # misaligned halfword store
             ([SW(1, 2, 2)], RAM, 6, RAM + 2),               # misaligned word store
             ([LW(1, 2, 0)], 0, 5, 0),                       # unmapped: address zero
-            ([LBU(1, 2, 0)], RAM + 0x800000, 5, RAM + 0x800000),  # first byte past RAM
-            ([LW(1, 2, 0)], RAM + 0x7FFFFE, 4, RAM + 0x7FFFFE),   # misaligned before bounds
-            ([LH(1, 2, 0)], RAM + 0x7FFFFF, 4, RAM + 0x7FFFFF),
+            ([LBU(1, 2, 0)], RAM + 0x1000000, 5, RAM + 0x1000000),  # first byte past RAM
+            ([LW(1, 2, 0)], RAM + 0xFFFFFE, 4, RAM + 0xFFFFFE),   # misaligned before bounds
+            ([LH(1, 2, 0)], RAM + 0xFFFFFF, 4, RAM + 0xFFFFFF),
             ([SW(1, 2, 0)], UNMAPPED, 7, UNMAPPED),     # unmapped store
             ([SB(1, 2, 0)], 0x7FFFFFFF, 7, 0x7FFFFFFF),     # one byte below RAM
             ([SW(1, 2, 0)], 0xFFFFFFFC, 7, 0xFFFFFFFC),     # top of the address space
@@ -332,8 +333,10 @@ class EmulatorTest(unittest.TestCase):
             ([LW(1, 2, 0)], 0x10002000, 5, 0x10002000),     # virt's second virtio slot: unmapped here
             ([LW(1, 2, 2)], MTIME, 4, MTIME + 2),           # misalignment is decided before the window
             ([LHU(1, 2, 2)], MTIME, 5, MTIME + 2),          # an aligned halfword inside the window is refused by it
-            ([LW(1, 2, 0)], 0x11003000, 5, 0x11003000),     # the palette window reserved for M6 is unmapped in M5
-            ([SW(1, 2, 0)], 0x11003000, 7, 0x11003000),
+            ([LW(1, 2, 0)], 0x11003400, 5, 0x11003400),     # past the palette's 1 KiB (issue #35): unmapped
+            ([SW(1, 2, 0)], 0x11003400, 7, 0x11003400),
+            ([LBU(1, 2, 5)], PALETTE, 5, PALETTE + 5),      # the palette takes words only
+            ([SH(1, 2, 2)], PALETTE, 7, PALETTE + 2),
             ([LW(1, 2, 0)], DISPLAY, 5, DISPLAY),           # PRESENT is write-only
             ([SW(1, 2, 4)], DISPLAY, 7, DISPLAY + 4),       # FRAMES, WIDTH, HEIGHT are read-only
             ([SW(1, 2, 12)], DISPLAY, 7, DISPLAY + 12),
@@ -351,16 +354,16 @@ class EmulatorTest(unittest.TestCase):
             with self.subTest(body=body, base=hex(base)):
                 result = self.run_trapping(LI(2, base) + LI(1, 0x5555) + body)
                 self.assertEqual((result.state.x[10], result.state.x[11]), (cause, tval))
-        result = self.run_trapping(LI(2, RAM + 0x7FFFFC) + [LW(1, 2, 0), LH(1, 2, 2), LBU(1, 2, 3), SW(1, 2, 0),
+        result = self.run_trapping(LI(2, RAM + 0xFFFFFC) + [LW(1, 2, 0), LH(1, 2, 2), LBU(1, 2, 3), SW(1, 2, 0),
                                                             SH(1, 2, 2), SB(1, 2, 3), LW(1, 2, 4)])
-        self.assertEqual((result.state.x[10], result.state.x[11]), (5, RAM + 0x800000), "only the last access faults")
+        self.assertEqual((result.state.x[10], result.state.x[11]), (5, RAM + 0x1000000), "only the last access faults")
         self.assertEqual(result.state.retired, 2 + 1 + 2 + 6 + 3 + 5, "the six in-bounds accesses retired")
         # The last two framebuffer bytes as a halfword, then the byte past them.
         result = self.run_trapping(LI(2, FB + FB_SIZE - 2) + LI(1, 0xBEEF) + [SH(1, 2, 0), LHU(1, 2, 0), LW(1, 2, 2)])
         self.assertEqual((result.state.x[1], result.state.x[10], result.state.x[11]), (0xBEEF, 5, FB + FB_SIZE))
         # A fetch from the first word past RAM is a fetch fault, like one from below it.
-        result = self.run_trapping(LI(2, RAM + 0x800000) + [JALR(0, 2, 0)])
-        self.assertEqual((result.state.x[10], result.state.x[11]), (1, RAM + 0x800000))
+        result = self.run_trapping(LI(2, RAM + 0x1000000) + [JALR(0, 2, 0)])
+        self.assertEqual((result.state.x[10], result.state.x[11]), (1, RAM + 0x1000000))
 
     def test_double_fault_halts_with_report(self):
         result = self.run_words([ECALL()] + FINISH())
@@ -581,12 +584,12 @@ class EmulatorTest(unittest.TestCase):
     def test_record_writes_every_offered_event_as_a_replayable_script(self):
         """--record lists every event the host offered, scripted or not, at the frame it was offered,
         before the queue decides: a replay of the record reproduces the run, drops included."""
-        script = "frame 0 down LEFT\nframe 0 up left\nframe 1 down A\nframe 2 up 8\nframe 2 down 20\n"
+        script = "frame 0 down LEFT\nframe 0 up left\nframe 1 down A\nframe 2 up 8\nframe 2 down 30\n"
         words = LI(1, INPUT) + LI(2, DISPLAY) + [LW(3, 1, 0), LW(3, 1, 0), SW(0, 2, 0), LW(3, 1, 0), SW(0, 2, 0), LW(3, 1, 0), LW(3, 1, 0)]
         with tempfile.TemporaryDirectory() as directory:
             record = Path(directory) / "record.txt"
             result = self.run_pass(words, input_script=script, extra=["--record", str(record)], checkpoints=True)
-            self.assertEqual(record.read_text(), "frame 0 down LEFT\nframe 0 up LEFT\nframe 1 down A\nframe 2 up A\nframe 2 down 20\n")
+            self.assertEqual(record.read_text(), "frame 0 down LEFT\nframe 0 up LEFT\nframe 1 down A\nframe 2 up A\nframe 2 down 30\n")
             replay = self.run_pass(words, input_script=record.read_text(), checkpoints=True)
             self.assertEqual((replay.trace, replay.checkpoints), (result.trace, result.checkpoints))
             # A burst the queue cannot hold is recorded whole, so the replay drops the same event.
@@ -652,6 +655,37 @@ class EmulatorTest(unittest.TestCase):
         later = PONG_INPUT.read_text().replace("frame 200 down Q", "frame 201 down Q")
         result = self.run_words(words, limit=10_000_000, checkpoints=True, input_script=later)
         self.assertEqual((result.status, len(result.checkpoints)), (0, 201))
+
+    def test_palette(self):
+        """Issue #35: the palette's power-on words are RGB332's (hashed here over all 256); a word
+        write keeps its low 24 bits and the next frame is drawn through it."""
+        words = LI(1, PALETTE) + LI(10, 5381)
+        for i in range(256):
+            words += [LW(11, 1, 4 * i), SLLI(12, 10, 5), ADD(10, 10, 12), XOR(10, 10, 11)]
+        words += LI(4, 0xAB123456) + [SW(4, 1, 4 * 5), LW(5, 1, 4 * 5), LW(6, 1, 4 * 6)]
+        words += LI(7, FB) + LI(8, 5) + [SB(8, 7, 1)] + LI(9, DISPLAY) + [SW(0, 9, 0)]
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_pass(words, extra=("--frames", directory))
+            data = (Path(directory) / "frame-0001.ppm").read_bytes()
+        x = result.state.x
+        self.assertEqual(x[10], word_hash(power_on_palette()))
+        self.assertEqual((x[5], x[6]), (0x123456, power_on_palette()[6]), "the top byte reads as zero")
+        header = len(b"P6\n320 240\n255\n")
+        self.assertEqual(data[header:header + 6], b"\x00\x00\x00\x12\x34\x56", "pixel 1 is value 5, drawn in the new colour")
+
+    def test_each_frame_is_coloured_by_its_own_palette(self):
+        """Issue #35: a frame's picture is taken at its present, palette included; a change after
+        the first present colours only the second."""
+        words = LI(7, FB) + LI(8, 9) + [SB(8, 7, 0)] + LI(9, DISPLAY) + [SW(0, 9, 0)]
+        words += LI(1, PALETTE) + LI(4, 0x00ABCDEF) + [SW(4, 1, 4 * 9), SW(0, 9, 0)]
+        with tempfile.TemporaryDirectory() as directory:
+            self.run_pass(words, extra=("--frames", directory))
+            first, second = ((Path(directory) / f"frame-000{n}.ppm").read_bytes() for n in (1, 2))
+        header = len(b"P6\n320 240\n255\n")
+        before = power_on_palette()[9]
+        self.assertEqual(first[header:header + 3], before.to_bytes(3, "big"))
+        self.assertEqual(second[header:header + 3], b"\xab\xcd\xef")
+        self.assertEqual(first[header + 3:], second[header + 3:], "every other pixel is value 0 in both")
 
     def test_frames_are_written_as_ppm(self):
         """--frames DIR writes one binary PPM per present with the RGB332 mapping; an unwritable
@@ -850,6 +884,25 @@ class EmulatorTest(unittest.TestCase):
                                                capture_output=True, text=True, timeout=10)
                     self.assertEqual(completed.returncode, 2)
                     self.assertIn("rv32emu: bad", completed.stderr)
+
+    def test_disk_size_is_the_files(self):
+        """Issue #35: --disk takes whole 512-byte sectors up to VIRTIO_DISK_MAX, and the capacity the
+        device reports is the file's; without a disk it is VIRTIO_DISK_SIZE of zeros."""
+        words = LI(1, VIRTIO + 0x100) + [LW(10, 1, 0), LW(11, 1, 4)]
+        self.assertEqual(self.run_pass(words).state.x[10], VIRTIO_DISK_SIZE // 512)
+        with tempfile.TemporaryDirectory() as directory:
+            disk = Path(directory) / "disk"
+            for size in (512, VIRTIO_DISK_SIZE, 0x600000, VIRTIO_DISK_MAX):
+                with self.subTest(size=size):
+                    disk.write_bytes(bytes(size))
+                    x = self.run_pass(words, extra=("--disk", str(disk))).state.x
+                    self.assertEqual((x[10], x[11]), (size // 512, 0))
+            for size in (0, 1000, VIRTIO_DISK_MAX + 512):
+                with self.subTest(refused=size):
+                    disk.write_bytes(bytes(size))
+                    result = self.run_words(words + FINISH(), extra=("--disk", str(disk)))
+                    self.assertEqual(result.status, 2)
+                    self.assertIn("whole 512-byte sectors", result.stderr)
 
     def test_run_driver_rejects_negative_limit_and_times_out(self):
         driver = ROOT / "tools" / "rv32_run_emu.py"

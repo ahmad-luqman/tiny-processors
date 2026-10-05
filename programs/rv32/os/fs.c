@@ -1,8 +1,10 @@
-/* The kernel's file system; see fs.h and tools/rv32_mkfs.py. Every transfer
- * goes through one sector buffer, so a partial sector is read, changed and
- * written back. */
+/* The kernel's file system; see fs.h and tools/rv32_mkfs.py. A write, and a
+ * read of part of a sector, goes through one sector buffer, so a partial sector
+ * is read, changed and written back; since issue #35 a read of whole sectors
+ * into a word-aligned buffer in RAM goes straight there (direct_sectors). */
 #include "fs.h"
 
+#include "sys.h"
 #include "virtio.h"
 
 #define MAGIC 0x31534654u
@@ -121,11 +123,41 @@ void fs_truncate(int file)
     directory[file].size = 0;
 }
 
+/* Issue #35: how many whole sectors from `position` may go straight to `to` in one request
+ * rather than through the sector buffer: a sector-aligned position, a word-aligned buffer in RAM
+ * below the slots' end (the device may write only RAM), and only sectors both the request and the
+ * file fill, so no byte past either is written. */
+static uint32_t direct_sectors(const struct entry *e, uint32_t position, const uint8_t *to, uint32_t left)
+{
+    /* RAM starts at the kernel's base, below the slots, and ends with the last slot. */
+    const uint32_t ram = OS_SLOT_BASE - OS_KERNEL_SIZE, ram_end = OS_SLOT_BASE + OS_SLOTS * OS_SLOT_SIZE;
+    uint32_t address = (uint32_t)(uintptr_t)to;
+    if (position % VIRTIO_SECTOR || address & 3u || address < ram || address >= ram_end) {
+        return 0;
+    }
+    uint32_t in_file = (e->size - position) / VIRTIO_SECTOR, wanted = left / VIRTIO_SECTOR;
+    uint32_t whole = in_file < wanted ? in_file : wanted;
+    uint32_t room = (ram_end - address) / VIRTIO_SECTOR;
+    if (whole > room) {
+        return 0; /* the device writes only RAM: leave a run past its end to the buffered path */
+    }
+    return whole;
+}
+
 uint32_t fs_read(int file, uint32_t position, uint8_t *to, uint32_t length)
 {
     const struct entry *e = &directory[file];
     uint32_t done = 0;
     while (done < length && position < e->size) {
+        uint32_t whole = direct_sectors(e, position, to + done, length - done);
+        if (whole) {
+            if (!virtio_transfer(e->first + position / VIRTIO_SECTOR, to + done, whole, 0)) {
+                return FS_ERROR;
+            }
+            done += whole * VIRTIO_SECTOR;
+            position += whole * VIRTIO_SECTOR;
+            continue;
+        }
         uint32_t at = position % VIRTIO_SECTOR;
         if (!virtio_transfer(e->first + position / VIRTIO_SECTOR, sector_buffer, 1, 0)) {
             return FS_ERROR;

@@ -41,7 +41,7 @@ failures:
   find its devices.
 
 The hole the devices moved into was chosen from `virt`'s own tree:
-`qemu-system-riscv32 -M virt,dumpdtb=virt.dtb -bios none -m 4M` (QEMU 8.2.2; RAM is 8 MiB since issue #33)
+`qemu-system-riscv32 -M virt,dumpdtb=virt.dtb -bios none -m 4M` (QEMU 8.2.2; RAM is 8 MiB since issue #33 and 16 MiB since issue #35)
 describes nothing between its `fw_cfg` at `0x1010_0000` (24 bytes) and its
 flash at `0x2000_0000`. [rv32_virt_map.py](../tools/rv32_virt_map.py) repeats
 the check on every run of `make check-rv32-virt-map`. It parses both trees and
@@ -179,7 +179,7 @@ Verilator 5.040 built from their release tags, Yosys 0.33, dtc 1.7.
   malformed blobs and partial `reg` entries. The map checker passes ours
   against the installed QEMU and against a committed QEMU tree
   (QEMU 8.2.2 with 4 MiB then; since issue #33 the
-  [fixture](../tests/fixtures/qemu-11.1.2-virt-8M.dtb) is QEMU 11.1.2 with 8 MiB, so it also runs
+  [fixture](../tests/fixtures/qemu-11.1.2-virt-16M.dtb) is QEMU 11.1.2 with 16 MiB (8 MiB from issue #33), so it also runs
   without QEMU), and rejects the old input window, a moved CLINT or done
   register, a window on a virtio slot, a resized memory and a missing shared
   node. `fdt.c`, built natively under AddressSanitizer and UBSan (the tests

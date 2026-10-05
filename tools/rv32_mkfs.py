@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Make, list and read the kernel's file system on a disk image (Track 2, O3; docs/rv32-os.md).
 
-The disk is 128 KiB of 512-byte sectors, the size of the RTL's virtio-blk memory and
-the only size the emulator accepts. The file system, "tfs", is as small as a file
+A disk is whole 512-byte sectors, 128 KiB unless --new --size says otherwise, and at most
+8 MiB, the RTL's virtio-blk memory and the largest disk the emulator accepts (issue #35).
+The file system, "tfs", is as small as a file
 system can be and still be one:
 
     sector 0   superblock: "TFS1" (0x31534654), sectors, directory sector, first data sector,
@@ -16,7 +17,8 @@ Every number is a little-endian 32-bit word. A file is created with a fixed
 capacity (8 sectors, 4 KiB, unless given) and never grows beyond it; writing
 it replaces its contents from the start. programs/rv32/os/fs.c is the kernel's side.
 
-    python3 tools/rv32_mkfs.py disk.img --add welcome=programs/rv32/os/welcome.txt
+    python3 tools/rv32_mkfs.py disk.img --new --add welcome=programs/rv32/os/welcome.txt
+    python3 tools/rv32_mkfs.py big.disk --new --size 0x600000 --add pad=build/rv32/os/pad.bin
     python3 tools/rv32_mkfs.py disk.img --list
     python3 tools/rv32_mkfs.py disk.img --cat scores
 """
@@ -28,8 +30,8 @@ import sys
 from pathlib import Path
 
 SECTOR = 512
-DISK_SIZE = 0x20000
-SECTORS = DISK_SIZE // SECTOR
+DISK_SIZE = 0x20000   # a new disk unless --size gives another
+DISK_MAX = 0x800000   # the largest disk: the RTL's DISK_WORDS (issue #35)
 MAGIC = 0x31534654
 DIRECTORY, DATA = 1, 2
 ENTRIES = 16
@@ -41,22 +43,35 @@ class FsError(ValueError):
     """A disk that is not a tfs file system, or a request it cannot hold."""
 
 
-def blank() -> bytearray:
-    disk = bytearray(DISK_SIZE)
-    struct.pack_into("<5I", disk, 0, MAGIC, SECTORS, DIRECTORY, DATA, ENTRIES)
+def check_size(size: int) -> None:
+    if size % SECTOR or not (DATA + 1) * SECTOR <= size <= DISK_MAX:
+        raise FsError(f"a disk is whole {SECTOR}-byte sectors, {(DATA + 1) * SECTOR} to {DISK_MAX} bytes, not {size}")
+
+
+def blank(size: int = DISK_SIZE) -> bytearray:
+    check_size(size)
+    disk = bytearray(size)
+    struct.pack_into("<5I", disk, 0, MAGIC, size // SECTOR, DIRECTORY, DATA, ENTRIES)
     return disk
 
 
+def sector_count(disk: bytes) -> int:
+    """The file system's sectors, as its superblock records them: at most the disk's, which is the
+    kernel's rule (fs_mount), though this tool always makes them equal."""
+    check(disk)
+    return struct.unpack_from("<I", disk, 4)[0]
+
+
 def check(disk: bytes) -> None:
-    if len(disk) != DISK_SIZE:
-        raise FsError(f"a disk is {DISK_SIZE} bytes, not {len(disk)}")
-    if struct.unpack_from("<5I", disk, 0) != (MAGIC, SECTORS, DIRECTORY, DATA, ENTRIES):
-        raise FsError("no tfs superblock")
+    check_size(len(disk))
+    magic, sectors, directory, data, count = struct.unpack_from("<5I", disk, 0)
+    if (magic, directory, data, count) != (MAGIC, DIRECTORY, DATA, ENTRIES) or not DATA < sectors <= len(disk) // SECTOR:
+        raise FsError("no tfs superblock that fits this disk")
 
 
 def entries(disk: bytes) -> list[tuple[str, int, int, int]]:
     """(name, first sector, capacity, size) of every file, in directory order."""
-    check(disk)
+    sectors = sector_count(disk)
     out = []
     for i in range(ENTRIES):
         name, first, capacity, size = ENTRY.unpack_from(disk, DIRECTORY * SECTOR + ENTRY.size * i)
@@ -65,7 +80,7 @@ def entries(disk: bytes) -> list[tuple[str, int, int, int]]:
         except UnicodeDecodeError:
             raise FsError(f"directory entry {i}: the name {name!r} is not UTF-8") from None
         if name:
-            if first < DATA or first + capacity > SECTORS or size > capacity * SECTOR:
+            if first < DATA or first + capacity > sectors or size > capacity * SECTOR:
                 raise FsError(f"{name}: extent {first}+{capacity} or size {size} does not fit the disk")
             out.append((name, first, capacity, size))
     return out
@@ -86,7 +101,7 @@ def add(disk: bytearray, name: str, data: bytes, capacity: int = DEFAULT_CAPACIT
         raise FsError(f"{name} exists")
     capacity = max(capacity, -(-len(data) // SECTOR))
     first = max([DATA] + [f + c for _, f, c, _ in files])
-    if first + capacity > SECTORS:
+    if first + capacity > sector_count(disk):
         raise FsError(f"{name}: no room for {capacity} sectors")
     for i in range(ENTRIES):
         at = DIRECTORY * SECTOR + ENTRY.size * i
@@ -101,12 +116,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("disk", type=Path)
     parser.add_argument("--new", action="store_true", help="start from an empty file system")
+    parser.add_argument("--size", type=lambda text: int(text, 0),
+                        help=f"with --new, the disk's size in bytes (default {DISK_SIZE:#x}, at most {DISK_MAX:#x})")
     parser.add_argument("--add", action="append", default=[], metavar="NAME=FILE", help="add a file (repeatable)")
     parser.add_argument("--list", action="store_true", help="list the files")
     parser.add_argument("--cat", metavar="NAME", help="print a file's contents")
     args = parser.parse_args(argv)
+    if args.size is not None and not args.new:
+        parser.error("--size makes a new disk: give it with --new (an existing disk keeps its size)")
     try:
-        disk = blank() if args.new else bytearray(args.disk.read_bytes())
+        disk = blank(DISK_SIZE if args.size is None else args.size) if args.new else bytearray(args.disk.read_bytes())
         for item in args.add:
             name, _, path = item.partition("=")
             add(disk, name, Path(path).read_bytes())

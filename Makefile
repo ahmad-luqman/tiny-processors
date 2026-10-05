@@ -110,7 +110,7 @@ SDL3_CFLAGS := $(SDL3_CFLAGS)
 SDL3_LIBS := $(SDL3_LIBS)
 endif
 RV32_RTL := rtl/rv32/rv32_fregfile.v rtl/rv32/rv32_fdecode.v $(FP32_RTL) rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32_muldiv.v rtl/rv32/rv32.v
-RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_clint.v rtl/rv32/rv32_plic.v rtl/rv32/rv32_virtio_blk.v rtl/rv32/rv32_bootrom.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_dma_window.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
+RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_clint.v rtl/rv32/rv32_plic.v rtl/rv32/rv32_virtio_blk.v rtl/rv32/rv32_bootrom.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_palette.v rtl/rv32/rv32_dma_window.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
 RV32_TB := tests/rv32_tb.sv
 RV32_TB_VVP := build/rv32/rv32_tb.vvp
 RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
@@ -398,7 +398,7 @@ lint-rv32-soc:
 # The memories are shrunk to 64 words so the count measures the decoder and
 # the devices; the core's own count is synth-rv32's.
 synth-rv32-soc: | build
-	yosys -Q -T -l build/rv32-soc-synth.log -p 'read_verilog -Irtl/fp32 $(RV32_SOC_RTL); chparam -set RAM_WORDS 64 -set FB_WORDS 64 -set DISK_WORDS 64 rv32_soc; synth -top rv32_soc; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32-soc.json'
+	yosys -Q -T -l build/rv32-soc-synth.log -p 'read_verilog -Irtl/fp32 $(RV32_SOC_RTL); chparam -set RAM_WORDS 64 -set FB_WORDS 64 -set DISK_WORDS 64 -set PALETTE_ENTRIES 16 rv32_soc; synth -top rv32_soc; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32-soc.json'
 
 waves-rv32: $(RV32_TB_VVP) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl --mode waves --program loop --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/rv32/rtl
@@ -1259,7 +1259,7 @@ test-rv32: run-rv32-atom-qemu run-rv32-atom-emu run-rv32-atom-rtl run-rv32-atom-
 .PHONY: check-rv32-dtb check-rv32-virt-map check-rv32-platcheck-image test-rv32-platform
 .PHONY: run-rv32-platform-qemu run-rv32-platform-emu run-rv32-platform-rtl run-rv32-platform-rtl-verilator
 RV32_PLATCHECK_OBJS := build/rv32/platcheck.o build/rv32/fdt.o $(RV32_COMMON_OBJS)
-RV32_PLATCHECK_HEX := 91659113
+RV32_PLATCHECK_HEX := bee59113
 # QEMU 8.2 has no bare `rv32i` model; the generic CPU runs the RV32I image as is.
 RV32_PLATFORM_QEMU_CPU ?= rv32
 RV32_PLATFORM_ARGS := --image build/rv32/platcheck.bin --compare results --expect-last-line "PASS $(RV32_PLATCHECK_HEX)" --expect-console-file programs/rv32/platcheck.expected
@@ -1428,10 +1428,17 @@ RV32_OS_SLOT_libccheck := 6
 RV32_OS_SLOT_lua := 18
 RV32_OS_SPAN_lua := 6
 RV32_OS_STACK_lua := 0x28000
-# Issue #33: the slots 8 MiB added, from 24 on.
+# Issue #33: the slots 8 MiB added, from 24 on (issue #35 made RAM 16 MiB: slots 56 to 119).
 RV32_OS_SLOT_fpcheck := 24
 RV32_OS_SLOT_fpmate := 25
 RV32_OS_SLOT_mandel := 26
+# Issue #35: programs on the disk rather than in the RAM disk, each a tfs file that is a RAM disk
+# of one program; the kernel loads one when the RAM disk has no program of that name.
+RV32_OS_DISK_PROGRAMS := diskprog palcheck readcheck
+RV32_OS_SLOT_diskprog := 100
+RV32_OS_SPAN_diskprog := 4
+RV32_OS_SLOT_readcheck := 105
+RV32_OS_SLOT_palcheck := 104
 rv32_os_span = $(or $(RV32_OS_SPAN_$(1)),1)
 # A program's load address and span in bytes: the one place the slot formula is written here.
 rv32_os_base = $$(printf '0x%x' $$(($(RV32_OS_SLOT_BASE) + $(RV32_OS_SLOT_$(1)) * $(RV32_OS_SLOT_SIZE))))
@@ -1458,6 +1465,9 @@ RV32_OS_OBJS_fill := build/rv32/os/fill.o
 RV32_OS_OBJS_dmaprobe := build/rv32/os/dmaprobe.o
 RV32_OS_OBJS_fpcheck := build/rv32/os/fpcheck.o
 RV32_OS_OBJS_fpmate := build/rv32/os/fpmate.o
+RV32_OS_OBJS_diskprog := build/rv32/os/diskprog.o build/rv32/os/diskprog_table.o
+RV32_OS_OBJS_readcheck := build/rv32/os/readcheck.o
+RV32_OS_OBJS_palcheck := build/rv32/os/palcheck.o
 # Their objects alone are rv32if; the user library they link stays RV32I (both ILP32).
 $(foreach p,$(RV32_OS_FLOAT_PROGRAMS),build/rv32/os/$(p).o): RV32_OS_CFLAGS := $(filter-out -march=rv32i,$(RV32_OS_CFLAGS)) -march=rv32if_zicsr -ffp-contract=off
 $(foreach p,$(RV32_OS_FLOAT_PROGRAMS),build/rv32/os/$(p).o): $(RV32_OS)/ufloat.h
@@ -1465,7 +1475,10 @@ RV32_OS_OBJS_pong := build/rv32/os/pong.o build/rv32/os/score.o build/rv32/pong_
 RV32_OS_OBJS_tetris := build/rv32/os/tetris.o build/rv32/os/score.o build/rv32/tetris_game.o build/rv32/gfx.o build/rv32/gfx_text.o
 RV32_OS_OBJS_menu := build/rv32/os/menu.o $(filter-out build/rv32/capstone.o $(RV32_COMMON_OBJS),$(RV32_CAPSTONE_OBJS))
 RV32_OS_ELFS := $(foreach p,$(RV32_OS_PROGRAMS),build/rv32/os/$(p).elf)
-RV32_OS_BARE_ELFS := $(foreach p,$(filter-out $(RV32_OS_LIBC_PROGRAMS) $(RV32_OS_HF_PROGRAMS),$(RV32_OS_PROGRAMS)),build/rv32/os/$(p).elf)
+RV32_OS_DISK_ELFS := $(foreach p,$(RV32_OS_DISK_PROGRAMS),build/rv32/os/$(p).elf)
+RV32_OS_DISK_LSTS := $(RV32_OS_DISK_ELFS:.elf=.lst)
+RV32_OS_DISK_PRGS := $(RV32_OS_DISK_ELFS:.elf=.prg)
+RV32_OS_BARE_ELFS := $(foreach p,$(filter-out $(RV32_OS_LIBC_PROGRAMS) $(RV32_OS_HF_PROGRAMS),$(RV32_OS_PROGRAMS)),build/rv32/os/$(p).elf) $(RV32_OS_DISK_ELFS)
 RV32_OS_KERNEL_OBJS := build/rv32/os/kentry.o build/rv32/os/kfpu.o build/rv32/os/kernel.o build/rv32/os/mem.o build/rv32/os/virtio.o build/rv32/os/fs.o build/rv32/fdt.o build/rv32/muldiv.o
 RV32_OS_DISK := build/rv32/os/disk.img
 RV32_OS_ARGS := --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/session.txt --disk $(RV32_OS_DISK) --compare results --compare-traps faults --expect-console-file $(RV32_OS)/session.expected
@@ -1480,8 +1493,10 @@ build/rv32/os:
 RV32_OS_C_OBJS := $(patsubst $(RV32_OS)/%.c,build/rv32/os/%.o,$(wildcard $(RV32_OS)/*.c))
 $(RV32_OS_C_OBJS): build/rv32/os/%.o: $(RV32_OS)/%.c $(RV32_OS_HEADERS) $(RV32_DIGIT_GENERATED) $(RV32_G3D_GENERATED) | build/rv32/os
 	$(RV32_CC) $(RV32_OS_CFLAGS) -c -o $@ $<
-build/rv32/os/ustart.o: $(RV32_OS)/ustart.S $(RV32_OS)/sys.h | build/rv32/os
+RV32_OS_S_OBJS := $(patsubst $(RV32_OS)/%.S,build/rv32/os/%.o,$(filter-out $(RV32_OS)/kentry.S $(RV32_OS)/kfpu.S,$(wildcard $(RV32_OS)/*.S)))
+$(RV32_OS_S_OBJS): build/rv32/os/%.o: $(RV32_OS)/%.S | build/rv32/os
 	$(RV32_CC) $(RV32_OS_CFLAGS) -c -o $@ $<
+build/rv32/os/ustart.o: $(RV32_OS)/sys.h
 .SECONDEXPANSION:
 # Link program $* for its slots and stack from the objects and libraries $(1), in order.
 rv32_os_link = $(RV32_CC) $(or $(RV32_OS_LINK_ARCH),$(RV32_ARCH)) -nostdlib -static --ld-path=$(RV32_LD) -Wl,-T,$(RV32_OS)/user.ld \
@@ -1489,10 +1504,13 @@ rv32_os_link = $(RV32_CC) $(or $(RV32_OS_LINK_ARCH),$(RV32_ARCH)) -nostdlib -sta
 	-Wl,--defsym=STACK_SIZE=$(call rv32_os_stack,$*) -Wl,-Map,$(@:.elf=.map) -o $@ $(1)
 $(RV32_OS_BARE_ELFS): build/rv32/os/%.elf: $$(RV32_OS_OBJS_$$*) $(RV32_OS_USER) $(RV32_OS)/user.ld
 	$(call rv32_os_link,$(RV32_OS_OBJS_$*) $(RV32_OS_USER))
-$(RV32_OS_ELFS:.elf=.lst) build/rv32/os/kernel.lst: build/rv32/os/%.lst: build/rv32/os/%.elf
+$(RV32_OS_ELFS:.elf=.lst) $(RV32_OS_DISK_LSTS) build/rv32/os/kernel.lst: build/rv32/os/%.lst: build/rv32/os/%.elf
 	$(RV32_OBJDUMP) -d -S $< > $@
 build/rv32/os/kernel.bin: build/rv32/os/%.bin: build/rv32/os/%.elf
 	$(RV32_OBJCOPY) -O binary $< $@
+# Issue #35: a program on the disk is a RAM disk of one program, its file on the disk.
+$(RV32_OS_DISK_PRGS): build/rv32/os/%.prg: build/rv32/os/%.elf tools/rv32_ramdisk.py
+	$(PYTHON) tools/rv32_ramdisk.py --out $@ $<
 build/rv32/os/ramdisk.img: $(RV32_OS_ELFS) tools/rv32_ramdisk.py
 	$(PYTHON) tools/rv32_ramdisk.py --out $@ --accelerators menu --accelerators dmaprobe $(RV32_OS_ELFS)
 build/rv32/os/kentry.o: $(RV32_OS)/kentry.S build/rv32/os/ramdisk.img programs/rv32/board.h | build/rv32/os
@@ -1503,8 +1521,8 @@ build/rv32/os/kfpu.o: $(RV32_OS)/kfpu.S | build/rv32/os
 	$(RV32_CC) $(filter-out -march=rv32i,$(RV32_OS_CFLAGS)) -march=rv32if_zicsr -c -o $@ $<
 build/rv32/os/kernel.elf: $(RV32_OS_KERNEL_OBJS) $(RV32_OS)/kernel.ld
 	$(RV32_CC) $(RV32_ARCH) -nostdlib -static --ld-path=$(RV32_LD) -Wl,-T,$(RV32_OS)/kernel.ld -Wl,-Map,$(@:.elf=.map) -o $@ $(RV32_OS_KERNEL_OBJS)
-.SECONDARY: $(RV32_OS_ELFS) build/rv32/os/kernel.elf $(RV32_OS_USER) $(RV32_OS_KERNEL_OBJS) \
-	$(sort $(foreach p,$(RV32_OS_PROGRAMS),$(RV32_OS_OBJS_$(p))))
+.SECONDARY: $(RV32_OS_ELFS) $(RV32_OS_DISK_ELFS) build/rv32/os/kernel.elf $(RV32_OS_USER) $(RV32_OS_KERNEL_OBJS) \
+	$(sort $(foreach p,$(RV32_OS_PROGRAMS) $(RV32_OS_DISK_PROGRAMS),$(RV32_OS_OBJS_$(p))))
 
 # Track 3, L1: the C library (docs/rv32-libc.md). picolibc and the compiler-rt builtins (multiply,
 # divide, 64-bit integers and soft single and double floating point for RV32I) are vendored as only
@@ -1643,7 +1661,7 @@ $(foreach p,$(RV32_OS_HF_PROGRAMS),$(eval RV32_OS_GATE_$(p) := --allow-user --al
 .SECONDARY: $(RV32_LIBC_HF_OBJS_libc) $(RV32_LIBC_HF_OBJS_builtins) $(RV32_OS_LIBC_HF_GLUE) \
 	$(foreach p,$(RV32_OS_HF_PROGRAMS),build/rv32/os/libc-hf/libc/crt-$(p).o) $(RV32_OS_HF_MAIN_OBJS)
 
-firmware-rv32-os: build/rv32/os/kernel.elf build/rv32/os/kernel.bin build/rv32/os/kernel.lst $(RV32_OS_ELFS:.elf=.lst)
+firmware-rv32-os: build/rv32/os/kernel.elf build/rv32/os/kernel.bin build/rv32/os/kernel.lst $(RV32_OS_ELFS:.elf=.lst) $(RV32_OS_DISK_LSTS) $(RV32_OS_DISK_PRGS)
 
 # Every program is checked against its slots, the kernel against its 1 MiB.
 # O3: the disk the sessions start from, a tfs file system holding welcome and the two report files
@@ -1651,12 +1669,14 @@ firmware-rv32-os: build/rv32/os/kernel.elf build/rv32/os/kernel.bin build/rv32/o
 $(RV32_OS_DISK): tools/rv32_mkfs.py $(RV32_OS)/welcome.txt | build/rv32/os
 	$(PYTHON) tools/rv32_mkfs.py --new --add welcome=$(RV32_OS)/welcome.txt --add bars.out=/dev/null --add life.out=/dev/null $@
 check-rv32-os-image: firmware-rv32-os $(RV32_OS_DISK)
-	@set -e; $(foreach p,$(RV32_OS_PROGRAMS),\
+	@set -e; $(foreach p,$(RV32_OS_PROGRAMS) $(RV32_OS_DISK_PROGRAMS),\
 		$(PYTHON) tools/rv32_image.py build/rv32/os/$(p).elf --listing build/rv32/os/$(p).lst --ram-base $(call rv32_os_base,$(p)) \
 			--ram-size $(call rv32_os_size,$(p)) $(call rv32_os_gate,$(p)) > /dev/null; \
 		echo "build/rv32/os/$(p).elf: slot at $(call rv32_os_base,$(p))";)
 	$(PYTHON) tools/rv32_image.py build/rv32/os/kernel.elf --listing build/rv32/os/kernel.lst --bin build/rv32/os/kernel.bin --hex build/rv32/os/kernel.hex --ram-size 0x100000 --allow-system --allow-f-in fpu_save --allow-f-in fpu_load --page-tables
 	$(PYTHON) tools/rv32_ramdisk.py --list build/rv32/os/ramdisk.img
+	@# Issue #35: no two programs, in the RAM disk or on the disk, share a slot.
+	$(PYTHON) tools/rv32_ramdisk.py --check $(RV32_OS_ELFS) $(RV32_OS_DISK_ELFS)
 print-rv32-os-slot-%:
 	@echo $(RV32_OS_SLOT_$*) $(call rv32_os_span,$*)
 print-rv32-os-layout:
@@ -1743,12 +1763,15 @@ test-rv32: run-rv32-os-qemu run-rv32-os-qemu-reboot run-rv32-os-qemu-enter run-r
 # L1: libccheck checks picolibc on the kernel's system calls, and `fault stack` the guard page
 # below every program's stack. L2: the Lua REPL and three scripts from the disk. Each runs on QEMU
 # virt (transcript pinned), the emulator and Verilator, results-identical with identical disks.
-.PHONY: run-rv32-libc-qemu run-rv32-libc-emu run-rv32-libc-rtl-verilator run-rv32-lua-qemu run-rv32-lua-emu run-rv32-lua-rtl-verilator run-rv32-float-qemu run-rv32-float-emu run-rv32-float-rtl-verilator run-rv32-mandel-qemu run-rv32-mandel-emu run-rv32-mandel-rtl-verilator
+# Every such session runs on QEMU, the emulator and Verilator (issue #35 made it one list).
+RV32_OS_APPS := libc lua float mandel diskprog
+.PHONY: $(foreach a,$(RV32_OS_APPS),run-rv32-$(a)-qemu run-rv32-$(a)-emu run-rv32-$(a)-rtl-verilator)
 RV32_OS_LUA_SCRIPTS := $(wildcard $(RV32_OS)/lua/*.lua)
 RV32_OS_APPS_DISK := build/rv32/os/apps.disk
 $(RV32_OS_APPS_DISK): tools/rv32_mkfs.py $(RV32_OS)/welcome.txt $(RV32_OS_LUA_SCRIPTS) | build/rv32/os
 	$(PYTHON) tools/rv32_mkfs.py --new --add welcome=$(RV32_OS)/welcome.txt $(foreach f,$(RV32_OS_LUA_SCRIPTS),--add $(notdir $(f))=$(f)) $@
-rv32_os_apps_args = --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/$(1).session --disk $(RV32_OS_APPS_DISK) \
+rv32_os_apps_disk = $(or $(RV32_OS_APPS_DISK_$(1)),$(RV32_OS_APPS_DISK))
+rv32_os_apps_args = --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/$(1).session --disk $(call rv32_os_apps_disk,$(1)) \
 	--compare results --compare-traps faults --expect-console-file $(RV32_OS)/$(1).session.expected \
 	--timeout $(or $(RV32_OS_APPS_TIMEOUT_$(1)),1800) \
 	$(RV32_OS_APPS_ARGS_$(1))
@@ -1760,20 +1783,32 @@ RV32_OS_APPS_ARGS_mandel := --expect-checkpoint "frame 1 c7e54ac5"
 # its budget is about twice that, so a slower FPU fails here rather than passing unnoticed.
 rv32_os_apps_cycles = $(or $(RV32_OS_APPS_CYCLES_$(1)),400000000)
 RV32_OS_APPS_CYCLES_mandel := 100000000
+# Issue #35: diskprog's session runs it from just past 4 MiB into a 6 MiB disk, behind a 4 MiB
+# `pad` whose byte i is i mod 256, so the kernel reads it with whole-sector requests from far into
+# the disk into the slots above 8 MiB. palcheck checks the palette through SYS_PALETTE, readcheck a
+# user's reads of `pad` on every path of fs_read; `renamed` (diskprog under another name) and `pad`
+# are refused, a file named `hello` does not replace the RAM disk's program, and a file written
+# there, far past the old 128 KiB, reads back.
+RV32_OS_APPS_DISK_diskprog := build/rv32/os/diskprog.disk
+build/rv32/os/pad.bin: | build/rv32/os
+	$(PYTHON) -c "import sys; open(sys.argv[1], 'wb').write(bytes(range(256)) * 16384)" $@
+build/rv32/os/diskprog.disk: build/rv32/os/pad.bin $(RV32_OS_DISK_PRGS) tools/rv32_mkfs.py | build/rv32/os
+	$(PYTHON) tools/rv32_mkfs.py --new --size 0x600000 --add pad=$< --add diskprog=build/rv32/os/diskprog.prg \
+		--add renamed=build/rv32/os/diskprog.prg --add palcheck=build/rv32/os/palcheck.prg \
+		--add readcheck=build/rv32/os/readcheck.prg --add hello=build/rv32/os/palcheck.prg $@
 # QEMU's disk ends byte for byte the emulator's.
-run-rv32-libc-qemu run-rv32-lua-qemu run-rv32-float-qemu run-rv32-mandel-qemu: run-rv32-%-qemu: check-rv32-os-image $(RV32_OS_APPS_DISK) run-rv32-%-emu
-	cp $(RV32_OS_APPS_DISK) build/rv32/os/$*.qemu.disk
+$(foreach a,$(RV32_OS_APPS),run-rv32-$(a)-qemu): run-rv32-%-qemu: check-rv32-os-image $$(call rv32_os_apps_disk,$$*) run-rv32-%-emu
+	cp $(call rv32_os_apps_disk,$*) build/rv32/os/$*.qemu.disk
 	$(RV32_OS_QEMU) --stdin $(RV32_OS)/$*.session --drive build/rv32/os/$*.qemu.disk --timeout 120 --transcript build/rv32/os/$*.qemu.transcript
 	diff -u $(RV32_OS)/$*.session.qemu.expected build/rv32/os/$*.qemu.transcript
 	cmp build/rv32/os/$*-emu/kernel.emu.disk build/rv32/os/$*.qemu.disk
-run-rv32-libc-emu run-rv32-lua-emu run-rv32-float-emu run-rv32-mandel-emu: run-rv32-%-emu: check-rv32-os-image $(RV32_OS_APPS_DISK) $(RV32EMU)
+$(foreach a,$(RV32_OS_APPS),run-rv32-$(a)-emu): run-rv32-%-emu: check-rv32-os-image $$(call rv32_os_apps_disk,$$*) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl $(call rv32_os_apps_args,$*) --backend emulator --emulator $(RV32EMU) --out build/rv32/os/$*-emu
-run-rv32-libc-rtl-verilator run-rv32-lua-rtl-verilator run-rv32-float-rtl-verilator run-rv32-mandel-rtl-verilator: run-rv32-%-rtl-verilator: check-rv32-os-image $(RV32_OS_APPS_DISK) $(RV32EMU) $(RV32_TB_VERILATOR)
+$(foreach a,$(RV32_OS_APPS),run-rv32-$(a)-rtl-verilator): run-rv32-%-rtl-verilator: check-rv32-os-image $$(call rv32_os_apps_disk,$$*) $(RV32EMU) $(RV32_TB_VERILATOR)
 	$(PYTHON) -m tools.rv32_rtl $(call rv32_os_apps_args,$*) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 --max-cycles $(call rv32_os_apps_cycles,$*) --out build/rv32/os/$*-verilator
-test-rv32: run-rv32-libc-qemu run-rv32-libc-emu run-rv32-libc-rtl-verilator run-rv32-lua-qemu run-rv32-lua-emu run-rv32-lua-rtl-verilator
 # Issue #33: fpcheck and fpmate keep their floating state apart across preemption; mandel draws, in
-# 4x4 blocks there and in its 2x2 in its own session.
-test-rv32: run-rv32-float-qemu run-rv32-float-emu run-rv32-float-rtl-verilator run-rv32-mandel-qemu run-rv32-mandel-emu run-rv32-mandel-rtl-verilator
+# 4x4 blocks in the float session and in its 2x2 in its own.
+test-rv32: $(foreach a,$(RV32_OS_APPS),run-rv32-$(a)-qemu run-rv32-$(a)-emu run-rv32-$(a)-rtl-verilator)
 
 # O3: storage. virtiocheck drives the virtio-blk device directly on QEMU virt (a 128 KiB drive on
 # virtio-mmio-bus.0), the emulator (--disk) and the RTL (+disk); the runner compares the disks the

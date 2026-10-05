@@ -462,7 +462,7 @@ static bool virtio_request(machine *m)
     if (!dma_read(m, address[0], &type) || !dma_read(m, address[0] + 8u, &sector) || !dma_read(m, address[0] + 12u, &sector_hi)) {
         return false;
     }
-    const uint32_t sectors = VIRTIO_DISK_SIZE / 512u, words_total = VIRTIO_DISK_SIZE / 4u;
+    const uint32_t sectors = v->disk_size / 512u, words_total = v->disk_size / 4u;
     uint8_t result;
     if (type > 1) {
         result = 2; /* UNSUPP */
@@ -552,7 +552,7 @@ static mem_access virtio_load(machine *m, uint32_t offset, int width, uint32_t *
     case 0x0a0: *value = v->device_lo; break;
     case 0x0a4: *value = v->device_hi; break;
     case 0x0fc: *value = 0; break;
-    case 0x100: *value = VIRTIO_DISK_SIZE / 512u; break;
+    case 0x100: *value = v->disk_size / 512u; break;
     case 0x104: *value = 0; break;
     default: return ACC_FAULT; /* write-only registers and unused offsets */
     }
@@ -694,13 +694,21 @@ uint32_t emu_frame_hash(const uint8_t *pixels)
     return h;
 }
 
-/* The fixed RGB332 mapping (bits 7:5 red, 4:2 green, 1:0 blue, each scaled
- * to 0..255), shared by the PPM writer and the window's table. */
-void emu_rgb332(uint8_t pixel, uint8_t rgb[3])
+/* The palette's power-on word for a pixel value (issue #35): the fixed RGB332 mapping the pixels
+ * had before, bits 7:5 red, 4:2 green, 1:0 blue, each scaled to 0..255 with truncation, as
+ * 0x00RRGGBB. The same table is in rtl/rv32/rv32_palette.v, tools/rv32_devices.py
+ * (power_on_palette) and programs/rv32/os/palcheck.c; tests compare them, so change all four. */
+static uint32_t rgb332_word(uint8_t pixel)
 {
-    rgb[0] = (uint8_t)(((pixel >> 5) & 7u) * 255u / 7u);
-    rgb[1] = (uint8_t)(((pixel >> 2) & 7u) * 255u / 7u);
-    rgb[2] = (uint8_t)((pixel & 3u) * 255u / 3u);
+    return ((pixel >> 5) & 7u) * 255u / 7u << 16 | ((pixel >> 2) & 7u) * 255u / 7u << 8 | (pixel & 3u) * 255u / 3u;
+}
+
+void emu_palette_rgb(const machine *m, uint8_t pixel, uint8_t rgb[3])
+{
+    uint32_t colour = m->palette[pixel];
+    rgb[0] = (uint8_t)(colour >> 16);
+    rgb[1] = (uint8_t)(colour >> 8);
+    rgb[2] = (uint8_t)colour;
 }
 
 /* Write the frame as a binary PPM so it can be looked at without the window. The file is created
@@ -716,7 +724,7 @@ static bool write_ppm(const machine *m, const char *path)
     fprintf(out, "P6\n%u %u\n255\n", FB_COLUMNS, FB_ROWS);
     for (uint32_t i = 0; i < FB_SIZE; i++) {
         uint8_t rgb[3];
-        emu_rgb332(m->fb[i], rgb);
+        emu_palette_rgb(m, m->fb[i], rgb);
         fwrite(rgb, 1, 3, out);
     }
     bool ok = !ferror(out);
@@ -742,6 +750,25 @@ static void present(machine *m)
             m->output_error = true;
         }
     }
+}
+
+/* The palette (issue #35): word access only; a stored word keeps its low 24 bits. */
+static mem_access palette_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    if (width != 4) {
+        return ACC_FAULT;
+    }
+    *value = m->palette[offset / 4u];
+    return ACC_OK;
+}
+
+static mem_access palette_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    if (width != 4) {
+        return ACC_FAULT;
+    }
+    m->palette[offset / 4u] = value & 0x00ffffffu;
+    return ACC_OK;
 }
 
 static mem_access display_load(machine *m, uint32_t offset, int width, uint32_t *value)
@@ -828,6 +855,7 @@ static const region REGIONS[] = {
     {"bootrom", RV32_DTB_ROM_BASE, RV32_DTB_ROM_SIZE, rom_load, NULL},
     {"input", INPUT_BASE, 16, input_load, NULL},
     {"display", DISPLAY_BASE, 16, display_load, display_store},
+    {"palette", PALETTE_BASE, PALETTE_SIZE, palette_load, palette_store},
     {"framebuffer", FB_BASE, FB_SIZE, fb_load, fb_store},
     {"simd4", SIMD_BASE, 32, simd_load, simd_store},
     {"simd4_program", SIMD_PROGRAM, 1024, simd_program_load, simd_program_store},
@@ -2033,6 +2061,8 @@ static bool decimal_ok(const char *text)
 static const struct { const char *name; int code; } KEY_NAMES[] = {
     {"LEFT", 1}, {"RIGHT", 2}, {"UP", 3}, {"DOWN", 4}, {"SPACE", 5}, {"ENTER", 6}, {"ESCAPE", 7},
     {"A", 8}, {"D", 9}, {"W", 10}, {"S", 11}, {"P", 12}, {"Q", 13}, {"R", 14},
+    {"CTRL", 15}, {"SHIFT", 16}, {"TAB", 17}, {"Y", 18}, {"N", 19},
+    {"DIGIT1", 20}, {"DIGIT2", 21}, {"DIGIT3", 22}, {"DIGIT4", 23}, {"DIGIT5", 24}, {"DIGIT6", 25}, {"DIGIT7", 26},
 };
 
 const char *emu_key_name(int code)
@@ -2164,11 +2194,18 @@ void emu_open_disk(machine *m, const char *path)
         fprintf(stderr, "%s: cannot open disk %s: %s\n", emu_prog, path, strerror(errno));
         exit(EXIT_EMULATOR_ERROR);
     }
-    size_t got = fread(v->disk, 1, VIRTIO_DISK_SIZE, v->file);
-    if (ferror(v->file) || got != VIRTIO_DISK_SIZE || fgetc(v->file) != EOF) {
-        fprintf(stderr, "%s: disk %s must be exactly %u bytes\n", emu_prog, path, VIRTIO_DISK_SIZE);
+    size_t got = fread(v->disk, 1, VIRTIO_DISK_MAX, v->file);
+    bool longer = got == VIRTIO_DISK_MAX && fgetc(v->file) != EOF;
+    if (ferror(v->file)) {
+        fprintf(stderr, "%s: cannot read disk %s: %s\n", emu_prog, path, strerror(errno));
         exit(EXIT_EMULATOR_ERROR);
     }
+    if (longer || got == 0 || got % 512u) {
+        fprintf(stderr, "%s: disk %s is %s%zu bytes; it must be whole 512-byte sectors, at most %u bytes\n", emu_prog,
+                path, longer ? "more than " : "", got, VIRTIO_DISK_MAX);
+        exit(EXIT_EMULATOR_ERROR);
+    }
+    v->disk_size = (uint32_t)got;
 }
 
 void emu_init(machine *m)
@@ -2186,6 +2223,9 @@ void emu_init(machine *m)
     m->x[10] = BOOT_HART;
     m->x[11] = RV32_DTB_ROM_BASE;
     m->limit = 100000000ull;
+    for (uint32_t i = 0; i < PALETTE_ENTRIES; i++) {
+        m->palette[i] = rgb332_word((uint8_t)i); /* issue #35: power-on colours are RGB332's */
+    }
 }
 
 bool emu_alloc(machine *m)
@@ -2195,6 +2235,7 @@ bool emu_alloc(machine *m)
     m->virtio = calloc(1, sizeof *m->virtio);
     if (m->virtio) {
         m->virtio->queue_sel_zero = true;
+        m->virtio->disk_size = VIRTIO_DISK_SIZE;
     }
     if (!m->ram || !m->fb || !m->virtio) {
         fprintf(stderr, "%s: cannot allocate memory\n", emu_prog);

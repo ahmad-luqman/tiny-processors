@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 from tools.rv32_asm import (ADDI, AMO_OPS, AMOADD_W, AMOSWAP_W, BOOTROM, CLINT, CONSOLE, CSRRC, CSRRS, CSRRWI, DISPLAY,
-                            DONE, FB, INPUT, LR_W, LW, MSTATUS, PLIC, RAM, SC_W, VIRTIO, i_type, r_type)
+                            DONE, FB, INPUT, PALETTE, LR_W, LW, MSTATUS, PLIC, RAM, SC_W, VIRTIO, i_type, r_type)
 from tools.rv32_f_asm import arithmetic, flw, fsw
 from tools.rv32_rtl import floating_word, trap_records_by_region
 from tools.rv32_devices import (DIAG_EXPECTED_VALUES, EVENT_PRESS, EVENT_VALID, FB_SIZE, KEYS, QUEUE_SIZE, diag_checksum,
@@ -18,7 +18,7 @@ from tools.rv32_devices import (DIAG_EXPECTED_VALUES, EVENT_PRESS, EVENT_VALID, 
 from tools.rv32_image import (ImageError, check_a_build, check_image, check_listing, check_m_build, flatten, parse_elf,
                               to_hex_words)
 from tools.rv32_run_qemu import classify, qemu_command
-from tools import rv32_vendor_libc
+from tools import rv32_mkfs, rv32_vendor_libc
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -395,7 +395,7 @@ class QemuDriverTests(unittest.TestCase):
                                        "-kernel", "fw.elf"])
         self.assertIn("-no-reboot", command)
         self.assertNotIn("-no-shutdown", command)
-        self.assertEqual(command[command.index("-m") + 1], "8M")
+        self.assertEqual(command[command.index("-m") + 1], "16M")
         self.assertEqual(command[command.index("-monitor") + 1], "none")
         self.assertNotIn("-d", command)
         self.assertIn("-D", qemu_command("q", "fw.elf", log="q.log"))
@@ -455,7 +455,7 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertEqual(event_word(False, 31), EVENT_VALID | 31)
         self.assertEqual((key_code("left"), key_code("LEFT"), key_code("7"), key_code("31")), (1, 1, 7, 31))
         self.assertEqual(key_code("000000001"), 1, "nine digits is the most a number may have")
-        for bad in ("32", "-1", "shift", "", "0000000001", "٣"):  # ten digits; an Arabic-Indic three
+        for bad in ("32", "-1", "alt", "", "0000000001", "٣"):  # ten digits; an Arabic-Indic three
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     key_code(bad)
@@ -578,7 +578,9 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertEqual(dict(re.findall(r'\{"(\w+)", (\d+)\}', emulator)), expected, "rv32emu_core.c")
         self.assertEqual(dict(re.findall(r'\(u == "(\w+)"\) key_code = (\d+);', testbench)), expected, "rv32_tb.sv")
         window = (ROOT / "tools/rv32win.c").read_text()
-        host_names = {"RETURN": "ENTER"}  # SDL names the key by its keycap
+        # SDL names the key by its keycap; either Ctrl or Shift is one key (issue #35).
+        host_names = {"RETURN": "ENTER", "LCTRL": "CTRL", "RCTRL": "CTRL", "LSHIFT": "SHIFT", "RSHIFT": "SHIFT",
+                      **{str(d): f"DIGIT{d}" for d in range(1, 8)}}
         keymap = {host_names.get(name, name): code for name, code in re.findall(r"\{SDL_SCANCODE_(\w+), (\d+)\}", window)}
         self.assertEqual(keymap, expected, "rv32win.c")
         self.assertRegex(header, rf"#define RV32_INPUT_QUEUE\s+{QUEUE_SIZE}\b")
@@ -586,7 +588,7 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertRegex(header, rf"#define RV32_EVENT_PRESS\s+{EVENT_PRESS:#010x}\b")
         self.assertIn(f"32'h{EVENT_VALID:08x} | ((token2 == \"down\") ? 32'h{EVENT_PRESS:x} : 32'h0)".replace("8000_0000", "80000000"),
                       testbench.replace("8000_0000", "80000000"))
-        bases = {"RAM": RAM, "CONSOLE": CONSOLE, "DONE": DONE, "CLINT": CLINT, "PLIC": PLIC, "VIRTIO": VIRTIO, "BOOTROM": BOOTROM, "INPUT": INPUT, "DISPLAY": DISPLAY, "FB": FB,
+        bases = {"RAM": RAM, "CONSOLE": CONSOLE, "DONE": DONE, "CLINT": CLINT, "PLIC": PLIC, "VIRTIO": VIRTIO, "BOOTROM": BOOTROM, "INPUT": INPUT, "DISPLAY": DISPLAY, "PALETTE": PALETTE, "FB": FB,
                  "SIMD4": 0x11004000, "SIMD4_PROGRAM": 0x11005000, "SIMD4_DATA": 0x11006000, "GPU": 0x11007000,
                  "G3D": 0x11008000, "DMA_WINDOW": 0x1100A000}
         header_bases = {name: int(value, 16) for name, value in re.findall(r"#define RV32_(\w+)_BASE\s+0x([0-9a-fA-F]+)", header)}
@@ -606,7 +608,7 @@ class DeviceHelperTests(unittest.TestCase):
         from tools import rv32_dtb
         tree = {"RAM": rv32_dtb.RAM_BASE, "CONSOLE": rv32_dtb.CONSOLE_BASE, "DONE": rv32_dtb.DONE_BASE,
                 "CLINT": rv32_dtb.CLINT_BASE, "PLIC": rv32_dtb.PLIC_BASE, "VIRTIO": rv32_dtb.VIRTIO_BASE, "BOOTROM": rv32_dtb.ROM_BASE, "INPUT": rv32_dtb.INPUT_BASE,
-                "DISPLAY": rv32_dtb.DISPLAY_BASE, "FB": rv32_dtb.FB_BASE, "SIMD4": rv32_dtb.SIMD4_BASE,
+                "DISPLAY": rv32_dtb.DISPLAY_BASE, "PALETTE": rv32_dtb.PALETTE_BASE, "FB": rv32_dtb.FB_BASE, "SIMD4": rv32_dtb.SIMD4_BASE,
                 "SIMD4_PROGRAM": rv32_dtb.SIMD4_PROGRAM, "SIMD4_DATA": rv32_dtb.SIMD4_DATA,
                 "GPU": rv32_dtb.GPU_BASE, "G3D": rv32_dtb.G3D_BASE, "DMA_WINDOW": rv32_dtb.DMA_WINDOW_BASE}
         self.assertEqual(tree, bases, "rv32_dtb.py describes the same windows")
@@ -635,7 +637,7 @@ class DeviceHelperTests(unittest.TestCase):
         words = {name: int(value) for name, value in re.findall(r"parameter integer (\w+) = (\d+)", bus)}
         decoded = {}
         selects = re.findall(r"wire (\w+)_sel = (.*?);", bus, re.S)
-        self.assertEqual(len(selects), 15, "one select per window, plus none_sel")
+        self.assertEqual(len(selects), 16, "one select per window, plus none_sel")
         for select, expr in selects:
             if select == "none":
                 continue
@@ -698,7 +700,11 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertIn(f"rv32_plic #(.WIRED(32'h{wired >> 16:04x}_{wired & 0xffff:04x}))", (ROOT / "rtl/rv32/rv32_soc.v").read_text())
         self.assertEqual(evaluate("PLIC_WIRED"), wired, "rv32emu_core.h")
         self.assertEqual(evaluate("VIRTIO_DISK_SIZE"), rv32_asm.VIRTIO_DISK_SIZE)
-        self.assertIn(f"parameter integer DISK_WORDS = {rv32_asm.VIRTIO_DISK_SIZE // 4}", (ROOT / "rtl/rv32/rv32_soc.v").read_text())
+        self.assertEqual(evaluate("VIRTIO_DISK_MAX"), rv32_asm.VIRTIO_DISK_MAX)
+        self.assertEqual(rv32_mkfs.DISK_SIZE, rv32_asm.VIRTIO_DISK_SIZE)
+        self.assertEqual(rv32_mkfs.DISK_MAX, rv32_asm.VIRTIO_DISK_MAX)
+        self.assertIn(f"parameter integer DISK_WORDS = {rv32_asm.VIRTIO_DISK_MAX // 4}", (ROOT / "rtl/rv32/rv32_soc.v").read_text())
+        self.assertIn(f"integer disk_words = {rv32_asm.VIRTIO_DISK_SIZE // 4};", (ROOT / "tests/rv32_tb.sv").read_text())
         self.assertRegex(board, rf"#define RV32_PLIC_SOURCE_INPUT\s+{rv32_asm.PLIC_SOURCE_INPUT}\b")
         self.assertEqual(evaluate("PLIC_SOURCE_INPUT"), rv32_asm.PLIC_SOURCE_INPUT)
         self.assertEqual(rv32_dtb.INPUT_IRQ, rv32_asm.PLIC_SOURCE_INPUT)

@@ -3,7 +3,9 @@
 // virtio-blk (docs/rv32.md, "virtio-blk"; Track 2, O3): a block device in
 // virtio-mmio version 2's register layout at QEMU virt's first virtio slot,
 // with one split virtqueue and a disk held in DISK_WORDS words of memory
-// (the testbench loads and saves it). Word access only:
+// (the testbench loads and saves it). The disk in the drive may be smaller:
+// `disk_sectors` is its size, the capacity the device reports and checks
+// requests against (issue #35), clamped to the memory. Word access only:
 //
 //   +0x000 MagicValue "virt"   +0x004 Version 2      +0x008 DeviceID 2 (block)
 //   +0x00c VendorID            +0x010 DeviceFeatures (sel 1: bit 0, VERSION_1)
@@ -28,12 +30,13 @@
 // DMA address outside RAM, sets Status bit 6
 // (DEVICE_NEEDS_RESET) and stops. tools/rv32emu_core.c runs the same steps.
 module rv32_virtio_blk #(
-    parameter integer DISK_WORDS = 32768,   // 128 KiB: 256 sectors
-    parameter integer RAM_WORDS = 2097152,
+    parameter integer DISK_WORDS = 2097152, // 8 MiB: 16,384 sectors, the largest disk
+    parameter integer RAM_WORDS = 4194304,
     parameter [31:0] RAM_BASE = 32'h8000_0000
 ) (
     input  wire        clk,
     input  wire        reset,
+    input  wire [31:0] disk_sectors,  // the size of the disk in the drive
     // Register port.
     input  wire        valid,
     input  wire        we,
@@ -57,7 +60,17 @@ module rv32_virtio_blk #(
     localparam [31:0] MAGIC = 32'h7472_6976, VENDOR = 32'h594e_4954; // "virt", "TINY"
     localparam [31:0] QUEUE_MAX = 32'd8;
     localparam [31:0] RAM_BYTES = RAM_WORDS * 4;
-    localparam [31:0] SECTORS = DISK_WORDS / 128;
+    localparam [31:0] MAX_SECTORS = DISK_WORDS / 128;
+    wire [31:0] sectors = disk_sectors > MAX_SECTORS ? MAX_SECTORS : disk_sectors;
+`ifndef SYNTHESIS
+    // The clamp keeps a synthesized device safe; in simulation a disk larger than the memory, or a
+    // memory that is not whole sectors, is the testbench's mistake and stops the run.
+    initial if (DISK_WORDS >= 128 && DISK_WORDS % 128 != 0)
+        begin $display("rv32_virtio_blk: DISK_WORDS %0d is not whole 128-word sectors", DISK_WORDS); $stop; end
+    always @(posedge clk)
+        if (disk_sectors > MAX_SECTORS)
+            begin $display("rv32_virtio_blk: a disk of %0d sectors does not fit the %0d-sector memory", disk_sectors, MAX_SECTORS); $stop; end
+`endif
     localparam [3:0] IDLE = 4'd0, AVAIL_IDX = 4'd1, RING = 4'd2, DESC = 4'd3, HEADER = 4'd4, COPY = 4'd5,
                      STATUS = 4'd6, USED_ID = 4'd7, USED_LEN = 4'd8, USED_IDX = 4'd9, NEXT = 4'd10, FAIL = 4'd11;
 
@@ -112,7 +125,7 @@ module rv32_virtio_blk #(
             12'h0a0: value = device_lo;
             12'h0a4: value = device_hi;
             12'h0fc: value = 32'd0;
-            12'h100: value = SECTORS;
+            12'h100: value = sectors;
             12'h104: value = 32'd0;
             12'h014, 12'h020, 12'h024, 12'h030, 12'h038, 12'h050, 12'h064: known = we; // write-only
             default: known = 1'b0;
@@ -142,9 +155,9 @@ module rv32_virtio_blk #(
     wire [31:0] used_slot = device_lo + 32'd4 + {26'd0, (used_idx[2:0] & queue_mask), 3'd0};
     wire [31:0] desc_base = desc_lo + {12'd0, (which == 2'd0 ? head : next), 4'd0};
     wire [31:0] disk_index = sector * 32'd128 + copied;
-    localparam [38:0] DISK_LIMIT = {7'd0, DISK_WORDS[31:0]};
-    wire range_ok = sector_hi == 32'd0 && sector < SECTORS && data_len[1:0] == 2'd0 && data_addr[1:0] == 2'd0 &&
-                    ({sector, 7'd0} + {9'd0, data_len[31:2]}) <= DISK_LIMIT;
+    wire [38:0] disk_limit = {sectors, 7'd0};
+    wire range_ok = sector_hi == 32'd0 && sector < sectors && data_len[1:0] == 2'd0 && data_addr[1:0] == 2'd0 &&
+                    ({sector, 7'd0} + {9'd0, data_len[31:2]}) <= disk_limit;
 
     // Start a DMA access (and the state that consumes its answer).
     task access;

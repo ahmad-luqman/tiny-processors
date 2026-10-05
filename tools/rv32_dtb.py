@@ -60,6 +60,7 @@ CPU_INTC, PLIC_PHANDLE = 1, 2
 IRQ_MSI, IRQ_MTI, IRQ_MEI = 3, 7, 11
 INPUT_BASE = rv32_asm.INPUT
 DISPLAY_BASE = rv32_asm.DISPLAY
+PALETTE_BASE, PALETTE_SIZE = rv32_asm.PALETTE, rv32_asm.PALETTE_SIZE
 SIMD4_BASE, SIMD4_PROGRAM, SIMD4_DATA = rv32_asm.SIMD_BASE, rv32_asm.SIMD_PROGRAM, rv32_asm.SIMD_DATA
 GPU_BASE = rv32_asm.GPU_BASE
 G3D_BASE, G3D_SIZE = rv32_asm.G3D_BASE, rv32_asm.G3D_SIZE
@@ -135,7 +136,7 @@ MACHINE = node("", {
          device("console", CONSOLE_BASE, ("tiny-processors,console",), ((CONSOLE_BASE, 8),)),
          device("input", INPUT_BASE, ("tiny-processors,input",), ((INPUT_BASE, 16),),
                 {"interrupt-parent": u32(PLIC_PHANDLE), "interrupts": u32(INPUT_IRQ)}),
-         device("display", DISPLAY_BASE, ("tiny-processors,display",), ((DISPLAY_BASE, 16), (FB_BASE, FB_SIZE))),
+         device("display", DISPLAY_BASE, ("tiny-processors,display",), ((DISPLAY_BASE, 16), (FB_BASE, FB_SIZE), (PALETTE_BASE, PALETTE_SIZE))),
          device("simd4", SIMD4_BASE, ("tiny-processors,simd4",),
                 ((SIMD4_BASE, 32), (SIMD4_PROGRAM, 1024), (SIMD4_DATA, 1024))),
          device("gpu", GPU_BASE, ("tiny-processors,g1",), ((GPU_BASE, 128),)),

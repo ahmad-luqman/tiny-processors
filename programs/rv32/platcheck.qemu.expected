@@ -1,6 +1,6 @@
 platcheck: hart 0
 platcheck: model riscv-virtio,qemu
-platcheck: memory 80000000 00800000
+platcheck: memory 80000000 01000000
 platcheck: done 00100000
 platcheck: console 10000000
 platcheck: clint 02000000
@@ -12,4 +12,4 @@ platcheck: display absent
 platcheck: simd4 absent
 platcheck: g1 absent
 platcheck: g2 absent
-PASS 91659113
+PASS bee59113

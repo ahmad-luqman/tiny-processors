@@ -30,6 +30,9 @@ static const struct { SDL_Scancode scancode; int code; } KEYMAP[] = {
     {SDL_SCANCODE_SPACE, 5}, {SDL_SCANCODE_RETURN, 6}, {SDL_SCANCODE_ESCAPE, 7}, {SDL_SCANCODE_A, 8},
     {SDL_SCANCODE_D, 9}, {SDL_SCANCODE_W, 10}, {SDL_SCANCODE_S, 11}, {SDL_SCANCODE_P, 12},
     {SDL_SCANCODE_Q, 13}, {SDL_SCANCODE_R, 14},
+    /* Issue #35, for Doom: either Ctrl or Shift, Tab, Y, N and the digits 1 to 7. */
+    {SDL_SCANCODE_LCTRL, 15}, {SDL_SCANCODE_LSHIFT, 16}, {SDL_SCANCODE_TAB, 17}, {SDL_SCANCODE_Y, 18}, {SDL_SCANCODE_N, 19}, {SDL_SCANCODE_RCTRL, 15}, {SDL_SCANCODE_RSHIFT, 16},
+    {SDL_SCANCODE_1, 20}, {SDL_SCANCODE_2, 21}, {SDL_SCANCODE_3, 22}, {SDL_SCANCODE_4, 23}, {SDL_SCANCODE_5, 24}, {SDL_SCANCODE_6, 25}, {SDL_SCANCODE_7, 26},
 };
 
 static int scancode_to_key(SDL_Scancode scancode)
@@ -49,7 +52,8 @@ static void usage(void)
           "Runs FILE as rv32emu does, with no instruction limit unless --max-instructions, and shows\n"
           "each present in a window scaled by N (1..8, default 3),\n"
           "at most N presents per second (default 60; 0 runs unthrottled). Keys become the contract's\n"
-          "events at the next present: arrows, space, return, escape, A, D, W, S, P, Q, R. A scripted\n"
+          "events at the next present: arrows, space, return, escape, A, D, W, S, P, Q, R, and for\n"
+          "Doom Ctrl, Shift (either one), Tab, Y, N and 1 to 7. A scripted\n"
           "--input replays as on rv32emu; --record writes every event, typed or scripted, as a script\n"
           "that replays this session. Closing the window stops the run with halt=stopped.\n",
           stderr);
@@ -63,9 +67,17 @@ static int fail_sdl(const char *what)
     return EXIT_EMULATOR_ERROR;
 }
 
-/* Copy the framebuffer into the texture through the RGB332 table. */
-static bool upload_frame(SDL_Texture *texture, const uint8_t *fb, const uint32_t *lut)
+/* Copy the framebuffer into the texture through the palette as it is at this present (issue #35;
+ * RGB332 until the guest writes it). */
+static bool upload_frame(SDL_Texture *texture, const machine *m)
 {
+    uint32_t lut[PALETTE_ENTRIES];
+    for (unsigned p = 0; p < PALETTE_ENTRIES; p++) {
+        uint8_t rgb[3];
+        emu_palette_rgb(m, (uint8_t)p, rgb); /* as the PPM writer colours it */
+        lut[p] = 0xff000000u | (uint32_t)rgb[0] << 16 | (uint32_t)rgb[1] << 8 | rgb[2];
+    }
+    const uint8_t *fb = m->fb;
     void *pixels;
     int pitch;
     if (!SDL_LockTexture(texture, NULL, &pixels, &pitch)) {
@@ -164,12 +176,6 @@ int main(int argc, char **argv)
         !SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST) /* pixels stay square blocks */) {
         return fail_sdl("cannot set up the frame texture");
     }
-    uint32_t lut[256];
-    for (unsigned p = 0; p < 256; p++) {
-        uint8_t rgb[3];
-        emu_rgb332((uint8_t)p, rgb);
-        lut[p] = 0xff000000u | ((uint32_t)rgb[0] << 16) | ((uint32_t)rgb[1] << 8) | rgb[2];
-    }
     if (record_path) { /* opened before frame 0's events are delivered, so they are recorded too */
         m.record = emu_open_output(record_path, "record file");
         if (!m.record) {
@@ -189,6 +195,7 @@ int main(int argc, char **argv)
 
     uint32_t *pending = NULL; /* host keys polled since the last present; grows as needed */
     size_t pending_count = 0, pending_capacity = 0;
+    int held[32] = {0}; /* host keys held per contract key code */
     bool closing = false, render_ok = true;
     uint64_t period = fps ? 1000000000ull / fps : 0, next_frame = SDL_GetTicksNS();
     for (;;) {
@@ -201,7 +208,14 @@ int main(int argc, char **argv)
                 if (e.key.repeat || code < 0) { /* held keys are one press; unmapped keys do not exist */
                     continue;
                 }
-                uint32_t event = EVENT_VALID | (e.type == SDL_EVENT_KEY_DOWN ? EVENT_PRESS : 0u) | (uint32_t)code;
+                /* Two host keys share a code (either Ctrl, either Shift): the contract's key is
+                 * pressed with the first and released with the last, as one key would be. */
+                bool down = e.type == SDL_EVENT_KEY_DOWN;
+                held[code] += down ? 1 : (held[code] ? -1 : 0);
+                if (held[code] != (down ? 1 : 0)) {
+                    continue;
+                }
+                uint32_t event = EVENT_VALID | (down ? EVENT_PRESS : 0u) | (uint32_t)code;
                 if (pending_count == pending_capacity) {
                     pending_capacity = pending_capacity ? 2 * pending_capacity : 64;
                     pending = realloc(pending, pending_capacity * sizeof *pending);
@@ -231,7 +245,7 @@ int main(int argc, char **argv)
             emu_queue_event(&m, m.frames, pending[i]);
         }
         pending_count = 0;
-        if (!upload_frame(texture, m.fb, lut) || !SDL_RenderClear(renderer) ||
+        if (!upload_frame(texture, &m) || !SDL_RenderClear(renderer) ||
             !SDL_RenderTexture(renderer, texture, NULL, NULL) || !SDL_RenderPresent(renderer)) {
             fprintf(stderr, "rv32win: cannot draw the frame: %s\n", SDL_GetError());
             render_ok = false;

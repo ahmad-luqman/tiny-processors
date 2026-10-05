@@ -19,7 +19,7 @@ import tempfile
 import unittest
 
 from tools.rv32_asm import *  # noqa: F401,F403
-from tools.rv32_devices import FB_SIZE, diag_checksum, event_word, frame_hash, render_diag_frame
+from tools.rv32_devices import FB_SIZE, diag_checksum, event_word, frame_hash, power_on_palette, render_diag_frame, word_hash
 from tools.rv32_pong_native import EXPECTED as PONG_EXPECTED, INPUT as PONG_INPUT
 from tools.rv32_image import to_hex_words, write_hex
 from tools.rv32_rtl import (ROOT, Run, check_passed, compile_testbench, cycle_relation, diff_traces, has_value_changes,
@@ -614,6 +614,74 @@ class RtlTest(unittest.TestCase):
         self.assertGreater(outcomes["done"], 50, "most words execute and reach the done store")
         self.assertGreater(outcomes["double-fault"], 40, "the illegal ones and the jumps to nowhere trap")
 
+    def test_disk_size_is_the_files(self):
+        """Issue #35: a disk is any whole number of sectors up to DISK_WORDS; the capacity both
+        backends report is the file's, and the run gives back a disk of the same size. A disk that
+        is not whole sectors is refused before the run."""
+        words = LI(1, VIRTIO + 0x100) + [LW(10, 1, 0), LW(11, 1, 4)] + FINISH()
+        with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
+            hex_path, bin_path = write_image(words, directory, "image")
+            for size in (512, VIRTIO_DISK_SIZE, 0x100000):
+                with self.subTest(size=size):
+                    disks = {}
+                    for backend in ("emu", "rtl"):
+                        disks[backend] = Path(directory) / f"{backend}.disk"
+                        disks[backend].write_bytes(bytes(range(256)) * (size // 256))
+                    emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace", disk=disks["emu"])
+                    rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", disk=disks["rtl"], timeout=RTL_TIMEOUT)
+                    self.assertEqual((rtl.halt["halt"], rtl.halt["outcome"]), ("done", "pass"), rtl.stderr)
+                    self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
+                    self.assertEqual((registers(rtl.trace)[10], registers(rtl.trace).get(11, 0)), (size // 512, 0))
+                    self.assertEqual(disks["rtl"].read_bytes(), bytes(range(256)) * (size // 256))
+            odd = Path(directory) / "odd.disk"
+            odd.write_bytes(bytes(1000))
+            rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", disk=odd, timeout=RTL_TIMEOUT)
+            self.assertNotEqual(rtl.status, 0)
+            self.assertIn("whole sectors", rtl.stderr + rtl.noise)
+
+    def test_requests_are_bounded_by_the_disk_in_the_drive(self):
+        """Issue #35: on a 1 MiB disk (2,048 sectors) the last sector reads, the first past it is
+        IOERR, and a two-sector write from the last is IOERR and leaves the disk as it was, on both
+        backends trace for trace; neither bounds requests by the largest disk."""
+        ring = RAM + 0x3000
+        desc, avail, used, header, data, status = ring, ring + 0x100, ring + 0x200, ring + 0x300, ring + 0x400, ring + 0xc00
+        words = []
+
+        def put(address, value):
+            words.extend(LI(1, address) + LI(2, value) + [SW(2, 1, 0)])
+
+        for i, (address, length, flags) in enumerate(((header, 16, 1 | 1 << 16), (data, 512, 3 | 2 << 16), (status, 1, 2))):
+            put(desc + 16 * i, address)
+            put(desc + 16 * i + 8, length)
+            put(desc + 16 * i + 12, flags)
+        for offset, value in ((0x070, 0), (0x070, 1), (0x070, 3), (0x070, 11), (0x030, 0), (0x038, 8), (0x080, desc),
+                              (0x090, avail), (0x0A0, used), (0x044, 1), (0x070, 15)):
+            put(VIRTIO + offset, value)
+        requests = ((0, 2047, 512, 3, 3), (0, 2048, 512, 3, 4), (1, 2047, 1024, 1, 5))  # type, sector, length, flags, reg
+        for index, (kind, sector, length, flags, reg) in enumerate(requests):
+            put(header, kind)
+            put(header + 8, sector)
+            put(desc + 16 + 8, length)
+            put(desc + 16 + 12, flags | 2 << 16)
+            put(avail, (index + 1) << 16)                  # ring[index] stays 0: descriptor 0
+            put(VIRTIO + 0x050, 0)                         # served before the store retires
+            words += LI(1, status) + [LBU(reg, 1, 0)]
+        words += LI(1, data) + [LW(6, 1, 0)] + FINISH()
+        image = bytes(range(256)) * (0x100000 // 256)
+        with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
+            hex_path, bin_path = write_image(words, directory, "image")
+            disks = {name: Path(directory) / f"{name}.disk" for name in ("emu", "rtl")}
+            for disk in disks.values():
+                disk.write_bytes(image)
+            emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace", disk=disks["emu"])
+            rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", disk=disks["rtl"], timeout=RTL_TIMEOUT)
+            self.assertEqual((rtl.halt["halt"], rtl.halt["outcome"]), ("done", "pass"), rtl.stderr)
+            self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
+            values = registers(rtl.trace)
+            self.assertEqual((values[3], values[4], values[5]), (0, 1, 1), "OK, then IOERR past the end and across it")
+            self.assertEqual(values[6], int.from_bytes(image[2047 * 512:2047 * 512 + 4], "little"))
+            self.assertEqual((disks["emu"].read_bytes(), disks["rtl"].read_bytes()), (image, image), "nothing written")
+
     def test_memory_and_target_faults(self):
         cases = [
             ("load outside the map", LI(1, UNMAPPED) + [LW(2, 1, 0)], 5, UNMAPPED),
@@ -627,7 +695,7 @@ class RtlTest(unittest.TestCase):
             ("load from the done register", LI(1, DONE) + [LW(2, 1, 0)], 5, DONE),
             ("byte store to the done register", LI(1, DONE) + [SB(1, 1, 0)], 7, DONE),
             ("word store past the done register", LI(1, DONE) + [SW(1, 1, 4)], 7, DONE + 4),
-            ("store past the end of RAM", LI(1, RAM + 0x800000) + [SW(1, 1, 0)], 7, RAM + 0x800000),
+            ("store past the end of RAM", LI(1, RAM + 0x1000000) + [SW(1, 1, 0)], 7, RAM + 0x1000000),
             ("misaligned halfword load", LI(1, RAM + 0x201) + [LH(2, 1, 0)], 4, RAM + 0x201),
             ("misaligned halfword store", LI(1, RAM + 0x203) + [SH(1, 1, 0)], 6, RAM + 0x203),
             ("halfword load of the console status", LI(1, CONSOLE) + [LHU(2, 1, 4)], 5, CONSOLE + 4),
@@ -660,9 +728,12 @@ class RtlTest(unittest.TestCase):
             ("read of an unimplemented input offset", LI(1, INPUT) + [LW(2, 1, 12)], 5, INPUT + 12),
             ("misaligned load inside a device window", LI(1, MTIME + 2) + [LW(2, 1, 0)], 4, MTIME + 2),
             ("aligned halfword inside a device window", LI(1, MTIME + 2) + [LHU(2, 1, 0)], 5, MTIME + 2),
-            ("load from the palette window reserved for M6", LI(1, 0x11003000) + [LW(2, 1, 0)], 5, 0x11003000),
-            ("store to the palette window reserved for M6", LI(1, 0x11003000) + [SW(1, 1, 0)], 7, 0x11003000),
-            ("fetch from the first word past RAM", LI(1, RAM + 0x800000) + [JALR(0, 1, 0)], 1, RAM + 0x800000),
+            ("load past the palette's 1 KiB (issue #35)", LI(1, 0x11003400) + [LW(2, 1, 0)], 5, 0x11003400),
+            ("store past the palette's 1 KiB", LI(1, 0x11003400) + [SW(1, 1, 0)], 7, 0x11003400),
+            ("byte load from the palette, which takes words", LI(1, PALETTE + 5) + [LBU(2, 1, 0)], 5, PALETTE + 5),
+            ("halfword store to the palette", LI(1, PALETTE + 2) + [SH(1, 1, 0)], 7, PALETTE + 2),
+            ("fetch from the palette", LI(1, PALETTE) + [JALR(0, 1, 0)], 1, PALETTE),
+            ("fetch from the first word past RAM", LI(1, RAM + 0x1000000) + [JALR(0, 1, 0)], 1, RAM + 0x1000000),
         ]
         for name, words, cause, value in cases:
             with self.subTest(name=name):
@@ -672,12 +743,12 @@ class RtlTest(unittest.TestCase):
                 self.assertEqual(len(rtl.trace), len(words) + 2 if cause == 1 else len(words) + 1)
                 self.assertNotIn("]<-", rtl.trace[-2], "a faulting store writes nothing")
         # The last RAM word, halfword, and byte are inside the map, for stores and loads.
-        words = LI(1, RAM + 0x7FFFFC) + [SW(1, 1, 0), LW(2, 1, 0), SH(1, 1, 2), SB(1, 1, 3), LHU(3, 1, 2), LBU(4, 1, 3)] + FINISH()
+        words = LI(1, RAM + 0xFFFFFC) + [SW(1, 1, 0), LW(2, 1, 0), SH(1, 1, 2), SB(1, 1, 3), LHU(3, 1, 2), LBU(4, 1, 3)] + FINISH()
         emulator, rtl = self.assert_same_pass(words, stall=0)
-        self.assertEqual(effects(rtl.trace[3]), "x2=807ffffc mem[807ffffc]->807ffffc/4")
+        self.assertEqual(effects(rtl.trace[3]), "x2=80fffffc mem[80fffffc]->80fffffc/4")
         self.assertEqual([effects(line) for line in rtl.trace[4:8]],
-                         ["mem[807ffffe]<-0000fffc/2", "mem[807fffff]<-000000fc/1",
-                          "x3=0000fcfc mem[807ffffe]->0000fcfc/2", "x4=000000fc mem[807fffff]->000000fc/1"])
+                         ["mem[80fffffe]<-0000fffc/2", "mem[80ffffff]<-000000fc/1",
+                          "x3=0000fcfc mem[80fffffe]->0000fcfc/2", "x4=000000fc mem[80ffffff]->000000fc/1"])
 
     def test_console_bytes_and_done_words(self):
         say = LI(1, CONSOLE)
@@ -790,6 +861,18 @@ class RtlTest(unittest.TestCase):
                 x = registers(rtl.trace)
                 self.assertEqual((x[7], x[8], x[14], x[15], x[21], x[22]), (1, 1, 5, 5, 0, 0))
 
+    def test_palette(self):
+        """Issue #35: the palette's power-on words are RGB332's on the RTL too (all 256 hashed), a
+        word write keeps its low 24 bits, and every access agrees with the emulator trace for trace."""
+        words = LI(1, PALETTE) + LI(10, 5381)
+        for i in range(256):
+            words += [LW(11, 1, 4 * i), SLLI(12, 10, 5), ADD(10, 10, 12), XOR(10, 10, 11)]
+        words += LI(4, 0xAB123456) + [SW(4, 1, 4 * 5), LW(5, 1, 4 * 5), LW(6, 1, 4 * 6), SW(4, 1, 1020), LW(7, 1, 1020)]
+        emulator, rtl = self.assert_same_pass(words + FINISH(), stall=1)
+        values = registers(rtl.trace)
+        self.assertEqual(values[10], word_hash(power_on_palette()))
+        self.assertEqual((values[5], values[6], values[7]), (0x123456, power_on_palette()[6], 0x123456))
+
     def test_display_and_framebuffer(self):
         """WIDTH and HEIGHT, byte/halfword/word stores into the framebuffer and reads back, two
         presents with FRAMES read between them. Both backends write the same checkpoint lines, and
@@ -832,6 +915,21 @@ class RtlTest(unittest.TestCase):
         self.assertEqual((rtl.checkpoints, emulator.checkpoints), ([f"frame 1 {frame_hash(bytes(FB_SIZE)):08x}"],) * 2)
         emulator, rtl = self.assert_same_pass(FINISH(), stall=0, checkpoints=True)
         self.assertEqual((rtl.checkpoints, emulator.checkpoints), ([], []))
+
+    def test_every_key_name_parses_alike(self):
+        """Issue #35 added keys 15 to 26 for Doom: every board.h name, in any case, gives the same
+        event on both backends, so a script written by name means one thing everywhere."""
+        from tools.rv32_devices import KEYS
+        names = sorted(KEYS, key=KEYS.get)
+        self.assertEqual([KEYS[n] for n in names], list(range(1, 27)))
+        script = "".join(f"frame 0 down {name.lower() if i % 2 else name}\n" for i, name in enumerate(names[:16]))
+        script += "".join(f"frame 1 down {name}\n" for name in names[16:])
+        words = LI(1, INPUT) + LI(2, DISPLAY)
+        words += [LW(3 + i % 2, 1, 0) for i in range(16)] + [SW(0, 2, 0)] + [LW(5, 1, 0) for _ in names[16:]] + [LW(6, 1, 8)]
+        emulator, rtl = self.assert_same_pass(words + FINISH(), input_script=script)
+        events = [int(m, 16) for m in re.findall(rf"mem\[{INPUT:08x}\]->([0-9a-f]{{8}})", "\n".join(rtl.trace))]
+        self.assertEqual(events, [event_word(True, KEYS[n]) for n in names])
+        self.assertEqual(registers(rtl.trace)[6], sum(1 << KEYS[n] for n in names))
 
     def test_input_events_arrive_at_frames(self):
         """A script's events are readable after the present that reaches their frame (frame 0 from
@@ -946,6 +1044,19 @@ class RtlTest(unittest.TestCase):
                 self.assertEqual(rtl.halt["stalls"], stall * rtl.halt["transfers"] + 2 * 3, "two extra stalls per byte")
         emulator, rtl = self.assert_same_pass(say + FINISH(), stall=0)
         self.assertEqual(rtl.halt["stalls"], 0, "the default console never waits")
+
+    def test_a_reset_leaves_the_palette(self):
+        """Issue #35: the palette, like the framebuffer, keeps what was written across a +reset-at
+        reset; only power-on fills it with RGB332 (the emulator has no warm reset)."""
+        words = LI(1, PALETTE) + [LW(2, 1, 20)] + LI(3, 0x123456) + [SW(3, 1, 20)] + [ADDI(4, 4, 1)] * 100 + FINISH()
+        emulator, rtl = self.run_both(words, stall=0, reset_at=200)
+        self.assertEqual((rtl.halt["halt"], rtl.halt["outcome"]), ("done", "pass"), rtl.stderr)
+        restarts = [i for i, line in enumerate(rtl.trace) if line.split()[1] == f"{RAM:08x}"]
+        self.assertEqual(len(restarts), 2, "the machine restarted once")
+        first, second = rtl.trace[restarts[0]:restarts[1]], rtl.trace[restarts[1]:]
+        index = next(i for i, line in enumerate(first) if f"mem[{PALETTE + 20:08x}]->" in line)
+        self.assertEqual(effects(first[index]), f"x2={power_on_palette()[5]:08x} mem[{PALETTE + 20:08x}]->{power_on_palette()[5]:08x}/4")
+        self.assertEqual(effects(second[index]), f"x2=00123456 mem[{PALETTE + 20:08x}]->00123456/4", "the write survived the reset")
 
     def test_reset_during_a_held_store(self):
         """+reset-at=N resets the machine while a store is being held: it never lands, the timer,

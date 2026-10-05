@@ -15,7 +15,7 @@ tiers are safe to run in parallel.
 | `make -j8 test-rv32-full` | Both | Before merging, or nightly |
 
 `test-rv32-full` ran exactly the 123 checks the single `test-rv32` ran before
-issue #26 (issue #33 added the float and mandel sessions since), with one exception. `test-rv32-3d` used to run four test files in
+issue #26 (issue #33 added the float and mandel sessions since, and issue #35 the diskprog session on QEMU, the emulator and Verilator, 22 s on Verilator), with one exception. `test-rv32-3d` used to run four test files in
 one process. The aggregate now runs them as two targets:
 
 - `test-rv32-3d-model` (in `test-rv32`) runs the oracle, the C reference and the
@@ -92,6 +92,8 @@ datapath](fp32.md#narrow-datapath-2026-10-03) the picture takes 43.7 M cycles
 and under a minute, so it runs in `test-rv32` beside the float session
 (`run-rv32-float-rtl-verilator`, 31.2 M cycles), and its 100 M cycle budget
 fails a slower FPU.
+
+With issue #35's platform PR (16 MiB RAM, the diskprog session, the palette and key tests) `make -j8 test-rv32` took 5 min 5 s and 5 min 19 s on two runs on the same Mac, against #26's 284 s; the added Verilator runs account for most of it, and every Icarus run starts about 3.7 s later, zero-filling 16 MiB of RAM.
 
 The OS sessions never ran on Icarus in the aggregate; `run-rv32-os-rtl` is a
 manual target.

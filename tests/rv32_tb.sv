@@ -8,7 +8,7 @@
 // trace contract. Contract for its plusargs, counters, and halt line:
 // docs/rv32-rtl.md.
 module rv32_tb;
-    parameter integer RAM_WORDS = 2097152; // the contract's 8 MiB
+    parameter integer RAM_WORDS = 4194304; // the contract's 16 MiB
     parameter integer CONSOLE_BUSY = 0;    // cycles the console waits before each byte
     parameter integer FB_WORDS = 19200;    // 320 x 240 one-byte pixels, as 32-bit words
     localparam integer STDERR = 32'h8000_0002;
@@ -167,6 +167,9 @@ module rv32_tb;
     reg [31:0] done_word;
 
     string disk_path, disk_out_path; // +disk=, +disk-out=: the virtio-blk disk as hex words (O3)
+    integer disk_words = 32768;       // the disk's size (issue #35): +disk's word count, else 128 KiB
+    reg has_disk;
+    wire [31:0] disk_sectors = disk_words / 128;
     string image_path, trace_path, wave_path, console_path, checkpoints_path, input_path, text;
     integer trace_fd = 0, console_fd = 0, checkpoints_fd = 0;
     integer image_words = 0;
@@ -314,7 +317,7 @@ module rv32_tb;
                         events - next_event, event_frame[next_event]);
             if (trace_fd != 0) $fclose(trace_fd);
             if (console_fd != 0) $fclose(console_fd);
-            if (disk_out_path != "") $writememh(disk_out_path, dut.virtio.disk);
+            if (disk_out_path != "") $writememh(disk_out_path, dut.virtio.disk, 0, disk_words - 1);
             if (checkpoints_fd != 0) $fclose(checkpoints_fd);
             finished = 1;
             // The script and the program disagreed: the guest's pass says nothing about the events it
@@ -567,6 +570,18 @@ module rv32_tb;
             else if (u == "P") key_code = 12;
             else if (u == "Q") key_code = 13;
             else if (u == "R") key_code = 14;
+            else if (u == "CTRL") key_code = 15;
+            else if (u == "SHIFT") key_code = 16;
+            else if (u == "TAB") key_code = 17;
+            else if (u == "Y") key_code = 18;
+            else if (u == "N") key_code = 19;
+            else if (u == "DIGIT1") key_code = 20;
+            else if (u == "DIGIT2") key_code = 21;
+            else if (u == "DIGIT3") key_code = 22;
+            else if (u == "DIGIT4") key_code = 23;
+            else if (u == "DIGIT5") key_code = 24;
+            else if (u == "DIGIT6") key_code = 25;
+            else if (u == "DIGIT7") key_code = 26;
             else if (value >= 0 && value < 32) key_code = value;
             else key_code = -1;
         end
@@ -727,15 +742,19 @@ module rv32_tb;
             dut.accelerator.data_mem[i] = 0;
         end
         $readmemh(image_path, dut.ram.mem, 0, image_words - 1);
-        // The disk: zero unless +disk gives its words (exactly DISK_WORDS of them, as the emulator
-        // requires a disk file of exactly its size); it survives a +reset-at reset, as a disk would.
-        for (i = 0; i < dut.DISK_WORDS; i = i + 1)
-            dut.virtio.disk[i] = 32'd0;
-        if ($value$plusargs("disk=%s", disk_path)) begin
-            if (count_words(disk_path) != dut.DISK_WORDS)
-                $fatal(1, "Disk %0s must hold %0d words", disk_path, dut.DISK_WORDS);
-            $readmemh(disk_path, dut.virtio.disk);
+        // The disk: +disk gives its words, whole 512-byte sectors and at most DISK_WORDS of them, as
+        // the emulator requires of a disk file (issue #35); without it, 128 KiB of zeros. Only the
+        // disk's own words are cleared, loaded and saved. It survives a +reset-at reset, as a disk would.
+        has_disk = $value$plusargs("disk=%s", disk_path);
+        if (has_disk) begin
+            disk_words = count_words(disk_path);
+            if (disk_words == 0 || disk_words % 128 != 0 || disk_words > dut.DISK_WORDS)
+                $fatal(1, "Disk %0s holds %0d words; it must hold whole sectors of 128 words, at most %0d words",
+                       disk_path, disk_words, dut.DISK_WORDS);
         end
+        for (i = 0; i < disk_words; i = i + 1)
+            dut.virtio.disk[i] = 32'd0;
+        if (has_disk) $readmemh(disk_path, dut.virtio.disk, 0, disk_words - 1);
         if (!$value$plusargs("disk-out=%s", disk_out_path)) disk_out_path = "";
         repeat (2) @(posedge clk);
         #1 reset = 0;
