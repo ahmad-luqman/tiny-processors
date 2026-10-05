@@ -8,6 +8,7 @@ QEMU's own diagnostics stay on stderr.
 """
 
 import argparse
+import bisect
 import io
 import os
 from collections import namedtuple
@@ -81,21 +82,34 @@ class PromptCounter:
             self.seen += self.tail == self.prompt
 
 
+PROMPT_MAX = 64  # bytes: the emulator's --console-prompt and the testbench's +console-prompt-hex allow 1 to 64
+
+
 def run_gated(command, timeout, stdin, prompt):
     """Like run(), but the guest receives line k of `stdin` only once it has printed `prompt` k times
     (issue #36), so a shell sees each command when it is waiting for one, as the emulator's
-    --console-prompt and the testbench's +console-prompt-hex arrange. Output is read as it comes;
-    QEMU's stdin stays open. Returns a GatedRun, which says how many lines were fed."""
+    --console-prompt and the testbench's +console-prompt-hex arrange. Output is read and input
+    written as the pipes allow, in one select loop, so the timeout holds even when the guest stops
+    reading; QEMU's stdin stays open. Returns a GatedRun; a line counts as fed once its last byte
+    is written."""
     lines = input_lines(Path(stdin).read_bytes())
+    ends = [sum(len(line) for line in lines[:k + 1]) for k in range(len(lines))]  # byte offsets past each line
     prompts = PromptCounter(prompt.encode())
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    out, err, fed, closed = bytearray(), bytearray(), 0, False
+    out, err, pending, released, written, closed = bytearray(), bytearray(), bytearray(), 0, 0, False
+    inp = process.stdin.fileno()
+    os.set_blocking(inp, False)
+    fed = lambda: bisect.bisect_right(ends, written)  # noqa: E731
     try:
         deadline = time.monotonic() + timeout
         streams = {process.stdout.fileno(): out, process.stderr.fileno(): err}
         while streams and (left := deadline - time.monotonic()) > 0:
-            ready, _, _ = select.select(list(streams), [], [], min(left, 0.5))
-            for fd in ready:
+            while released < len(lines) and prompts.seen > released:
+                pending += lines[released]
+                released += 1
+            wanted = [inp] if pending and not closed else []
+            readable, writable, _ = select.select(list(streams), wanted, [], min(left, 0.5))
+            for fd in readable:
                 chunk = os.read(fd, 65536)
                 if not chunk:
                     del streams[fd]
@@ -103,19 +117,21 @@ def run_gated(command, timeout, stdin, prompt):
                 streams[fd].extend(chunk)
                 if fd == process.stdout.fileno():
                     prompts.feed(chunk)
-            while not closed and fed < len(lines) and prompts.seen > fed:
+            if writable:
                 try:
-                    process.stdin.write(lines[fed])
-                    process.stdin.flush()
-                    fed += 1
+                    count = os.write(inp, pending)
+                    del pending[:count]
+                    written += count
+                except BlockingIOError:
+                    pass
                 except BrokenPipeError:  # QEMU has gone; classify_status says which line it missed
                     closed = True
         if streams:
-            return GatedRun(None, decode(out), decode(err), True, fed, len(lines))
+            return GatedRun(None, decode(out), decode(err), True, fed(), len(lines))
         status = process.wait(timeout=max(1.0, deadline - time.monotonic()))
-        return GatedRun(status, decode(out), decode(err), False, fed, len(lines))
+        return GatedRun(status, decode(out), decode(err), False, fed(), len(lines))
     except subprocess.TimeoutExpired:
-        return GatedRun(None, decode(out), decode(err), True, fed, len(lines))
+        return GatedRun(None, decode(out), decode(err), True, fed(), len(lines))
     finally:
         if process.poll() is None:  # a timeout, an interrupt or an error: never leave QEMU running
             process.kill()
@@ -188,6 +204,8 @@ def main():
     args = parser.parse_args()
     if args.prompt is not None and args.stdin is None:
         parser.error("--prompt gates --stdin, which is missing")
+    if args.prompt is not None and not 1 <= len(args.prompt.encode()) <= PROMPT_MAX:
+        parser.error(f"--prompt must be 1 to {PROMPT_MAX} bytes, as on the emulator and the testbench")
     command = qemu_command(args.qemu, args.elf, cpu=args.cpu, memory=args.memory, log=args.qemu_log, drive=args.drive,
                            icount=args.icount)
     fed = lines = None

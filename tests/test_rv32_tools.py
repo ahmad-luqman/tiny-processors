@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -1022,6 +1023,28 @@ class GatedQemuRunnerTests(unittest.TestCase):
         self.assertEqual((run.status, run.fed, run.lines), (0, 1, 3), "one prompt, one line")
         outcome = classify_status(run.status, run.stdout, run.timed_out, run.fed, run.lines)
         self.assertFalse(outcome.ok, "exit 0 is not a pass while input is unfed")
+
+    def test_a_guest_that_stops_reading_still_times_out(self):
+        """Codex P2 on PR #45: a released line longer than the pipe holds, sent to a guest that never
+        reads, must not block the feeder past its timeout."""
+        stalls = "import sys, time\nsys.stdout.write(sys.argv[1]); sys.stdout.flush()\ntime.sleep(30)"
+        started = time.monotonic()
+        run = self.gated(b"x" * (1 << 20) + b"\n", "> ", 1, timeout=1, script=stalls)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual((run.timed_out, run.fed, run.lines), (True, 0, 1), "a line half written is not fed")
+
+    def test_the_prompt_is_one_to_sixty_four_bytes(self):
+        """Codex P2 on PR #45: --prompt has the emulator's and the testbench's limits."""
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "in"
+            source.write_bytes(b"x\n")
+            for prompt in ("", "y" * 65):
+                with self.subTest(length=len(prompt)):
+                    completed = subprocess.run([sys.executable, str(ROOT / "tools" / "rv32_run_qemu.py"), "image",
+                                                "--stdin", str(source), "--prompt", prompt],
+                                               capture_output=True, text=True)
+                    self.assertEqual(completed.returncode, 2)
+                    self.assertIn("1 to 64 bytes", completed.stderr)
 
     def test_status_only_verdicts(self):
         self.assertTrue(classify_status(0, "a\r\nb\r\n", False, 2, 2).ok)
