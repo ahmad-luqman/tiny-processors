@@ -1949,6 +1949,36 @@ test-rv32: $(foreach a,$(RV32_OS_APPS),run-rv32-$(a)-qemu run-rv32-$(a)-emu run-
 test-rv32: run-rv32-doom-qemu run-rv32-doom-emu run-rv32-doomkeys-emu run-rv32-doomafter-emu check-rv32-doom-window
 test-rv32-slow: run-rv32-doom35-rtl-verilator
 
+# Issue #36: Linux without an MMU (docs/rv32-linux.md). tools/rv32_linux.py builds the image in
+# Docker (7 minutes from a filled download cache) into the git-ignored third_party/linux/ and holds it to a
+# pinned SHA-256; the targets below need it, and build it if it is missing or stale. The session's
+# lines reach the shell one at a time, each once the prompt is printed (--console-prompt and
+# --prompt), so the transcript reads as typed. QEMU's transcript is pinned on its own: a few lines
+# name QEMU's CPU (docs/rv32-linux.md lists them).
+.PHONY: rv32-linux-image check-rv32-linux-image run-rv32-linux-qemu run-rv32-linux-emu run-rv32-linux-rtl-verilator test-rv32-linux
+RV32_LINUX := programs/rv32/linux
+RV32_LINUX_IMAGE := third_party/linux/Image
+RV32_LINUX_ARGS = --image $(RV32_LINUX_IMAGE) --console-input $(RV32_LINUX)/linux.session --console-prompt '/ \# ' \
+	--compare outputs --ticks steps --allow-traps --limit 200000000 --timeout 3600 \
+	--expect-console-file $(RV32_LINUX)/linux.session.expected
+rv32-linux-image:
+	$(PYTHON) tools/rv32_linux.py --build
+check-rv32-linux-image:
+	$(PYTHON) tools/rv32_linux.py --check
+run-rv32-linux-qemu: rv32-linux-image | build/rv32
+	mkdir -p build/rv32/linux
+	$(PYTHON) tools/rv32_run_qemu.py $(RV32_LINUX_IMAGE) --qemu $(QEMU_RV32) --cpu rv32,mmu=false --icount 3 \
+		--stdin $(RV32_LINUX)/linux.session --prompt '/ # ' --status-only --timeout 300 --transcript build/rv32/linux/qemu.transcript
+	diff -u $(RV32_LINUX)/linux.session.qemu.expected build/rv32/linux/qemu.transcript
+run-rv32-linux-emu: rv32-linux-image $(RV32EMU)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_LINUX_ARGS) --backend emulator --emulator $(RV32EMU) --out build/rv32/linux/emu
+# 345 M cycles: about five minutes.
+run-rv32-linux-rtl-verilator: rv32-linux-image $(RV32EMU) $(RV32_TB_VERILATOR)
+	$(PYTHON) -m tools.rv32_rtl $(RV32_LINUX_ARGS) --emulator $(RV32EMU) --simulator $(RV32_TB_VERILATOR) --stall 1 \
+		--max-cycles 1000000000 --rtl-timeout 7200 --out build/rv32/linux/verilator
+test-rv32-linux: run-rv32-linux-qemu run-rv32-linux-emu
+test-rv32-slow: test-rv32-linux run-rv32-linux-rtl-verilator
+
 # O3: storage. virtiocheck drives the virtio-blk device directly on QEMU virt (a 128 KiB drive on
 # virtio-mmio-bus.0), the emulator (--disk) and the RTL (+disk); the runner compares the disks the
 # backends leave. The kernel's file system (tfs) comes from tools/rv32_mkfs.py.

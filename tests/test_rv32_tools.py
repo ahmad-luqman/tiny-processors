@@ -626,6 +626,29 @@ class DeviceHelperTests(unittest.TestCase):
                          "rv32_soc.v's memories and the core's reset a1 use the bus's bases")
         self.assertIn("rv32 #(.BOOT_A1(BOOTROM_BASE)) core (", machine)
 
+    def test_linux_tree_names_the_contract_addresses(self):
+        """Issue #36: Linux's built-in tree is built from the same addresses as the boot ROM's, names
+        only devices every backend has, and leaves the boot ROM's tree alone."""
+        from tools import rv32_asm, rv32_dtb
+        tree = rv32_dtb.parse(rv32_dtb.build(rv32_dtb.LINUX))
+        soc = tree.child("soc")
+        reg = lambda n: rv32_dtb.cells(n.props["reg"])  # noqa: E731
+        self.assertEqual(reg(tree.child(f"memory@{rv32_asm.RAM:x}")), [rv32_asm.RAM, rv32_asm.RAM_SIZE])
+        self.assertEqual({n.name: reg(n)[0] for n in soc.children},
+                         {f"test@{rv32_asm.DONE:x}": rv32_asm.DONE, f"clint@{rv32_asm.CLINT:x}": rv32_asm.CLINT,
+                          f"serial@{rv32_asm.CONSOLE:x}": rv32_asm.CONSOLE})
+        serial = soc.child(f"serial@{rv32_asm.CONSOLE:x}")
+        self.assertEqual(rv32_dtb.strings_of(serial.props["compatible"]), ["ns16550a"])
+        self.assertNotIn("interrupts", serial.props, "polled: our console raises no interrupt")
+        cpus = tree.child("cpus")
+        self.assertEqual(rv32_dtb.cells(cpus.props["timebase-frequency"]), [10_000_000])
+        cpu = cpus.child("cpu@0")
+        self.assertEqual(rv32_dtb.strings_of(cpu.props["riscv,isa-extensions"]), ["i", "m", "a", "zicsr", "zicntr", "zifencei"])
+        poweroff = tree.child("poweroff")
+        self.assertEqual(rv32_dtb.cells(poweroff.props["regmap"]), rv32_dtb.cells(soc.child(f"test@{rv32_asm.DONE:x}").props["phandle"]))
+        self.assertEqual(rv32_dtb.cells(poweroff.props["value"]), [0x5555])
+        self.assertEqual(rv32_dtb.main(["--check"]), 0, "the boot ROM's tree is unchanged")
+
     def test_window_bases_and_sizes_agree_everywhere(self):
         """Review on PR #18: the map check proves our windows avoid virt's using the device tree's
         sizes, so every other copy of a window must have the same base and size: the bus decoder's

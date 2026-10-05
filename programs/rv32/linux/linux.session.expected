@@ -1,0 +1,91 @@
+Linux version 6.12.27 (buildroot@buildroot) (riscv32-buildroot-linux-uclibc-gcc.br_real (Buildroot 2025.02.18) 13.4.0, GNU ld (GNU Binutils) 2.43.1) #1 Wed Oct  1 00:00:00 UTC 2025
+Machine model: tiny-processors RV32 machine
+earlycon: uart8250 at MMIO 0x10000000 (options '')
+printk: legacy bootconsole [uart8250] enabled
+OF: reserved mem: Reserved memory: No reserved-memory node in the DT
+Zone ranges:
+  Normal   [mem 0x0000000080000000-0x0000000080ffffff]
+Movable zone start for each node
+Early memory node ranges
+  node   0: [mem 0x0000000080000000-0x0000000080ffffff]
+Initmem setup node 0 [mem 0x0000000080000000-0x0000000080ffffff]
+riscv: base ISA extensions aim
+riscv: ELF capabilities aim
+Kernel command line: earlycon=uart8250,mmio,0x10000000 console=ttyS0
+Dentry cache hash table entries: 2048 (order: 1, 8192 bytes, linear)
+Inode-cache hash table entries: 1024 (order: 0, 4096 bytes, linear)
+Built 1 zonelists, mobility grouping on.  Total pages: 4096
+mem auto-init: stack:all(zero), heap alloc:off, heap free:off
+SLUB: HWalign=64, Order=0-1, MinObjects=0, CPUs=1, Nodes=1
+NR_IRQS: 64, nr_irqs: 64, preallocated irqs: 0
+riscv-intc: 32 local interrupts mapped
+clint: clint@2000000: timer running at 10000000 Hz
+clocksource: clint_clocksource: mask: 0xffffffffffffffff max_cycles: 0x24e6a1710, max_idle_ns: 440795202120 ns
+sched_clock: 64 bits at 10MHz, resolution 100ns, wraps every 4398046511100ns
+Calibrating delay loop (skipped), value calculated using timer frequency.. 20.00 BogoMIPS (lpj=100000)
+pid_max: default: 32768 minimum: 301
+Mount-cache hash table entries: 1024 (order: 0, 4096 bytes, linear)
+Mountpoint-cache hash table entries: 1024 (order: 0, 4096 bytes, linear)
+Memory: 13260K/16384K available (1212K kernel code, 445K rwdata, 140K rodata, 785K init, 163K bss, 2936K reserved, 0K cma-reserved)
+devtmpfs: initialized
+clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 19112604462750000 ns
+futex hash table entries: 256 (order: -1, 3072 bytes, linear)
+clocksource: Switched to clocksource clint_clocksource
+workingset: timestamp_bits=30 max_order=12 bucket_order=0
+Serial: 8250/16550 driver, 1 ports, IRQ sharing disabled
+of_serial 10000000.serial: error -6: IRQ index 0 not found
+printk: legacy console [ttyS0] disabled
+10000000.serial: ttyS0 at MMIO 0x10000000 (irq = 0, base_baud = 230400) is a 16550A
+printk: legacy console [ttyS0] enabled
+printk: legacy console [ttyS0] enabled
+printk: legacy bootconsole [uart8250] disabled
+printk: legacy bootconsole [uart8250] disabled
+clk: Disabling unused clocks
+Freeing unused kernel image (initmem) memory: 780K
+This architecture does not have kernel memory protection.
+Run /init as init process
+init started: BusyBox v1.37.0 ()
+starting pid 16, tty '': '/bin/mount -t proc proc /proc'
+starting pid 17, tty '': '/bin/echo "tiny-processors linux: up"'
+tiny-processors linux: up
+starting pid 18, tty '/dev/ttyS0': '-/bin/sh'
+
+
+BusyBox v1.37.0 () hush - the humble shell
+Enter 'help' for a list of built-in commands.
+
+/ # uname -a
+Linux (none) 6.12.27 #1 Wed Oct  1 00:00:00 UTC 2025 riscv32
+/ # cat /proc/version
+Linux version 6.12.27 (buildroot@buildroot) (riscv32-buildroot-linux-uclibc-gcc.br_real (Buildroot 2025.02.18) 13.4.0, GNU ld (GNU Binutils) 2.43.1) #1 Wed Oct  1 00:00:00 UTC 2025
+/ # head -n 1 /proc/meminfo
+MemTotal:          14228 kB
+/ # cat /proc/cpuinfo
+processor	: 0
+hart		: 0
+isa		: rv32ima_zicntr_zicsr_zifencei
+mmu		: none
+mvendorid	: 0x0
+marchid		: 0x0
+mimpid		: 0x0
+hart isa	: rv32ima_zicntr_zicsr_zifencei
+
+/ # ls /
+bin    etc    lib    media  opt    root   sbin   tmp    var
+dev    init   lib32  mnt    proc   run    sys    usr
+/ # for i in 1 2 3; do echo line $i; done
+line 1
+line 2
+line 3
+/ # echo $((6 * 7))
+42
+/ # busybox | head -n 1
+BusyBox v1.37.0 () multi-call binary.
+/ # poweroff
+starting pid 27, tty '': '/bin/echo "tiny-processors linux: down"'
+/ # tiny-processors linux: down
+The system is going down NOW!
+/ # Sent SIGTERM to all processes
+Sent SIGKILL to all processes
+Requesting system poweroff
+reboot: Power down

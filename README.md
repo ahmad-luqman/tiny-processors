@@ -301,6 +301,17 @@ Verilator (the first 35). The
 [Doom record](docs/rv32-doom.md) covers how: 16 MiB of RAM, disks up to 8 MiB, programs on the
 disk, the palette window, and a virtual clock.
 
+## Linux
+
+`make run-rv32-linux-emu` boots Linux 6.12 without an MMU on the emulator, in machine mode on
+RV32IMA, and types a short session into a busybox shell: `uname`, `/proc/cpuinfo`, a loop, and
+`poweroff`, which ends the run through the done register. `make run-rv32-linux-qemu` runs the same
+image on QEMU `virt`, and `make run-rv32-linux-rtl-verilator` on Verilator. The image is built in
+Docker from pinned sources and never committed: `make rv32-linux-image` (7 minutes once its
+downloads are cached). The [Linux record](docs/rv32-linux.md) covers what the machine needed (machine-information
+CSRs, `fence.i`, a 16550 the 8250 driver can drive, a readable done register), the built-in
+device tree, and how a session is typed into Linux on every backend alike.
+
 ## What to read
 
 1. [counter.v](labs/01-counter/counter.v): the actual circuit.

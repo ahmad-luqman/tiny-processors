@@ -1,0 +1,9 @@
+uname -a
+cat /proc/version
+head -n 1 /proc/meminfo
+cat /proc/cpuinfo
+ls /
+for i in 1 2 3; do echo line $i; done
+echo $((6 * 7))
+busybox | head -n 1
+poweroff

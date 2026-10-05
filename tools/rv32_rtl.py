@@ -58,7 +58,7 @@ def compile_testbench(output, iverilog="iverilog", params=None):
 
 def simulator_command(simulator, image, trace=None, console=None, wave=None, stall=None, seed=None, max_cycles=None,
                       checkpoints=None, input_script=None, reset_at=None, allow_lost_events=False, simd_stall=None, simd_seed=None, gpu_stall=None, gpu_seed=None,
-                      ticks=None, console_input=None, disk=None, disk_out=None):
+                      ticks=None, console_input=None, disk=None, disk_out=None, console_prompt=None):
     """The command line for a compiled testbench: `vvp` for a .vvp file, else a Verilator binary."""
     simulator = Path(simulator)
     if simulator.suffix == ".vvp":
@@ -96,6 +96,8 @@ def simulator_command(simulator, image, trace=None, console=None, wave=None, sta
         command.append(f"+ticks={ticks}")
     if console_input is not None:
         command.append(f"+console-input={console_input}")
+    if console_prompt is not None:  # hex, so spaces survive every simulator's plusarg parsing
+        command.append(f"+console-prompt-hex={console_prompt.encode().hex()}")
     if disk is not None:
         command.append(f"+disk={disk}")
     if disk_out is not None:
@@ -182,7 +184,7 @@ def run_backend(command, trace, parse_halt, timeout, console=None, checkpoints=N
 
 def run_rtl(simulator, image_hex, trace, stall=None, seed=None, wave=None, max_cycles=None, timeout=120,
             checkpoints=None, input_script=None, reset_at=None, allow_lost_events=False, simd_stall=None, simd_seed=None, gpu_stall=None, gpu_seed=None,
-            ticks=None, console_input=None, disk=None):
+            ticks=None, console_input=None, disk=None, console_prompt=None):
     """Run the testbench on a hex image with the documented plusargs; the console goes next to the
     trace, or next to the image (`<image>.console`) when `trace` is None and no trace is written."""
     if trace is not None:
@@ -198,7 +200,7 @@ def run_rtl(simulator, image_hex, trace, stall=None, seed=None, wave=None, max_c
                                 stall=stall, seed=seed, max_cycles=max_cycles, checkpoints=checkpoints,
                                 input_script=input_script, reset_at=reset_at, allow_lost_events=allow_lost_events,
                                 simd_stall=simd_stall, simd_seed=simd_seed, gpu_stall=gpu_stall, gpu_seed=gpu_seed, ticks=ticks,
-                                console_input=console_input, disk=disk_hex, disk_out=disk_out)
+                                console_input=console_input, disk=disk_hex, disk_out=disk_out, console_prompt=console_prompt)
     run = run_backend(command, trace, rtl_halt_line, timeout, console=console, checkpoints=checkpoints)
     if disk is not None:
         # The testbench reads and writes the disk as hex words; the run's disk is the bytes again.
@@ -214,12 +216,12 @@ def run_rtl(simulator, image_hex, trace, stall=None, seed=None, wave=None, max_c
 
 
 def run_emulator(emulator, image_bin, trace, limit=None, timeout=120, checkpoints=None, input_script=None,
-                 frames=None, allow_lost_events=False, console_input=None, disk=None):
+                 frames=None, allow_lost_events=False, console_input=None, disk=None, console_prompt=None):
     """Run the emulator on a flat image the same way tools/rv32_run_emu.py does, with a trace
     unless `trace` is None."""
     command = emulator_command(emulator, image_bin, trace=trace, limit=limit, checkpoints=checkpoints,
                                input_script=input_script, frames=frames, allow_lost_events=allow_lost_events,
-                               console_input=console_input, disk=disk)
+                               console_input=console_input, disk=disk, console_prompt=console_prompt)
     return run_backend(command, trace, halt_line, timeout, checkpoints=checkpoints)
 
 
@@ -524,6 +526,8 @@ def main():
     parser.add_argument("--frames", type=Path, help="directory for the emulator's frame-NNNN.ppm pictures")
     parser.add_argument("--console-input", type=Path,
                         help="bytes both backends' consoles receive, all waiting from reset (O2); not a file under --out")
+    parser.add_argument("--console-prompt",
+                        help="make line k of --console-input visible only once the guest has sent this k times (issue #36)")
     parser.add_argument("--limit", type=int, help="the emulator's instruction limit (default: its own)")
     parser.add_argument("--disk", type=Path, help="the virtio-blk disk both backends start from (O3); never written")
     parser.add_argument("--disk-out", type=Path, help="where the emulator's final disk goes, after the RTL's is found equal")
@@ -642,7 +646,7 @@ def main():
     emulator = run_emulator(args.emulator, bin_path, trace_path("emu"), timeout=args.timeout,
                             checkpoints=out / f"{name}.emu.checkpoints", input_script=args.input, frames=args.frames,
                             allow_lost_events=args.allow_lost_events, console_input=args.console_input, limit=args.limit,
-                            disk=backend_disk("emu"))
+                            disk=backend_disk("emu"), console_prompt=args.console_prompt)
     check_passed(emulator, "emulator")
     # Device time differs for timers and asynchronous accelerators. Compare guest
     # results and trap records when either interface makes the CPU trace timing-dependent.
@@ -661,7 +665,7 @@ def main():
         sys.exit("--compare results is for a program that reads the timer, the cycle/time counters or accelerator registers, "
                  "or takes interrupts, with cycle ticks; this one does not, use --compare trace")
     if args.expect_console_file is not None:
-        args.expect_console = args.expect_console_file.read_text().rstrip("\n")
+        args.expect_console = args.expect_console_file.read_bytes().decode().rstrip("\n")  # bytes: keep a guest's \r (Linux sends \r\n)
     if args.expect_console is not None and emulator.console.rstrip("\n") != args.expect_console:
         sys.exit(f"emulator console {emulator.console!r} is not {args.expect_console!r}")
     last_line = emulator.console.rstrip("\n").rsplit("\n", 1)[-1]
@@ -683,7 +687,7 @@ def main():
                        timeout=args.timeout if args.rtl_timeout is None else args.rtl_timeout, max_cycles=args.max_cycles, checkpoints=out / f"{name}.rtl.checkpoints",
                        input_script=args.input, allow_lost_events=args.allow_lost_events, simd_stall=args.simd_stall,
                        simd_seed=args.simd_seed, gpu_stall=args.gpu_stall, gpu_seed=args.gpu_seed, ticks=args.ticks,
-                       console_input=args.console_input, disk=backend_disk("rtl"))
+                       console_input=args.console_input, disk=backend_disk("rtl"), console_prompt=args.console_prompt)
 
     def compare_disks():
         """What each backend left on its disk (O3): identical, or the run fails."""

@@ -195,7 +195,26 @@ static void console_poll_stdin(machine *m)
 static bool console_rx_waiting(machine *m)
 {
     console_poll_stdin(m);
-    return m->console_in_next < m->console_in_len;
+    return m->console_in_next < (m->console_prompt_len ? m->console_in_limit : m->console_in_len);
+}
+
+/* --console-prompt: after each byte sent, a match of the prompt makes the next input line visible. */
+static void console_watch_prompt(machine *m, uint8_t byte)
+{
+    size_t n = m->console_prompt_len;
+    if (m->console_tail_len == n) {
+        memmove(m->console_tail, m->console_tail + 1, n - 1);
+        m->console_tail_len--;
+    }
+    m->console_tail[m->console_tail_len++] = byte;
+    if (m->console_tail_len < n || memcmp(m->console_tail, m->console_prompt, n) != 0) {
+        return;
+    }
+    size_t at = m->console_in_limit;
+    while (at < m->console_in_len && m->console_in[at] != '\n') {
+        at++;
+    }
+    m->console_in_limit = at < m->console_in_len ? at + 1 : m->console_in_len;
 }
 
 /* The console (docs/rv32.md, "Console"): the subset of a 16550 that Linux's 8250 driver drives
@@ -254,6 +273,9 @@ static mem_access console_store(machine *m, uint32_t offset, int width, uint32_t
             m->console_latched++;   /* no byte is sent: reported if DLAB is still set at the halt */
         } else {
             fputc(byte, stdout);
+            if (m->console_prompt_len) {
+                console_watch_prompt(m, byte);
+            }
         }
         return ACC_OK;
     case CONSOLE_IER:
@@ -2230,6 +2252,17 @@ void emu_read_input_script(machine *m, const char *path)
         exit(EXIT_EMULATOR_ERROR);
     }
     fclose(in);
+}
+
+void emu_set_console_prompt(machine *m, const char *prompt)
+{
+    size_t n = strlen(prompt);
+    if (n == 0 || n > sizeof m->console_prompt) {
+        fprintf(stderr, "%s: --console-prompt must be 1 to %zu bytes\n", emu_prog, sizeof m->console_prompt);
+        exit(EXIT_EMULATOR_ERROR);
+    }
+    memcpy(m->console_prompt, prompt, n);
+    m->console_prompt_len = n;
 }
 
 void emu_read_console_input(machine *m, const char *path)

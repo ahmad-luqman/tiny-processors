@@ -78,11 +78,13 @@ class RtlTest(unittest.TestCase):
         cls.workdir.cleanup()
 
     def run_both(self, words, stall=None, seed=None, limit=100000, max_cycles=None, checkpoints=False,
-                 input_script=None, reset_at=None, simulator=None, allow_lost_events=False, console_input=None):
+                 input_script=None, reset_at=None, simulator=None, allow_lost_events=False, console_input=None,
+                 console_prompt=None):
         """Run one image on both backends; the caller decides what must agree. With `checkpoints`
         both write their `frame N <hash>` lines; `input_script` is text for both `+input`/`--input`;
         `allow_lost_events` tells both that a dropped or undelivered event is expected;
-        `console_input` is bytes waiting at the console from reset on both."""
+        `console_input` is bytes waiting at the console from reset on both, or, with `console_prompt`,
+        released a line per prompt the guest sends (issue #36)."""
         with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
             hex_path, bin_path = write_image(words, directory, "image")
             script = None
@@ -97,11 +99,11 @@ class RtlTest(unittest.TestCase):
             rtl_checkpoints = Path(directory) / "rtl.checkpoints" if checkpoints else None
             emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace", limit=limit,
                                     checkpoints=emu_checkpoints, input_script=script, allow_lost_events=allow_lost_events,
-                                    console_input=console)
+                                    console_input=console, console_prompt=console_prompt)
             rtl = run_rtl(simulator or self.simulator, hex_path, Path(directory) / "rtl.trace",
                           stall=stall, seed=seed, max_cycles=max_cycles, checkpoints=rtl_checkpoints,
                           input_script=script, reset_at=reset_at, allow_lost_events=allow_lost_events,
-                          timeout=RTL_TIMEOUT, console_input=console)
+                          timeout=RTL_TIMEOUT, console_input=console, console_prompt=console_prompt)
         report = f"\n--- simulator output ---\n{rtl.noise}--- guest console ---\n{rtl.console}--- stderr ---\n{rtl.stderr}"
         self.assertEqual(rtl.status, 0, report)
         self.assertEqual(rtl.noise, "", "the simulator printed something of its own" + report)
@@ -795,6 +797,16 @@ class RtlTest(unittest.TestCase):
         self.assertEqual(rtl.console, "", "the divisor latch transmits nothing")
         x = registers(rtl.trace)
         expected = console_expected | info_expected
+        self.assertEqual({r: x[r] for r in expected}, expected)
+
+    def test_console_prompt_gates_input_lines(self):
+        """Issue #36: the testbench's +console-prompt-hex releases input lines exactly when the
+        emulator's --console-prompt does, so the traces stay identical."""
+        from test_rv32_emu import console_prompt_program
+        words, expected = console_prompt_program()
+        emulator, rtl = self.assert_same_pass(words + FINISH(), stall=1, console_input=b"a\nb\n", console_prompt="> ")
+        self.assertEqual(rtl.console, "> > ")
+        x = registers(rtl.trace)
         self.assertEqual({r: x[r] for r in expected}, expected)
 
     def test_timer_ticks_are_clock_cycles(self):

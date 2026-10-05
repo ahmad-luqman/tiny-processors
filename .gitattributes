@@ -1,0 +1,2 @@
+# Linux sends \r\n; its transcripts are compared byte for byte (issue #36)
+programs/rv32/linux/*.expected -text

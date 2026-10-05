@@ -149,6 +149,45 @@ MACHINE = node("", {
 )
 
 
+# Linux's tree (issue #36, docs/rv32-linux.md). The kernel compiles it in (CONFIG_BUILTIN_DTB) and
+# ignores a1, so one image boots with the same tree on QEMU virt, the emulator and the RTL, and the
+# boot ROM's MACHINE stays byte-identical. It names only what Linux drives and every backend has at
+# the same address: RAM, the CLINT (the timer), the console as an ns16550a, polled because it has
+# no `interrupts`, and the done register as a syscon that syscon-poweroff writes 0x5555 to. The
+# timebase is QEMU's CLINT rate; on our backends a tick is an instruction (the emulator, and the
+# RTL's step ticks), so it only sets how fast guest time runs. riscv,isa-base and
+# riscv,isa-extensions are what Linux reads (its fallback to riscv,isa is configured out).
+LINUX_TIMEBASE = 10_000_000
+LINUX_UART_CLOCK = 3_686_400   # a common 16550 crystal; the divisor it implies sets no rate here
+LINUX_ISA_EXTENSIONS = ("i", "m", "a", "zicsr", "zicntr", "zifencei")
+LINUX_DONE_PHANDLE = 3
+LINUX_POWEROFF_WORD = 0x5555  # the done register's pass word (docs/rv32.md, "Done register")
+LINUX = node("", {
+    "#address-cells": u32(1), "#size-cells": u32(1),
+    "compatible": string("tiny-processors,rv32-machine"),
+    "model": string("tiny-processors RV32 machine"),
+},
+    node("chosen", {"stdout-path": string(f"/soc/serial@{CONSOLE_BASE:x}")}),
+    node("cpus", {"#address-cells": u32(1), "#size-cells": u32(0), "timebase-frequency": u32(LINUX_TIMEBASE)},
+         node("cpu@0", {"device_type": string("cpu"), "reg": u32(0), "compatible": string("riscv"),
+                        "riscv,isa": string("rv32ima_zicsr_zicntr_zifencei"),
+                        "riscv,isa-base": string("rv32i"),
+                        "riscv,isa-extensions": string(*LINUX_ISA_EXTENSIONS), "status": string("okay")},
+              node("interrupt-controller", {"#interrupt-cells": u32(1), "interrupt-controller": b"",
+                                            "compatible": string("riscv,cpu-intc"), "phandle": u32(CPU_INTC)}))),
+    node(f"memory@{RAM_BASE:x}", {"device_type": string("memory"), "reg": u32(RAM_BASE, RAM_SIZE)}),
+    node("poweroff", {"compatible": string("syscon-poweroff"), "regmap": u32(LINUX_DONE_PHANDLE),
+                      "offset": u32(0), "value": u32(LINUX_POWEROFF_WORD)}),
+    node("soc", {"#address-cells": u32(1), "#size-cells": u32(1),
+                 "compatible": string("simple-bus"), "ranges": b""},
+         device("test", DONE_BASE, ("sifive,test0", "syscon"), ((DONE_BASE, 4),),
+                {"phandle": u32(LINUX_DONE_PHANDLE)}),
+         device("clint", CLINT_BASE, ("riscv,clint0",), ((CLINT_BASE, CLINT_SIZE),),
+                {"interrupts-extended": u32(CPU_INTC, IRQ_MSI, CPU_INTC, IRQ_MTI)}),
+         device("serial", CONSOLE_BASE, ("ns16550a",), ((CONSOLE_BASE, 8),),
+                {"clock-frequency": u32(LINUX_UART_CLOCK)})),
+)
+
 def build(root: Node) -> bytes:
     """Flatten a tree. Property names are stored once each, in first-use order."""
     strings = bytearray()
@@ -375,6 +414,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--write", action="store_true", help="refresh tools/rv32_dtb.h and rtl/rv32/rv32_bootrom.v")
     parser.add_argument("--check", action="store_true", help="fail when the committed copies are stale")
     parser.add_argument("--dts", action="store_true", help="print the tree")
+    parser.add_argument("--linux-dtb", type=Path, help="write Linux's tree (issue #36) here")
+    parser.add_argument("--linux-dts", action="store_true", help="print Linux's tree")
     args = parser.parse_args(argv)
     blob = build(MACHINE)
     if len(blob) > ROM_SIZE:
@@ -395,6 +436,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"rv32_dtb: {len(blob)}-byte blob; {C_HEADER.name} and {VERILOG.name} are up to date")
     if args.dts:
         print(dts(parse(blob)))
+    if args.linux_dtb:
+        args.linux_dtb.parent.mkdir(parents=True, exist_ok=True)
+        args.linux_dtb.write_bytes(build(LINUX))
+    if args.linux_dts:
+        print(dts(parse(build(LINUX))))
     return 0
 
 
