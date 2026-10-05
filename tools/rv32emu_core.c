@@ -462,7 +462,7 @@ static bool virtio_request(machine *m)
     if (!dma_read(m, address[0], &type) || !dma_read(m, address[0] + 8u, &sector) || !dma_read(m, address[0] + 12u, &sector_hi)) {
         return false;
     }
-    const uint32_t sectors = VIRTIO_DISK_SIZE / 512u, words_total = VIRTIO_DISK_SIZE / 4u;
+    const uint32_t sectors = v->disk_size / 512u, words_total = v->disk_size / 4u;
     uint8_t result;
     if (type > 1) {
         result = 2; /* UNSUPP */
@@ -552,7 +552,7 @@ static mem_access virtio_load(machine *m, uint32_t offset, int width, uint32_t *
     case 0x0a0: *value = v->device_lo; break;
     case 0x0a4: *value = v->device_hi; break;
     case 0x0fc: *value = 0; break;
-    case 0x100: *value = VIRTIO_DISK_SIZE / 512u; break;
+    case 0x100: *value = v->disk_size / 512u; break;
     case 0x104: *value = 0; break;
     default: return ACC_FAULT; /* write-only registers and unused offsets */
     }
@@ -2164,11 +2164,12 @@ void emu_open_disk(machine *m, const char *path)
         fprintf(stderr, "%s: cannot open disk %s: %s\n", emu_prog, path, strerror(errno));
         exit(EXIT_EMULATOR_ERROR);
     }
-    size_t got = fread(v->disk, 1, VIRTIO_DISK_SIZE, v->file);
-    if (ferror(v->file) || got != VIRTIO_DISK_SIZE || fgetc(v->file) != EOF) {
-        fprintf(stderr, "%s: disk %s must be exactly %u bytes\n", emu_prog, path, VIRTIO_DISK_SIZE);
+    size_t got = fread(v->disk, 1, VIRTIO_DISK_MAX, v->file);
+    if (ferror(v->file) || got == 0 || got % 512u || fgetc(v->file) != EOF) {
+        fprintf(stderr, "%s: disk %s must be whole 512-byte sectors, at most %u bytes\n", emu_prog, path, VIRTIO_DISK_MAX);
         exit(EXIT_EMULATOR_ERROR);
     }
+    v->disk_size = (uint32_t)got;
 }
 
 void emu_init(machine *m)
@@ -2195,6 +2196,7 @@ bool emu_alloc(machine *m)
     m->virtio = calloc(1, sizeof *m->virtio);
     if (m->virtio) {
         m->virtio->queue_sel_zero = true;
+        m->virtio->disk_size = VIRTIO_DISK_SIZE;
     }
     if (!m->ram || !m->fb || !m->virtio) {
         fprintf(stderr, "%s: cannot allocate memory\n", emu_prog);

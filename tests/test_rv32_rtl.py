@@ -614,6 +614,31 @@ class RtlTest(unittest.TestCase):
         self.assertGreater(outcomes["done"], 50, "most words execute and reach the done store")
         self.assertGreater(outcomes["double-fault"], 40, "the illegal ones and the jumps to nowhere trap")
 
+    def test_disk_size_is_the_files(self):
+        """Issue #35: a disk is any whole number of sectors up to DISK_WORDS; the capacity both
+        backends report is the file's, and the run gives back a disk of the same size. A disk that
+        is not whole sectors is refused before the run."""
+        words = LI(1, VIRTIO + 0x100) + [LW(10, 1, 0), LW(11, 1, 4)] + FINISH()
+        with tempfile.TemporaryDirectory(dir=self.workdir.name) as directory:
+            hex_path, bin_path = write_image(words, directory, "image")
+            for size in (512, VIRTIO_DISK_SIZE, 0x100000):
+                with self.subTest(size=size):
+                    disks = {}
+                    for backend in ("emu", "rtl"):
+                        disks[backend] = Path(directory) / f"{backend}.disk"
+                        disks[backend].write_bytes(bytes(range(256)) * (size // 256))
+                    emulator = run_emulator(self.emulator, bin_path, Path(directory) / "emu.trace", disk=disks["emu"])
+                    rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", disk=disks["rtl"], timeout=RTL_TIMEOUT)
+                    self.assertEqual((rtl.halt["halt"], rtl.halt["outcome"]), ("done", "pass"), rtl.stderr)
+                    self.assertIsNone(diff_traces(rtl.trace, emulator.trace))
+                    self.assertEqual((registers(rtl.trace)[10], registers(rtl.trace).get(11, 0)), (size // 512, 0))
+                    self.assertEqual(disks["rtl"].read_bytes(), bytes(range(256)) * (size // 256))
+            odd = Path(directory) / "odd.disk"
+            odd.write_bytes(bytes(1000))
+            rtl = run_rtl(self.simulator, hex_path, Path(directory) / "rtl.trace", disk=odd, timeout=RTL_TIMEOUT)
+            self.assertNotEqual(rtl.status, 0)
+            self.assertIn("whole sectors", rtl.stderr + rtl.noise)
+
     def test_memory_and_target_faults(self):
         cases = [
             ("load outside the map", LI(1, UNMAPPED) + [LW(2, 1, 0)], 5, UNMAPPED),

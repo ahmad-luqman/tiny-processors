@@ -851,6 +851,25 @@ class EmulatorTest(unittest.TestCase):
                     self.assertEqual(completed.returncode, 2)
                     self.assertIn("rv32emu: bad", completed.stderr)
 
+    def test_disk_size_is_the_files(self):
+        """Issue #35: --disk takes whole 512-byte sectors up to VIRTIO_DISK_MAX, and the capacity the
+        device reports is the file's; without a disk it is VIRTIO_DISK_SIZE of zeros."""
+        words = LI(1, VIRTIO + 0x100) + [LW(10, 1, 0), LW(11, 1, 4)]
+        self.assertEqual(self.run_pass(words).state.x[10], VIRTIO_DISK_SIZE // 512)
+        with tempfile.TemporaryDirectory() as directory:
+            disk = Path(directory) / "disk"
+            for size in (512, VIRTIO_DISK_SIZE, 0x600000, VIRTIO_DISK_MAX):
+                with self.subTest(size=size):
+                    disk.write_bytes(bytes(size))
+                    x = self.run_pass(words, extra=("--disk", str(disk))).state.x
+                    self.assertEqual((x[10], x[11]), (size // 512, 0))
+            for size in (0, 1000, VIRTIO_DISK_MAX + 512):
+                with self.subTest(refused=size):
+                    disk.write_bytes(bytes(size))
+                    result = self.run_words(words + FINISH(), extra=("--disk", str(disk)))
+                    self.assertEqual(result.status, 2)
+                    self.assertIn("whole 512-byte sectors", result.stderr)
+
     def test_run_driver_rejects_negative_limit_and_times_out(self):
         driver = ROOT / "tools" / "rv32_run_emu.py"
         with tempfile.TemporaryDirectory() as directory:

@@ -3,6 +3,7 @@
  * written back. */
 #include "fs.h"
 
+#include "sys.h"
 #include "virtio.h"
 
 #define MAGIC 0x31534654u
@@ -121,11 +122,35 @@ void fs_truncate(int file)
     directory[file].size = 0;
 }
 
+/* Issue #35: how many whole sectors from `position` may go straight to `to` in one request
+ * rather than through the sector buffer: a sector-aligned position, a word-aligned buffer in RAM
+ * below the slots' end (the device may write only RAM), and only sectors both the request and the
+ * file fill, so no byte past either is written. */
+static uint32_t direct_sectors(const struct entry *e, uint32_t position, const uint8_t *to, uint32_t left)
+{
+    uint32_t address = (uint32_t)(uintptr_t)to;
+    if (position % VIRTIO_SECTOR || address & 3u || address < OS_SLOT_BASE - OS_KERNEL_SIZE ||
+        address > OS_SLOT_BASE + OS_SLOTS * OS_SLOT_SIZE - left) {
+        return 0;
+    }
+    uint32_t in_file = (e->size - position) / VIRTIO_SECTOR, wanted = left / VIRTIO_SECTOR;
+    return in_file < wanted ? in_file : wanted;
+}
+
 uint32_t fs_read(int file, uint32_t position, uint8_t *to, uint32_t length)
 {
     const struct entry *e = &directory[file];
     uint32_t done = 0;
     while (done < length && position < e->size) {
+        uint32_t whole = direct_sectors(e, position, to + done, length - done);
+        if (whole) {
+            if (!virtio_transfer(e->first + position / VIRTIO_SECTOR, to + done, whole, 0)) {
+                return FS_ERROR;
+            }
+            done += whole * VIRTIO_SECTOR;
+            position += whole * VIRTIO_SECTOR;
+            continue;
+        }
         uint32_t at = position % VIRTIO_SECTOR;
         if (!virtio_transfer(e->first + position / VIRTIO_SECTOR, sector_buffer, 1, 0)) {
             return FS_ERROR;

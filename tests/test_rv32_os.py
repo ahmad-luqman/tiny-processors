@@ -122,6 +122,18 @@ class FileSystemToolTest(unittest.TestCase):
         self.assertEqual(struct.unpack_from("<5I", disk, 0), (0x31534654, 256, 1, 2, 16))
         self.assertEqual(disk[10 * 512:10 * 512 + 5], b"hello", "an extent starts on its sector")
 
+    def test_sizes(self):
+        """Issue #35: a disk is any whole number of sectors up to 8 MiB; the superblock records it,
+        and a host-built file is one extent of any length."""
+        disk = mkfs.blank(0x600000)
+        self.assertEqual(struct.unpack_from("<5I", disk, 0), (0x31534654, 0x3000, 1, 2, 16))
+        mkfs.add(disk, "big", b"\x5a" * 0x400001)
+        self.assertEqual(mkfs.entries(disk), [("big", 2, 0x2001, 0x400001)])
+        self.assertEqual(mkfs.read(disk, "big"), b"\x5a" * 0x400001)
+        with self.assertRaises(mkfs.FsError):
+            mkfs.entries(disk + bytes(512))  # the superblock says 0x3000 sectors
+        self.assertEqual(len(mkfs.blank(mkfs.DISK_MAX)), mkfs.DISK_MAX)
+
     def test_refusals(self):
         disk = mkfs.blank()
         mkfs.add(disk, "a", b"")
@@ -134,6 +146,9 @@ class FileSystemToolTest(unittest.TestCase):
                              ("wrong size", lambda: mkfs.entries(bytes(512)))):
             with self.subTest(name), self.assertRaises(mkfs.FsError):
                 action()
+        for size in (0, 1000, 2 * 512, mkfs.DISK_MAX + 512):
+            with self.subTest(size=size), self.assertRaises(mkfs.FsError):
+                mkfs.blank(size)
         full = mkfs.blank()
         for i in range(16):
             mkfs.add(full, f"f{i}", b"", capacity=1)

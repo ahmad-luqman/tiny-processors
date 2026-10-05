@@ -12,10 +12,11 @@ module rv32_soc #(
     parameter integer RAM_WORDS = 4194304,
     parameter integer FB_WORDS = 19200, // 320 x 240 one-byte pixels, as 32-bit words
     parameter integer CONSOLE_BUSY = 0,
-    parameter integer DISK_WORDS = 32768  // the virtio-blk disk (O3): 128 KiB
+    parameter integer DISK_WORDS = 2097152  // the virtio-blk disk's memory (O3): 8 MiB, the largest disk (issue #35)
 ) (
     input  wire        clk,
     input  wire        reset,
+    input  wire [31:0] disk_sectors,  // the virtio-blk disk's size in 512-byte sectors (issue #35)
     input  wire        mem_hold,
     // Deterministic tick mode (O1): mtime and `cycle` advance once per step, as on the emulator.
     input  wire        step_ticks,
@@ -286,7 +287,7 @@ module rv32_soc #(
 
     // virtio-blk at virt's first virtio slot (O3); the testbench loads and saves its disk.
     rv32_virtio_blk #(.DISK_WORDS(DISK_WORDS), .RAM_WORDS(RAM_WORDS), .RAM_BASE(RAM_BASE)) virtio (
-        .clk(clk), .reset(reset), .valid(virtio_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
+        .clk(clk), .reset(reset), .disk_sectors(disk_sectors), .valid(virtio_valid), .we(mem_we), .addr(mem_addr), .strb(mem_strb),
         .wdata(mem_wdata), .rdata(virtio_rdata), .ready(virtio_ready), .error(virtio_error),
         .busy(virtio_busy), .dma_valid(vio_valid), .dma_we(vio_we), .dma_addr(vio_addr), .dma_strb(vio_strb),
         .dma_wdata(vio_wdata), .dma_rdata(ram_physical_rdata), .dma_ready(vio_ready), .irq(virtio_irq)

@@ -18,7 +18,7 @@ from tools.rv32_devices import (DIAG_EXPECTED_VALUES, EVENT_PRESS, EVENT_VALID, 
 from tools.rv32_image import (ImageError, check_a_build, check_image, check_listing, check_m_build, flatten, parse_elf,
                               to_hex_words)
 from tools.rv32_run_qemu import classify, qemu_command
-from tools import rv32_vendor_libc
+from tools import rv32_mkfs, rv32_vendor_libc
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -698,7 +698,11 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertIn(f"rv32_plic #(.WIRED(32'h{wired >> 16:04x}_{wired & 0xffff:04x}))", (ROOT / "rtl/rv32/rv32_soc.v").read_text())
         self.assertEqual(evaluate("PLIC_WIRED"), wired, "rv32emu_core.h")
         self.assertEqual(evaluate("VIRTIO_DISK_SIZE"), rv32_asm.VIRTIO_DISK_SIZE)
-        self.assertIn(f"parameter integer DISK_WORDS = {rv32_asm.VIRTIO_DISK_SIZE // 4}", (ROOT / "rtl/rv32/rv32_soc.v").read_text())
+        self.assertEqual(evaluate("VIRTIO_DISK_MAX"), rv32_asm.VIRTIO_DISK_MAX)
+        self.assertEqual(rv32_mkfs.DISK_SIZE, rv32_asm.VIRTIO_DISK_SIZE)
+        self.assertEqual(rv32_mkfs.DISK_MAX, rv32_asm.VIRTIO_DISK_MAX)
+        self.assertIn(f"parameter integer DISK_WORDS = {rv32_asm.VIRTIO_DISK_MAX // 4}", (ROOT / "rtl/rv32/rv32_soc.v").read_text())
+        self.assertIn(f"integer disk_words = {rv32_asm.VIRTIO_DISK_SIZE // 4};", (ROOT / "tests/rv32_tb.sv").read_text())
         self.assertRegex(board, rf"#define RV32_PLIC_SOURCE_INPUT\s+{rv32_asm.PLIC_SOURCE_INPUT}\b")
         self.assertEqual(evaluate("PLIC_SOURCE_INPUT"), rv32_asm.PLIC_SOURCE_INPUT)
         self.assertEqual(rv32_dtb.INPUT_IRQ, rv32_asm.PLIC_SOURCE_INPUT)
