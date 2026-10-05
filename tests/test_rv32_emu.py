@@ -493,8 +493,12 @@ class EmulatorTest(unittest.TestCase):
             result = self.run_pass(words, extra=("--console-input", str(source)))
         self.assertEqual(result.stdout, "", "the divisor latch transmits nothing")
         self.assertEqual({r: result.state.x[r] for r in expected}, expected)
-        self.assertIn("warning: 2 console byte(s) met the divisor latch", result.stderr,
-                      "the store to DLL and the read of it (+0 under DLAB) are reported")
+        self.assertNotIn("warning", result.stderr, "DLAB was cleared again, as a driver setting the divisor does")
+        muted = LI(5, CONSOLE) + LI(7, 0x80) + [SB(7, 5, 3), SB(7, 5, 3)] + LI(7, ord("x")) + [SB(7, 5, 0), SB(7, 5, 0)]
+        result = self.run_pass(muted)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("warning: the console ended with LCR.DLAB set; 2 byte(s) since went to the divisor latch",
+                      result.stderr, "a run left muted is reported, counting from when DLAB was set")
 
     def test_machine_information_csrs_fence_i_and_done_read(self):
         """Issue #36 (machine_information_program); and a write to a read-only ID register traps."""

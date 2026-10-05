@@ -188,7 +188,7 @@ typedef struct {
     size_t console_in_len, console_in_next;
     bool console_stdin;     /* --console-input -: bytes arrive from stdin as the host has them */
     uint8_t console_ier, console_lcr, console_mcr, console_scr, console_dll, console_dlm; /* issue #36 */
-    uint64_t console_latched; /* THR stores and RBR reads that met the divisor latch instead (DLAB set) */
+    uint64_t console_latched; /* THR stores and RBR reads that met the divisor latch since DLAB was last set */
     /* Effects of the current step, for the trace line. */
     int wr_reg, wr_freg;
     bool wr_fcsr;

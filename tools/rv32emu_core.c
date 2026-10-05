@@ -213,7 +213,7 @@ static mem_access console_load(machine *m, uint32_t offset, int width, uint32_t 
     case CONSOLE_TX:
         if (dlab) {
             *value = m->console_dll;
-            m->console_latched++; /* no byte is taken: reported at the halt */
+            m->console_latched++; /* no byte is taken: reported if DLAB is still set at the halt */
         } else {
             *value = console_rx_waiting(m) ? m->console_in[m->console_in_next++] : 0u;
         }
@@ -251,7 +251,7 @@ static mem_access console_store(machine *m, uint32_t offset, int width, uint32_t
     case CONSOLE_TX:
         if (dlab) {
             m->console_dll = byte; /* the divisor sets no rate here: bytes leave at once */
-            m->console_latched++;   /* no byte is sent: reported at the halt */
+            m->console_latched++;   /* no byte is sent: reported if DLAB is still set at the halt */
         } else {
             fputc(byte, stdout);
         }
@@ -264,7 +264,12 @@ static mem_access console_store(machine *m, uint32_t offset, int width, uint32_t
         }
         return ACC_OK;
     case CONSOLE_IIR: return ACC_OK; /* FCR: there is no FIFO to enable or clear */
-    case CONSOLE_LCR: m->console_lcr = byte; return ACC_OK;
+    case CONSOLE_LCR:
+        if ((byte & CONSOLE_LCR_DLAB) && !(m->console_lcr & CONSOLE_LCR_DLAB)) {
+            m->console_latched = 0; /* a driver setting the divisor sets DLAB, writes, and clears it */
+        }
+        m->console_lcr = byte;
+        return ACC_OK;
     case CONSOLE_MCR: m->console_mcr = byte & CONSOLE_MCR_MASK; return ACC_OK;
     case CONSOLE_SCR: m->console_scr = byte; return ACC_OK;
     default: return ACC_FAULT; /* LSR and MSR are read-only */
@@ -2422,9 +2427,11 @@ int emu_report_halt(const machine *m, size_t loaded)
         fprintf(stderr, "%s: %zu scripted event(s) never delivered (first: frame %" PRIu32 ")\n", emu_prog,
                 m->scripted - m->next_scripted, m->script[m->next_scripted].frame);
     }
-    if (m->console_latched) { /* a 16550 does the same, so it is not a fault; but it is rarely meant */
-        fprintf(stderr, "%s: warning: %" PRIu64 " console byte(s) met the divisor latch (LCR.DLAB set) and were not "
-                "sent or taken\n", emu_prog, m->console_latched);
+    /* A 16550 does the same, so it is not a fault; but a run that ends with DLAB set has had its
+     * console muted, most likely by a stray LCR write. A driver setting the divisor clears it again. */
+    if (m->console_lcr & CONSOLE_LCR_DLAB) {
+        fprintf(stderr, "%s: warning: the console ended with LCR.DLAB set; %" PRIu64 " byte(s) since went to the "
+                "divisor latch and were not sent or taken\n", emu_prog, m->console_latched);
     }
     int status = EXIT_EMULATOR_ERROR;
     fprintf(stderr, "%s: halt=%s steps=%" PRIu64 " retired=%" PRIu64 " traps=%" PRIu64, emu_prog,
