@@ -7,7 +7,7 @@ its platform layer cut down to six hooks. It is Track 3 B3's `doom` program
 [doom_rv32.c](../../programs/rv32/os/libc/doom_rv32.c).
 
 The files are copied unmodified from the repository's `doomgeneric/` directory:
-- the 80 sources its own `Makefile` compiles, less the X11 back end `doomgeneric_xlib.c`, listed in
+- the 80 sources its own `Makefile` compiles besides the X11 back end `doomgeneric_xlib.c`, listed in
   `SOURCES` (the Makefile's input);
 - every header in that directory;
 - the repository's `LICENSE` (GNU GPL version 2) and `README.TXT`.

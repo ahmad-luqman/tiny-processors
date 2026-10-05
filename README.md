@@ -293,10 +293,11 @@ Read the [window record](docs/rv32-window.md): the decisions, the core split, th
 
 `make fetch-rv32-doom-wad` fetches the shareware `doom1.wad`, which is never committed. Then
 `make run-rv32-doom` boots the OS in the window and starts doomgeneric, a disk program, at 35
-frames a second. Arrows or W/S move, A/D strafe, Ctrl fires, Space opens, Shift runs, 1 to 7 pick a
+frames a second. Left and Right turn, Up/Down or W/S move, A/D strafe, Ctrl fires, Space opens, Shift runs, 1 to 7 pick a
 weapon, Tab shows the map, and Escape opens the menu (Y and N answer it).
 
-The same timedemo draws the same frames, by hash, on QEMU, the emulator and Verilator. The
+The same timedemo draws the same frames, by hash, on QEMU and the emulator (350 frames) and on
+Verilator (the first 35). The
 [Doom record](docs/rv32-doom.md) covers how: 16 MiB of RAM, disks up to 8 MiB, programs on the
 disk, the palette window, and a virtual clock.
 

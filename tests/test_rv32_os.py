@@ -199,6 +199,18 @@ class ComparisonTest(unittest.TestCase):
         self.assertIsNone(compare_backends(a, b, "results", checkpoints="count"))
         self.assertIn("count mismatch", compare_backends(a, self.run_of([], ["frame 1 00000001"]), "results", checkpoints="count"))
 
+    def test_outputs_mode_compares_the_console_and_checkpoints_only(self):
+        """Issue #35: with no trace written, the console and the checkpoints are all there is to
+        compare; trap records are not, and a mismatch in either output still fails."""
+        a = self.run_of(["1 80120020 00000000 trap 5 00200000"], ["frame 1 00000001"])
+        b = self.run_of([], ["frame 1 00000001"])
+        self.assertIsNone(compare_backends(a, b, "outputs"), "no trap records in outputs mode")
+        self.assertIn("trap mismatch", compare_backends(a, b, "results"))
+        other_console = Run(0, "not ok\n", "", "", [], {"halt": "done"}, ["frame 1 00000001"])
+        self.assertIn("console mismatch", compare_backends(a, other_console, "outputs"))
+        self.assertIn("checkpoint mismatch", compare_backends(a, self.run_of([], ["frame 1 00000002"]), "outputs"))
+        self.assertIsNone(compare_backends(a, self.run_of([], ["frame 1 00000002"]), "outputs", checkpoints="count"))
+
 
 class ConsoleReceiveTest(unittest.TestCase):
     """O2: the console's RBR and LSR.DR on both backends, trace for trace."""

@@ -110,9 +110,9 @@ A suite and riscv-tests' rv32ua against QEMU ([record](docs/rv32-a.md)). B3
 slots), a disk is up to 8 MiB, a program can live on the disk, the palette at
 `0x1100_3000` is built on every backend, and there are twelve more keys
 ([record](docs/rv32-doom.md)). The second runs doomgeneric, unmodified, as a
-disk program. The shareware demo plays the same frames, by hash, on QEMU, the
-emulator and Verilator, through the palette into the framebuffer, and the
-window plays it at 35 frames a second. Linux without an MMU (#36) follows.
+disk program. The shareware demo plays the same 350 frames, by hash, on QEMU and
+the emulator, and its first 35 on Verilator, through the palette into the
+framebuffer, and the window plays it at 35 frames a second. Linux without an MMU (#36) follows.
 
 ## Later optional tracks
 

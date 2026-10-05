@@ -26,9 +26,10 @@ math functions. What it needs is short:
 | `gettimeofday` | the epoch: there is no real-time clock | none |
 | `times` (so `clock()`) | the low word of `mtime`, in device ticks | `time` |
 | `_exit` | the end of the process | `exit` |
-| `unlink`, `rename`, `stat`, `mkdir`, `getentropy` | not provided: `ENOSYS` (`mkdir` since issue #35: Doom makes a save directory, and tfs has none) | |
+| `unlink`, `rename`, `stat`, `mkdir`, `getentropy` | not provided: `ENOSYS` (`mkdir` since issue #35: Doom makes its config and save directories, and tfs has none) | |
 
-and three compiler-runtime facts: the programs are built for RV32I, which has
+and three compiler-runtime facts: the programs are built for RV32I (issue #33's
+`mandel` for rv32imf and issue #35's `doom` for rv32im are the exceptions), which has
 no multiply or divide, no floating point (the core has RV32F, but the OS's
 programs do not use it) and no 64-bit arithmetic, so clang emits calls to
 `__muldf3`, `__divdi3` and so on. Those come from LLVM's compiler-rt builtins,

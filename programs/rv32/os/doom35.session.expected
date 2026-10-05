@@ -6,7 +6,7 @@ sh: ls, NAME [ARGS] [&], wait, halt [CODE]
 $ doom -iwad doom1.wad -timedemo demo1 -frames 35
                            Doom Generic 0.1
 Z_Init: Init zone memory allocation daemon. 
-zone memory: 0x8054ce30, 600000 allocated for zone
+zone memory: 0x8054d380, 600000 allocated for zone
 Using . for configuration and saves
 V_Init: allocate screens.
 M_LoadDefaults: Load system defaults.

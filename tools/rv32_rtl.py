@@ -384,7 +384,8 @@ def store_records(trace):
 
 def compare_backends(rtl, emulator, compare, compare_stores=False, checkpoints="lines", traps="all"):
     """What must agree between two passing runs, as the first mismatch or None: the console
-    transcript and the checkpoint lines always; the whole retirement trace in trace mode; in
+    transcript and the checkpoint lines always, and in outputs mode nothing more, since no trace was
+    written (issue #35); the whole retirement trace in trace mode; in
     results mode (device time) the trap records, which step numbers never move, compared per 128 KiB
     region of their PC: one process's order is fixed, two processes' interleaving is not (O4).
     compare_stores is an opt-in for firmware whose stores are timing-independent;
@@ -420,7 +421,8 @@ def generated_paths(out, name, frames=None):
     input script that names one of them can be refused before anything is written."""
     paths = {out / f"{name}.{suffix}" for suffix in ("hex", "bin", "input", "vcd", "emu.trace", "emu.checkpoints",
                                                      "rtl.trace", "rtl.trace.console", "rtl.checkpoints", "emu.disk",
-                                                     "rtl.disk", "rtl.disk.hex", "rtl.disk.out.hex")}
+                                                     "rtl.disk", "rtl.disk.hex", "rtl.disk.out.hex",
+                                                     "console")}  # the untraced RTL run's console (issue #35)
     if frames is not None:
         paths |= set(frames.glob("frame-*.ppm"))
     return paths
@@ -534,7 +536,7 @@ def main():
     parser.add_argument("--compare", choices=("trace", "results", "outputs"), default="trace",
                         help="`trace`: identical retirement traces and the cycle formula; `results`: identical "
                              "console, outcome, and checkpoints, for a program that reads the timer, the cycle/time counters or accelerator registers (device time); "
-                             "`outputs`: the same as `results` less the trap records, with no trace written, for a run too long to trace (issue #35: Doom)")
+                             "`outputs`: the same as `results` less the trap records and the device-time check, with no trace written, only for a run too long to trace (issue #35: Doom)")
     parser.add_argument("--compare-checkpoints", choices=("lines", "count"), default="lines",
                         help="`count` compares only how many frames each backend presented, for programs whose frames "
                              "depend on how the scheduler interleaved them (O4); results mode only")
@@ -566,8 +568,8 @@ def main():
         parser.error("--compare-stores requires --compare results")
     if args.compare_traps == "faults" and args.compare != "results":
         parser.error("--compare-traps faults requires --compare results")
-    if args.compare_checkpoints == "count" and args.compare != "results":
-        parser.error("--compare-checkpoints count requires --compare results")
+    if args.compare_checkpoints == "count" and args.compare not in ("results", "outputs"):
+        parser.error("--compare-checkpoints count requires --compare results or outputs")
     for option in ("simd_stall", "simd_seed", "gpu_stall", "gpu_seed"):
         value = getattr(args, option)
         if value is not None and not 0 <= value <= 2147483647:
@@ -629,8 +631,15 @@ def main():
         copy.write_bytes(args.disk.read_bytes())
         return copy
 
+    # Outputs mode writes no trace, so it cannot tell whether a trace comparison would have been
+    # possible (the device-time checks below see an empty trace): it is for runs too long to trace,
+    # and says what it leaves out.
     untraced = args.compare == "outputs"
-    emulator = run_emulator(args.emulator, bin_path, None if untraced else out / f"{name}.emu.trace", timeout=args.timeout,
+
+    def trace_path(backend):
+        return None if untraced else out / f"{name}.{backend}.trace"
+
+    emulator = run_emulator(args.emulator, bin_path, trace_path("emu"), timeout=args.timeout,
                             checkpoints=out / f"{name}.emu.checkpoints", input_script=args.input, frames=args.frames,
                             allow_lost_events=args.allow_lost_events, console_input=args.console_input, limit=args.limit,
                             disk=backend_disk("emu"))
@@ -648,7 +657,7 @@ def main():
     uses_simd = uses_accelerator(emulator.trace)
     if args.compare == "trace" and uses_simd:
         sys.exit("this program accesses accelerator registers; use --compare results")
-    if args.compare == "results" and not (reads_timer or uses_simd or interrupted):  # untraced runs cannot tell
+    if args.compare == "results" and not (reads_timer or uses_simd or interrupted):
         sys.exit("--compare results is for a program that reads the timer, the cycle/time counters or accelerator registers, "
                  "or takes interrupts, with cycle ticks; this one does not, use --compare trace")
     if args.expect_console_file is not None:
@@ -664,13 +673,13 @@ def main():
         if args.disk_out is not None:
             args.disk_out.write_bytes((out / f"{name}.emu.disk").read_bytes())
         print(emulator.stderr.strip().splitlines()[-1])
-        steps = f"{emulator.halt['steps']} steps, untraced" if untraced else f"{len(emulator.trace)} trace lines"
-        print(f"emulator: {steps}, {len(emulator.checkpoints)} checkpoint(s), console ends {last_line!r}")
+        extent = f"{emulator.halt['steps']} steps, untraced" if untraced else f"{len(emulator.trace)} trace lines"
+        print(f"emulator: {extent}, {len(emulator.checkpoints)} checkpoint(s), console ends {last_line!r}")
         return
 
     def run_rtl_as_asked(stall, seed, wave=None):
         """The RTL run every mode makes: the arguments given, with this stall setting."""
-        return run_rtl(args.simulator, hex_path, None if untraced else out / f"{name}.rtl.trace", stall=stall, seed=seed, wave=wave,
+        return run_rtl(args.simulator, hex_path, trace_path("rtl"), stall=stall, seed=seed, wave=wave,
                        timeout=args.timeout if args.rtl_timeout is None else args.rtl_timeout, max_cycles=args.max_cycles, checkpoints=out / f"{name}.rtl.checkpoints",
                        input_script=args.input, allow_lost_events=args.allow_lost_events, simd_stall=args.simd_stall,
                        simd_seed=args.simd_seed, gpu_stall=args.gpu_stall, gpu_seed=args.gpu_seed, ticks=args.ticks,
@@ -734,7 +743,7 @@ def main():
     if untraced:
         print(f"outputs identical (untraced): {len(emulator.console.splitlines())} console line(s) ending {last_line!r}, "
               f"{len(rtl.checkpoints)} checkpoint(s); RTL {rtl.halt['steps']} instructions in {rtl.halt['cycles']} cycles, "
-              f"emulator {emulator.halt['steps']} instructions")
+              f"emulator {emulator.halt['steps']} instructions; no trace, so no trap records or stores compared")
     elif args.compare == "results":
         # What the guest printed and presented agreed, and so did every fault it took: the same PC,
         # word, cause, and value in the same order, only the step numbers differing.

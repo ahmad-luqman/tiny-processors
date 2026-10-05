@@ -1605,34 +1605,41 @@ RV32_LUA_CFLAGS := $(RV32_ARCH) -std=gnu99 -O2 -g -Wall -Wextra -DLUA_COMPAT_5_3
 $(RV32_LUA_OBJS): build/rv32/lua/%.o: $(RV32_LUA)/%.c
 	@mkdir -p $(@D)
 	$(RV32_CC) $(RV32_LUA_CFLAGS) -MD -MP -c -o $@ $<
-RV32_LIBC_DEPS := $(patsubst %.o,%.d,$(RV32_LIBC_OBJS_libc) $(RV32_LIBC_OBJS_builtins) $(RV32_LUA_OBJS) $(RV32_OS_OBJS_doom) \
-	build/rv32/os/libc/syscalls.o build/rv32/os/libc/tty.o build/rv32/os/libc/libccheck.o \
-	$(foreach p,$(RV32_OS_LIBC_PROGRAMS),build/rv32/os/libc/crt-$(p).o))
--include $(RV32_LIBC_DEPS)
-# Made only as a side effect of compiling: never try to remake one (crt-%.o would match crt-lua.d's
-# object through make's built-in rules).
-$(RV32_LIBC_DEPS): ;
 RV32_OS_OBJS_libccheck := build/rv32/os/libc/libccheck.o
 RV32_OS_OBJS_lua := $(RV32_LUA_OBJS)
 # Issue #35: doomgeneric, unmodified (third_party/doomgeneric/README.md), built as its own Makefile
 # builds it less the X11 back end, with CMAP256 (palette indices) at 320x200, and for rv32im: the
 # core has M, Doom's fixed point multiplies all the time, and rv32im objects link with the ilp32 C
-# library. Its code is built without warnings, as the vendored C library is; our platform file with them.
+# library. Its code is built with warnings off (-w), as the vendored C library is; our platform file
+# with the C library programs' flags (-Wall -Wextra -Werror), for rv32im too.
 RV32_DOOM := third_party/doomgeneric
 RV32_DOOM_OBJS := $(patsubst %.c,build/rv32/doom/%.o,$(shell cat $(RV32_DOOM)/SOURCES))
 RV32_ARCH_M := $(subst -march=rv32i ,-march=rv32im ,$(RV32_ARCH))
+ifeq ($(RV32_ARCH_M),$(RV32_ARCH))
+$(error RV32_ARCH_M: RV32_ARCH no longer reads -march=rv32i, so Doom would build without M)
+endif
 RV32_DOOM_DEFINES := -DCMAP256 -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200
+RV32_OS_LIBC_CFLAGS_M := $(subst $(RV32_ARCH),$(RV32_ARCH_M),$(RV32_OS_LIBC_CFLAGS))
 RV32_DOOM_CFLAGS := $(RV32_ARCH_M) -std=gnu99 -O2 -g -w $(RV32_DOOM_DEFINES) $(RV32_LIBC_ALLOC_FLAGS) $(RV32_LIBC_INCLUDES)
 $(RV32_DOOM_OBJS): build/rv32/doom/%.o: $(RV32_DOOM)/%.c
 	@mkdir -p $(@D)
 	$(RV32_CC) $(RV32_DOOM_CFLAGS) -MD -MP -c -o $@ $<
 build/rv32/os/libc/doom_rv32.o: $(RV32_OS_LIBC)/doom_rv32.c
 	@mkdir -p $(@D)
-	$(RV32_CC) $(subst $(RV32_ARCH),$(RV32_ARCH_M),$(RV32_OS_LIBC_CFLAGS)) $(RV32_DOOM_DEFINES) -I$(RV32_DOOM) -MD -MP -c -o $@ $<
+	$(RV32_CC) $(RV32_OS_LIBC_CFLAGS_M) $(RV32_DOOM_DEFINES) -Iprograms/rv32 -I$(RV32_DOOM) -MD -MP -c -o $@ $<
 RV32_OS_OBJS_doom := $(RV32_DOOM_OBJS) build/rv32/os/libc/doom_rv32.o
 # As for the hard-float programs: Doom never reads stdin, so bufio.c's weak reference to it would
 # stay undefined in the image (the image check refuses that); the linker is told to resolve it.
 build/rv32/os/doom.elf: RV32_OS_LIBC_LDFLAGS += -Wl,--undefined=stdin
+# The dependency files compiling writes, Doom's included: listed after every object list they name,
+# since := expands each list where it is used.
+RV32_LIBC_DEPS := $(patsubst %.o,%.d,$(RV32_LIBC_OBJS_libc) $(RV32_LIBC_OBJS_builtins) $(RV32_LUA_OBJS) $(RV32_OS_OBJS_doom) \
+	build/rv32/os/libc/syscalls.o build/rv32/os/libc/tty.o build/rv32/os/libc/libccheck.o \
+	$(foreach p,$(RV32_OS_LIBC_PROGRAMS) $(RV32_OS_DISK_LIBC_PROGRAMS),build/rv32/os/libc/crt-$(p).o))
+-include $(RV32_LIBC_DEPS)
+# Made only as a side effect of compiling: never try to remake one (crt-%.o would match crt-lua.d's
+# object through make's built-in rules).
+$(RV32_LIBC_DEPS): ;
 RV32_OS_LIBC_ELFS := $(foreach p,$(RV32_OS_LIBC_PROGRAMS) $(RV32_OS_DISK_LIBC_PROGRAMS),build/rv32/os/$(p).elf)
 $(RV32_OS_LIBC_ELFS): build/rv32/os/%.elf: build/rv32/os/libc/crt-%.o $$(RV32_OS_OBJS_$$*) $(RV32_OS_LIBC_GLUE) \
 		$(RV32_LIBC_ARCHIVES) $(RV32_OS)/user.ld
@@ -1791,13 +1798,27 @@ test-rv32: run-rv32-os-qemu run-rv32-os-qemu-reboot run-rv32-os-qemu-enter run-r
 # L1: libccheck checks picolibc on the kernel's system calls, and `fault stack` the guard page
 # below every program's stack. L2: the Lua REPL and three scripts from the disk. Each runs on QEMU
 # virt (transcript pinned), the emulator and Verilator, results-identical with identical disks.
-# Every such session runs on QEMU, the emulator and Verilator (issue #35 made it one list).
+# RV32_OS_APPS run on QEMU, the emulator and Verilator. Doom's sessions (issue #35, below) run on
+# some backends only: its 350 frames on QEMU and the emulator, its 35 on the emulator and Verilator,
+# and its keys on the emulator alone (QEMU has no input device). A QEMU run compares its disk with
+# the emulator's, so every QEMU app is an emulator app too.
+#
+# Each session `a` may set, beside $(RV32_OS)/a.session and a.session.expected:
+#   RV32_OS_APPS_DISK_a       its disk (default apps.disk)
+#   RV32_OS_APPS_COMPARE_a    the runner's whole --compare argument, flags included
+#                             (default RV32_OS_APPS_COMPARE_DEFAULT)
+#   RV32_OS_APPS_ARGS_a       more runner arguments (checkpoints, input, the emulator's --limit)
+#   RV32_OS_APPS_TIMEOUT_a    the runner's seconds per backend (default 1800)
+#   RV32_OS_APPS_CYCLES_a     Verilator's cycle budget (default 400 M; the runner's cap is 2^31-1)
+#   RV32_OS_APPS_QEMU_TIMEOUT_a  QEMU's seconds (default 120)
 RV32_OS_APPS := libc lua float mandel diskprog
-# Doom's (issue #35, below): its 350-frame session on QEMU and the emulator, its 35-frame one on
-# the emulator and Verilator.
 RV32_OS_APPS_QEMU := $(RV32_OS_APPS) doom
-RV32_OS_APPS_EMU := $(RV32_OS_APPS) doom doom35
+RV32_OS_APPS_EMU := $(RV32_OS_APPS) doom doom35 doomkeys
 RV32_OS_APPS_VERILATOR := $(RV32_OS_APPS) doom35
+RV32_OS_APPS_COMPARE_DEFAULT := results --compare-traps faults
+ifneq ($(filter-out $(RV32_OS_APPS_EMU),$(RV32_OS_APPS_QEMU)),)
+$(error RV32_OS_APPS_QEMU: $(filter-out $(RV32_OS_APPS_EMU),$(RV32_OS_APPS_QEMU)) has no emulator run to compare disks with)
+endif
 .PHONY: $(foreach a,$(RV32_OS_APPS_QEMU),run-rv32-$(a)-qemu) $(foreach a,$(RV32_OS_APPS_EMU),run-rv32-$(a)-emu) \
 	$(foreach a,$(RV32_OS_APPS_VERILATOR),run-rv32-$(a)-rtl-verilator)
 RV32_OS_LUA_SCRIPTS := $(wildcard $(RV32_OS)/lua/*.lua)
@@ -1806,7 +1827,7 @@ $(RV32_OS_APPS_DISK): tools/rv32_mkfs.py $(RV32_OS)/welcome.txt $(RV32_OS_LUA_SC
 	$(PYTHON) tools/rv32_mkfs.py --new --add welcome=$(RV32_OS)/welcome.txt $(foreach f,$(RV32_OS_LUA_SCRIPTS),--add $(notdir $(f))=$(f)) $@
 rv32_os_apps_disk = $(or $(RV32_OS_APPS_DISK_$(1)),$(RV32_OS_APPS_DISK))
 rv32_os_apps_args = --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/$(1).session --disk $(call rv32_os_apps_disk,$(1)) \
-	--compare $(or $(RV32_OS_APPS_COMPARE_$(1)),results --compare-traps faults) --expect-console-file $(RV32_OS)/$(1).session.expected \
+	--compare $(or $(RV32_OS_APPS_COMPARE_$(1)),$(RV32_OS_APPS_COMPARE_DEFAULT)) --expect-console-file $(RV32_OS)/$(1).session.expected \
 	--timeout $(or $(RV32_OS_APPS_TIMEOUT_$(1)),1800) \
 	$(RV32_OS_APPS_ARGS_$(1))
 # Issue #33: mandel's frames, which it also prints (QEMU has no display): 4x4 blocks in the float
@@ -1836,6 +1857,9 @@ build/rv32/os/diskprog.disk: build/rv32/os/pad.bin $(RV32_OS_DISK_PRGS) tools/rv
 # Doom prints its screen and palette hashes every 35 frames, which it computes itself, so QEMU,
 # which has no display, pins the same picture; the emulator and Verilator also pin the
 # framebuffer's checkpoint. Start-up takes about 202 M instructions and a frame about 1.3 M.
+# The fetch is written twice on purpose: the phony target fetches again whenever the WAD is not the
+# pinned one, and the file target fetches only when it is missing (the disk's recipe then checks it).
+# A first run of test-rv32 therefore needs the network.
 .PHONY: fetch-rv32-doom-wad
 fetch-rv32-doom-wad:
 	$(PYTHON) tools/rv32_doom.py --fetch
@@ -1844,17 +1868,25 @@ $(RV32_DOOM_WAD):
 	$(PYTHON) tools/rv32_doom.py --fetch
 RV32_OS_APPS_DISK_doom := build/rv32/os/doom.disk
 RV32_OS_APPS_DISK_doom35 := build/rv32/os/doom.disk
-build/rv32/os/doom.disk: build/rv32/os/doom.prg $(RV32_DOOM_WAD) tools/rv32_mkfs.py | build/rv32/os
+RV32_OS_APPS_DISK_doomkeys := build/rv32/os/doom.disk
+build/rv32/os/doom.disk: build/rv32/os/doom.prg $(RV32_DOOM_WAD) tools/rv32_mkfs.py tools/rv32_doom.py | build/rv32/os
 	$(PYTHON) tools/rv32_doom.py --check
 	$(PYTHON) tools/rv32_mkfs.py --new --size 0x500000 --add doom1.wad=$(RV32_DOOM_WAD) --add doom=$< $@
 # Untraced: a trace of the 35 frames alone is 9.5 GB. Every frame's framebuffer checkpoint is pinned.
+# doom35's emulator run is for trying by hand; run-rv32-doom35-rtl-verilator runs it beside the RTL.
+# doomkeys plays the title and menus with scripted keys (doomkeys.input) for 50 frames, so a wrong
+# key map changes its pinned screens; it also checks -fps's line and a limit that is not a
+# multiple of 35.
 RV32_OS_APPS_COMPARE_doom := outputs
 RV32_OS_APPS_COMPARE_doom35 := outputs
+RV32_OS_APPS_COMPARE_doomkeys := outputs
 RV32_OS_APPS_ARGS_doom := --limit 2000000000 --expect-checkpoints $(RV32_OS)/doom.checkpoints
 RV32_OS_APPS_ARGS_doom35 := --limit 1000000000 --expect-checkpoints $(RV32_OS)/doom35.checkpoints
+RV32_OS_APPS_ARGS_doomkeys := --limit 1000000000 --input $(RV32_OS)/doomkeys.input --expect-checkpoints $(RV32_OS)/doomkeys.checkpoints
+# Doom's 35 frames take about 1.41 G cycles; the runner refuses a budget over 2^31-1.
 RV32_OS_APPS_CYCLES_doom35 := 2000000000
 RV32_OS_APPS_TIMEOUT_doom35 := 5400
-RV32_OS_QEMU_TIMEOUT_doom := 600
+RV32_OS_APPS_QEMU_TIMEOUT_doom := 600
 # Play it: the window paces presents at 35 a second, Doom's tic rate, and since its clock is
 # virtual that is the game's speed (docs/rv32-doom.md). The session runs on a copy of the disk
 # and is recorded, so it replays headless.
@@ -1865,21 +1897,33 @@ run-rv32-doom: check-rv32-os-image build/rv32/os/doom.disk $(RV32WIN)
 	cp build/rv32/os/doom.disk build/rv32/os/doom.play.disk
 	$(RV32WIN) --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/doom.play --disk build/rv32/os/doom.play.disk \
 		--fps 35 --record build/rv32/os/doom.recorded.input
-# The same window, headless (SDL's dummy driver), for 400 M instructions: Doom starts, draws its
-# title and demo through the palette, and the run ends at the limit.
-check-rv32-doom-window: check-rv32-os-image build/rv32/os/doom.disk $(RV32WIN)
+# The same window, headless (SDL's dummy driver), for 400 M instructions: Doom starts and draws its
+# title and demo through the palette (396 frames), and the run ends at the limit. The window
+# must give the headless emulator's console and checkpoints, line for line, and Doom must still be
+# running: a kill or an exit would leave the shell idling to the limit, which the console shows.
+check-rv32-doom-window: check-rv32-os-image build/rv32/os/doom.disk $(RV32WIN) $(RV32EMU)
 	cp build/rv32/os/doom.disk build/rv32/os/doom.window.disk
-	SDL_VIDEO_DRIVER=dummy SDL_RENDER_DRIVER=software $(RV32WIN) --image build/rv32/os/kernel.bin \
+	cp build/rv32/os/doom.disk build/rv32/os/doom.window-emu.disk
+	@status=0; SDL_VIDEO_DRIVER=dummy SDL_RENDER_DRIVER=software $(RV32WIN) --image build/rv32/os/kernel.bin \
 		--console-input $(RV32_OS)/doom.play --disk build/rv32/os/doom.window.disk --fps 0 \
 		--max-instructions 400000000 --checkpoints build/rv32/os/doom.window.checkpoints > build/rv32/os/doom.window.console \
-		2> build/rv32/os/doom.window.stderr; test $$? -eq 2
-	grep -q "halt=limit steps=400000000 " build/rv32/os/doom.window.stderr
-	grep -q "I_InitGraphics: DOOM screen size: w x h: 320 x 200" build/rv32/os/doom.window.console
-	test $$(wc -l < build/rv32/os/doom.window.checkpoints) -ge 100
+		2> build/rv32/os/doom.window.stderr || status=$$?; \
+	$(RV32EMU) --image build/rv32/os/kernel.bin --console-input $(RV32_OS)/doom.play --disk build/rv32/os/doom.window-emu.disk \
+		--max-instructions 400000000 --checkpoints build/rv32/os/doom.window-emu.checkpoints > build/rv32/os/doom.window-emu.console \
+		2> build/rv32/os/doom.window-emu.stderr; \
+	if ! { test $$status -eq 2 && grep -q "halt=limit steps=400000000 " build/rv32/os/doom.window.stderr && \
+	       grep -q "I_InitGraphics: DOOM screen size: w x h: 320 x 200" build/rv32/os/doom.window.console && \
+	       ! grep -Eq "killed|exited|I_Error|Error:" build/rv32/os/doom.window.console && \
+	       test $$(wc -l < build/rv32/os/doom.window.checkpoints) -ge 100 && \
+	       cmp -s build/rv32/os/doom.window.checkpoints build/rv32/os/doom.window-emu.checkpoints && \
+	       cmp -s build/rv32/os/doom.window.console build/rv32/os/doom.window-emu.console; }; then \
+		echo "check-rv32-doom-window: the window's run (status $$status) is not the emulator's, or Doom stopped"; \
+		tail -5 build/rv32/os/doom.window.stderr; tail -20 build/rv32/os/doom.window.console; exit 1; fi; \
+	echo "check-rv32-doom-window: $$(wc -l < build/rv32/os/doom.window.checkpoints) frames, the emulator's, Doom running"
 # QEMU's disk ends byte for byte the emulator's.
 $(foreach a,$(RV32_OS_APPS_QEMU),run-rv32-$(a)-qemu): run-rv32-%-qemu: check-rv32-os-image $$(call rv32_os_apps_disk,$$*) run-rv32-%-emu
 	cp $(call rv32_os_apps_disk,$*) build/rv32/os/$*.qemu.disk
-	$(RV32_OS_QEMU) --stdin $(RV32_OS)/$*.session --drive build/rv32/os/$*.qemu.disk --timeout $(or $(RV32_OS_QEMU_TIMEOUT_$*),120) --transcript build/rv32/os/$*.qemu.transcript
+	$(RV32_OS_QEMU) --stdin $(RV32_OS)/$*.session --drive build/rv32/os/$*.qemu.disk --timeout $(or $(RV32_OS_APPS_QEMU_TIMEOUT_$*),120) --transcript build/rv32/os/$*.qemu.transcript
 	diff -u $(RV32_OS)/$*.session.qemu.expected build/rv32/os/$*.qemu.transcript
 	cmp build/rv32/os/$*-emu/kernel.emu.disk build/rv32/os/$*.qemu.disk
 $(foreach a,$(RV32_OS_APPS_EMU),run-rv32-$(a)-emu): run-rv32-%-emu: check-rv32-os-image $$(call rv32_os_apps_disk,$$*) $(RV32EMU)
@@ -1889,9 +1933,9 @@ $(foreach a,$(RV32_OS_APPS_VERILATOR),run-rv32-$(a)-rtl-verilator): run-rv32-%-r
 # Issue #33: fpcheck and fpmate keep their floating state apart across preemption; mandel draws, in
 # 4x4 blocks in the float session and in its 2x2 in its own.
 test-rv32: $(foreach a,$(RV32_OS_APPS),run-rv32-$(a)-qemu run-rv32-$(a)-emu run-rv32-$(a)-rtl-verilator)
-# Issue #35: Doom's 350 frames on QEMU and the emulator (about 30 s each) and the window, in the
-# fast tier; its 35 frames on Verilator in the slow one.
-test-rv32: run-rv32-doom-qemu run-rv32-doom-emu check-rv32-doom-window
+# Issue #35: Doom's 350 frames on the emulator (about 26 s) and QEMU (about 1 s), its keys and the
+# window, in the fast tier; its 35 frames on Verilator in the slow one.
+test-rv32: run-rv32-doom-qemu run-rv32-doom-emu run-rv32-doomkeys-emu check-rv32-doom-window
 test-rv32-slow: run-rv32-doom35-rtl-verilator
 
 # O3: storage. virtiocheck drives the virtio-blk device directly on QEMU virt (a 128 KiB drive on

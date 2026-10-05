@@ -56,8 +56,8 @@ static void usage(void)
           "events at the next present: arrows, space, return, escape, A, D, W, S, P, Q, R, and for\n"
           "Doom Ctrl, Shift (either one), Tab, Y, N and 1 to 7. A scripted\n"
           "--input replays as on rv32emu; --record writes every event, typed or scripted, as a script\n"
-          "that replays this session. --console-input and --disk are rv32emu's (issue #35: Doom runs\n"
-          "under the OS from a disk). Closing the window stops the run with halt=stopped.\n",
+          "that replays this session. --console-input (a file, or - for stdin) and --disk are rv32emu's\n"
+          "(issue #35: Doom runs under the OS from a disk). Closing the window stops the run with halt=stopped.\n",
           stderr);
     exit(EXIT_EMULATOR_ERROR);
 }
@@ -157,16 +157,18 @@ int main(int argc, char **argv)
     m.pc = start_given ? start : RAM_BASE;
     /* Refuse every aliased pair, parse the script, and open SDL before any output file is
      * created, so a refused run truncates nothing. */
-    emu_require_distinct(record_path, "record file", image_path, "image");
-    emu_require_distinct(record_path, "record file", input_path, "input script");
-    emu_require_distinct(checkpoints_path, "checkpoints file", image_path, "image");
-    emu_require_distinct(checkpoints_path, "checkpoints file", input_path, "input script");
-    emu_require_distinct(checkpoints_path, "checkpoints file", record_path, "record file");
-    const char *console_file = console_input && strcmp(console_input, "-") ? console_input : NULL;
-    const char *outputs[][2] = {{record_path, "record file"}, {checkpoints_path, "checkpoints file"}};
+    /* As rv32emu does: every output against every input and every earlier output. The disk is
+     * written through, so it counts as an output too (issue #35). */
+    const char *inputs[][2] = {{image_path, "image"}, {input_path, "input script"},
+                               {console_input && strcmp(console_input, "-") ? console_input : NULL, "console input"}};
+    const char *outputs[][2] = {{record_path, "record file"}, {checkpoints_path, "checkpoints file"}, {disk_path, "disk"}};
     for (size_t i = 0; i < sizeof outputs / sizeof outputs[0]; i++) {
-        emu_require_distinct(outputs[i][0], outputs[i][1], console_file, "console input");
-        emu_require_distinct(outputs[i][0], outputs[i][1], disk_path, "disk");
+        for (size_t j = 0; j < sizeof inputs / sizeof inputs[0]; j++) {
+            emu_require_distinct(outputs[i][0], outputs[i][1], inputs[j][0], inputs[j][1]);
+        }
+        for (size_t j = 0; j < i; j++) {
+            emu_require_distinct(outputs[i][0], outputs[i][1], outputs[j][0], outputs[j][1]);
+        }
     }
     if (input_path) {
         emu_read_input_script(&m, input_path); /* exits on a bad script */
