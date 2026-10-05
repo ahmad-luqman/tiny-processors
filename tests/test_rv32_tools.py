@@ -1046,6 +1046,14 @@ class GatedQemuRunnerTests(unittest.TestCase):
                     self.assertEqual(completed.returncode, 2)
                     self.assertIn("1 to 64 bytes", completed.stderr)
 
+    def test_many_short_lines_start_at_once(self):
+        """Codex on PR #45: the line offsets are a running total, so 64 KiB of blank lines costs
+        nothing before the guest starts (it fails at once here: no prompt ever comes)."""
+        started = time.monotonic()
+        run = self.gated(b"\n" * 65536, "> ", 0, timeout=1)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual((run.fed, run.lines), (0, 65536))
+
     def test_status_only_verdicts(self):
         self.assertTrue(classify_status(0, "a\r\nb\r\n", False, 2, 2).ok)
         self.assertTrue(classify_status(0, "", False).ok, "without a gate only the status counts")

@@ -10,6 +10,7 @@ QEMU's own diagnostics stay on stderr.
 import argparse
 import bisect
 import io
+import itertools
 import os
 from collections import namedtuple
 from pathlib import Path
@@ -93,7 +94,7 @@ def run_gated(command, timeout, stdin, prompt):
     reading; QEMU's stdin stays open. Returns a GatedRun; a line counts as fed once its last byte
     is written."""
     lines = input_lines(Path(stdin).read_bytes())
-    ends = [sum(len(line) for line in lines[:k + 1]) for k in range(len(lines))]  # byte offsets past each line
+    ends = list(itertools.accumulate(len(line) for line in lines))  # the byte offset past each line
     prompts = PromptCounter(prompt.encode())
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out, err, pending, released, written, closed = bytearray(), bytearray(), bytearray(), 0, 0, False
