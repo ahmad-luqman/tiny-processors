@@ -246,7 +246,7 @@ with a file name a script with `arg`.
 | stack | 160 KiB |
 | heap, up to the stack | 252 KB |
 
-It spans slots 18 to 23, the six at the top of 4 MiB RAM (issue #33 doubled RAM to 8 MiB). Lua's image is the RAM disk's
+It spans slots 18 to 23, the six at the top of 4 MiB RAM (issue #33 doubled RAM to 8 MiB, issue #35 to 16 MiB). Lua's image is the RAM disk's
 largest program, and spawning it copied its 370 KB a byte at a time; [mem.c](../programs/rv32/os/mem.c)'s
 `memcpy` and `memset` now move words when both addresses allow, which took
 the Lua session from 24.7 M steps to 14.7 M.

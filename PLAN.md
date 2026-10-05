@@ -105,8 +105,12 @@ draws the Mandelbrot set ([record](docs/rv32-os.md#floating-state-issue-33)).
 B2 ([#34](https://github.com/ahmad-luqman/tiny-processors/issues/34)) adds
 the A extension to both backends: `lr.w`, `sc.w` and the nine AMOs, with a
 reservation that every SC, trap and xRET clears. It passes riscv-arch-test's
-A suite and riscv-tests' rv32ua against QEMU ([record](docs/rv32-a.md)). Doom
-(#35) and Linux without an MMU (#36) follow.
+A suite and riscv-tests' rv32ua against QEMU ([record](docs/rv32-a.md)). B3
+(#35, Doom) is two PRs. The first builds the platform: RAM is 16 MiB (120
+slots), a disk is up to 8 MiB, a program can live on the disk, the palette at
+`0x1100_3000` is built on every backend, and there are twelve more keys
+([record](docs/rv32-doom.md)). Doom itself and Linux without an MMU (#36)
+follow.
 
 ## Later optional tracks
 
