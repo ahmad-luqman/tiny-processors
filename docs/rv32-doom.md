@@ -138,9 +138,9 @@ Frame 120 of the demo, written as a PPM by the emulator (`rv32emu --frames`), sh
 
 - **doomgeneric** ([ozkl/doomgeneric](https://github.com/ozkl/doomgeneric), `master` at `dcb7a8db`) is GPL-2.0. It is vendored unmodified in [third_party/doomgeneric](../third_party/doomgeneric/README.md): the 80 sources its own Makefile compiles besides the X11 back end, every header, and `LICENSE`. The `doom` program built from it is therefore GPL too; nothing else links it.
 - **The shareware `doom1.wad` v1.9** is not free software. id's licence lets anyone copy it to give to others, unmodified and free of charge. The copyright file in Debian's `doom-wad-shareware` package keeps John Carmack's 1999 clarification that "the DOOM shareware wad is freely distributable".
-  - It is never committed. [tools/rv32_doom.py](../tools/rv32_doom.py) (`make fetch-rv32-doom-wad`) downloads that Debian package and checks its SHA-256. It takes out the WAD and checks its SHA-256 `1d7d43be…` (4,196,020 bytes, MD5 `f0cefca4…`, the Doom Wiki's v1.9). It writes the copyright file, then the WAD, each whole or not at all, into the git-ignored `third_party/doom-wad/`.
+  - It is never committed. [tools/rv32_doom.py](../tools/rv32_doom.py) (`make fetch-rv32-doom-wad`) downloads that Debian package and checks its SHA-256. It takes out the WAD and checks its SHA-256 `1d7d43be…` (4,196,020 bytes, MD5 `f0cefca4…`, the Doom Wiki's v1.9). It checks the copyright file's SHA-256 too, and writes it, then the WAD, each whole or not at all, into the git-ignored `third_party/doom-wad/`.
   - The mirrors that served the bare file directly were gone (404). The archive's pool keeps a version only while a release has it, so the tool falls back to snapshot.debian.org, which serves the same package by its SHA-1 for good. Both are checked against the same SHA-256.
-  - A target that needs the WAD fetches it, so the first `make test-rv32` needs the network. `--check` names the fetch target when the WAD or its licence is missing or wrong.
+  - A target that needs the WAD fetches it, so the first `make test-rv32` needs the network. `--check` names the fetch target when the WAD or its licence is missing or not the pinned file.
 
 ### Building it
 
@@ -173,7 +173,7 @@ Frame 120 of the demo, written as a PPM by the emulator (`rv32emu --frames`), sh
   - A timedemo never waits in `TryRunTics`: it runs one tic per frame by itself. In play, the first frame after a wipe may run the tics the wipe let pass.
   - With `mtime`, the wipe would draw as many frames as fit in the device time it took, and device time per frame differs between QEMU, the emulator and the RTL. The same demo would give each backend a different frame count.
   - In the window, presents are paced at 35 a second, Doom's tic rate, and that is the game's real speed, as for Pong.
-- **`-frames N`** (N a count above 0; anything else is an error) ends the run after N frames, with `exit()`, not `I_Quit`: no config is saved and a timedemo's end-of-demo report (an `I_Error`) never comes. **`-fps`** adds a line with the device ticks from the first frame's present to the last's, so start-up is not counted: the low word of `mtime` (100 ns on QEMU, a step on the emulator, a cycle on the RTL). It depends on the backend, so the cross-backend sessions leave it out.
+- **`-frames N`** (N a count above 0; anything else is an error) ends the run after N frames, with `exit()`, not `I_Quit`: no config is saved and a timedemo's end-of-demo report (an `I_Error`) never comes. **`-fps`** adds a line with the device ticks from the first frame's present to the last's, read straight after each present, so neither start-up nor the reports are counted (it needs two frames or more): the low word of `mtime` (100 ns on QEMU, a step on the emulator, a cycle on the RTL). It depends on the backend, so the cross-backend sessions leave it out.
 
 ### The pinned runs
 

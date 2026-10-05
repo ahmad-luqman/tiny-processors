@@ -37,6 +37,7 @@ PACKAGE_URLS = (
 PACKAGE_SHA256 = "5802f176c0303e228095b5312def53de602781cf4c53e79842257484a0d9e938"
 WAD_SHA256 = "1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771"
 WAD_SIZE = 4196020
+COPYRIGHT_SHA256 = "1482321ff0640a41f039d771f7a2abe62b32ff76f6fd458c291cb981df94d083"  # 8,656 bytes, the package's
 MEMBERS = {"./usr/share/games/doom/doom1.wad": "doom1.wad",
            "./usr/share/doc/doom-wad-shareware/copyright": "copyright"}
 
@@ -115,19 +116,23 @@ def fetch() -> None:
     digest = sha256(wad)
     if len(wad) != WAD_SIZE or digest != WAD_SHA256:
         raise FetchError(f"doom1.wad: {len(wad)} bytes, SHA-256 {digest}; expected {WAD_SIZE}, {WAD_SHA256}")
+    licence = sha256(files["copyright"])
+    if licence != COPYRIGHT_SHA256:
+        raise FetchError(f"the copyright file's SHA-256 is {licence}, expected {COPYRIGHT_SHA256}")
     WAD_DIR.mkdir(parents=True, exist_ok=True)
     write(COPYRIGHT, files["copyright"])  # the licence first: a WAD never sits without it
     write(WAD, wad)
 
 
 def check() -> None:
-    """Raise unless the pinned WAD and its licence are in place, naming the target that fetches them."""
+    """Raise unless the pinned WAD and its pinned licence are in place, naming the target that fetches them."""
     if not WAD.is_file():
         raise FetchError(f"{WAD.relative_to(ROOT)} is missing: run `make fetch-rv32-doom-wad`")
     if sha256(WAD.read_bytes()) != WAD_SHA256:
         raise FetchError(f"{WAD.relative_to(ROOT)} is not the pinned shareware v1.9: run `make fetch-rv32-doom-wad`")
-    if not COPYRIGHT.is_file():
-        raise FetchError(f"{COPYRIGHT.relative_to(ROOT)}, the WAD's licence, is missing: run `make fetch-rv32-doom-wad`")
+    if not COPYRIGHT.is_file() or sha256(COPYRIGHT.read_bytes()) != COPYRIGHT_SHA256:
+        raise FetchError(f"{COPYRIGHT.relative_to(ROOT)}, the WAD's licence, is missing or not the pinned file: "
+                         "run `make fetch-rv32-doom-wad`")
 
 
 def main(argv: list[str] | None = None) -> int:

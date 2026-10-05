@@ -21,8 +21,9 @@
  * frame number and the hashes of the screen buffer and of the palette (the checkpoint hash of
  * docs/rv32.md: h = h*33 ^ word from 5381), which it computes itself, so QEMU, which has no
  * display, prints the same lines. `-fps` adds a line with the device ticks (the low word of mtime)
- * from the first frame's present to the last's, so start-up is not counted; that depends on the
- * backend, so the cross-backend sessions leave it out.
+ * from the first frame's present to the last's, read straight after each present, so neither
+ * start-up nor the reports are counted; it needs at least two frames. It depends on the backend,
+ * so the cross-backend sessions leave it out.
  */
 #include <errno.h>
 #include <stdbool.h>
@@ -120,17 +121,19 @@ void DG_DrawFrame(void)
         }
     }
     frames++;
-    if (frames == 1) {
-        first_ticks = sys_time();
-    }
     bool last = frames == frame_limit;
+    uint32_t now = frames == 1 || last ? sys_time() : 0; /* before any reporting work */
+    if (frames == 1) {
+        first_ticks = now;
+    }
     if (frames % REPORT_EVERY == 0 || last) {
         report();
     }
     if (last) {
-        if (report_ticks) {
-            printf("doom: frames 2 to %lu in %lu device ticks\n", (unsigned long)frames,
-                   (unsigned long)(sys_time() - first_ticks));
+        if (report_ticks && frames >= 2) {
+            printf("doom: frames 2 to %lu in %lu device ticks\n", (unsigned long)frames, (unsigned long)(now - first_ticks));
+        } else if (report_ticks) {
+            printf("doom: -fps needs two frames or more\n");
         }
         /* exit(), not I_Quit(): Doom's own exit handlers stay out of a measured run, so it saves
          * no config and a timedemo's end-of-demo report (an I_Error) never comes. */

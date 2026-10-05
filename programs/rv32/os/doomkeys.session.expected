@@ -6,7 +6,7 @@ sh: ls, NAME [ARGS] [&], wait, halt [CODE]
 $ doom -iwad doom1.wad -frames 50 -fps
                            Doom Generic 0.1
 Z_Init: Init zone memory allocation daemon. 
-zone memory: 0x8054d3c0, 600000 allocated for zone
+zone memory: 0x8054d420, 600000 allocated for zone
 Using . for configuration and saves
 V_Init: allocate screens.
 M_LoadDefaults: Load system defaults.
@@ -39,7 +39,7 @@ I_InitGraphics: DOOM screen size: w x h: 320 x 200
 I_InitGraphics: Auto-scaling factor: 1
 doom: frame 35 screen 5ed56775 palette 2002492b
 doom: frame 50 screen 8eae0071 palette 2002492b
-doom: frames 2 to 50 in 32125521 device ticks
+doom: frames 2 to 50 in 32007140 device ticks
 $ halt
 kernel: halt, 1 exits
 PASS 1af5ac24

@@ -901,6 +901,10 @@ class DoomFetchTest(unittest.TestCase):
                 rv32_doom.fetch()                         # the package passes, the WAD is not the pinned one
             stack.enter_context(mock.patch.object(rv32_doom, "WAD_SHA256", rv32_doom.sha256(wad)))
             stack.enter_context(mock.patch.object(rv32_doom, "WAD_SIZE", len(wad)))
+            with self.assertRaisesRegex(rv32_doom.FetchError, "copyright file's SHA-256"):
+                rv32_doom.fetch()                         # the WAD passes, its licence is not the pinned one
+            self.assertEqual(list(Path(directory).iterdir()), [], "still nothing written")
+            stack.enter_context(mock.patch.object(rv32_doom, "COPYRIGHT_SHA256", rv32_doom.sha256(b"c")))
             rv32_doom.fetch()
             self.assertEqual(((Path(directory) / "doom1.wad").read_bytes(), (Path(directory) / "copyright").read_bytes()), (wad, b"c"))
             rv32_doom.check()
@@ -918,9 +922,14 @@ class DoomFetchTest(unittest.TestCase):
             (Path(directory) / "doom1.wad").write_bytes(b"not the shareware WAD")
             with self.assertRaisesRegex(rv32_doom.FetchError, "not the pinned shareware v1.9"):
                 rv32_doom.check()
-            with mock.patch.object(rv32_doom, "WAD_SHA256", rv32_doom.sha256(b"not the shareware WAD")), \
-                    self.assertRaisesRegex(rv32_doom.FetchError, "licence, is missing"):
-                rv32_doom.check()
+            with mock.patch.object(rv32_doom, "WAD_SHA256", rv32_doom.sha256(b"not the shareware WAD")):
+                with self.assertRaisesRegex(rv32_doom.FetchError, "licence, is missing or not the pinned file"):
+                    rv32_doom.check()                     # no licence
+                (Path(directory) / "copyright").write_bytes(b"cut")
+                with self.assertRaisesRegex(rv32_doom.FetchError, "licence, is missing or not the pinned file"):
+                    rv32_doom.check()                     # a licence that is not the package's
+                with mock.patch.object(rv32_doom, "COPYRIGHT_SHA256", rv32_doom.sha256(b"cut")):
+                    rv32_doom.check()
 
 
 if __name__ == "__main__":
