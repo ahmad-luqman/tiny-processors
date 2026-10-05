@@ -9,10 +9,15 @@ $ pad
 sh: pad: cannot run
 $ renamed
 sh: renamed: cannot run
+$ palcheck
+palcheck: power-on palette is RGB332
+palcheck: set and read back, top byte dropped
+palcheck: restored; bad requests refused
 $ files
 pad 4194304
 diskprog 264316
 renamed 264316
+palcheck 2704
 $ halt
-kernel: halt, 2 exits
-PASS f58ccc18
+kernel: halt, 3 exits
+PASS e9591b4a

@@ -129,8 +129,14 @@
 #define RV32_DISPLAY_COLUMNS   320
 #define RV32_DISPLAY_ROWS      240
 
-/* Framebuffer (M5): one byte per pixel, row-major from the top-left, RGB332
- * until a palette exists; readable and writable at every width. */
+/* Palette (issue #35): 256 words, word N the colour of pixel value N as
+ * 0x00RRGGBB; word access only, the top byte reads as zero. Its power-on
+ * contents are the RGB332 mapping. */
+#define RV32_PALETTE_BASE      0x11003000
+#define RV32_PALETTE_SIZE      0x400
+
+/* Framebuffer (M5): one byte per pixel, row-major from the top-left, coloured
+ * through the palette; readable and writable at every width. */
 #define RV32_FB_BASE           0x12000000
 #define RV32_FB_SIZE           (RV32_DISPLAY_COLUMNS * RV32_DISPLAY_ROWS)
 

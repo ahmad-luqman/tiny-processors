@@ -65,6 +65,11 @@
 #define DISPLAY_FRAMES 0x4u
 #define DISPLAY_WIDTH 0x8u
 #define DISPLAY_HEIGHT 0xCu
+/* The palette (issue #35): 256 words, 0x00RRGGBB, the colour of each pixel value; word access
+ * only, the top byte reads as zero. Its power-on contents are the RGB332 mapping. */
+#define PALETTE_BASE 0x11003000u
+#define PALETTE_SIZE 0x400u
+#define PALETTE_ENTRIES 256u
 /* The DMA window (issue #20): the RAM G1 and G2 may reach, [START, END), in its own page so the
  * kernel can keep it from the programs it grants the engines. */
 #define DMA_WINDOW_BASE 0x1100a000u
@@ -145,6 +150,7 @@ typedef struct {
     uint64_t mtimecmp;     /* CLINT: mip.MTIP is mtime >= mtimecmp, mip.MSIP is msip (O1) */
     uint32_t msip;
     uint8_t *fb;           /* the framebuffer window, FB_SIZE bytes */
+    uint32_t palette[PALETTE_ENTRIES]; /* issue #35: 0x00RRGGBB per pixel value */
     uint32_t frames;       /* presents since reset */
     FILE *checkpoints;     /* one `frame N <hash>` line per present, or NULL */
     const char *frames_dir; /* directory for frame-NNNN.ppm, or NULL */
@@ -207,6 +213,8 @@ emu_stop emu_run_until(machine *m, uint64_t budget);
  * framebuffer, and the fixed RGB332 mapping of one pixel. */
 uint32_t emu_frame_hash(const uint8_t *pixels);
 void emu_rgb332(uint8_t pixel, uint8_t rgb[3]);
+/* The colour the palette gives `pixel` now (issue #35), as the PPM writer and the window draw it. */
+void emu_palette_rgb(const machine *m, uint8_t pixel, uint8_t rgb[3]);
 
 /* Reporting. emu_finish_outputs flushes the console and closes whichever of the trace, checkpoints,
  * and record streams are open (a path is only for the message), returning false when any output is

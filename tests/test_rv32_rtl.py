@@ -19,7 +19,7 @@ import tempfile
 import unittest
 
 from tools.rv32_asm import *  # noqa: F401,F403
-from tools.rv32_devices import FB_SIZE, diag_checksum, event_word, frame_hash, render_diag_frame
+from tools.rv32_devices import FB_SIZE, diag_checksum, event_word, frame_hash, power_on_palette, render_diag_frame, word_hash
 from tools.rv32_pong_native import EXPECTED as PONG_EXPECTED, INPUT as PONG_INPUT
 from tools.rv32_image import to_hex_words, write_hex
 from tools.rv32_rtl import (ROOT, Run, check_passed, compile_testbench, cycle_relation, diff_traces, has_value_changes,
@@ -685,8 +685,11 @@ class RtlTest(unittest.TestCase):
             ("read of an unimplemented input offset", LI(1, INPUT) + [LW(2, 1, 12)], 5, INPUT + 12),
             ("misaligned load inside a device window", LI(1, MTIME + 2) + [LW(2, 1, 0)], 4, MTIME + 2),
             ("aligned halfword inside a device window", LI(1, MTIME + 2) + [LHU(2, 1, 0)], 5, MTIME + 2),
-            ("load from the palette window reserved for M6", LI(1, 0x11003000) + [LW(2, 1, 0)], 5, 0x11003000),
-            ("store to the palette window reserved for M6", LI(1, 0x11003000) + [SW(1, 1, 0)], 7, 0x11003000),
+            ("load past the palette's 1 KiB (issue #35)", LI(1, 0x11003400) + [LW(2, 1, 0)], 5, 0x11003400),
+            ("store past the palette's 1 KiB", LI(1, 0x11003400) + [SW(1, 1, 0)], 7, 0x11003400),
+            ("byte load from the palette, which takes words", LI(1, PALETTE + 5) + [LBU(2, 1, 0)], 5, PALETTE + 5),
+            ("halfword store to the palette", LI(1, PALETTE + 2) + [SH(1, 1, 0)], 7, PALETTE + 2),
+            ("fetch from the palette", LI(1, PALETTE) + [JALR(0, 1, 0)], 1, PALETTE),
             ("fetch from the first word past RAM", LI(1, RAM + 0x1000000) + [JALR(0, 1, 0)], 1, RAM + 0x1000000),
         ]
         for name, words, cause, value in cases:
@@ -697,12 +700,12 @@ class RtlTest(unittest.TestCase):
                 self.assertEqual(len(rtl.trace), len(words) + 2 if cause == 1 else len(words) + 1)
                 self.assertNotIn("]<-", rtl.trace[-2], "a faulting store writes nothing")
         # The last RAM word, halfword, and byte are inside the map, for stores and loads.
-        words = LI(1, RAM + 0x7FFFFC) + [SW(1, 1, 0), LW(2, 1, 0), SH(1, 1, 2), SB(1, 1, 3), LHU(3, 1, 2), LBU(4, 1, 3)] + FINISH()
+        words = LI(1, RAM + 0xFFFFFC) + [SW(1, 1, 0), LW(2, 1, 0), SH(1, 1, 2), SB(1, 1, 3), LHU(3, 1, 2), LBU(4, 1, 3)] + FINISH()
         emulator, rtl = self.assert_same_pass(words, stall=0)
-        self.assertEqual(effects(rtl.trace[3]), "x2=807ffffc mem[807ffffc]->807ffffc/4")
+        self.assertEqual(effects(rtl.trace[3]), "x2=80fffffc mem[80fffffc]->80fffffc/4")
         self.assertEqual([effects(line) for line in rtl.trace[4:8]],
-                         ["mem[807ffffe]<-0000fffc/2", "mem[807fffff]<-000000fc/1",
-                          "x3=0000fcfc mem[807ffffe]->0000fcfc/2", "x4=000000fc mem[807fffff]->000000fc/1"])
+                         ["mem[80fffffe]<-0000fffc/2", "mem[80ffffff]<-000000fc/1",
+                          "x3=0000fcfc mem[80fffffe]->0000fcfc/2", "x4=000000fc mem[80ffffff]->000000fc/1"])
 
     def test_console_bytes_and_done_words(self):
         say = LI(1, CONSOLE)
@@ -814,6 +817,18 @@ class RtlTest(unittest.TestCase):
                 emulator, rtl = self.assert_same_pass(words + FINISH(), stall=stall)
                 x = registers(rtl.trace)
                 self.assertEqual((x[7], x[8], x[14], x[15], x[21], x[22]), (1, 1, 5, 5, 0, 0))
+
+    def test_palette(self):
+        """Issue #35: the palette's power-on words are RGB332's on the RTL too (all 256 hashed), a
+        word write keeps its low 24 bits, and every access agrees with the emulator trace for trace."""
+        words = LI(1, PALETTE) + LI(10, 5381)
+        for i in range(256):
+            words += [LW(11, 1, 4 * i), SLLI(12, 10, 5), ADD(10, 10, 12), XOR(10, 10, 11)]
+        words += LI(4, 0xAB123456) + [SW(4, 1, 4 * 5), LW(5, 1, 4 * 5), LW(6, 1, 4 * 6), SW(4, 1, 1020), LW(7, 1, 1020)]
+        emulator, rtl = self.assert_same_pass(words + FINISH(), stall=1)
+        values = registers(rtl.trace)
+        self.assertEqual(values[10], word_hash(power_on_palette()))
+        self.assertEqual((values[5], values[6], values[7]), (0x123456, power_on_palette()[6], 0x123456))
 
     def test_display_and_framebuffer(self):
         """WIDTH and HEIGHT, byte/halfword/word stores into the framebuffer and reads back, two

@@ -110,7 +110,7 @@ SDL3_CFLAGS := $(SDL3_CFLAGS)
 SDL3_LIBS := $(SDL3_LIBS)
 endif
 RV32_RTL := rtl/rv32/rv32_fregfile.v rtl/rv32/rv32_fdecode.v $(FP32_RTL) rtl/rv32/rv32_regfile.v rtl/rv32/rv32_alu.v rtl/rv32/rv32_decode.v rtl/rv32/rv32_muldiv.v rtl/rv32/rv32.v
-RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_clint.v rtl/rv32/rv32_plic.v rtl/rv32/rv32_virtio_blk.v rtl/rv32/rv32_bootrom.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_dma_window.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
+RV32_SOC_RTL := $(RV32_RTL) rtl/rv32/rv32_bus.v rtl/rv32/rv32_ram.v rtl/rv32/rv32_console.v rtl/rv32/rv32_done.v rtl/rv32/rv32_clint.v rtl/rv32/rv32_plic.v rtl/rv32/rv32_virtio_blk.v rtl/rv32/rv32_bootrom.v rtl/rv32/rv32_input.v rtl/rv32/rv32_display.v rtl/rv32/rv32_palette.v rtl/rv32/rv32_dma_window.v rtl/rv32/rv32_soc.v rtl/rv32/rv32_gpu.v rtl/rv32/rv32_g3d.v rtl/rv32/rv32_g3d_core.v rtl/rv32/rv32_simd4.v $(SIMD4_RTL)
 RV32_TB := tests/rv32_tb.sv
 RV32_TB_VVP := build/rv32/rv32_tb.vvp
 RV32_TB_VERILATOR := build/verilator-rv32/rv32_sim
@@ -398,7 +398,7 @@ lint-rv32-soc:
 # The memories are shrunk to 64 words so the count measures the decoder and
 # the devices; the core's own count is synth-rv32's.
 synth-rv32-soc: | build
-	yosys -Q -T -l build/rv32-soc-synth.log -p 'read_verilog -Irtl/fp32 $(RV32_SOC_RTL); chparam -set RAM_WORDS 64 -set FB_WORDS 64 -set DISK_WORDS 64 rv32_soc; synth -top rv32_soc; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32-soc.json'
+	yosys -Q -T -l build/rv32-soc-synth.log -p 'read_verilog -Irtl/fp32 $(RV32_SOC_RTL); chparam -set RAM_WORDS 64 -set FB_WORDS 64 -set DISK_WORDS 64 -set PALETTE_ENTRIES 16 rv32_soc; synth -top rv32_soc; check -assert; select -assert-none t:*LATCH*; stat; write_json build/rv32-soc.json'
 
 waves-rv32: $(RV32_TB_VVP) $(RV32EMU)
 	$(PYTHON) -m tools.rv32_rtl --mode waves --program loop --emulator $(RV32EMU) --simulator $(RV32_TB_VVP) --rtl-timeout $(RV32_ICARUS_TIMEOUT) --out build/rv32/rtl
@@ -1434,9 +1434,10 @@ RV32_OS_SLOT_fpmate := 25
 RV32_OS_SLOT_mandel := 26
 # Issue #35: programs on the disk rather than in the RAM disk, each a tfs file that is a RAM disk
 # of one program; the kernel loads one when the RAM disk has no program of that name.
-RV32_OS_DISK_PROGRAMS := diskprog
+RV32_OS_DISK_PROGRAMS := diskprog palcheck
 RV32_OS_SLOT_diskprog := 100
 RV32_OS_SPAN_diskprog := 4
+RV32_OS_SLOT_palcheck := 104
 rv32_os_span = $(or $(RV32_OS_SPAN_$(1)),1)
 # A program's load address and span in bytes: the one place the slot formula is written here.
 rv32_os_base = $$(printf '0x%x' $$(($(RV32_OS_SLOT_BASE) + $(RV32_OS_SLOT_$(1)) * $(RV32_OS_SLOT_SIZE))))
@@ -1464,6 +1465,7 @@ RV32_OS_OBJS_dmaprobe := build/rv32/os/dmaprobe.o
 RV32_OS_OBJS_fpcheck := build/rv32/os/fpcheck.o
 RV32_OS_OBJS_fpmate := build/rv32/os/fpmate.o
 RV32_OS_OBJS_diskprog := build/rv32/os/diskprog.o build/rv32/os/diskprog_table.o
+RV32_OS_OBJS_palcheck := build/rv32/os/palcheck.o
 # Their objects alone are rv32if; the user library they link stays RV32I (both ILP32).
 $(foreach p,$(RV32_OS_FLOAT_PROGRAMS),build/rv32/os/$(p).o): RV32_OS_CFLAGS := $(filter-out -march=rv32i,$(RV32_OS_CFLAGS)) -march=rv32if_zicsr -ffp-contract=off
 $(foreach p,$(RV32_OS_FLOAT_PROGRAMS),build/rv32/os/$(p).o): $(RV32_OS)/ufloat.h
@@ -1774,11 +1776,12 @@ RV32_OS_APPS_ARGS_mandel := --expect-checkpoint "frame 1 c7e54ac5"
 rv32_os_apps_cycles = $(or $(RV32_OS_APPS_CYCLES_$(1)),400000000)
 RV32_OS_APPS_CYCLES_mandel := 100000000
 # Issue #35: diskprog's session runs it from the end of a 6 MiB disk, behind 4 MiB of padding, so
-# the kernel reads it with whole-sector requests from far into the disk into the slots above 8 MiB.
+# the kernel reads it with whole-sector requests from far into the disk into the slots above 8 MiB;
+# then palcheck, also on the disk, checks the palette through SYS_PALETTE.
 RV32_OS_APPS_DISK_diskprog := build/rv32/os/diskprog.disk
-build/rv32/os/diskprog.disk: build/rv32/os/diskprog.prg tools/rv32_mkfs.py | build/rv32/os
+build/rv32/os/diskprog.disk: build/rv32/os/diskprog.prg build/rv32/os/palcheck.prg tools/rv32_mkfs.py | build/rv32/os
 	$(PYTHON) -c "import sys; open(sys.argv[1], 'wb').write(bytes(range(256)) * 16384)" build/rv32/os/pad.bin
-	$(PYTHON) tools/rv32_mkfs.py --new --size 0x600000 --add pad=build/rv32/os/pad.bin --add diskprog=$< --add renamed=$< $@
+	$(PYTHON) tools/rv32_mkfs.py --new --size 0x600000 --add pad=build/rv32/os/pad.bin --add diskprog=$< --add renamed=$< --add palcheck=build/rv32/os/palcheck.prg $@
 # QEMU's disk ends byte for byte the emulator's.
 run-rv32-libc-qemu run-rv32-lua-qemu run-rv32-float-qemu run-rv32-mandel-qemu run-rv32-diskprog-qemu: run-rv32-%-qemu: check-rv32-os-image $(RV32_OS_APPS_DISK) build/rv32/os/diskprog.disk run-rv32-%-emu
 	cp $(call rv32_os_apps_disk,$*) build/rv32/os/$*.qemu.disk

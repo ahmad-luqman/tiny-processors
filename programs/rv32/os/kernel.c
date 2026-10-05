@@ -141,7 +141,7 @@ static uint32_t idle_stack[64];
 static uint32_t next_pid = 1, exits, exit_sum;
 
 static uint32_t console, done_register, clint, plic;
-static uint32_t input, input_source, display, framebuffer, framebuffer_size, gpu, g3d, disk;
+static uint32_t input, input_source, display, framebuffer, framebuffer_size, palette, gpu, g3d, disk;
 static uint32_t accelerators, accelerators_end; /* O5: the window PMP grants a PROGRAM_ACCELERATORS program */
 /* The engines' register and memory windows. O5's PMP region spans them all; since issue #25 the
  * page table of a PROGRAM_ACCELERATORS program maps each one, and nothing between them. */
@@ -357,6 +357,12 @@ static void discover(uintptr_t address)
     display = find(&t, "tiny-processors,display", 0, 0);
     if (display && fdt_find(&t, "compatible", "tiny-processors,display", 1, &framebuffer, &framebuffer_size) != FDT_OK) {
         panic("display without a framebuffer");
+    }
+    /* Issue #35: the display's palette, its third window; a tree without one gives the call an error. */
+    uint32_t palette_size;
+    if (!display || fdt_find(&t, "compatible", "tiny-processors,display", 2, &palette, &palette_size) != FDT_OK ||
+        palette_size < 4 * OS_PALETTE_ENTRIES) {
+        palette = 0;
     }
     /* The disk: the first "virtio,mmio" node with a block device behind it. QEMU lists all eight
      * of virt's slots, most of them empty (DeviceID 0); our tree lists the one we have. */
@@ -1132,6 +1138,19 @@ static int syscall(struct proc *p)
         break;
     case SYS_DISPLAY:
         result = framebuffer;
+        break;
+    case SYS_PALETTE:
+        if (palette && !(a0 & 3u) && a1 <= 1 && user_range(p, a0, 4 * OS_PALETTE_ENTRIES)) {
+            uint32_t *colours = (uint32_t *)(uintptr_t)a0;
+            for (uint32_t i = 0; i < OS_PALETTE_ENTRIES; i++) {
+                if (a1) {
+                    mmio_write32(palette + 4 * i, colours[i]);
+                } else {
+                    colours[i] = mmio_read32(palette + 4 * i);
+                }
+            }
+            result = 0;
+        }
         break;
     case SYS_SWITCHES:
         result = p->switches;

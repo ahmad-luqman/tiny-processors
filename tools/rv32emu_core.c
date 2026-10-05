@@ -703,6 +703,14 @@ void emu_rgb332(uint8_t pixel, uint8_t rgb[3])
     rgb[2] = (uint8_t)((pixel & 3u) * 255u / 3u);
 }
 
+void emu_palette_rgb(const machine *m, uint8_t pixel, uint8_t rgb[3])
+{
+    uint32_t colour = m->palette[pixel];
+    rgb[0] = (uint8_t)(colour >> 16);
+    rgb[1] = (uint8_t)(colour >> 8);
+    rgb[2] = (uint8_t)colour;
+}
+
 /* Write the frame as a binary PPM so it can be looked at without the window. The file is created
  * exclusively: a frame file that already exists, whatever it is (a stale frame, a link to one of
  * the run's own files), is never overwritten, so the run is rejected instead. The runner deletes
@@ -716,7 +724,7 @@ static bool write_ppm(const machine *m, const char *path)
     fprintf(out, "P6\n%u %u\n255\n", FB_COLUMNS, FB_ROWS);
     for (uint32_t i = 0; i < FB_SIZE; i++) {
         uint8_t rgb[3];
-        emu_rgb332(m->fb[i], rgb);
+        emu_palette_rgb(m, m->fb[i], rgb);
         fwrite(rgb, 1, 3, out);
     }
     bool ok = !ferror(out);
@@ -742,6 +750,25 @@ static void present(machine *m)
             m->output_error = true;
         }
     }
+}
+
+/* The palette (issue #35): word access only; a stored word keeps its low 24 bits. */
+static mem_access palette_load(machine *m, uint32_t offset, int width, uint32_t *value)
+{
+    if (width != 4) {
+        return ACC_FAULT;
+    }
+    *value = m->palette[offset / 4u];
+    return ACC_OK;
+}
+
+static mem_access palette_store(machine *m, uint32_t offset, int width, uint32_t value)
+{
+    if (width != 4) {
+        return ACC_FAULT;
+    }
+    m->palette[offset / 4u] = value & 0x00ffffffu;
+    return ACC_OK;
 }
 
 static mem_access display_load(machine *m, uint32_t offset, int width, uint32_t *value)
@@ -828,6 +855,7 @@ static const region REGIONS[] = {
     {"bootrom", RV32_DTB_ROM_BASE, RV32_DTB_ROM_SIZE, rom_load, NULL},
     {"input", INPUT_BASE, 16, input_load, NULL},
     {"display", DISPLAY_BASE, 16, display_load, display_store},
+    {"palette", PALETTE_BASE, PALETTE_SIZE, palette_load, palette_store},
     {"framebuffer", FB_BASE, FB_SIZE, fb_load, fb_store},
     {"simd4", SIMD_BASE, 32, simd_load, simd_store},
     {"simd4_program", SIMD_PROGRAM, 1024, simd_program_load, simd_program_store},
@@ -2187,6 +2215,11 @@ void emu_init(machine *m)
     m->x[10] = BOOT_HART;
     m->x[11] = RV32_DTB_ROM_BASE;
     m->limit = 100000000ull;
+    for (uint32_t i = 0; i < PALETTE_ENTRIES; i++) { /* issue #35: power-on colours are RGB332's */
+        uint8_t rgb[3];
+        emu_rgb332((uint8_t)i, rgb);
+        m->palette[i] = (uint32_t)rgb[0] << 16 | (uint32_t)rgb[1] << 8 | rgb[2];
+    }
 }
 
 bool emu_alloc(machine *m)

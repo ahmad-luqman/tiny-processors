@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 from tools.rv32_asm import (ADDI, AMO_OPS, AMOADD_W, AMOSWAP_W, BOOTROM, CLINT, CONSOLE, CSRRC, CSRRS, CSRRWI, DISPLAY,
-                            DONE, FB, INPUT, LR_W, LW, MSTATUS, PLIC, RAM, SC_W, VIRTIO, i_type, r_type)
+                            DONE, FB, INPUT, PALETTE, LR_W, LW, MSTATUS, PLIC, RAM, SC_W, VIRTIO, i_type, r_type)
 from tools.rv32_f_asm import arithmetic, flw, fsw
 from tools.rv32_rtl import floating_word, trap_records_by_region
 from tools.rv32_devices import (DIAG_EXPECTED_VALUES, EVENT_PRESS, EVENT_VALID, FB_SIZE, KEYS, QUEUE_SIZE, diag_checksum,
@@ -586,7 +586,7 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertRegex(header, rf"#define RV32_EVENT_PRESS\s+{EVENT_PRESS:#010x}\b")
         self.assertIn(f"32'h{EVENT_VALID:08x} | ((token2 == \"down\") ? 32'h{EVENT_PRESS:x} : 32'h0)".replace("8000_0000", "80000000"),
                       testbench.replace("8000_0000", "80000000"))
-        bases = {"RAM": RAM, "CONSOLE": CONSOLE, "DONE": DONE, "CLINT": CLINT, "PLIC": PLIC, "VIRTIO": VIRTIO, "BOOTROM": BOOTROM, "INPUT": INPUT, "DISPLAY": DISPLAY, "FB": FB,
+        bases = {"RAM": RAM, "CONSOLE": CONSOLE, "DONE": DONE, "CLINT": CLINT, "PLIC": PLIC, "VIRTIO": VIRTIO, "BOOTROM": BOOTROM, "INPUT": INPUT, "DISPLAY": DISPLAY, "PALETTE": PALETTE, "FB": FB,
                  "SIMD4": 0x11004000, "SIMD4_PROGRAM": 0x11005000, "SIMD4_DATA": 0x11006000, "GPU": 0x11007000,
                  "G3D": 0x11008000, "DMA_WINDOW": 0x1100A000}
         header_bases = {name: int(value, 16) for name, value in re.findall(r"#define RV32_(\w+)_BASE\s+0x([0-9a-fA-F]+)", header)}
@@ -606,7 +606,7 @@ class DeviceHelperTests(unittest.TestCase):
         from tools import rv32_dtb
         tree = {"RAM": rv32_dtb.RAM_BASE, "CONSOLE": rv32_dtb.CONSOLE_BASE, "DONE": rv32_dtb.DONE_BASE,
                 "CLINT": rv32_dtb.CLINT_BASE, "PLIC": rv32_dtb.PLIC_BASE, "VIRTIO": rv32_dtb.VIRTIO_BASE, "BOOTROM": rv32_dtb.ROM_BASE, "INPUT": rv32_dtb.INPUT_BASE,
-                "DISPLAY": rv32_dtb.DISPLAY_BASE, "FB": rv32_dtb.FB_BASE, "SIMD4": rv32_dtb.SIMD4_BASE,
+                "DISPLAY": rv32_dtb.DISPLAY_BASE, "PALETTE": rv32_dtb.PALETTE_BASE, "FB": rv32_dtb.FB_BASE, "SIMD4": rv32_dtb.SIMD4_BASE,
                 "SIMD4_PROGRAM": rv32_dtb.SIMD4_PROGRAM, "SIMD4_DATA": rv32_dtb.SIMD4_DATA,
                 "GPU": rv32_dtb.GPU_BASE, "G3D": rv32_dtb.G3D_BASE, "DMA_WINDOW": rv32_dtb.DMA_WINDOW_BASE}
         self.assertEqual(tree, bases, "rv32_dtb.py describes the same windows")
@@ -635,7 +635,7 @@ class DeviceHelperTests(unittest.TestCase):
         words = {name: int(value) for name, value in re.findall(r"parameter integer (\w+) = (\d+)", bus)}
         decoded = {}
         selects = re.findall(r"wire (\w+)_sel = (.*?);", bus, re.S)
-        self.assertEqual(len(selects), 15, "one select per window, plus none_sel")
+        self.assertEqual(len(selects), 16, "one select per window, plus none_sel")
         for select, expr in selects:
             if select == "none":
                 continue

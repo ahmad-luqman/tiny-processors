@@ -63,9 +63,15 @@ static int fail_sdl(const char *what)
     return EXIT_EMULATOR_ERROR;
 }
 
-/* Copy the framebuffer into the texture through the RGB332 table. */
-static bool upload_frame(SDL_Texture *texture, const uint8_t *fb, const uint32_t *lut)
+/* Copy the framebuffer into the texture through the palette as it is at this present (issue #35;
+ * RGB332 until the guest writes it). */
+static bool upload_frame(SDL_Texture *texture, const machine *m)
 {
+    uint32_t lut[PALETTE_ENTRIES];
+    for (unsigned p = 0; p < PALETTE_ENTRIES; p++) {
+        lut[p] = 0xff000000u | m->palette[p];
+    }
+    const uint8_t *fb = m->fb;
     void *pixels;
     int pitch;
     if (!SDL_LockTexture(texture, NULL, &pixels, &pitch)) {
@@ -164,12 +170,6 @@ int main(int argc, char **argv)
         !SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST) /* pixels stay square blocks */) {
         return fail_sdl("cannot set up the frame texture");
     }
-    uint32_t lut[256];
-    for (unsigned p = 0; p < 256; p++) {
-        uint8_t rgb[3];
-        emu_rgb332((uint8_t)p, rgb);
-        lut[p] = 0xff000000u | ((uint32_t)rgb[0] << 16) | ((uint32_t)rgb[1] << 8) | rgb[2];
-    }
     if (record_path) { /* opened before frame 0's events are delivered, so they are recorded too */
         m.record = emu_open_output(record_path, "record file");
         if (!m.record) {
@@ -231,7 +231,7 @@ int main(int argc, char **argv)
             emu_queue_event(&m, m.frames, pending[i]);
         }
         pending_count = 0;
-        if (!upload_frame(texture, m.fb, lut) || !SDL_RenderClear(renderer) ||
+        if (!upload_frame(texture, &m) || !SDL_RenderClear(renderer) ||
             !SDL_RenderTexture(renderer, texture, NULL, NULL) || !SDL_RenderPresent(renderer)) {
             fprintf(stderr, "rv32win: cannot draw the frame: %s\n", SDL_GetError());
             render_ok = false;

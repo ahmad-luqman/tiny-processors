@@ -20,7 +20,8 @@ import unittest
 
 # The encoder lives in tools/rv32_asm.py so the RTL tests assemble the same words.
 from tools.rv32_asm import *  # noqa: F401,F403
-from tools.rv32_devices import FB_SIZE, KEYS, diag_checksum, event_word, frame_hash, render_diag_frame
+from tools.rv32_devices import (FB_SIZE, KEYS, diag_checksum, event_word, frame_hash, power_on_palette, render_diag_frame,
+                                word_hash)
 from tools.rv32_diff_qemu import compare, qemu_pcs, trace_pcs
 from tools.rv32_pong_native import EXPECTED as PONG_EXPECTED, INPUT as PONG_INPUT
 from tools.rv32_run_emu import build_emulator, halt_line
@@ -332,8 +333,10 @@ class EmulatorTest(unittest.TestCase):
             ([LW(1, 2, 0)], 0x10002000, 5, 0x10002000),     # virt's second virtio slot: unmapped here
             ([LW(1, 2, 2)], MTIME, 4, MTIME + 2),           # misalignment is decided before the window
             ([LHU(1, 2, 2)], MTIME, 5, MTIME + 2),          # an aligned halfword inside the window is refused by it
-            ([LW(1, 2, 0)], 0x11003000, 5, 0x11003000),     # the palette window reserved for M6 is unmapped in M5
-            ([SW(1, 2, 0)], 0x11003000, 7, 0x11003000),
+            ([LW(1, 2, 0)], 0x11003400, 5, 0x11003400),     # past the palette's 1 KiB (issue #35): unmapped
+            ([SW(1, 2, 0)], 0x11003400, 7, 0x11003400),
+            ([LBU(1, 2, 5)], PALETTE, 5, PALETTE + 5),      # the palette takes words only
+            ([SH(1, 2, 2)], PALETTE, 7, PALETTE + 2),
             ([LW(1, 2, 0)], DISPLAY, 5, DISPLAY),           # PRESENT is write-only
             ([SW(1, 2, 4)], DISPLAY, 7, DISPLAY + 4),       # FRAMES, WIDTH, HEIGHT are read-only
             ([SW(1, 2, 12)], DISPLAY, 7, DISPLAY + 12),
@@ -652,6 +655,23 @@ class EmulatorTest(unittest.TestCase):
         later = PONG_INPUT.read_text().replace("frame 200 down Q", "frame 201 down Q")
         result = self.run_words(words, limit=10_000_000, checkpoints=True, input_script=later)
         self.assertEqual((result.status, len(result.checkpoints)), (0, 201))
+
+    def test_palette(self):
+        """Issue #35: the palette's power-on words are RGB332's (hashed here over all 256); a word
+        write keeps its low 24 bits and the next frame is drawn through it."""
+        words = LI(1, PALETTE) + LI(10, 5381)
+        for i in range(256):
+            words += [LW(11, 1, 4 * i), SLLI(12, 10, 5), ADD(10, 10, 12), XOR(10, 10, 11)]
+        words += LI(4, 0xAB123456) + [SW(4, 1, 4 * 5), LW(5, 1, 4 * 5), LW(6, 1, 4 * 6)]
+        words += LI(7, FB) + LI(8, 5) + [SB(8, 7, 1)] + LI(9, DISPLAY) + [SW(0, 9, 0)]
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_pass(words, extra=("--frames", directory))
+            data = (Path(directory) / "frame-0001.ppm").read_bytes()
+        x = result.state.x
+        self.assertEqual(x[10], word_hash(power_on_palette()))
+        self.assertEqual((x[5], x[6]), (0x123456, power_on_palette()[6]), "the top byte reads as zero")
+        header = len(b"P6\n320 240\n255\n")
+        self.assertEqual(data[header:header + 6], b"\x00\x00\x00\x12\x34\x56", "pixel 1 is value 5, drawn in the new colour")
 
     def test_frames_are_written_as_ppm(self):
         """--frames DIR writes one binary PPM per present with the RGB332 mapping; an unwritable

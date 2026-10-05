@@ -185,7 +185,7 @@ class GeneratorTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("Warning", result.stderr)
         self.assertIn('compatible = "tiny-processors,rv32-machine";', result.stdout)
-        self.assertIn("reg = <0x12000000 0x12c00>", result.stdout.replace("0x11002000 0x10 ", ""))
+        self.assertIn("reg = <0x12000000 0x12c00 0x11003000 0x400>", result.stdout.replace("0x11002000 0x10 ", ""))
 
     def test_parser_rejects_malformed_blobs(self):
         blob = rv32_dtb.build(rv32_dtb.MACHINE)

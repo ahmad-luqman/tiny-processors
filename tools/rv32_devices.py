@@ -19,6 +19,20 @@ KEYS = {"LEFT": 1, "RIGHT": 2, "UP": 3, "DOWN": 4, "SPACE": 5, "ENTER": 6, "ESCA
         "A": 8, "D": 9, "W": 10, "S": 11, "P": 12, "Q": 13, "R": 14}
 
 
+def power_on_palette():
+    """The palette's 256 words at power-on (issue #35): the RGB332 mapping, bits 7:5 red, 4:2
+    green, 1:0 blue, each scaled to 0..255 with truncation, as 0x00RRGGBB."""
+    return [((p >> 5 & 7) * 255 // 7) << 16 | ((p >> 2 & 7) * 255 // 7) << 8 | (p & 3) * 255 // 3 for p in range(256)]
+
+
+def word_hash(words):
+    """The checkpoint hash's fold over a list of 32-bit words."""
+    h = 5381
+    for word in words:
+        h = (((h << 5) + h) ^ word) & M
+    return h
+
+
 def frame_hash(pixels):
     """The checkpoint hash of a framebuffer's bytes: h = ((h << 5) + h) ^ word from 5381 over its
     little-endian words (shift, add, xor; no multiply)."""
