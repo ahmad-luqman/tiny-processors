@@ -109,16 +109,16 @@ class WindowTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             image = self.write_image(directory, words)
             script = Path(directory) / "script.txt"
-            script.write_text("frame 0 down A\nframe 1 up a\nframe 2 down 20\n")
+            script.write_text("frame 0 down A\nframe 1 up a\nframe 2 down 30\n")
             record = Path(directory) / "record"
             status, _, stderr = self.run_window("--image", str(image), "--input", str(script), "--record", str(record))
             self.assertEqual(status, 0, stderr)
-            self.assertEqual(record.read_text(), "frame 0 down A\nframe 1 up A\nframe 2 down 20\n")
+            self.assertEqual(record.read_text(), "frame 0 down A\nframe 1 up A\nframe 2 down 30\n")
             script.write_text("frame 1 sideways A\n")
             status, _, stderr = self.run_window("--image", str(image), "--input", str(script), "--record", str(record))
             self.assertEqual(status, 2)
             self.assertIn("input script", stderr)
-            self.assertEqual(record.read_text(), "frame 0 down A\nframe 1 up A\nframe 2 down 20\n", "the old recording survives a refused run")
+            self.assertEqual(record.read_text(), "frame 0 down A\nframe 1 up A\nframe 2 down 30\n", "the old recording survives a refused run")
 
     def test_closing_the_window_stops_the_run_and_keeps_the_outputs(self):
         """A present-forever guest at 60 frames a second: SDL turns SIGTERM into a quit event, the

@@ -569,6 +569,18 @@ module rv32_tb;
             else if (u == "P") key_code = 12;
             else if (u == "Q") key_code = 13;
             else if (u == "R") key_code = 14;
+            else if (u == "CTRL") key_code = 15;
+            else if (u == "SHIFT") key_code = 16;
+            else if (u == "TAB") key_code = 17;
+            else if (u == "Y") key_code = 18;
+            else if (u == "N") key_code = 19;
+            else if (u == "DIGIT1") key_code = 20;
+            else if (u == "DIGIT2") key_code = 21;
+            else if (u == "DIGIT3") key_code = 22;
+            else if (u == "DIGIT4") key_code = 23;
+            else if (u == "DIGIT5") key_code = 24;
+            else if (u == "DIGIT6") key_code = 25;
+            else if (u == "DIGIT7") key_code = 26;
             else if (value >= 0 && value < 32) key_code = value;
             else key_code = -1;
         end

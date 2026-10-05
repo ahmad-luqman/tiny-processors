@@ -2061,6 +2061,8 @@ static bool decimal_ok(const char *text)
 static const struct { const char *name; int code; } KEY_NAMES[] = {
     {"LEFT", 1}, {"RIGHT", 2}, {"UP", 3}, {"DOWN", 4}, {"SPACE", 5}, {"ENTER", 6}, {"ESCAPE", 7},
     {"A", 8}, {"D", 9}, {"W", 10}, {"S", 11}, {"P", 12}, {"Q", 13}, {"R", 14},
+    {"CTRL", 15}, {"SHIFT", 16}, {"TAB", 17}, {"Y", 18}, {"N", 19},
+    {"DIGIT1", 20}, {"DIGIT2", 21}, {"DIGIT3", 22}, {"DIGIT4", 23}, {"DIGIT5", 24}, {"DIGIT6", 25}, {"DIGIT7", 26},
 };
 
 const char *emu_key_name(int code)

@@ -578,7 +578,9 @@ class DeviceHelperTests(unittest.TestCase):
         self.assertEqual(dict(re.findall(r'\{"(\w+)", (\d+)\}', emulator)), expected, "rv32emu_core.c")
         self.assertEqual(dict(re.findall(r'\(u == "(\w+)"\) key_code = (\d+);', testbench)), expected, "rv32_tb.sv")
         window = (ROOT / "tools/rv32win.c").read_text()
-        host_names = {"RETURN": "ENTER"}  # SDL names the key by its keycap
+        # SDL names the key by its keycap; either Ctrl or Shift is one key (issue #35).
+        host_names = {"RETURN": "ENTER", "LCTRL": "CTRL", "RCTRL": "CTRL", "LSHIFT": "SHIFT", "RSHIFT": "SHIFT",
+                      **{str(d): f"DIGIT{d}" for d in range(1, 8)}}
         keymap = {host_names.get(name, name): code for name, code in re.findall(r"\{SDL_SCANCODE_(\w+), (\d+)\}", window)}
         self.assertEqual(keymap, expected, "rv32win.c")
         self.assertRegex(header, rf"#define RV32_INPUT_QUEUE\s+{QUEUE_SIZE}\b")

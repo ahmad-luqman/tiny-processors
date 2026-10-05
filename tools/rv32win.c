@@ -30,6 +30,9 @@ static const struct { SDL_Scancode scancode; int code; } KEYMAP[] = {
     {SDL_SCANCODE_SPACE, 5}, {SDL_SCANCODE_RETURN, 6}, {SDL_SCANCODE_ESCAPE, 7}, {SDL_SCANCODE_A, 8},
     {SDL_SCANCODE_D, 9}, {SDL_SCANCODE_W, 10}, {SDL_SCANCODE_S, 11}, {SDL_SCANCODE_P, 12},
     {SDL_SCANCODE_Q, 13}, {SDL_SCANCODE_R, 14},
+    /* Issue #35, for Doom: either Ctrl or Shift, Tab, Y, N and the digits 1 to 7. */
+    {SDL_SCANCODE_LCTRL, 15}, {SDL_SCANCODE_LSHIFT, 16}, {SDL_SCANCODE_TAB, 17}, {SDL_SCANCODE_Y, 18}, {SDL_SCANCODE_N, 19}, {SDL_SCANCODE_RCTRL, 15}, {SDL_SCANCODE_RSHIFT, 16},
+    {SDL_SCANCODE_1, 20}, {SDL_SCANCODE_2, 21}, {SDL_SCANCODE_3, 22}, {SDL_SCANCODE_4, 23}, {SDL_SCANCODE_5, 24}, {SDL_SCANCODE_6, 25}, {SDL_SCANCODE_7, 26},
 };
 
 static int scancode_to_key(SDL_Scancode scancode)

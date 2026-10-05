@@ -584,12 +584,12 @@ class EmulatorTest(unittest.TestCase):
     def test_record_writes_every_offered_event_as_a_replayable_script(self):
         """--record lists every event the host offered, scripted or not, at the frame it was offered,
         before the queue decides: a replay of the record reproduces the run, drops included."""
-        script = "frame 0 down LEFT\nframe 0 up left\nframe 1 down A\nframe 2 up 8\nframe 2 down 20\n"
+        script = "frame 0 down LEFT\nframe 0 up left\nframe 1 down A\nframe 2 up 8\nframe 2 down 30\n"
         words = LI(1, INPUT) + LI(2, DISPLAY) + [LW(3, 1, 0), LW(3, 1, 0), SW(0, 2, 0), LW(3, 1, 0), SW(0, 2, 0), LW(3, 1, 0), LW(3, 1, 0)]
         with tempfile.TemporaryDirectory() as directory:
             record = Path(directory) / "record.txt"
             result = self.run_pass(words, input_script=script, extra=["--record", str(record)], checkpoints=True)
-            self.assertEqual(record.read_text(), "frame 0 down LEFT\nframe 0 up LEFT\nframe 1 down A\nframe 2 up A\nframe 2 down 20\n")
+            self.assertEqual(record.read_text(), "frame 0 down LEFT\nframe 0 up LEFT\nframe 1 down A\nframe 2 up A\nframe 2 down 30\n")
             replay = self.run_pass(words, input_script=record.read_text(), checkpoints=True)
             self.assertEqual((replay.trace, replay.checkpoints), (result.trace, result.checkpoints))
             # A burst the queue cannot hold is recorded whole, so the replay drops the same event.

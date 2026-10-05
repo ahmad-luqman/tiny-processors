@@ -117,6 +117,19 @@
 #define RV32_KEY_P             12
 #define RV32_KEY_Q             13
 #define RV32_KEY_R             14
+/* Issue #35, for Doom: fire, run, the map, yes and no, and the weapons. */
+#define RV32_KEY_CTRL            15
+#define RV32_KEY_SHIFT           16
+#define RV32_KEY_TAB             17
+#define RV32_KEY_Y               18
+#define RV32_KEY_N               19
+#define RV32_KEY_DIGIT1          20
+#define RV32_KEY_DIGIT2          21
+#define RV32_KEY_DIGIT3          22
+#define RV32_KEY_DIGIT4          23
+#define RV32_KEY_DIGIT5          24
+#define RV32_KEY_DIGIT6          25
+#define RV32_KEY_DIGIT7          26
 
 /* Display (M5): a word write to PRESENT snapshots the framebuffer (a
  * checkpoint hash in M5, the native window in M6); FRAMES counts presents

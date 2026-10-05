@@ -16,7 +16,10 @@ EVENT_PRESS = 0x100
 QUEUE_SIZE = 16
 # programs/rv32/board.h, RV32_KEY_*.
 KEYS = {"LEFT": 1, "RIGHT": 2, "UP": 3, "DOWN": 4, "SPACE": 5, "ENTER": 6, "ESCAPE": 7,
-        "A": 8, "D": 9, "W": 10, "S": 11, "P": 12, "Q": 13, "R": 14}
+        "A": 8, "D": 9, "W": 10, "S": 11, "P": 12, "Q": 13, "R": 14,
+        # Issue #35, for Doom: fire, run, the map, yes and no, and the weapons.
+        "CTRL": 15, "SHIFT": 16, "TAB": 17, "Y": 18, "N": 19,
+        "DIGIT1": 20, "DIGIT2": 21, "DIGIT3": 22, "DIGIT4": 23, "DIGIT5": 24, "DIGIT6": 25, "DIGIT7": 26}
 
 
 def power_on_palette():

@@ -873,6 +873,21 @@ class RtlTest(unittest.TestCase):
         emulator, rtl = self.assert_same_pass(FINISH(), stall=0, checkpoints=True)
         self.assertEqual((rtl.checkpoints, emulator.checkpoints), ([], []))
 
+    def test_every_key_name_parses_alike(self):
+        """Issue #35 added keys 15 to 26 for Doom: every board.h name, in any case, gives the same
+        event on both backends, so a script written by name means one thing everywhere."""
+        from tools.rv32_devices import KEYS
+        names = sorted(KEYS, key=KEYS.get)
+        self.assertEqual([KEYS[n] for n in names], list(range(1, 27)))
+        script = "".join(f"frame 0 down {name.lower() if i % 2 else name}\n" for i, name in enumerate(names[:16]))
+        script += "".join(f"frame 1 down {name}\n" for name in names[16:])
+        words = LI(1, INPUT) + LI(2, DISPLAY)
+        words += [LW(3 + i % 2, 1, 0) for i in range(16)] + [SW(0, 2, 0)] + [LW(5, 1, 0) for _ in names[16:]] + [LW(6, 1, 8)]
+        emulator, rtl = self.assert_same_pass(words + FINISH(), input_script=script)
+        events = [int(m, 16) for m in re.findall(rf"mem\[{INPUT:08x}\]->([0-9a-f]{{8}})", "\n".join(rtl.trace))]
+        self.assertEqual(events, [event_word(True, KEYS[n]) for n in names])
+        self.assertEqual(registers(rtl.trace)[6], sum(1 << KEYS[n] for n in names))
+
     def test_input_events_arrive_at_frames(self):
         """A script's events are readable after the present that reaches their frame (frame 0 from
         reset); EVENT pops, COUNT counts, KEYS follows arrivals; the sequence the guest reads is
