@@ -1605,7 +1605,7 @@ RV32_LUA_CFLAGS := $(RV32_ARCH) -std=gnu99 -O2 -g -Wall -Wextra -DLUA_COMPAT_5_3
 $(RV32_LUA_OBJS): build/rv32/lua/%.o: $(RV32_LUA)/%.c
 	@mkdir -p $(@D)
 	$(RV32_CC) $(RV32_LUA_CFLAGS) -MD -MP -c -o $@ $<
-RV32_LIBC_DEPS := $(patsubst %.o,%.d,$(RV32_LIBC_OBJS_libc) $(RV32_LIBC_OBJS_builtins) $(RV32_LUA_OBJS) \
+RV32_LIBC_DEPS := $(patsubst %.o,%.d,$(RV32_LIBC_OBJS_libc) $(RV32_LIBC_OBJS_builtins) $(RV32_LUA_OBJS) $(RV32_OS_OBJS_doom) \
 	build/rv32/os/libc/syscalls.o build/rv32/os/libc/tty.o build/rv32/os/libc/libccheck.o \
 	$(foreach p,$(RV32_OS_LIBC_PROGRAMS),build/rv32/os/libc/crt-$(p).o))
 -include $(RV32_LIBC_DEPS)
@@ -1629,7 +1629,6 @@ $(RV32_DOOM_OBJS): build/rv32/doom/%.o: $(RV32_DOOM)/%.c
 build/rv32/os/libc/doom_rv32.o: $(RV32_OS_LIBC)/doom_rv32.c
 	@mkdir -p $(@D)
 	$(RV32_CC) $(subst $(RV32_ARCH),$(RV32_ARCH_M),$(RV32_OS_LIBC_CFLAGS)) $(RV32_DOOM_DEFINES) -I$(RV32_DOOM) -MD -MP -c -o $@ $<
--include $(patsubst %.o,%.d,$(RV32_DOOM_OBJS) build/rv32/os/libc/doom_rv32.o)
 RV32_OS_OBJS_doom := $(RV32_DOOM_OBJS) build/rv32/os/libc/doom_rv32.o
 # As for the hard-float programs: Doom never reads stdin, so bufio.c's weak reference to it would
 # stay undefined in the image (the image check refuses that); the linker is told to resolve it.

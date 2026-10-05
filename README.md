@@ -1,6 +1,6 @@
 # Tiny Processors
 
-Learning Verilog by building small CPUs, parallel compute hardware, and an end-to-end computer. Our RV32IMAF CPU and native Mac emulator run C, a small OS/runtime, Pong, and Tetris; complete CPU floating-point integration is verified; GPU/NPU integration also follows the playable machine. See [the roadmap](PLAN.md) and the [detailed full-stack plan](docs/planning/roadmap.md).
+Learning Verilog by building small CPUs, parallel compute hardware, and an end-to-end computer. Our RV32IMAF CPU and native Mac emulator run C, a small OS/runtime, Pong, Tetris, Lua and Doom; complete CPU floating-point integration is verified; GPU/NPU integration also follows the playable machine. See [the roadmap](PLAN.md) and the [detailed full-stack plan](docs/planning/roadmap.md).
 
 ## Play the complete computer (M7)
 
@@ -288,6 +288,17 @@ make run-rv32-pong-rtl        # the same on Icarus, trace for trace (run-rv32-po
 ```
 
 Read the [window record](docs/rv32-window.md): the decisions, the core split, the window loop, the drawing routines, Pong's rules and dirty rectangles, a key press followed from the queue to a pixel store in the trace, the measured cycles, and exercises.
+
+## Doom on the OS
+
+`make fetch-rv32-doom-wad` fetches the shareware `doom1.wad`, which is never committed. Then
+`make run-rv32-doom` boots the OS in the window and starts doomgeneric, a disk program, at 35
+frames a second. Arrows or W/S move, A/D strafe, Ctrl fires, Space opens, Shift runs, 1 to 7 pick a
+weapon, Tab shows the map, and Escape opens the menu (Y and N answer it).
+
+The same timedemo draws the same frames, by hash, on QEMU, the emulator and Verilator. The
+[Doom record](docs/rv32-doom.md) covers how: 16 MiB of RAM, disks up to 8 MiB, programs on the
+disk, the palette window, and a virtual clock.
 
 ## What to read
 
