@@ -90,6 +90,7 @@ class PromptCounter:
             self.seen += self.tail == self.prompt
 
 
+DRAIN_LIMIT = 1 << 18  # console bytes a gated run reads per pass of its loop: well under its 50 ms at PromptCounter's pace
 PROMPT_MAX = 64  # bytes: the emulator's --console-prompt and the testbench's +console-prompt-hex allow 1 to 64
 
 
@@ -110,10 +111,19 @@ def run_gated(command, timeout, stdin, prompt):
     os.set_blocking(inp, False)
     fed = lambda: bisect.bisect_right(ends, written)  # noqa: E731
 
-    def drain():  # the console bytes QEMU has written since the last call; pread leaves QEMU's offset alone
-        while chunk := os.pread(console.fileno(), 65536, len(out)):
+    def drain(limit=DRAIN_LIMIT):
+        """Read and scan at most `limit` of the console bytes QEMU has written since the last call, so
+        a guest that prints faster than the prompt is scanned cannot hold the loop past its deadline
+        (Codex on PR #47). pread leaves QEMU's offset alone."""
+        while (want := min(65536, limit)) > 0 and (chunk := os.pread(console.fileno(), want, len(out))):
             out.extend(chunk)
             prompts.feed(chunk)
+            limit -= len(chunk)
+
+    def rest():  # once QEMU has stopped: the rest of its console, unscanned, since no line can be fed now;
+        # QEMU shares the file's offset, so it may be moved only now
+        console.seek(len(out))
+        out.extend(console.read())
 
     try:
         deadline = time.monotonic() + timeout
@@ -121,7 +131,7 @@ def run_gated(command, timeout, stdin, prompt):
             drain()
             status = process.poll()
             if status is not None:
-                drain()
+                rest()
                 while errors is not None and (chunk := os.read(errors, 65536)):
                     err.extend(chunk)
                 return GatedRun(status, decode(out), decode(err), False, fed(), len(lines))
@@ -146,7 +156,9 @@ def run_gated(command, timeout, stdin, prompt):
                     pass
                 except BrokenPipeError:  # QEMU has gone; classify_status says which line it missed
                     closed = True
-        drain()
+        process.kill()  # stopped first, so the file stops growing before rest() reads it
+        process.wait()
+        rest()
         return GatedRun(None, decode(out), decode(err), True, fed(), len(lines))
     finally:
         if process.poll() is None:  # a timeout, an interrupt or an error: never leave QEMU running

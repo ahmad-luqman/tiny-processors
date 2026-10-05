@@ -1068,6 +1068,16 @@ class GatedQemuRunnerTests(unittest.TestCase):
         self.assertEqual((run_.status, run_.fed), (0, 1))
         self.assertEqual(run_.stdout, "0123456\n" * 32768 + "> got b'one\\n'\r\n")
 
+    def test_a_guest_that_never_stops_printing_still_times_out(self):
+        """Codex P1 on PR #47: each pass reads a bounded part of the console file, so a guest that
+        prints faster than the prompt is scanned cannot hold the loop past its deadline."""
+        flood = "import sys, time\nwhile True:\n    sys.stdout.write('x' * 65536); time.sleep(0.001)"  # ~60 MB/s
+        started = time.monotonic()
+        run_ = self.gated(b"one\n", "> ", 1, timeout=1, script=flood)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual((run_.status, run_.timed_out, run_.fed), (None, True, 0))
+        self.assertTrue(run_.stdout.startswith("x" * 65536))
+
     def test_a_timed_out_run_keeps_its_console(self):
         partial = "import sys, time\nsys.stdout.write('half\\n'); sys.stdout.flush()\ntime.sleep(30)"
         status, console, _, timed_out = run([sys.executable, "-c", partial], 1)
