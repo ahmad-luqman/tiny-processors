@@ -7,11 +7,16 @@ Written 2026-09-30, after Track 1. This fixes the contract and acceptance for
 own commit with its own evidence; the record is
 [docs/rv32-os.md](../rv32-os.md).
 
+**Status (2026-10-07): O1–O5 complete.** Later milestones also delivered
+S-mode/Sv32, a four-entry RTL TLB, per-process page tables, DMA bounds, stack
+guards, lazy FPU switching and disk programs. See the [current backlog](next-tracks.md)
+for optional OS expansion and MMU Linux/xv6.
+
 **As built.** The plan below is kept as written; where the build departed
 from it, the [record](../rv32-os.md) and [docs/rv32.md](../rv32.md) are the
 contract:
 
-- Slots are 128 KiB, 24 of them from `0x8010_0000` (56 since issue #33's 8 MiB), and a program may span
+- Slots are 128 KiB, 24 of them from `0x8010_0000` (56 with issue #33's 8 MiB; now 120 with issue #35's 16 MiB), and a program may span
   several (O4); they were 256 KiB in O2, as planned.
 - The shell runs a program by its name (`NAME [ARGS]`, `NAME &`), not
   `run NAME`, and gained `wait` (O4) and file programs (`cat`, `write`,
@@ -21,7 +26,7 @@ contract:
   emulator and the RTL (`run-rv32-os-boot2`) and on QEMU
   (`run-rv32-os-qemu-reboot`), not a mid-run reset on the RTL.
 - The file calls are `open`, `read`, `write`, `close` and `files`; there is
-  no seek, and opening for writing truncates.
+  no seek at O3 (Track 3 L1 subsequently added it), and opening for writing truncates.
 - PLIC sources latch their requests in a gateway until claimed (the PLIC
   specification, QEMU 11), rather than being pending only while the line is
   high as item 6 of O1 says.

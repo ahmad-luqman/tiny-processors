@@ -1,171 +1,170 @@
 # Next tracks: platform, OS, more software, and Nand2Tetris beyond
 
-Written 2026-09-29, after S1 and the digit size fix. This is a menu of
-candidate tracks with a recommended order, not a commitment. Each track gets
-its own contract and acceptance checks in the usual milestone style when it is
-chosen; the entries below say what it would take and what "done" could mean.
+Updated 2026-10-07 after Track 3 and the console fixes. Tracks 0–3 are complete.
+The remaining entries are saved ideas, not commitments or implementation claims.
+Choose one bounded milestone and fix its contract and acceptance checks before
+implementation. [PLAN.md](../../PLAN.md) preserves the milestone history.
 
 ## Where the machine stands
 
-| Layer | Today | Gap |
+| Layer | Current capability | Remaining boundary |
 | --- | --- | --- |
-| CPU | Multicycle RV32I + F: 4 to 5 cycles per integer instruction, plus FPU issue/wait cycles for floating-point arithmetic (see [F2](../rv32-f.md)); the four trap CSRs plus `fflags`/`frm`/`fcsr`; machine mode only | No M (multiply/divide is software in `programs/rv32/rt/muldiv.c`), no `mstatus`, no interrupts, no A, no C, no counters |
-| Memory and devices | 4 MiB RAM (images fit a 256 KiB slice); timer, 16-event input queue, 320×240 RGB332 framebuffer, SIMD4, G1, G2 | Everything polls; no storage device; the palette window at `0x2000_3000` is reserved but unbuilt |
-| OS | Polling runtime: one static image with every application compiled into the menu | No syscalls, separate programs, files, scheduling, or protection |
-| QEMU | Reference runner only: `selfcheck` and `floatsoft` run on the `virt` board because the console and done register match its 16550 UART and `sifive_test` | None of our other devices exist there, so the capstone cannot run on QEMU |
-| Software | Freestanding C, no libc, no `malloc` | Real programs expect a C library |
+| CPU | Multicycle RV32IMAF, Zicsr/Zicntr, interrupts, M/S/U modes | No pipeline, C extension or caches |
+| Memory/protection | 16 MiB RAM, PMP, Sv32, four-entry RTL TLB, per-process page tables and stack guards | Existing paging does not establish compatibility with another paged OS |
+| Devices | CLINT, M-context PLIC, console, virtio-blk, input, palette/framebuffer, SIMD4, G1 and G2 | QEMU virt lacks our custom input/display/accelerators; no S-context PLIC |
+| Our OS | Shell, syscalls, separate programs from RAM/disk, files, scheduling, isolation, lazy FPU switching | Further Unix-like services are optional |
+| Software | Pong, Tetris, digit inference, 3D, picolibc, Lua, Mandelbrot, Doom | More ports need their own dependency and resource checks |
+| Linux | Separate no-MMU image boots to BusyBox on QEMU, emulator and Verilator | MMU Linux has not been demonstrated |
+| Verification | Differential tests, architectural suites, deterministic replay, GDB stub, benchmarks, lint and synthesis | Emulator speed and RTL cycles remain different measurements |
 
 ## Track 0: groundwork
 
-**Done (2026-09-29):** all five steps; see the [Track 0 record](../rv32-groundwork.md).
-The CPU row of the table above is now RV32IMF with Zicntr, and O1 is next.
-
-Small, low-risk steps that every later track leans on.
-
-- **Architectural compliance.** Run `riscv-arch-test` (the official RISC-V
-  architectural tests) for I, F and later M/A/Zicsr on the emulator and the
-  RTL. Done: all selected suites pass on the emulator, Icarus and Verilator.
-- **M extension in hardware.** Multiply and divide in the core and the
-  emulator; retire `rt/muldiv.c` for M builds while keeping an RV32I build.
-  Linux, Lua and Doom all assume it.
-- **Zicntr.** `cycle`, `time` and `instret` (with their high halves), so
-  programs can measure themselves.
-- **CoreMark and Dhrystone.** A standard performance baseline in cycles per
-  iteration on the RTL, recorded before any pipelining work.
-- **GDB stub in `rv32emu`.** Registers, memory, breakpoints and single-step
-  over the GDB remote protocol, so kernel work can be debugged.
+**Complete.** M extension, counters, architectural suites, CoreMark/Dhrystone
+baseline and emulator GDB stub. See [the record](../rv32-groundwork.md) and
+[GDB](../rv32-gdb.md). The A extension was added in Track 3.
 
 ## Track 1: proper QEMU support
 
-**Done (2026-09-29), option 1:** see the [plan](track1-qemu.md) and the
-[Track 1 record](../rv32-platform.md). Our devices moved into a hole `virt`
-leaves unused, the timer became a CLINT at `virt`'s address, and every backend
-passes a device tree in `a1`; the PLIC and virtio-blk addresses are reserved for
-O1 and O3. Option 2 (a custom QEMU board) remains optional.
-
-"Proper QEMU support" can mean two different things.
-
-1. **Make the platform `virt`-compatible where QEMU already has devices
-   (recommended).** Put the timer at the CLINT addresses (`mtime` at
-   `0x0200_bff8`, `mtimecmp` at `0x0200_4000`), then add an interrupt controller
-   compatible with the PLIC and a virtio-blk storage device (see O3). The
-   console and done register already match. Result: the kernel runs unmodified
-   on QEMU, the emulator and the RTL, and QEMU becomes an independent check of
-   the kernel rather than of `selfcheck` alone. Our own devices (input,
-   display, accelerators) are not simply absent on QEMU: as
-   [docs/rv32.md](../rv32.md#memory-map) records, their
-   windows overlap `virt`'s flash banks at `0x2000_0000`, its PCIe
-   configuration space at `0x3000_0000` and its PCI memory up to
-   `0x8000_0000`, so probing them would touch unrelated QEMU devices. This
-   track must first choose one of: remap our devices into a range `virt`
-   leaves unused (checked against `-M virt,dumpdtb=`), or have the kernel
-   discover the platform without touching those addresses, for example from
-   the device tree QEMU passes in `a1` (with our backends passing a
-   recognisable value or their own device tree) and never access a device
-   the platform does not describe.
-2. **A custom QEMU board for our machine (optional).** A QEMU fork with our
-   timer, input queue, display and framebuffer, with device models wrapping the
-   existing C models in `tools/rv32_simd4.c`, `tools/rv32_gpu.c` and
-   `tools/rv32_g3d.c`. The capstone would run on a third independent backend
-   with QEMU's gdbstub and record/replay. Our emulator is already fast (about
-   400 M instructions/s), so the payoff is independence and tooling, not speed.
+**Option 1 complete:** shared devices follow virt, custom devices occupy
+non-overlapping ranges, and a device tree describes the platform. See
+[the plan](track1-qemu.md) and [record](../rv32-platform.md).
+Option 2, a custom board, remains proposed as Track 7 below.
 
 ## Track 2: a real OS, one step at a time
 
-**Done (2026-09-30):** see the [plan](track2-os.md) and the
-[Track 2 record](../rv32-os.md). O1 is done: `mstatus`, `mie`, `mip`,
-`mscratch`, `wfi`, CLINT and PLIC interrupts on the emulator and the RTL, and
-the open question below answered both ways (results comparison, and a
-deterministic step-tick mode on the RTL that keeps trace comparison). O2 is
-done: a kernel with system calls runs separately linked programs from a RAM
-disk and a shell, on QEMU, the emulator and the RTL. O3 is done: virtio-blk at
-`virt`'s first virtio slot, a tiny file system, and high scores that survive
-a boot. O4 is done: timer-driven round-robin scheduling, two programs sharing
-the screen, trace-identical in step-tick mode. O5 is done: user mode and eight
-PMP entries on the emulator and the RTL; every program runs in user mode, and
-one that touches kernel memory, another process's memory or a machine CSR is
-killed while the shell keeps running, with the same cause and address on QEMU.
-An Sv32 MMU remained a later milestone; issue #20 added S-mode and Sv32 to the hardware (docs/rv32.md), and issue #24 a 4-entry TLB to the RTL; since #25 the kernel gives every process its own page table ([the record](../rv32-os.md#paging-issue-25)).
-
-- **O1 interrupts.** `mstatus` (MIE/MPIE), `mie`, `mip`, a CLINT timer
-  interrupt and `wfi`, on the RTL and the emulator.
-  Open question: a timer tick is one instruction on the emulator and one clock
-  cycle on the RTL, so an interrupt lands on a different instruction on each
-  backend. Extend the [device-time contract](../rv32.md#device-time) so
-  interrupt-driven programs are compared at the results level, as timer reads
-  already are, and keep trace comparison for programs that never enable
-  interrupts. A deterministic mode that fires the timer on an instruction count
-  on both backends would give a trace-comparable variant.
-- **O2 kernel and syscalls.** `ecall` becomes a syscall interface (write,
-  exit, read input, present, sbrk). Pong, Tetris and the digit screen become
-  separately linked programs loaded from a RAM disk bundled into the image; a
-  shell on the console lists and runs them. The menu becomes one program.
-- **O3 storage.** A block device backed by a host file on the emulator and by
-  memory on the RTL (virtio-blk-compatible if Track 1.1 is chosen), plus a tiny
-  file system. High scores persist across boots.
-- **O4 preemptive multitasking.** Timer-driven context switches, a
-  round-robin scheduler, and two programs visibly sharing the machine.
-- **O5 protection.** User mode and PMP first: a user program that touches
-  kernel memory traps and is killed while the system keeps running. A Sv32 MMU
-  with a TLB is a later, larger hardware milestone (since done: issues #20 and #24).
+**O1–O5 complete:** interrupts, kernel/syscalls/shell, persistent storage,
+preemptive scheduling and user-mode PMP protection. Subsequent work added
+bounded accelerator DMA (#20), S-mode/Sv32 (#20), the RTL TLB (#24), and
+per-process paging (#25). Track 3 added stack guards, seek, lazy FPU switching,
+more memory and programs loaded from disk. See [the plan](track2-os.md) and
+[the current OS record](../rv32-os.md).
 
 ## Track 3: run more apps
 
-**Split into two streams (2026-10-02):** see the [plan](track3-apps.md).
-Stream A is done: picolibc with the kernel's system calls under it (L1) and
-Lua 5.4.7's REPL and scripts (L2) run on QEMU `virt`, the emulator and the RTL,
-and every program's stack now has a size of its own and a guard page
-([record](../rv32-libc.md)). Stream B (the FPU showcase, Linux without an MMU,
-Doom) waits for what each needs underneath.
+**Both streams complete.** [The plan](track3-apps.md) records:
 
-- **C library.** Port picolibc or newlib with `sbrk` and file access backed
-  by O2 and O3. Most of the list below needs it.
-- **Lua or MicroPython REPL** on the console: the first real third-party
-  program.
-- **Ray tracer or Mandelbrot on the FPU**: an easy showcase for F2.
-- **Doom (doomgeneric).** 320×200 fits the 320×240 framebuffer, and its
-  256-colour palette justifies building the reserved palette window. It needs
-  more than 4 MiB of RAM and somewhere to keep the WAD, so it depends on O3 and
-  a larger RAM contract.
-- **Linux without an MMU (stretch).** cnlohr's `mini-rv32ima` shows that Linux
-  boots on RV32IMA + Zicsr with a CLINT timer and a UART, without an MMU.
-  Track 0, O1 and the A extension put this in reach on the emulator first, then
-  slowly on Verilator. A Sv32 MMU later would open xv6 or Linux with an MMU; issue #20 added it to the hardware and issue #24 a TLB.
+| Milestone | Result | Evidence |
+| --- | --- | --- |
+| L1/L2 | picolibc and unmodified Lua, REPL and disk scripts | [C library/Lua](../rv32-libc.md) |
+| B1 | Lazy floating-state switching and hard-float Mandelbrot | [Floating state](../rv32-os.md#floating-state-issue-33) |
+| B2 | LR/SC and AMOs on emulator and RTL, compared with QEMU | [A extension](../rv32-a.md) |
+| B3 | 16 MiB RAM, disks up to 8 MiB, disk programs, palette/keys, Doom | [Doom](../rv32-doom.md) |
+| B4 | Pinned no-MMU Linux/BusyBox image, shell session and poweroff on all three backends | [Linux](../rv32-linux.md) |
+
+Doom compares 350 demo frames on QEMU/emulator and 35 on Verilator; QEMU
+checks guest-computed hashes without our display device. Linux's recorded
+session takes 60,889,775 instructions on our backends and 345,437,877 RTL
+cycles. These are acceptance records, not newly rerun measurements.
 
 ## Track 4: Nand2Tetris and beyond
 
-- **The bottom of the stack.** Map `rv32` to NAND gates only with Yosys
-  (`abc -g NAND`) and report the count: how many NANDs is our CPU? Optionally a
-  tiny NAND-level simulator that runs the self-check, slowly.
-- **The top of the stack.** A Jack-like compiler, the Nand2Tetris VM translated
-  to RV32, and the Nand2Tetris OS libraries (Math, Memory, Screen, Output,
-  Keyboard, String, Array, Sys) written for our devices. Acceptance: unmodified
-  course Jack programs (Pong, Square) run on our machine.
+**Proposed; independent of the other future tracks.**
 
-This track does not depend on the others and can run alongside any of them.
+- **NAND mapping:** define how sequential cells and memories are counted,
+  synthesize the combinational logic to a NAND-based library, and report
+  reproducible gate/storage counts. A tiny gate-level self-check is optional.
+- **Compiler and VM:** a Jack-like compiler, course VM translated to RV32,
+  and Math/Memory/Screen/Output/Keyboard/String/Array/Sys libraries for our
+  devices. Finish line: course Pong and Square programs run through the new
+  toolchain with checked output and a bounded RTL replay.
 
 ## Track 5: hardware performance
 
-- A 5-stage pipeline with hazards and branch prediction, measured against the
-  multicycle core with CoreMark.
-- The C extension (compressed instructions) for code size.
-- Caches, once memory has latency worth hiding.
-- **FPGA port.** `rv32_ram` reads asynchronously, and FPGA block RAM needs
-  synchronous reads; the ready/valid bus already allows memory to take extra
-  cycles, so the change is contained.
-- **Browser frontend.** Compile `rv32emu` to WebAssembly so anyone can play
-  the capstone in a browser.
+**Proposed.** Preserve the multicycle core as a reference and measure each
+change with the existing workloads before combining optimizations.
+
+- **Pipeline first:** start with a five-stage integer pipeline, forwarding,
+  load-use stalls, branch flushing and precise traps. Specify interactions
+  with memory stalls, MMIO, interrupts, paging, atomics and multicycle M/F
+  units before replacing the full core. Finish line: architectural and guest
+  regressions agree at retirement/results as appropriate, with published
+  CoreMark/Dhrystone cycles and synthesis cost. Branch prediction follows a
+  correct measured baseline.
+- **Compressed instructions:** add C decode and instruction fetch across
+  boundaries to both backends. Finish line: architectural tests and the same
+  applications pass, with measured code-size and fetch-traffic changes.
+- **Caches:** first establish a memory-latency workload. Define MMIO bypass,
+  DMA ownership/coherence, fences and reset. Finish line: identical results
+  under stalls plus measured miss rates, traffic and cycles.
+- **FPGA:** choose a board and resource budget, adapt RAM to synchronous
+  reads, then boot a serial self-check. Finish line: timing closure and a
+  reproducible hardware demo; display and accelerators can follow separately.
+
+## Track 6: Linux or xv6 using the MMU
+
+**Proposed; feasible to investigate, not a boot claim.** Sv32, S-mode,
+delegation, PMP and the TLB are already implemented, and our own OS uses
+per-process page tables. This track exercises them with another kernel.
+
+### Linux with Sv32
+
+Start with a pinned RV32 kernel/configuration on QEMU, then the emulator,
+then a bounded Verilator run. Audit the ISA/configuration, page-table A/D
+handling, fences, boot memory layout and RAM budget. Define the M-mode
+firmware/SBI services and how S-mode receives timer and external interrupts:
+our PLIC currently has only an M-mode context, and supervisor interrupt bits
+are driven by software. Choose firmware forwarding or hardware extensions
+explicitly; existing Sv32 support alone does not settle this.
+
+Linux's [boot requirements](https://docs.kernel.org/arch/riscv/boot.html)
+require a hart ID and device-tree pointer at entry and an initially disabled
+MMU. Follow the selected kernel's boot contract rather than assuming the
+no-MMU image's configuration can simply be reused.
+
+Proposed finish line: reproducible image, boot to a user shell with paging
+active, user-program execution, isolation/page-fault checks, timer-driven
+scheduling and clean shutdown, checked against QEMU and replayed on Verilator.
+Keep the existing no-MMU target as its own regression. Disk support can be a
+follow-up after an initramfs-based boot.
+
+### xv6 with Sv32
+
+Upstream [MIT xv6](https://github.com/mit-pdos/xv6-riscv) targets RV64; its
+[book](https://pdos.csail.mit.edu/6.1810/2024/xv6/book-riscv-rev4.pdf)
+describes Sv39. It cannot run unchanged on RV32/Sv32. First choose an audited,
+pinned RV32 port or scope our own port: word sizes/ABI, assembly, page tables,
+linker layout, traps, timers and devices. Extending the machine to RV64/Sv39
+would be a separate, much larger hardware track.
+
+Proposed finish line: shell, process creation/exec/wait, file I/O and relevant
+user tests with paging/isolation on QEMU and the emulator, followed by a
+bounded matching RTL session. Choose Linux or xv6 first; neither is a
+prerequisite for the other.
+
+## Track 7: a custom QEMU board
+
+**Proposed; this is Track 1's deferred option 2.** Model our whole machine,
+including input, display/palette, SIMD4, G1 and G2, so QEMU can run the capstone
+with our actual device interfaces rather than only virt's shared subset.
+
+Pin a QEMU version and define reset state, memory map, device tree, MMIO widths
+and faults, interrupt wiring, DMA ownership, and device time. Build in slices:
+board/shared devices, input/display, then each accelerator. Existing C device
+models can help, but shared implementation is not an independent oracle;
+retain the Python/guest references and RTL comparisons.
+
+Proposed finish line: the same guest images boot, recorded capstone and SoC
+sessions produce matching console/frame checkpoints, and directed tests cover
+faults/reset/ownership. Compare results under an explicit timing contract,
+not QEMU host speed against RTL cycles. Preserve all virt-based tests.
+The benefit is broader QEMU tooling and platform coverage; cost includes
+maintaining device models and a QEMU fork. MMU Linux is not a prerequisite.
+
+## Other saved ideas
+
+| Idea | First bounded milestone and finish line |
+| --- | --- |
+| Browser frontend | Build the emulator as WebAssembly; adapt display/input and run a recorded capstone session with native-matching checkpoints. Add persistent storage after defining browser save/export behavior. |
+| Richer OS | Choose one of pipes/redirection, directories, or more flexible loading; define syscall/failure semantics and verify shell/file behavior and process isolation on applicable backends. |
+| Graphics | Textures or a programmable fragment stage, then optionally G1/G2 overlap; define formats and ownership first, compare pixels/depth against an independent reference and measure traffic/cycles. |
+| Inference | A larger model or convolution workload; fix preprocessing, numeric bounds and held-out accuracy, then compare CPU/accelerator results and measured end-to-end costs. |
+| More applications | MicroPython or a ray tracer as separate ports; audit memory/library dependencies and preserve deterministic output tests. |
 
 ## Recommended order
 
-1. Groundwork: compliance suite, M, Zicntr, CoreMark, GDB stub (done, [record](../rv32-groundwork.md)).
-2. Track 1 option 1 (done, [record](../rv32-platform.md)), then O1 interrupts
-   through its CLINT and a PLIC at `virt`'s address.
-3. O2 kernel, syscalls, separate programs and a shell, run on QEMU `virt` as
-   well as our backends.
-4. C library, then Lua: the first "runs more apps" result (done, Track 3
-   stream A, [record](../rv32-libc.md)).
-5. A extension, then Linux without an MMU on the emulator and then the RTL;
-   or the Jack compiler and OS if Nand2Tetris is the priority.
-6. Storage, palette and more RAM, then Doom. After that: the MMU, the
-   pipeline, the custom QEMU board or the FPGA, by interest.
+No future track is selected. For deeper CPU design, start with Track 5's
+pipeline. For an easily shared result, start with the browser frontend. For
+OS learning, choose Track 6's feasibility milestone; for compiler learning,
+choose Track 4. Track 7 is independently useful when full-device QEMU support
+is the priority. Each starts with a bounded contract, then emulator/reference
+checks, RTL evidence where applicable, and a documented learning walkthrough.

@@ -6,6 +6,11 @@ machine compatible with QEMU's `virt` board wherever `virt` already has a
 device, so one image runs unmodified on QEMU, our emulator and the RTL. The
 optional custom QEMU board (option 2) is not part of this plan.
 
+**Status (2026-10-07): complete.** See [the acceptance record](../rv32-platform.md).
+This document preserves the original milestone contract. Track 2 subsequently
+implemented the reserved PLIC and virtio-blk; RAM is now 16 MiB. The custom
+board is saved as [Track 7](next-tracks.md#track-7-a-custom-qemu-board).
+
 ## The choice: remap, and describe the platform
 
 [Next tracks](next-tracks.md#track-1-proper-qemu-support) asked the track to

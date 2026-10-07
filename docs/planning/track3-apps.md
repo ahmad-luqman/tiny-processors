@@ -6,8 +6,13 @@ bullet list: a C library, Lua or MicroPython, a ray tracer, Doom and Linux
 without an MMU. They do not depend on one another equally. A C library unlocks
 almost everything else, and the larger programs each need something new
 underneath (more RAM, a palette, the A extension). So the track is split into
-two streams. Stream A is done first and has its own record; stream B is a menu
-for later, like the rest of next-tracks.md.
+two streams. Stream A is done first and has its own record; stream B subsequently completed all four milestones.
+
+**Status (2026-10-07): both streams complete.** L1/L2 and B1–B4 are delivered,
+including Doom and no-MMU Linux on QEMU, the emulator and Verilator. PRs #46
+and #47 subsequently fixed interactive output flushing and QEMU console capture.
+Future work lives in [next tracks](next-tracks.md); MMU Linux/xv6 and a custom
+QEMU board are separate proposed tracks.
 
 ## Stream A: a C library, then Lua (done)
 
@@ -66,11 +71,11 @@ changes, for every program:
   overflow is a page fault and the process is killed with
   `(stack overflow)` instead of corrupting its heap. `fault stack` tests it.
 
-## Stream B: bigger programs
+## Stream B: bigger programs (done)
 
-Each needs something stream A did not, so each gets its own contract and
-acceptance checks when it is chosen. It is four issues, one PR each, in this
-order: [#33](https://github.com/ahmad-luqman/tiny-processors/issues/33) (B1, the
+Each needed additions below the application, with its own contract and
+acceptance checks. Four issues were completed in this order (B3 and B4 each
+took two PRs): [#33](https://github.com/ahmad-luqman/tiny-processors/issues/33) (B1, the
 FPU), [#34](https://github.com/ahmad-luqman/tiny-processors/issues/34) (B2, the
 A extension), [#35](https://github.com/ahmad-luqman/tiny-processors/issues/35)
 (B3, Doom) and [#36](https://github.com/ahmad-luqman/tiny-processors/issues/36)

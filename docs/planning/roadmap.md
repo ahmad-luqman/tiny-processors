@@ -1,6 +1,13 @@
 # Our computer: detailed roadmap
 
-Planning baseline: 2026-09-19. The [interview](full-stack-plan.md) records the twelve initial user decisions and the accepted floating-point follow-up. The destination and ordering are selected; the technical defaults below are proposals to make the next work concrete, not implemented features. No implementation was started during this planning session.
+Planning baseline: 2026-09-19; status reconciled 2026-10-07. The
+[interview](full-stack-plan.md) records the original decisions. Both finish
+lines and all milestones below are complete, as are follow-on Tracks 0–3:
+platform, OS/paging, third-party applications, Doom and no-MMU Linux.
+The diagrams, initial defaults and milestone costs below preserve their
+historical scope; current interfaces live in [the machine contract](../rv32.md).
+[Next tracks](next-tracks.md) is the maintained future backlog; no next track
+is selected.
 
 ## Two finish lines
 
@@ -105,22 +112,16 @@ GPU FP32/other formats and NPU integer/other formats remain independent choices.
 
 ## Next implementation session: optional tracks
 
-S1 completed the advanced SoC. One 185-frame menu session drives G1, G2 and
-SIMD4 from one boot, with every frame matching the C references on the emulator
-and on Verilator under seeded waits on all three memory paths. An eleven-case
-diagnostic proves the overlap contract: G1 and G2 exclude each other, SIMD4
-runs alongside either, and a reset or fault in one engine leaves the others
-exact. No RTL changed; the SoC is 327,986 cells. See the
-[S1 record](../rv32-s1.md) and [Accelerator overlap](../rv32-soc.md#accelerator-overlap).
+The advanced SoC and digit-size fix are complete. Tracks 0–3 subsequently
+added RV32IMAF, interrupts, storage, our OS, S-mode/Sv32 and a TLB, picolibc,
+Lua, Mandelbrot, Doom and a separate no-MMU Linux/BusyBox image. See
+[PLAN.md](../../PLAN.md) for the completed sequence and acceptance records.
 
-1. Done: hand testing found the digit screen misread digits not drawn about 20
-   cells tall. [The digit size fix](digit-size-fix.md#outcome) resizes to MNIST's
-   20-pixel box in the one preprocessing contract and retrains with keyboard-style
-   strokes; both accuracy targets were locked before measuring and are met.
-2. Next, choose among the optional tracks below. A programmable fragment
-   stage reusing the G2 core, and G1/G2 overlap, remain candidates, not
-   requirements. [Next tracks](next-tracks.md) lays out the platform, OS,
-   software and Nand2Tetris candidates with a recommended order.
+Choose from [the current backlog](next-tracks.md): compiler/VM and NAND
+mapping (Track 4), hardware performance (Track 5), MMU Linux or an RV32/Sv32
+xv6 port (Track 6), a custom QEMU board (Track 7), or browser/OS/graphics/
+inference extensions. A pipeline is the recommended hardware-learning next
+step; a browser frontend is the recommended sharing step. Neither is selected.
 
 ## Verification and learning discipline
 
@@ -132,7 +133,10 @@ Retirement comparisons check PC, instruction, register writes, and memory effect
 
 Complete milestones autonomously, then explain what changed, why it works, how it was tested, and what to inspect. Include two or three waveform observations and exercises for hardware work; use instruction/memory traces for software work. Exercises are optional experiments on a preserved baseline, not mandatory approval gates before every edit. Commit verified increments; update the roadmap when scope or evidence changes.
 
-## Deferred choices and their triggers
+## Historical choices and remaining triggers
+
+Rows retain their milestone-era addresses and measurements; consult the
+current machine contract for later remapping, RAM expansion and device changes.
 
 | Choice | Decide when | Starting direction |
 | --- | --- | --- |
@@ -148,7 +152,7 @@ Complete milestones autonomously, then explain what changed, why it works, how i
 | Pretrained model/dataset, weight license, accuracy target | Decided in N1 ([record](../rv32-digit.md)): a 196-32-10 int8 classifier trained once off-line, the MNIST test set vendored with a SHA-256 manifest and a provenance note recording that the source states no license, and a 95% target locked before testing, met at 96.16% (96.53% after the [digit size fix](digit-size-fix.md#outcome)) and asserted in `tests/test_rv32_digit.py` | Small classifier whose operations fit the planned engine; lock a test set and accuracy target before acceptance testing |
 | GPU programmable stage/ISA, clipping and depth rules | Decided in G2 ([record](../rv32-3d.md)): a vertex stage on four SIMT lanes with a structured ISA (IF/ELSE, divergent loops with BREAK, mask stack of 8); Q16.16 lanes, S12.4 screen, 16-bit depth, exact divider; whole-triangle cull at w < 1/16, outside the 4w guard band or outside 0 ≤ z ≤ w; strict-less depth; affine Gouraud; zero tolerance among the integer implementations and a measured bound against doubles | Fragment shading and near-plane clipping remain open |
 | Interrupts, DMA, concurrent accelerators, caching | A2 onward, only when polling/ownership or bandwidth limits justify complexity | Polling, simple transfers, no caches/coherence initially |
-| Shell, files, multiple programs, protection | After M7 as a separate OS expansion track | One feature at a time; Linux is a separate platform project if later desired |
+| Shell, files, multiple programs, protection | Completed in Track 2 and paging follow-ups | Further OS services and MMU Linux/xv6 are optional; no-MMU Linux is complete |
 | Own language, compiler, software VM | After M7, when revisiting language learning | Compile a small language to our established machine or to an explicitly defined software VM |
 | Pipelining, warps, masks, advanced scheduling | After measured baseline bottlenecks | Compare against the multicycle/serialized baseline |
 | Browser frontend or FPGA board | Optional post-M7 track | Reuse the machine contract; validate board memory/clock/tool support before choosing hardware |

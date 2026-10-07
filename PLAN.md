@@ -1,7 +1,14 @@
 # Tiny Processors: our computer and advanced SoC
 
-Updated 2026-09-22 after the [planning interview](docs/planning/full-stack-plan.md) and the completed M1 to M7, F1, F2, A1, A2, G1 and N1 sessions. The machine contract, the firmware toolchain, the emulator with its native window, a full RV32I multicycle RTL CPU, the machine around it (bus decoder, timer, input queue, display and framebuffer, matched on both backends), Pong, the boot menu/runtime/Tetris capstone, complete RV32F CPU/emulator integration, and a SIMD4 engine that multiplies and accumulates exist; A2 attaches SIMD4 to the RV32 bus with a matched emulator device and guest driver. G1 adds the integer 2D rasterizer, shared RAM arbitration and the third menu entry.
-N1 adds a quantized digit classifier that runs on the CPU and the SIMD4 engine, with a fourth menu entry where a digit drawn with the keyboard is read back.
+Updated 2026-10-07. The original computer and advanced SoC milestones (M1–M7,
+F1–F2, A1–A2, G1, N1, G2 and S1) and follow-on Tracks 0–3 are complete.
+The machine now has an RV32IMAF multicycle CPU, supervisor mode, Sv32 paging
+and a four-entry RTL TLB, 16 MiB RAM, graphics and SIMD4 accelerators, a native
+Mac frontend, and our own OS with files, scheduling and per-process protection.
+Picolibc, Lua, Mandelbrot and Doom run on our OS; a separate no-MMU Linux image
+boots to BusyBox on QEMU, the emulator and Verilator. The acceptance records
+below describe completed work; [next tracks](docs/planning/next-tracks.md) is
+the current optional backlog. No next implementation track is selected.
 
 Build our own Nand2Tetris-inspired computer, preserving the completed labs. Design an RV32I CPU and matching emulator, reuse an existing C compiler, and run our own boot/menu/game runtime in a native Mac window. Pong comes first; Tetris defines the first complete computer. After Tetris, build an FP32 unit and integrate the RISC-V F extension into our CPU and emulator. GPU/NPU work also follows the playable machine: 2D acceleration, programmable 3D, and handwritten-digit recognition, integrated into an advanced SoC.
 
@@ -58,7 +65,7 @@ These rows record each milestone’s acceptance baseline; the F1 session also re
 
 The recommended post-Tetris order is F1 → F2 → A1 → A2 → G1 → N1 → G2 → S1. Floating-point integration must pass before programmable 3D; N1 and G2 can be reordered once their prerequisites pass. CPU FP32 support does not select the GPU or NPU numeric format. A small programmable 3D demonstration is the selected graphics goal, not commercial graphics API compatibility. Neural inference uses a small pretrained model; training hardware is outside the initial goal.
 
-## Next: optional tracks
+## Completed follow-on tracks
 
 S1 completed the advanced SoC: one menu session drives G1, G2 and SIMD4 from
 one boot, and a diagnostic proves the overlap contract (G1 and G2 exclude each
@@ -96,7 +103,7 @@ runs on the kernel's system calls with a new `seek` call and a console line
 discipline (L1), and Lua 5.4.7, unmodified, gives its REPL and runs scripts
 from the disk (L2), on QEMU `virt`, the emulator and the RTL. Lua's C stack
 needs led to a stack size per program and an unmapped guard page below every
-program's stack. Stream B is four issues, one PR each. B1
+program's stack. Stream B is complete across four issues (B3 and B4 each took two PRs). B1
 ([#33](https://github.com/ahmad-luqman/tiny-processors/issues/33), PR #37) makes
 `mstatus.FS` real on both backends, so the kernel saves a process's F
 registers lazily, only when another float program takes the FPU; it raises RAM
@@ -112,10 +119,24 @@ slots), a disk is up to 8 MiB, a program can live on the disk, the palette at
 ([record](docs/rv32-doom.md)). The second runs doomgeneric, unmodified, as a
 disk program. The shareware demo plays the same 350 frames, by hash, on QEMU and
 the emulator, and its first 35 on Verilator, through the palette into the
-framebuffer, and the window plays it at 35 frames a second. Linux without an MMU (#36) follows.
+framebuffer, and the window plays it at 35 frames a second. B4 (#36, PRs #44
+and #45) boots no-MMU Linux to BusyBox on QEMU, the emulator and Verilator,
+including a scripted shell session and clean poweroff ([record](docs/rv32-linux.md)).
+Subsequent fixes flush interactive emulator output immediately (#46) and
+capture QEMU console output through a file (#47).
 
-## Later optional tracks
+## Future ideas: choose the next track
 
-Expand the OS with shell/files/program loading and eventually scheduling/protection; build a small language/compiler/software VM; explore pipelining, GPU scheduling/masks, deeper NPU designs, a browser frontend, or an FPGA. Each track gets its own contract and completion checks when chosen. No fabricated chip or Linux-compatible platform is required by the current plan.
+The maintained [next-tracks backlog](docs/planning/next-tracks.md) records
+prerequisites and proposed finish lines for:
 
-[Next tracks](docs/planning/next-tracks.md) surveys the current capabilities and lays out candidate tracks with a recommended order: groundwork (compliance suite, M extension, counters, CoreMark, GDB stub), `virt`-compatible interrupts and QEMU support, a step-by-step OS, running more software (a C library, Lua, Doom, Linux without an MMU), Nand2Tetris beyond (NAND count, a Jack compiler and OS), and hardware performance.
+- Track 4: NAND mapping, a Jack-like compiler, VM and course OS libraries.
+- Track 5: a pipelined CPU, compressed instructions, caches and an FPGA port.
+- Track 6: Linux using Sv32, or an explicit RV32/Sv32 port of xv6.
+- Track 7: a custom QEMU board implementing our own devices and accelerators.
+- Other candidates: a browser frontend, richer OS services, graphics and inference.
+
+A pipeline is the recommended next hardware-learning project; a browser
+frontend is the recommended sharing project. These are recommendations, not
+selected work. MMU Linux and the custom QEMU board are separate compatibility
+projects; upstream xv6 is RV64/Sv39 and cannot run unchanged on this RV32 core.
